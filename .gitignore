@@ -1,0 +1,155 @@
+# ============================================================================
+# HomeSynapse Core — .gitignore
+
+# General rule of thumb: if it is generated, local, or contains secrets,
+# it **DOES NOT** belong in the repo. The build.gradle.kts and gradle wrapper are
+# the single source of truth while everything else is reproducible.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Gradle
+# ----------------------------------------------------------------------------
+.gradle/
+build/
+# Keep wrapper jar and properties so that
+# developers don't need Gradle installed locally
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+# Gradle build scans and enterprise config
+.gradle-build-cache/
+gradle-app.setting
+
+# ----------------------------------------------------------------------------
+# Java / JVM
+# ----------------------------------------------------------------------------
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.war
+*.ear
+*.nar
+hs_err_pid*
+replay_pid*
+# JDK Flight Recorder dumps (from profiling, not source)
+*.jfr
+
+# ----------------------------------------------------------------------------
+# IDEs
+# ----------------------------------------------------------------------------
+# IntelliJ
+# Exclude entire .idea/ directory (IntelliJ regenerates from
+# build.gradle.kts upon import)
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# Eclipse
+.classpath
+.project
+.settings/
+.factorypath
+bin/
+
+# NetBeans
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+# VS Code
+.vscode/
+
+# ----------------------------------------------------------------------------
+# OS files
+# ----------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+
+# ----------------------------------------------------------------------------
+# Environment and secrets
+# ----------------------------------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+
+# ----------------------------------------------------------------------------
+# Runtime and logs
+# ----------------------------------------------------------------------------
+*.log
+logs/
+*.pid
+*.seed
+*.pid.lock
+
+# SQLite databases (produced at runtime, not source)
+*.db
+*.sqlite
+*.sqlite3
+
+# ----------------------------------------------------------------------------
+# Node / Frontend (web-ui/dashboard module)
+# ----------------------------------------------------------------------------
+node_modules/
+.npm
+.pnpm-store/
+dist/
+
+# Vite
+*.local
+
+# ----------------------------------------------------------------------------
+# Spike directory (code throwaway, directory is committed)
+# ----------------------------------------------------------------------------
+spike/**/build/
+spike/**/out/
+spike/**/.gradle/
+
+# ----------------------------------------------------------------------------
+# Documentation build artifacts
+# ----------------------------------------------------------------------------
+site/
+_site/
+
+# ----------------------------------------------------------------------------
+# Misc.
+# ----------------------------------------------------------------------------
+# Backup files
+*.bak
+*.swp
+*.swo
+*.orig
+*.tmp
+
+# Archives someone might accidentally drop in
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Coverage reports (generated, not source)
+coverage/
+*.exec
+jacoco/

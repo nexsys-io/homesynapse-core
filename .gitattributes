@@ -1,0 +1,24 @@
+# ============================================================================
+# HomeSynapse Core — Line Ending Normalization
+#
+# Enforce LF line endings in the repository regardless of OS. This prevents
+# CRLF/LF mismatches that cause Spotless failures and noisy diffs.
+# ============================================================================
+
+# Default: normalize all text files to LF on commit, check out as LF
+* text=auto eol=lf
+
+# Explicitly mark binary files so Git never tries to normalize them
+*.jar        binary
+*.png        binary
+*.jpg        binary
+*.gif        binary
+*.ico        binary
+*.pdf        binary
+*.woff       binary
+*.woff2      binary
+*.ttf        binary
+*.eot        binary
+
+# Windows batch files need CRLF to work on Windows
+*.bat        text eol=crlf
