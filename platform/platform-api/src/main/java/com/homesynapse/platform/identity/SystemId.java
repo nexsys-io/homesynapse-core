@@ -19,40 +19,51 @@ import java.util.Objects;
  * stable for the lifetime of the installation. The system ID is recorded in the
  * configuration store and used as the system-subject reference for all system events.</p>
  *
- * <p>The wrapped value is a 26-character ULID string in canonical Crockford Base32 encoding
- * per LTD-04. Stored as {@code BLOB(16)} in SQLite.</p>
+ * <p>The wrapped value is a {@link Ulid} per LTD-04. Stored as {@code BLOB(16)} in SQLite.</p>
  *
- * @param value the ULID string identifying this system instance, never {@code null} or blank
+ * @param value the ULID identifying this system instance, never {@code null}
  */
-public record SystemId(String value) {
+public record SystemId(Ulid value) implements Comparable<SystemId> {
 
     /**
-     * Validates that the ULID value is non-null and non-blank.
+     * Validates that the ULID value is non-null.
      *
-     * @throws NullPointerException     if {@code value} is {@code null}
-     * @throws IllegalArgumentException if {@code value} is blank
+     * @throws NullPointerException if {@code value} is {@code null}
      */
     public SystemId {
         Objects.requireNonNull(value, "SystemId value must not be null");
-        if (value.isBlank()) {
-            throw new IllegalArgumentException("SystemId value must not be blank");
-        }
     }
 
     /**
-     * Creates a {@code SystemId} from the given ULID string.
+     * Creates a {@code SystemId} from the given ULID.
      *
-     * @param value the ULID string, never {@code null} or blank
+     * @param value the ULID, never {@code null}
      * @return a new {@code SystemId} instance
-     * @throws NullPointerException     if {@code value} is {@code null}
-     * @throws IllegalArgumentException if {@code value} is blank
+     * @throws NullPointerException if {@code value} is {@code null}
      */
-    public static SystemId of(String value) {
+    public static SystemId of(Ulid value) {
         return new SystemId(value);
+    }
+
+    /**
+     * Creates a {@code SystemId} by parsing a 26-character Crockford Base32 ULID string.
+     *
+     * @param crockford the Crockford Base32 encoded ULID, never {@code null}
+     * @return a new {@code SystemId} instance
+     * @throws NullPointerException     if {@code crockford} is {@code null}
+     * @throws IllegalArgumentException if {@code crockford} is not a valid ULID string
+     */
+    public static SystemId parse(String crockford) {
+        return new SystemId(Ulid.parse(crockford));
+    }
+
+    @Override
+    public int compareTo(SystemId other) {
+        return value.compareTo(other.value);
     }
 
     @Override
     public String toString() {
-        return value;
+        return value.toString();
     }
 }

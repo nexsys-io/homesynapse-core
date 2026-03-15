@@ -19,41 +19,52 @@ import java.util.Objects;
  * transferred to the new device via {@code entity_transferred}, preserving entity-level
  * event history.</p>
  *
- * <p>The wrapped value is a 26-character ULID string in canonical Crockford Base32 encoding
- * per LTD-04. Stored as {@code BLOB(16)} in SQLite.</p>
+ * <p>The wrapped value is a {@link Ulid} per LTD-04. Stored as {@code BLOB(16)} in SQLite.</p>
  *
- * @param value the ULID string identifying this device, never {@code null} or blank
+ * @param value the ULID identifying this device, never {@code null}
  * @see EntityId
  */
-public record DeviceId(String value) {
+public record DeviceId(Ulid value) implements Comparable<DeviceId> {
 
     /**
-     * Validates that the ULID value is non-null and non-blank.
+     * Validates that the ULID value is non-null.
      *
-     * @throws NullPointerException     if {@code value} is {@code null}
-     * @throws IllegalArgumentException if {@code value} is blank
+     * @throws NullPointerException if {@code value} is {@code null}
      */
     public DeviceId {
         Objects.requireNonNull(value, "DeviceId value must not be null");
-        if (value.isBlank()) {
-            throw new IllegalArgumentException("DeviceId value must not be blank");
-        }
     }
 
     /**
-     * Creates a {@code DeviceId} from the given ULID string.
+     * Creates a {@code DeviceId} from the given ULID.
      *
-     * @param value the ULID string, never {@code null} or blank
+     * @param value the ULID, never {@code null}
      * @return a new {@code DeviceId} instance
-     * @throws NullPointerException     if {@code value} is {@code null}
-     * @throws IllegalArgumentException if {@code value} is blank
+     * @throws NullPointerException if {@code value} is {@code null}
      */
-    public static DeviceId of(String value) {
+    public static DeviceId of(Ulid value) {
         return new DeviceId(value);
+    }
+
+    /**
+     * Creates a {@code DeviceId} by parsing a 26-character Crockford Base32 ULID string.
+     *
+     * @param crockford the Crockford Base32 encoded ULID, never {@code null}
+     * @return a new {@code DeviceId} instance
+     * @throws NullPointerException     if {@code crockford} is {@code null}
+     * @throws IllegalArgumentException if {@code crockford} is not a valid ULID string
+     */
+    public static DeviceId parse(String crockford) {
+        return new DeviceId(Ulid.parse(crockford));
+    }
+
+    @Override
+    public int compareTo(DeviceId other) {
+        return value.compareTo(other.value);
     }
 
     @Override
     public String toString() {
-        return value;
+        return value.toString();
     }
 }

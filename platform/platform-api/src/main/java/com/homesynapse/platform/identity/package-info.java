@@ -11,15 +11,16 @@
  * <a href="https://github.com/ulid/spec">ULID</a> (Universally Unique Lexicographically
  * Sortable Identifier) per LTD-04.</p>
  *
- * <p>Each identity type is a single-field {@code record} wrapping the ULID string
- * representation. Typed wrappers prevent accidental cross-domain identity confusion
- * at compile time — passing a {@link DeviceId} where an {@link EntityId} is expected
- * is a type error, not a runtime surprise.</p>
+ * <p>Each identity type is a single-field {@code record} wrapping a {@link Ulid} value.
+ * Typed wrappers prevent accidental cross-domain identity confusion at compile time —
+ * passing a {@link DeviceId} where an {@link EntityId} is expected is a type error, not
+ * a runtime surprise.</p>
  *
- * <p><strong>Storage convention:</strong> ULIDs are stored as {@code BLOB(16)} in SQLite
- * (16-byte binary Crockford Base32 decoding). The {@code String} representation in these
- * records is the 26-character canonical text encoding used on the wire and in Java code.
- * Conversion between text and binary is handled by the persistence layer.</p>
+ * <p>The {@link Ulid} type provides the canonical 26-character Crockford Base32 text
+ * encoding via {@link Ulid#toString()} and 16-byte big-endian binary encoding via
+ * {@link Ulid#toBytes()} for {@code BLOB(16)} storage in SQLite. The {@link UlidFactory}
+ * generates monotonically increasing ULIDs using a thread-safe, virtual-thread-compatible
+ * algorithm backed by {@link java.util.concurrent.locks.ReentrantLock}.</p>
  *
  * @see <a href="https://github.com/ulid/spec">ULID Specification</a>
  */

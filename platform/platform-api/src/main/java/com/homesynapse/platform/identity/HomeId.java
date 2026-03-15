@@ -20,41 +20,52 @@ import java.util.Objects;
  * system reinstallation on new hardware produces a new system ID but should retain the
  * same home ID if managing the same dwelling.</p>
  *
- * <p>The wrapped value is a 26-character ULID string in canonical Crockford Base32 encoding
- * per LTD-04. Stored as {@code BLOB(16)} in SQLite.</p>
+ * <p>The wrapped value is a {@link Ulid} per LTD-04. Stored as {@code BLOB(16)} in SQLite.</p>
  *
- * @param value the ULID string identifying this home, never {@code null} or blank
+ * @param value the ULID identifying this home, never {@code null}
  * @see SystemId
  */
-public record HomeId(String value) {
+public record HomeId(Ulid value) implements Comparable<HomeId> {
 
     /**
-     * Validates that the ULID value is non-null and non-blank.
+     * Validates that the ULID value is non-null.
      *
-     * @throws NullPointerException     if {@code value} is {@code null}
-     * @throws IllegalArgumentException if {@code value} is blank
+     * @throws NullPointerException if {@code value} is {@code null}
      */
     public HomeId {
         Objects.requireNonNull(value, "HomeId value must not be null");
-        if (value.isBlank()) {
-            throw new IllegalArgumentException("HomeId value must not be blank");
-        }
     }
 
     /**
-     * Creates a {@code HomeId} from the given ULID string.
+     * Creates a {@code HomeId} from the given ULID.
      *
-     * @param value the ULID string, never {@code null} or blank
+     * @param value the ULID, never {@code null}
      * @return a new {@code HomeId} instance
-     * @throws NullPointerException     if {@code value} is {@code null}
-     * @throws IllegalArgumentException if {@code value} is blank
+     * @throws NullPointerException if {@code value} is {@code null}
      */
-    public static HomeId of(String value) {
+    public static HomeId of(Ulid value) {
         return new HomeId(value);
+    }
+
+    /**
+     * Creates a {@code HomeId} by parsing a 26-character Crockford Base32 ULID string.
+     *
+     * @param crockford the Crockford Base32 encoded ULID, never {@code null}
+     * @return a new {@code HomeId} instance
+     * @throws NullPointerException     if {@code crockford} is {@code null}
+     * @throws IllegalArgumentException if {@code crockford} is not a valid ULID string
+     */
+    public static HomeId parse(String crockford) {
+        return new HomeId(Ulid.parse(crockford));
+    }
+
+    @Override
+    public int compareTo(HomeId other) {
+        return value.compareTo(other.value);
     }
 
     @Override
     public String toString() {
-        return value;
+        return value.toString();
     }
 }

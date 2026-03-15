@@ -13,42 +13,39 @@ import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.PersonId;
 import com.homesynapse.platform.identity.SystemId;
+import com.homesynapse.platform.identity.Ulid;
 
 /**
  * Identifies the subject of an event — the domain object the event is "about."
  *
  * <p>Every event envelope carries a subject reference (Doc 01 §4.1 {@code subject_ref}).
- * The subject reference pairs a ULID with a {@link SubjectType} discriminator so that
- * the Event Bus can resolve the subject's type category at append time for subscription
+ * The subject reference pairs a {@link Ulid} with a {@link SubjectType} discriminator so
+ * that the Event Bus can resolve the subject's type category at append time for subscription
  * filter evaluation (Doc 01 §3.4) without requiring a registry lookup.</p>
  *
- * <p>The {@code id} field holds the 26-character canonical ULID string. The {@code type}
- * field classifies the subject. Together they enable type-safe construction through the
- * static factory methods while storing a uniform representation in the event envelope.</p>
+ * <p>The {@code id} field holds the subject's ULID. The {@code type} field classifies the
+ * subject. Together they enable type-safe construction through the static factory methods
+ * while storing a uniform representation in the event envelope.</p>
  *
- * <p><strong>Storage:</strong> In SQLite, only the ULID is stored in the {@code subject_ref}
+ * <p><strong>Storage:</strong> In SQLite, the ULID is stored in the {@code subject_ref}
  * column as {@code BLOB(16)}. The subject type is derivable from the typed identity and
  * may be denormalized into a separate column by the persistence layer for efficient
  * bus-side filtering.</p>
  *
- * @param id   the ULID string of the subject, never {@code null} or blank
+ * @param id   the ULID of the subject, never {@code null}
  * @param type the subject type category, never {@code null}
  * @see SubjectType
  */
-public record SubjectRef(String id, SubjectType type) {
+public record SubjectRef(Ulid id, SubjectType type) {
 
     /**
-     * Validates that both fields are non-null and that the ID is non-blank.
+     * Validates that both fields are non-null.
      *
-     * @throws NullPointerException     if {@code id} or {@code type} is {@code null}
-     * @throws IllegalArgumentException if {@code id} is blank
+     * @throws NullPointerException if {@code id} or {@code type} is {@code null}
      */
     public SubjectRef {
         Objects.requireNonNull(id, "SubjectRef id must not be null");
         Objects.requireNonNull(type, "SubjectRef type must not be null");
-        if (id.isBlank()) {
-            throw new IllegalArgumentException("SubjectRef id must not be blank");
-        }
     }
 
     /**
