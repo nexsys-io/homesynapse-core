@@ -41,6 +41,11 @@ import com.homesynapse.platform.identity.Ulid;
  * {@code subjectSequence} (next per-subject sequence), {@code globalPosition}
  * (SQLite rowid), and {@code categories} (static eventType→category lookup).</p>
  *
+ * <p>Thread-safe: the single-writer model means only one thread invokes the publisher
+ * at a time, but implementations must be safe for concurrent access from the caller's
+ * perspective (e.g., multiple virtual threads may hold a reference and call methods
+ * sequentially).</p>
+ *
  * @see EventDraft
  * @see EventEnvelope
  * @see CausalContext
