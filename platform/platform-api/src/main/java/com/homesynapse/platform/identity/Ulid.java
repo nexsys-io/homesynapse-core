@@ -2,7 +2,6 @@
  * HomeSynapse Core
  * Copyright (c) 2026 NexSys. All rights reserved.
  */
-
 package com.homesynapse.platform.identity;
 
 import java.time.Instant;

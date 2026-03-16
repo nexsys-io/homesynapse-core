@@ -1,8 +1,14 @@
+/*
+ * HomeSynapse Core
+ * Copyright (c) 2026 NexSys. All rights reserved.
+ */
+
 /**
  * Device model — Device, Entity, Capability, registries, and discovery.
  */
 module com.homesynapse.device {
-    requires com.homesynapse.event;
+    requires transitive com.homesynapse.event;
+    requires transitive com.homesynapse.platform;
 
-    // exports com.homesynapse.device; // TODO: uncomment when device model types are added (Sprint 2)
+    exports com.homesynapse.device;
 }
