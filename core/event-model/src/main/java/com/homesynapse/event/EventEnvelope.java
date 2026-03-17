@@ -8,12 +8,14 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 
+import com.homesynapse.platform.identity.Ulid;
+
 /**
  * Standard immutable wrapper for every event in the HomeSynapse domain event store.
  *
  * <p>The event envelope separates core infrastructure metadata (identity, ordering,
- * causality, classification) from event-type-specific data carried in the
- * {@link #payload()}. Envelope fields are owned and populated by the core event
+ * causality, classification, actor attribution) from event-type-specific data carried
+ * in the {@link #payload()}. Envelope fields are owned and populated by the core event
  * infrastructure; integration-specific and domain-specific data lives exclusively
  * in the payload. This separation ensures that the Event Bus, State Store, and
  * subscription system can operate on any event without knowledge of its payload
@@ -72,9 +74,19 @@ import java.util.Objects;
  *                        controls, crypto-shredding (INV-PD-07), and subscription filtering.
  *                        Never {@code null} or empty. Defensively copied to guarantee
  *                        immutability.
- * @param causalContext    carries correlation, causation, and actor attribution for this
- *                        event in the causal chain. See {@link CausalContext} for root vs.
- *                        derived event semantics. Never {@code null}.
+ * @param causalContext    carries correlation and causation metadata for this event in the
+ *                        causal chain. See {@link CausalContext} for root vs. derived event
+ *                        semantics. Never {@code null}.
+ * @param actorRef        the ULID of the person or actor attributable to this event;
+ *                        {@code null} when no user is attributable (e.g., device-autonomous
+ *                        or system-originated events). Promoted to the envelope as a
+ *                        top-level field to enable direct indexing and querying for
+ *                        multi-user audit trails (INV-MU-01). The actor may be a
+ *                        {@link com.homesynapse.platform.identity.PersonId},
+ *                        {@link com.homesynapse.platform.identity.AutomationId}, or
+ *                        {@link com.homesynapse.platform.identity.SystemId} — raw
+ *                        {@link Ulid} is used per LTD-04 to avoid a sealed hierarchy
+ *                        for actor identity at this layer.
  * @param payload         the event-type-specific data. Structure varies by
  *                        ({@code eventType}, {@code schemaVersion}). Use pattern matching
  *                        on {@link DomainEvent} subtypes for type-safe dispatch. Never
@@ -97,6 +109,7 @@ public record EventEnvelope(
         EventOrigin origin,
         List<EventCategory> categories,
         CausalContext causalContext,
+        Ulid actorRef,
         DomainEvent payload
 ) {
 
@@ -104,7 +117,9 @@ public record EventEnvelope(
      * Validates all envelope fields according to their documented constraints.
      *
      * <p>The {@code categories} list is defensively copied via {@link List#copyOf(java.util.Collection)}
-     * to prevent external mutation after construction.</p>
+     * to prevent external mutation after construction. The {@code actorRef} field is
+     * nullable — {@code null} represents system/autonomous events with no attributable
+     * actor.</p>
      *
      * @throws NullPointerException     if any non-nullable field is {@code null}
      * @throws IllegalArgumentException if {@code eventType} is blank,

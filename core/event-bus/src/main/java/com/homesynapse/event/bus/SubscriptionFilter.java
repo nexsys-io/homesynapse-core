@@ -22,10 +22,11 @@ import com.homesynapse.event.SubjectType;
  *       whose {@link EventEnvelope#eventType()} is contained in the set are accepted.
  *       An empty set means "accept all event types."</li>
  *   <li><strong>Minimum priority:</strong> Only events at or above the
- *       {@link #minimumPriority()} tier are accepted. {@link EventPriority} is ordered
- *       {@link EventPriority#CRITICAL CRITICAL} (ordinal 0) &gt;
- *       {@link EventPriority#NORMAL NORMAL} (ordinal 1) &gt;
- *       {@link EventPriority#DIAGNOSTIC DIAGNOSTIC} (ordinal 2). A minimum priority of
+ *       {@link #minimumPriority()} tier are accepted. Priority is compared using
+ *       {@link EventPriority#severity()} where lower severity values indicate higher
+ *       priority: {@link EventPriority#CRITICAL CRITICAL} (severity 0) &gt;
+ *       {@link EventPriority#NORMAL NORMAL} (severity 1) &gt;
+ *       {@link EventPriority#DIAGNOSTIC DIAGNOSTIC} (severity 2). A minimum priority of
  *       {@code NORMAL} accepts {@code CRITICAL} and {@code NORMAL} but rejects
  *       {@code DIAGNOSTIC}.</li>
  *   <li><strong>Subject type:</strong> If {@link #subjectTypeFilter()} is non-null, only
@@ -41,7 +42,7 @@ import com.homesynapse.event.SubjectType;
  * @param eventTypes        the set of event type strings this subscriber wants; an empty set
  *                          means "all types." Never {@code null}. Defensively copied.
  * @param minimumPriority   the minimum priority tier to receive — events with a lower
- *                          priority (higher ordinal) are rejected. Never {@code null}.
+ *                          priority (higher severity value) are rejected. Never {@code null}.
  * @param subjectTypeFilter restrict delivery to events whose subject belongs to a specific
  *                          {@link SubjectType} category. {@code null} means "all subject
  *                          types."
@@ -112,9 +113,10 @@ public record SubscriptionFilter(
      * <ol>
      *   <li>{@link #eventTypes()} is empty, or it contains
      *       {@link EventEnvelope#eventType() envelope.eventType()}.</li>
-     *   <li>The envelope's {@link EventEnvelope#priority() priority} ordinal is less than
-     *       or equal to this filter's {@link #minimumPriority()} ordinal (i.e., the
-     *       envelope's priority is at or above the minimum tier).</li>
+     *   <li>The envelope's {@link EventEnvelope#priority() priority}
+     *       {@link EventPriority#severity() severity} is less than or equal to this
+     *       filter's {@link #minimumPriority()} severity (i.e., the envelope's priority
+     *       is at or above the minimum tier).</li>
      *   <li>{@link #subjectTypeFilter()} is {@code null}, or it equals the envelope's
      *       {@link EventEnvelope#subjectRef() subjectRef}
      *       {@link com.homesynapse.event.SubjectRef#type() type}.</li>
@@ -131,7 +133,7 @@ public record SubscriptionFilter(
             return false;
         }
 
-        if (envelope.priority().ordinal() > minimumPriority.ordinal()) {
+        if (envelope.priority().severity() > minimumPriority.severity()) {
             return false;
         }
 

@@ -7,6 +7,8 @@ package com.homesynapse.event;
 import java.time.Instant;
 import java.util.Objects;
 
+import com.homesynapse.platform.identity.Ulid;
+
 /**
  * Bundles all caller-provided metadata for event publication via
  * {@link EventPublisher}.
@@ -26,11 +28,15 @@ import java.util.Objects;
  * </ul>
  *
  * <p>The causal context ({@link CausalContext}) is <em>not</em> part of the draft
- * because it determines which {@link EventPublisher} method to call: callers pass
- * a pre-built {@code CausalContext} to {@link EventPublisher#publish(EventDraft, CausalContext)}
- * for derived events, or an actor reference to
- * {@link EventPublisher#publishRoot(EventDraft, com.homesynapse.platform.identity.Ulid)}
- * for root events. This two-method API enforces causality at compile time.</p>
+ * because it determines which {@link EventPublisher} method to call: callers use
+ * {@link EventPublisher#publishRoot(EventDraft)} for root events or
+ * {@link EventPublisher#publish(EventDraft, CausalContext)} for derived events.
+ * This two-method API enforces causality at compile time.</p>
+ *
+ * <p>Actor attribution is carried on the draft via {@link #actorRef()}, which the
+ * publisher copies to the {@link EventEnvelope#actorRef()} field. For root events
+ * the caller sets actorRef directly. For derived events the caller inherits
+ * actorRef from the causing event's envelope.</p>
  *
  * <p>This record is immutable and safe to share across threads.</p>
  *
@@ -44,6 +50,10 @@ import java.util.Objects;
  * @param priority      delivery urgency and retention tier; never {@code null}
  * @param origin        evidence-based classification of the event's source; never {@code null}
  * @param payload       the event-type-specific data; never {@code null}
+ * @param actorRef      the ULID of the person or actor attributable to this event;
+ *                      {@code null} when no user is attributable (e.g., device-autonomous
+ *                      or system-originated events). Copied to
+ *                      {@link EventEnvelope#actorRef()} by the publisher.
  * @see EventPublisher
  * @see EventEnvelope
  */
@@ -54,11 +64,13 @@ public record EventDraft(
         SubjectRef subjectRef,
         EventPriority priority,
         EventOrigin origin,
-        DomainEvent payload
+        DomainEvent payload,
+        Ulid actorRef
 ) {
 
     /**
      * Validates all draft fields according to their documented constraints.
+     * The {@code actorRef} field is nullable and requires no validation.
      *
      * @throws NullPointerException     if {@code eventType}, {@code subjectRef},
      *                                  {@code priority}, {@code origin}, or

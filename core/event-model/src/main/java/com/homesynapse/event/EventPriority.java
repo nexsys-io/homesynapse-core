@@ -27,6 +27,12 @@ package com.homesynapse.event;
  * instance from {@link #DIAGNOSTIC} to {@link #NORMAL} — but not to {@link #CRITICAL},
  * and never downward.</p>
  *
+ * <p><strong>Severity ordering:</strong> Each priority carries a numeric {@link #severity()}
+ * value where lower numbers indicate higher severity. This provides a stable, ordinal-
+ * independent comparison mechanism for subscription filtering. Use
+ * {@code a.severity() <= b.severity()} to test whether priority {@code a} is at or above
+ * priority {@code b}.</p>
+ *
  * @see <a href="Doc 01 §3.3">Event Priority Model</a>
  */
 public enum EventPriority {
@@ -39,9 +45,9 @@ public enum EventPriority {
      * (timeout or failure), {@code system_started}, {@code system_stopped}.</p>
      *
      * <p>Default retention: 365 days. Never coalesced under any backpressure condition.
-     * Never dropped by emergency retention.</p>
+     * Never dropped by emergency retention. Severity: 0 (highest).</p>
      */
-    CRITICAL,
+    CRITICAL(0),
 
     /**
      * Meaningful state transitions, successful command outcomes, and automation activity.
@@ -49,9 +55,10 @@ public enum EventPriority {
      * <p>Examples: {@code state_changed}, {@code state_confirmed}, {@code command_issued},
      * {@code automation_triggered}, {@code presence_changed}, {@code config_changed}.</p>
      *
-     * <p>Default retention: 90 days. Delivered individually — never coalesced.</p>
+     * <p>Default retention: 90 days. Delivered individually — never coalesced.
+     * Severity: 1.</p>
      */
-    NORMAL,
+    NORMAL(1),
 
     /**
      * Observability data for debugging and performance analysis.
@@ -61,7 +68,28 @@ public enum EventPriority {
      *
      * <p>Default retention: 7 days. Under backpressure, specific DIAGNOSTIC event types
      * ({@code state_reported}, {@code presence_signal}, {@code telemetry_summary}) may
-     * be coalesced per Doc 01 §3.6 for non-exempt subscribers.</p>
+     * be coalesced per Doc 01 §3.6 for non-exempt subscribers. Severity: 2 (lowest).</p>
      */
-    DIAGNOSTIC
+    DIAGNOSTIC(2);
+
+    private final int severity;
+
+    EventPriority(int severity) {
+        this.severity = severity;
+    }
+
+    /**
+     * Returns the numeric severity value for this priority tier.
+     *
+     * <p>Lower values indicate higher severity: {@link #CRITICAL} = 0,
+     * {@link #NORMAL} = 1, {@link #DIAGNOSTIC} = 2. This provides a stable,
+     * ordinal-independent comparison mechanism — use
+     * {@code event.priority().severity() <= filter.minimumPriority().severity()}
+     * to test whether an event meets a minimum priority threshold.</p>
+     *
+     * @return the severity value (0 = highest, 2 = lowest)
+     */
+    public int severity() {
+        return severity;
+    }
 }

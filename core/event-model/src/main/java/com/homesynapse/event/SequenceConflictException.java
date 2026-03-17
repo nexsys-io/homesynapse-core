@@ -23,7 +23,7 @@ import java.util.Objects;
  * sequence for the subject and re-derive the next value.</p>
  *
  * @see EventPublisher#publish(EventDraft, CausalContext)
- * @see EventPublisher#publishRoot(EventDraft, com.homesynapse.platform.identity.Ulid)
+ * @see EventPublisher#publishRoot(EventDraft)
  */
 public class SequenceConflictException extends Exception {
 
