@@ -60,7 +60,7 @@ These decisions are final and must be followed exactly:
 `EventEnvelope` is a non-generic record. The payload field is typed as `DomainEvent` (a marker interface). Subscribers use Java 21 sealed interface pattern matching to dispatch on payload type. No type parameter.
 
 ### Decision 2: CausalContext Embedding
-`EventEnvelope` carries a single `CausalContext causalContext` field (not three separate causality fields). `CausalContext` is rewritten to use raw `Ulid` fields — `Ulid correlationId`, `@Nullable Ulid causationId`, `@Nullable Ulid actorRef`. The old typed wrappers (CorrelationId, CausationId, ActorRef) are deleted.
+`EventEnvelope` carries a single `CausalContext causalContext` field (not three separate causality fields). `CausalContext` is rewritten to use raw `Ulid` fields — `Ulid correlationId`, `Ulid causationId`. The old typed wrappers (CorrelationId, CausationId, ActorRef) are deleted. The `actorRef` field is now stored directly on `EventEnvelope` (not in `CausalContext`).
 
 ### Decision 3: List<EventCategory> for Categories
 `EventEnvelope` carries `List<EventCategory> categories` (not a Set, not a single value). The list is copied defensively in the compact constructor via `List.copyOf()` to guarantee immutability.
@@ -112,26 +112,23 @@ Complete rewrite. The new record uses raw Ulid fields instead of typed wrappers:
 ```java
 public record CausalContext(
     Ulid correlationId,
-    @Nullable Ulid causationId,
-    @Nullable Ulid actorRef
+    Ulid causationId
 )
 ```
 
 **Required members:**
-- Compact constructor: validates `correlationId` non-null. `causationId` and `actorRef` may be null.
-- `public static CausalContext root(Ulid correlationId, @Nullable Ulid actorRef)` — creates context for root events (causationId = null)
-- `public static CausalContext chain(Ulid correlationId, Ulid causationId, @Nullable Ulid actorRef)` — creates context for derived events (validates causationId non-null)
-- `public boolean isRoot()` — returns `causationId == null`
-
-**@Nullable annotation:** Use `@Nullable` from `jdk.internal.lang` — NO. Do NOT use jdk.internal. Instead, simply document nullability in Javadoc. Java records don't need annotation-based null markers for Phase 2. Just use clear Javadoc: `@param causationId the causing event's ID; {@code null} for root events`. The compact constructor enforces the invariants.
+- Compact constructor: validates both `correlationId` and `causationId` non-null.
+- `public static CausalContext root(Ulid correlationId)` — creates context for root events (causationId is the same as correlationId)
+- `public static CausalContext chain(Ulid correlationId, Ulid causationId)` — creates context for derived events (validates causationId non-null)
+- `public boolean isRoot()` — returns `correlationId.equals(causationId)`
 
 **Javadoc must explain:**
 - Carries causality metadata for propagation through event chains (Doc 01 §4.1, §8.3)
 - correlationId: the root event's event_id, propagated unchanged through all downstream events. Non-null for all events.
-- causationId: the immediately preceding event's event_id. Null for root events only.
-- actorRef: the ULID of the PersonId attributable to this event chain. Null when no user is attributable.
-- Root events are created via `root()` — correlation is self (the event's own ID assigned at append time), causation is null
-- Derived events are created via `chain()` — inherits correlation from causing event, causation set to causing event's ID
+- causationId: the immediately preceding event's event_id. For root events, causationId equals correlationId (self-causation).
+- Root events are created via `root(Ulid correlationId)` — causationId is set equal to correlationId
+- Derived events are created via `chain(Ulid correlationId, Ulid causationId)` — inherits correlation from causing event, causation set to causing event's ID
+- For actor attribution (who triggered this event chain), use the `actorRef` field on `EventEnvelope` (not on `CausalContext`)
 
 **Imports needed:** `com.homesynapse.platform.identity.Ulid`, `java.util.Objects`
 
@@ -204,11 +201,12 @@ public record EventEnvelope(
     EventOrigin origin,
     List<EventCategory> categories,
     CausalContext causalContext,
+    Ulid actorRef,               // nullable — the ULID of the PersonId attributable to this event chain
     DomainEvent payload
 )
 ```
 
-That's 13 components.
+That's 14 components.
 
 **Compact constructor validations:**
 - `eventId` — non-null
@@ -223,6 +221,7 @@ That's 13 components.
 - `origin` — non-null
 - `categories` — non-null, not empty, defensively copied via `List.copyOf(categories)`
 - `causalContext` — non-null
+- `actorRef` — nullable (no validation needed, null is valid when no user is attributable)
 - `payload` — non-null
 
 **Javadoc must be comprehensive enough that a developer who never read Doc 01 could implement against it:**
@@ -239,7 +238,8 @@ That's 13 components.
   - priority: delivery urgency and retention tier (CRITICAL/NORMAL/DIAGNOSTIC). Does not affect append-time durability.
   - origin: evidence-based classification of the event's source. UNKNOWN is the default when evidence is insufficient.
   - categories: consent-scope categories for this event. Populated by static lookup from eventType at creation time. Enables scoped access controls, crypto-shredding (INV-PD-07), and subscription filtering.
-  - causalContext: carries correlation, causation, and actor attribution for this event in the causal chain.
+  - causalContext: carries correlation and causation metadata for this event in the causal chain. For root events, causationId equals correlationId.
+  - actorRef: the ULID of the PersonId attributable to this event chain. Null when no user is attributable.
   - payload: the event-type-specific data. Structure varies by (eventType, schemaVersion). Use pattern matching on DomainEvent subtypes for dispatch.
 
 **Imports needed:** `java.time.Instant`, `java.util.List`, `java.util.Objects`, plus all event-model types.

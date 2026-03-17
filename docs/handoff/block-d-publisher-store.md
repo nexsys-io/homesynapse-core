@@ -25,8 +25,8 @@ The `event-model` module (`com.homesynapse.event` package) contains the foundati
 
 **Event model types (in event-model, `com.homesynapse.event`):**
 - `EventId.java` — `record EventId(Ulid value) implements Comparable<EventId>` with `of(Ulid)`, `parse(String)`
-- `EventEnvelope.java` — 13-component record: `(EventId eventId, String eventType, int schemaVersion, Instant ingestTime, Instant eventTime, SubjectRef subjectRef, long subjectSequence, long globalPosition, EventPriority priority, EventOrigin origin, List<EventCategory> categories, CausalContext causalContext, DomainEvent payload)`. Compact constructor validates all constraints and does `List.copyOf` on categories.
-- `CausalContext.java` — `record CausalContext(Ulid correlationId, Ulid causationId, Ulid actorRef)` with `root(Ulid, Ulid)`, `chain(Ulid, Ulid, Ulid)`, `isRoot()` factories. correlationId is non-null; causationId and actorRef are nullable.
+- `EventEnvelope.java` — 14-component record: `(EventId eventId, String eventType, int schemaVersion, Instant ingestTime, Instant eventTime, SubjectRef subjectRef, long subjectSequence, long globalPosition, EventPriority priority, EventOrigin origin, List<EventCategory> categories, CausalContext causalContext, DomainEvent payload, Ulid actorRef)`. Compact constructor validates all constraints and does `List.copyOf` on categories.
+- `CausalContext.java` — `record CausalContext(Ulid correlationId, Ulid causationId)` with `root(Ulid)`, `chain(Ulid, Ulid)`, `isRoot()` factories. correlationId is non-null; causationId is nullable.
 - `DomainEvent.java` — non-sealed marker interface, no methods
 - `DegradedEvent.java` — `record DegradedEvent(String eventType, int schemaVersion, String rawPayload, String failureReason) implements DomainEvent`
 - `SubjectRef.java` — `record SubjectRef(Ulid id, SubjectType type)` with factory methods for each subject type
@@ -78,7 +78,7 @@ Read §8 (Key Interfaces) fully before starting. Also read §4.1, §4.2, and §3
 
 Location: `core/event-model/src/main/java/com/homesynapse/event/EventDraft.java`
 
-Doc 01 §8.3 defines two publish methods: `publish(DomainEvent, CausalContext)` and `publishRoot(DomainEvent, Ulid actorRef)`. However, the EventPublisher needs additional metadata to build a complete EventEnvelope — metadata the caller provides but the design doc's simplified signatures don't show. The `EventDraft` record bundles all caller-provided event metadata (everything except causality fields and publisher-assigned fields).
+Doc 01 §8.3 defines two publish methods: `publish(EventDraft, CausalContext)` and `publishRoot(EventDraft)`. However, the EventPublisher needs additional metadata to build a complete EventEnvelope — metadata the caller provides but the design doc's simplified signatures don't show. The `EventDraft` record bundles all caller-provided event metadata (everything except causality fields and publisher-assigned fields).
 
 ```java
 public record EventDraft(
@@ -88,11 +88,12 @@ public record EventDraft(
     SubjectRef subjectRef,
     EventPriority priority,
     EventOrigin origin,
-    DomainEvent payload
+    DomainEvent payload,
+    Ulid actorRef               // nullable — ULID of PersonId initiating the event chain, null if not attributable
 )
 ```
 
-7 components. These are the fields the **caller** provides. The **publisher** generates: eventId, ingestTime, subjectSequence, globalPosition, categories (from static eventType→category lookup).
+7 components. These are the fields the **caller** provides. The **publisher** generates: eventId, ingestTime, subjectSequence, globalPosition, categories (from static eventType→category lookup), actorRef (from EventDraft).
 
 **Compact constructor validations:**
 - `eventType` — non-null, not blank
@@ -102,11 +103,13 @@ public record EventDraft(
 - `priority` — non-null
 - `origin` — non-null
 - `payload` — non-null
+- `actorRef` — nullable (null is valid)
 
 **Javadoc must explain:**
 - Bundles all caller-provided metadata for event publication via EventPublisher
 - Separates caller-provided fields from publisher-assigned fields (eventId, ingestTime, subjectSequence, globalPosition, categories)
 - The categories field is NOT provided by the caller — EventPublisher derives it from a static eventType→category mapping at creation time (Doc 01 §4.1, §4.4)
+- The actorRef field is provided by the caller and placed directly into the EventEnvelope's actorRef field (the ULID of the PersonId initiating the event chain, or null if not attributable)
 - The causal context is passed separately to EventPublisher.publish() / publishRoot() because it determines the method shape (the two-method API enforces causality at compile time)
 - @param documentation for each field, consistent with EventEnvelope's field documentation
 
@@ -119,37 +122,31 @@ public interface EventPublisher {
 
     EventEnvelope publish(EventDraft draft, CausalContext cause);
 
-    EventEnvelope publishRoot(EventDraft draft, Ulid actorRef);
+    EventEnvelope publishRoot(EventDraft draft);
 }
 ```
 
 **Two methods, no overloads.** This is the compile-time causality enforcement from Doc 01 §8.3:
-- `publish()` — for derived events (events caused by a prior event). The `CausalContext` carries the correlation chain from the causing event. The publisher creates the new event's CausalContext by setting correlationId = cause.correlationId() (inherited), causationId = the causing event's eventId (which the caller extracts from the causing EventEnvelope), and actorRef = cause.actorRef() (inherited).
-- `publishRoot()` — for root events (external stimuli). The publisher creates CausalContext with correlationId = the new event's own eventId (self-correlation), causationId = null, actorRef = the provided actorRef parameter.
+- `publish()` — for derived events (events caused by a prior event). The `CausalContext` carries the correlation chain from the causing event and is placed directly into the new EventEnvelope. The actorRef comes from the EventDraft.
+- `publishRoot()` — for root events (external stimuli). The publisher creates CausalContext with correlationId = the new event's own eventId (self-correlation) and causationId = null. The actorRef comes from the EventDraft.
 
 **Both methods:**
 - Are synchronous from the caller's perspective — the event is persisted to SQLite WAL and the method returns only after the WAL commit (INV-ES-04, LTD-06)
-- Return the fully-populated EventEnvelope (all 13 fields, including publisher-assigned eventId, ingestTime, subjectSequence, globalPosition, and categories)
+- Return the fully-populated EventEnvelope (all 14 fields, including publisher-assigned eventId, ingestTime, subjectSequence, globalPosition, and categories)
 - Subscriber notification happens asynchronously after the method returns
 - Throw `SequenceConflictException` if the `(subjectRef, subjectSequence)` unique constraint is violated (Doc 01 §6.7)
 
 **Javadoc must be thorough:**
 - Interface-level: explain that EventPublisher is the sole write path into the domain event store. Single-writer model (LTD-03). The two-method API enforces causality at compile time — callers cannot accidentally produce a derived event without a causal context, and cannot produce a root event with one.
 - Method-level: explain what each method does, what the publisher generates vs. what the caller provides, the synchronous persistence guarantee, the exception condition, and the ordering guarantee (events are assigned monotonically increasing globalPosition and per-subject subjectSequence values).
-- The `cause` parameter on `publish()`: the CausalContext is extracted from the **causing** event's envelope. The publisher propagates correlationId unchanged and sets causationId to the causing event's eventId. Document that the caller is responsible for extracting the correct CausalContext from the causing EventEnvelope.
-- The `actorRef` parameter on `publishRoot()`: the ULID of the PersonId who initiated this event chain. Null when no user is attributable (e.g., device-autonomous events).
+- The `cause` parameter on `publish()`: the CausalContext is extracted from the **causing** event's envelope by the caller and passed ready-made. The publisher places it directly into the new EventEnvelope. Document that the caller is responsible for constructing the correct CausalContext using CausalContext.chain() with values from the causing EventEnvelope.
+- The `draft` parameter: bundles all caller-provided metadata, including the actorRef (the ULID of the PersonId who initiated this event chain, or null if not attributable).
 
-**NOTE on the CausalContext for publish():** There is a subtlety. The `CausalContext cause` parameter carries the causing event's correlation context. But the NEW event's causation_id should be set to the causing event's event_id — which is NOT present in CausalContext (CausalContext carries correlationId, causationId, actorRef of the causing event). The publisher needs the causing event's event_id to set as the new event's causation_id.
+**NOTE on the CausalContext for publish():** The caller constructs the NEW event's CausalContext themselves using `CausalContext.chain(correlationId, causationId)` and passes it ready-made. This means `publish(EventDraft, CausalContext)` receives a ready-made CausalContext that the publisher places directly into the new EventEnvelope. The publisher does NOT transform or rewrite the CausalContext — it trusts the caller built it correctly. This keeps the API clean (two parameters per method) and leverages the CausalContext.chain() factory method we already built.
 
-There are two clean solutions:
-1. The `cause` parameter is a `CausalContext` from the causing event, PLUS the publisher needs the causing event's `EventId` separately. This means publish() needs another parameter.
-2. The caller constructs the NEW event's CausalContext themselves using `CausalContext.chain(correlationId, causingEventId, actorRef)` and passes it ready-made.
+For `publishRoot()`, the publisher constructs the CausalContext internally: `CausalContext.root(newEventId)` — because the correlationId is the new event's own eventId, which only the publisher knows.
 
-**Go with option 2.** The caller constructs the derived event's CausalContext using `CausalContext.chain()` with values extracted from the causing EventEnvelope, and passes it directly. This means `publish(EventDraft, CausalContext)` receives a ready-made CausalContext that the publisher places directly into the new EventEnvelope. The publisher does NOT transform or rewrite the CausalContext — it trusts the caller built it correctly. This keeps the API clean (two parameters per method) and leverages the CausalContext.chain() factory method we already built.
-
-For `publishRoot()`, the publisher constructs the CausalContext internally: `CausalContext.root(newEventId, actorRef)` — because the correlationId is the new event's own eventId, which only the publisher knows.
-
-Update the Javadoc accordingly: `publish()` receives a pre-built CausalContext for the new event; `publishRoot()` receives only the actorRef and the publisher constructs the root CausalContext.
+Update the Javadoc accordingly: `publish()` receives a pre-built CausalContext for the new event; `publishRoot()` constructs the root CausalContext internally.
 
 ### Step 3: Create EventPage.java
 
@@ -293,8 +290,8 @@ Run `./gradlew :core:event-model:compileJava :platform:platform-api:compileJava`
 
 | File | Kind | Components/Methods |
 |------|------|--------------------|
-| EventDraft.java | record | 7 components (eventType, schemaVersion, eventTime, subjectRef, priority, origin, payload) |
-| EventPublisher.java | interface | 2 methods: publish(EventDraft, CausalContext), publishRoot(EventDraft, Ulid) |
+| EventDraft.java | record | 8 components (eventType, schemaVersion, eventTime, subjectRef, priority, origin, payload, actorRef) |
+| EventPublisher.java | interface | 2 methods: publish(EventDraft, CausalContext), publishRoot(EventDraft) |
 | EventPage.java | record | 3 components (events, nextPosition, hasMore) |
 | SequenceConflictException.java | exception | subjectRef + conflictingSequence fields |
 | EventStore.java | interface | 6 methods: readFrom, readBySubject, readByCorrelation, readByType, readByTimeRange, latestPosition |

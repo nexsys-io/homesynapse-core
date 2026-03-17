@@ -26,8 +26,8 @@ The `event-model` module (`com.homesynapse.event` package) contains the foundati
 
 **Event model types (in event-model, `com.homesynapse.event`):**
 - `EventId.java` — `record EventId(Ulid value) implements Comparable<EventId>` with `of(Ulid)`, `parse(String)`
-- `EventEnvelope.java` — 13-component record (eventId, eventType, schemaVersion, ingestTime, eventTime, subjectRef, subjectSequence, globalPosition, priority, origin, categories, causalContext, payload). Compact constructor validates all constraints. `List.copyOf` on categories.
-- `CausalContext.java` — `record CausalContext(Ulid correlationId, Ulid causationId, Ulid actorRef)` with `root(Ulid, Ulid)`, `chain(Ulid, Ulid, Ulid)`, `isRoot()`. correlationId non-null; causationId and actorRef nullable.
+- `EventEnvelope.java` — 14-component record (eventId, eventType, schemaVersion, ingestTime, eventTime, subjectRef, subjectSequence, globalPosition, priority, origin, categories, causalContext, actorRef, payload). Compact constructor validates all constraints. `List.copyOf` on categories.
+- `CausalContext.java` — `record CausalContext(Ulid correlationId, Ulid causationId)` with `root(Ulid)`, `chain(Ulid, Ulid)`, `isRoot()`. correlationId non-null; causationId nullable.
 - `DomainEvent.java` — non-sealed marker interface, no methods
 - `DegradedEvent.java` — `record DegradedEvent(String eventType, int schemaVersion, String rawPayload, String failureReason) implements DomainEvent`
 - `SubjectRef.java` — `record SubjectRef(Ulid id, SubjectType type)` with factory methods for each subject type
@@ -40,7 +40,7 @@ The `event-model` module (`com.homesynapse.event` package) contains the foundati
 
 **Block D types (in event-model, `com.homesynapse.event`):**
 - `EventDraft.java` — record: 7 components (eventType, schemaVersion, eventTime, subjectRef, priority, origin, payload). Caller-provided metadata for EventPublisher.
-- `EventPublisher.java` — interface: `publish(EventDraft, CausalContext)` and `publishRoot(EventDraft, Ulid)`. Returns EventEnvelope. Throws SequenceConflictException.
+- `EventPublisher.java` — interface: `publish(EventDraft, CausalContext)` and `publishRoot(EventDraft)`. Returns EventEnvelope. Throws SequenceConflictException.
 - `EventStore.java` — interface: 6 query methods (readFrom, readBySubject, readByCorrelation, readByType, readByTimeRange, latestPosition). Returns EventPage or List<EventEnvelope>.
 - `EventPage.java` — record: 3 components (events, nextPosition, hasMore). Defensive copy on events list.
 - `SequenceConflictException.java` — checked exception with subjectRef and conflictingSequence fields.
@@ -116,11 +116,9 @@ public boolean matches(EventEnvelope envelope)
 ```
 Returns `true` if the given envelope passes this filter. Logic:
 1. If `eventTypes` is non-empty and does not contain `envelope.eventType()`, return false
-2. If `envelope.priority().ordinal() > minimumPriority.ordinal()`, return false (EventPriority is ordered CRITICAL=0, NORMAL=1, DIAGNOSTIC=2 — higher ordinal means lower priority; reject if envelope's priority is lower than the minimum)
+2. If `envelope.priority().severity() > minimumPriority.severity()`, return false (EventPriority has a severity() method: CRITICAL(0), NORMAL(1), DIAGNOSTIC(2) — higher severity means lower priority; reject if envelope's priority is lower than the minimum)
 3. If `subjectTypeFilter` is non-null and does not equal `envelope.subjectRef().type()`, return false
 4. Otherwise return true
-
-**IMPORTANT:** Check the actual ordinal ordering of EventPriority. If CRITICAL has ordinal 0 (declared first), NORMAL ordinal 1, DIAGNOSTIC ordinal 2, then "minimum priority NORMAL" means "accept CRITICAL and NORMAL, reject DIAGNOSTIC." The comparison is: `envelope.priority().ordinal() > minimumPriority.ordinal()` means reject. Verify this against the existing EventPriority.java before implementing.
 
 **Javadoc must explain:**
 - How the filter operates (conjunction of all non-trivial criteria)
