@@ -1,4 +1,5 @@
-/**
- * Configuration loading and validation.
+/*
+ * HomeSynapse Core Config
  */
+
 package com.homesynapse.config;

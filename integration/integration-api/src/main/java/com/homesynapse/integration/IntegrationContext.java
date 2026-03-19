@@ -4,6 +4,7 @@
  */
 package com.homesynapse.integration;
 
+import com.homesynapse.config.ConfigurationAccess;
 import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.event.EventPublisher;
 import com.homesynapse.persistence.TelemetryWriter;
@@ -35,6 +36,13 @@ import java.util.Objects;
  * {@code command_result}, {@code availability_changed},
  * {@code device_discovered}, {@code presence_signal}).</p>
  *
+ * <h2>Configuration Access</h2>
+ *
+ * <p>The {@link #configAccess()} field is always provided (not gated by
+ * {@link RequiredService}). Every adapter receives read-only access to its
+ * own configuration section, even if that section is empty (INV-CE-02 —
+ * zero-config is valid).</p>
+ *
  * <h2>Optional Services</h2>
  *
  * <p>The {@link #schedulerService()}, {@link #httpClient()}, and
@@ -59,6 +67,10 @@ import java.util.Objects;
  *                          integration; never {@code null}
  * @param healthReporter    adapter-to-supervisor health signal channel;
  *                          never {@code null}
+ * @param configAccess      read-only, integration-scoped configuration access —
+ *                          returns only configuration for this integration type;
+ *                          always provided (not gated by {@link RequiredService});
+ *                          never {@code null}
  * @param schedulerService  integration-scoped task scheduler, or {@code null}
  *                          if {@link RequiredService#SCHEDULER} was not
  *                          declared
@@ -76,6 +88,7 @@ import java.util.Objects;
  * @see IntegrationFactory#create(IntegrationContext)
  * @see IntegrationAdapter
  * @see IntegrationDescriptor#requiredServices()
+ * @see ConfigurationAccess
  */
 public record IntegrationContext(
         IntegrationId integrationId,
@@ -84,6 +97,7 @@ public record IntegrationContext(
         EntityRegistry entityRegistry,
         StateQueryService stateQueryService,
         HealthReporter healthReporter,
+        ConfigurationAccess configAccess,
         SchedulerService schedulerService,
         TelemetryWriter telemetryWriter,
         ManagedHttpClient httpClient
@@ -93,6 +107,7 @@ public record IntegrationContext(
      * Validates that all required fields are non-null. Optional fields
      * ({@code schedulerService}, {@code telemetryWriter}, {@code httpClient})
      * may be {@code null} based on the adapter's declared requirements.
+     * {@code configAccess} is always required (not gated by RequiredService).
      */
     public IntegrationContext {
         Objects.requireNonNull(integrationId, "integrationId must not be null");
@@ -101,6 +116,7 @@ public record IntegrationContext(
         Objects.requireNonNull(entityRegistry, "entityRegistry must not be null");
         Objects.requireNonNull(stateQueryService, "stateQueryService must not be null");
         Objects.requireNonNull(healthReporter, "healthReporter must not be null");
+        Objects.requireNonNull(configAccess, "configAccess must not be null");
         // schedulerService may be null if RequiredService.SCHEDULER not declared
         // telemetryWriter may be null if RequiredService.TELEMETRY_WRITER not declared
         // httpClient may be null if RequiredService.HTTP_CLIENT not declared

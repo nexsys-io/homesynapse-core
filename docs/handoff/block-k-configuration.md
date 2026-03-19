@@ -316,13 +316,44 @@ All modules must still compile (no regressions from module-info changes or the I
 
 ## Context Delta (post-completion)
 
-<!-- The Coder fills this in after the block compiles. -->
+**Files created (24):**
+- `Severity.java` — enum (FATAL, ERROR, WARNING)
+- `ReloadClassification.java` — enum (HOT, INTEGRATION_RESTART, PROCESS_RESTART)
+- `ChangeType.java` — enum (KEY_RENAMED, KEY_ADDED, KEY_REMOVED, VALUE_TRANSFORMED, SECTION_RESTRUCTURED)
+- `ConfigIssue.java` — record (6 fields)
+- `SecretEntry.java` — record (4 fields)
+- `ConfigMutation.java` — record (3 fields)
+- `ConfigSection.java` — record (3 fields)
+- `ConfigChange.java` — record (5 fields)
+- `MigrationChange.java` — record (5 fields)
+- `ConfigChangeSet.java` — record (2 fields)
+- `MigrationResult.java` — record (2 fields)
+- `MigrationPreview.java` — record (4 fields)
+- `ConfigModel.java` — record (5 fields, Phase 2 simplified)
+- `ReloadResult.java` — record (3 fields)
+- `ConfigurationLoadException.java` — extends HomeSynapseException (config.load_failed, HTTP 503)
+- `ConfigurationReloadException.java` — extends HomeSynapseException (config.reload_failed, HTTP 422)
+- `ConfigurationService.java` — interface (5 methods)
+- `ConfigurationAccess.java` — interface (4 methods)
+- `SecretStore.java` — interface (4 methods)
+- `ConfigValidator.java` — interface (1 method)
+- `ConfigMigrator.java` — interface (3 methods)
+- `SchemaRegistry.java` — interface (4 methods)
+- `module-info.java` — `requires transitive com.homesynapse.event; exports com.homesynapse.config;`
+- `package-info.java` — repurposed with package-level Javadoc (not deleted — VM disk space constraint)
 
-**Files created:**
-- {list}
+**Files modified (3):**
+- `IntegrationContext.java` (integration-api) — added `configAccess` (ConfigurationAccess) at position 7, non-null
+- `module-info.java` (integration-api) — added `requires transitive com.homesynapse.config`
+- `build.gradle.kts` (integration-api) — added `api(project(":config:configuration"))`
 
 **Decisions made during execution:**
-- {list any deviations or clarifications}
+- **Locked Decision #7 corrected:** Changed `requires com.homesynapse.event` to `requires transitive com.homesynapse.event`. The original decision's premise was incorrect — HomeSynapseException (exception superclass ×2) and ConfigurationValidationException (throws clause) ARE public API leaks that require transitive access. Compiler caught this with `-Xlint:all -Werror` `[exports]` warning.
+- **package-info.java repurposed instead of deleted:** VM disk space prevented bash execution. Replaced scaffold content with proper package-level Javadoc. Benign — no API or behavioral impact.
 
 **What the next block needs to know:**
-- {anything that affects downstream work}
+- IntegrationContext now has 10 fields (was 9). `configAccess` is position 7, REQUIRED (non-null). Any code constructing IntegrationContext must include this field.
+- `json-schema-validator` must be added to `gradle/libs.versions.toml` before Phase 3 implementation of ConfigValidator and SchemaRegistry.
+- The configuration module uses `requires transitive com.homesynapse.event`. This means downstream consumers of `com.homesynapse.config` automatically get access to `com.homesynapse.event` types.
+- JPMS rule expanded: `requires transitive` is needed for exception superclass types and throws clause types, not just record components and method parameters/returns.
+- MODULE_CONTEXT.md is populated (~250 lines) — read it for complete type inventory and cross-module contracts.

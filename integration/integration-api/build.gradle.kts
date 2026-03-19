@@ -10,4 +10,5 @@ dependencies {
     api(project(":core:device-model"))
     api(project(":core:state-store"))
     api(project(":core:persistence"))
+    api(project(":config:configuration"))
 }

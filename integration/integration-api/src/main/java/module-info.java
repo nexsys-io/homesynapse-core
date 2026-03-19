@@ -19,6 +19,7 @@ module com.homesynapse.integration {
     requires transitive com.homesynapse.device;
     requires transitive com.homesynapse.state;
     requires transitive com.homesynapse.persistence;
+    requires transitive com.homesynapse.config;
     requires transitive java.net.http;
 
     exports com.homesynapse.integration;
