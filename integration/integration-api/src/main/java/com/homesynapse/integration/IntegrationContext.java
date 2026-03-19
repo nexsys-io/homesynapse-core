@@ -6,6 +6,7 @@ package com.homesynapse.integration;
 
 import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.event.EventPublisher;
+import com.homesynapse.persistence.TelemetryWriter;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.state.StateQueryService;
 
@@ -61,14 +62,12 @@ import java.util.Objects;
  * @param schedulerService  integration-scoped task scheduler, or {@code null}
  *                          if {@link RequiredService#SCHEDULER} was not
  *                          declared
- * @param telemetryWriter   placeholder for telemetry sample writer from
- *                          the Persistence Layer (Doc 04); currently typed as
- *                          {@code Object} because the persistence module is
- *                          not yet specified (Block J). Will be refined to the
- *                          proper {@code TelemetryWriter} interface when
- *                          Block J is complete. {@code null} if
+ * @param telemetryWriter   telemetry sample writer from the Persistence Layer
+ *                          (Doc 04 §8.3) for high-frequency numeric data;
+ *                          {@code null} if
  *                          {@link RequiredService#TELEMETRY_WRITER} was not
- *                          declared or if the persistence module is not loaded
+ *                          declared or {@link com.homesynapse.integration.IntegrationDescriptor#dataPaths()
+ *                          DataPath.TELEMETRY} was not included
  * @param httpClient        integration-scoped managed HTTP client with
  *                          concurrency limits and rate limiting, or
  *                          {@code null} if {@link RequiredService#HTTP_CLIENT}
@@ -86,7 +85,7 @@ public record IntegrationContext(
         StateQueryService stateQueryService,
         HealthReporter healthReporter,
         SchedulerService schedulerService,
-        Object telemetryWriter,
+        TelemetryWriter telemetryWriter,
         ManagedHttpClient httpClient
 ) {
 
@@ -103,7 +102,7 @@ public record IntegrationContext(
         Objects.requireNonNull(stateQueryService, "stateQueryService must not be null");
         Objects.requireNonNull(healthReporter, "healthReporter must not be null");
         // schedulerService may be null if RequiredService.SCHEDULER not declared
-        // telemetryWriter may be null — placeholder for Block J TelemetryWriter
+        // telemetryWriter may be null if RequiredService.TELEMETRY_WRITER not declared
         // httpClient may be null if RequiredService.HTTP_CLIENT not declared
     }
 }
