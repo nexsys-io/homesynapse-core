@@ -8,4 +8,5 @@ description = "Integration API: adapter-facing contracts, health, command handli
 dependencies {
     api(project(":core:event-model"))
     api(project(":core:device-model"))
+    api(project(":core:state-store"))
 }
