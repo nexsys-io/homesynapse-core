@@ -5,16 +5,22 @@
 package com.homesynapse.integration;
 
 /**
- * Factory for integration adapter instances, discovered via
- * {@link java.util.ServiceLoader} (LTD-17) at system startup (Doc 05 §8.1, §8.3).
+ * Factory for integration adapter instances, constructed directly by the
+ * application wiring code at system startup (LTD-17, Doc 05 §8.1, §8.3).
  *
  * <p>Each integration module provides exactly one {@code IntegrationFactory}
- * implementation, declared in its {@code module-info.java} as a
- * {@code provides IntegrationFactory with ...} directive. The supervisor
- * discovers all factories at startup, calls {@link #descriptor()} once to
- * read the integration's requirements, and later calls
- * {@link #create(IntegrationContext)} to instantiate the adapter when the
- * integration is loaded.</p>
+ * implementation. The application module constructs each factory explicitly
+ * (e.g., {@code new ZigbeeIntegrationFactory()}) — no reflection, no
+ * {@link java.util.ServiceLoader}, no {@code Class.forName()} (LTD-17).
+ * The supervisor calls {@link #descriptor()} once to read the integration's
+ * requirements, and later calls {@link #create(IntegrationContext)} to
+ * instantiate the adapter when the integration is loaded.</p>
+ *
+ * <p><strong>DECIDE-04 (2026-03-20):</strong> Direct construction was chosen
+ * over ServiceLoader discovery. With a single MVP integration (Zigbee),
+ * ServiceLoader adds runtime scanning overhead for zero benefit. If post-MVP
+ * community integrations require dynamic discovery, LTD-17 can be amended
+ * at that time with a security evaluation of the loading mechanism.</p>
  *
  * <p>The factory is responsible for two things: declaring what the integration
  * needs (via the descriptor) and constructing the adapter with the provided
@@ -30,9 +36,9 @@ public interface IntegrationFactory {
     /**
      * Returns the static descriptor declaring this integration's requirements.
      *
-     * <p>Called once during {@link java.util.ServiceLoader} discovery. This
-     * method must be a pure function with no side effects — it must not perform
-     * I/O, access configuration, or modify any state. The supervisor uses the
+     * <p>Called once during integration registration at startup. This method
+     * must be a pure function with no side effects — it must not perform I/O,
+     * access configuration, or modify any state. The supervisor uses the
      * descriptor to plan resource allocation before constructing the adapter.</p>
      *
      * @return the integration descriptor, never {@code null}
