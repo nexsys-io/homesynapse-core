@@ -46,13 +46,11 @@ The WebSocket API introduces HomeSynapse's most complex sealed type hierarchy: `
 
 9. **`StateSnapshotMsg.entities` is `List<Object>` for the same reason.** Phase 3 delivers a list of entity state maps (Doc 10 §4.2). The Phase 2 type signature uses `Object` to avoid leaking domain types into the wire protocol type hierarchy.
 
-10. **The WebSocket module needs `requires com.homesynapse.api.rest` only.** Analysis of Phase 2 type signatures:
-    - `WsClientState` holds `ApiKeyIdentity` (from rest-api) → requires rest-api
-    - `ErrorMsg` references `ProblemType` concept, but the `errorType` field is `String` at the wire level (Doc 10 §3.3 shows `"error_type": "forbidden"`, not a ProblemType enum) → no additional require
-    - No Phase 2 type signature directly imports from event-model or event-bus — those are Phase 3 implementation imports (EventRelay registers with EventBus, reads from EventStore)
-    - `WsSubscriptionFilter.minPriority` is `String`, not `EventPriority` → no event-model require
+10. **JPMS Default Rule (learned from Blocks I, K, N):** All inter-module `requires` directives default to `requires transitive`. Use non-transitive `requires` ONLY when you can confirm that NO types from the required module appear in any: record component, method parameter, return type, exception superclass, or throws clause in this module's exported API. This rule exists because Blocks I, K, and N all had handoffs specifying `requires` that the compiler rejected — the expanded JPMS surface (especially exception types and record components) is consistently underestimated.
 
-    Therefore: `module com.homesynapse.api.ws { requires com.homesynapse.api.rest; exports com.homesynapse.api.ws; }`. The rest-api's own transitive dependencies (none in Phase 2) do not propagate additional requires.
+    **Analysis for this module:** `WsClientState` holds `ApiKeyIdentity` (from rest-api) in a record component, and `MessageCodec`/`SubscriptionManager` declare `ApiException` (from rest-api) in throws clauses → `requires transitive com.homesynapse.api.rest`. No Phase 2 type signature directly imports from event-model or event-bus — those are Phase 3 implementation imports → `requires` (non-transitive) is justified for those only because no event-model or event-bus types appear in any exported API surface.
+
+    Therefore: `module com.homesynapse.api.ws { requires transitive com.homesynapse.api.rest; exports com.homesynapse.api.ws; }`.
 
 11. **No cross-module updates.** Block N does not modify any files in other modules. The WebSocket API is a consumer of rest-api types but does not contribute types that rest-api or other modules embed in their records. The `build.gradle.kts` needs updates to add the rest-api dependency (see Build Configuration section).
 
