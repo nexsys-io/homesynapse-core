@@ -678,11 +678,38 @@ Then run the full project compile gate: `./gradlew compileJava` to verify no reg
 
 ## Context Delta (post-completion)
 
-**Files created:**
-- {Coder fills in after compile gate}
+**Files created (20 total — 18 new + 1 updated + module-info):**
+1. `HealthStatus.java` — enum (3 values)
+2. `HealthTier.java` — enum (3 values)
+3. `LifecycleState.java` — enum (3 values)
+4. `SubsystemHealth.java` — record (6 fields)
+5. `TierHealth.java` — record (4 fields, List.copyOf defensive copies)
+6. `SystemHealth.java` — record (6 fields, Map.copyOf defensive copies)
+7. `TraceCompleteness.java` — sealed interface with 3 permitted records (Complete, InProgress, PossiblyIncomplete)
+8. `TraceEvent.java` — record (8 fields, causationId NULLABLE, Map.copyOf on payload)
+9. `TraceNode.java` — record (2 fields, List.copyOf on children)
+10. `TraceChain.java` — record (7 fields, orderedEvents validated non-empty)
+11. `MetricSnapshot.java` — record (7 fields, count validated >= 0)
+12. `LogLevelOverride.java` — record (4 fields)
+13. `HealthContributor.java` — interface (2 methods)
+14. `HealthAggregator.java` — interface (4 methods)
+15. `TraceQueryService.java` — interface (5 methods, imports Ulid + EntityId)
+16. `MetricsRegistry.java` — interface (3 methods)
+17. `MetricsStreamBridge.java` — interface (5 methods, uses Consumer<List<MetricSnapshot>>)
+18. `LogLevelController.java` — interface (4 methods)
+19. `module-info.java` — requires transitive com.homesynapse.event; exports com.homesynapse.observability
+20. `package-info.java` — updated from stub with comprehensive package Javadoc
+
+**MODULE_CONTEXT.md:** Populated with full type inventory, dependencies, consumers, constraints, cross-module contracts, gotchas, and Phase 3 notes.
 
 **Decisions made during execution:**
-- {Coder fills in any deviations or clarifications}
+- No deviations from handoff. All 14 locked decisions followed exactly.
+- JPMS analysis confirmed: `requires transitive com.homesynapse.event` is correct and sufficient for Phase 2.
+- All Javadoc matches handoff spec with cross-references (@see), nullability contracts, and thread-safety statements.
+
+**Compile gate:** Pending manual execution — VM disk space exhausted during session. Code follows all established project patterns. Run: `./gradlew :observability:observability:compileJava` then `./gradlew compileJava`.
 
 **What the next block needs to know:**
-- {Anything that affects Block R (lifecycle), Block S (app assembly), or Block T (test support)}
+- **Block R (lifecycle):** LifecycleState enum and HealthAggregator are consumed by the lifecycle module. The lifecycle module will need `requires transitive com.homesynapse.observability` if LifecycleState or SystemHealth appear in its exported API. HealthAggregator.getSystemHealth() returns SystemHealth with LifecycleState — the lifecycle module sets this state.
+- **Block S (app assembly):** The app module wires HealthContributor instances to subsystems and calls MetricsStreamBridge.start()/stop(). All service interfaces are ready for dependency injection.
+- **Block T (test support):** Test utilities may need mock HealthContributor and stub TraceQueryService implementations. TraceEvent's nullable causationId is a testing edge case to cover.
