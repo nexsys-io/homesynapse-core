@@ -107,7 +107,7 @@ Both `requires transitive` declarations mean any module that reads `com.homesyna
 | `AttributeType` | enum | Primitive data type classifier for attribute values | BOOLEAN, INT, FLOAT, STRING, ENUM. |
 | `Permission` | enum | Access modes for an attribute in capability schema | READ, WRITE, NOTIFY. |
 | `EnergyDirection` | enum | Direction of energy flow for energy metering | IMPORT, EXPORT, BIDIRECTIONAL. |
-| `IdempotencyClass` | enum | Idempotency semantics of a device command | IDEMPOTENT, NOT_IDEMPOTENT, TOGGLE. |
+| `IdempotencyClass` | enum | Idempotency semantics of a device command | IDEMPOTENT, NOT_IDEMPOTENT, CONDITIONAL. |
 | `ConfirmationMode` | enum | Comparison strategy for command confirmation | EXACT_MATCH, TOLERANCE, ENUM_MATCH, ANY_CHANGE, DISABLED. |
 | `ConfirmationResult` | enum | Outcome of evaluating reported value against expectation | CONFIRMED, NOT_YET, FAILED, TIMEOUT. |
 
@@ -261,6 +261,10 @@ switch (expectation) {
 **GOTCHA: `EnergyMeter` attributes include `direction` (EnergyDirection enum) and `cumulative` (boolean).** These were Block G audit additions. The `direction` field distinguishes import (consumption) from export (solar/battery). The `cumulative` field indicates whether `energy_wh` resets on meter reset or accumulates forever. Do not omit these when implementing EnergyMeter-related logic.
 
 **GOTCHA: `PowerMeter.voltage_v` and `PowerMeter.current_a` are nullable.** Not all power meters report voltage and current — some only report watts. Always null-check these fields. This was a Block G audit finding.
+
+<!-- Added 2026-03-21: Architecture benchmark assessment finding M-4 -->
+
+**GOTCHA: Integration-initiated Display Name changes do NOT regenerate slugs.** When an integration adapter updates an entity's display name (e.g., from firmware metadata), the slug remains unchanged. Slug regeneration is a user-initiated action only (Identity Model §4.3). This prevents automations referencing slugs from silently breaking when an integration pushes a name update.
 
 ## Phase 3 Notes
 

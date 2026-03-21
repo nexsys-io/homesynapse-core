@@ -6,7 +6,7 @@ The Integration Runtime module is the supervisory layer that loads, isolates, mo
 
 Where integration-api (Block I) defines *what an adapter declares and receives*, this module defines *what the supervisor does with those declarations*: lifecycle management, health state machine, restart intensity enforcement, exception classification, thread allocation, and shutdown orchestration. The `IntegrationSupervisor` interface is consumed by the Startup/Lifecycle module for boot/shutdown, the REST API for integration management endpoints, and the Observability module for composite health indicators.
 
-This Phase 2 specification contains 6 Java files: 1 enum (ExceptionClassification — 3 values), 2 records (SlidingWindow — 3 fields, IntegrationHealthRecord — 12 fields), 1 interface (IntegrationSupervisor — 9 methods), package-info.java, and module-info.java.
+This Phase 2 specification contains 6 Java files: 1 enum (ExceptionClassification — 3 values), 2 records (SlidingWindow — 3 fields, IntegrationHealthRecord — 13 fields), 1 interface (IntegrationSupervisor — 9 methods), package-info.java, and module-info.java.
 
 ## Design Doc Reference
 
@@ -18,6 +18,7 @@ This Phase 2 specification contains 6 Java files: 1 enum (ExceptionClassificatio
 - §4.3: IntegrationHealthRecord — per-integration health state snapshot, weighted health score formula (0.30 × errorRate + 0.20 × timeoutRate + 0.15 × slowCallRate + 0.20 × dataFreshness + 0.15 × resourceCompliance)
 - §5: Startup — IntegrationSupervisor.start() returns CompletableFuture<Void>, failing integrations marked FAILED, system proceeds (INV-RF-03)
 - §8.1: IntegrationSupervisor — central supervisory contract (9 methods)
+- §3.14: Planned restart behavior — plannedRestart flag, availability suppression, command queuing, orphan exclusion, 60s timeout
 - §8.2: Runtime types — ExceptionClassification, SlidingWindow, IntegrationHealthRecord
 
 ## JPMS Module
@@ -59,7 +60,7 @@ module com.homesynapse.integration.runtime {
 | Type | Fields | Purpose |
 |---|---|---|
 | `SlidingWindow` (3 fields) | size (int — window capacity, default 20 from HealthParameters.healthWindowSize()), count (int — events in window, 0 to size), rate (double — count/size, 0.0 to 1.0) | Point-in-time snapshot of a sliding window for error/timeout/slow-call rate tracking. Phase 3 uses ConcurrentLinkedDeque\<Instant\> internally; this record captures observable state. |
-| `IntegrationHealthRecord` (12 fields) | integrationId (IntegrationId), state (HealthState), healthScore (double 0.0–1.0), lastHeartbeat (Instant), lastKeepalive (Instant, nullable), stateChangedAt (Instant), consecutiveFailures (int), suspensionCycleCount (int), totalSuspendedTime (Duration), errorWindow (SlidingWindow), timeoutWindow (SlidingWindow), slowCallWindow (SlidingWindow) | Per-integration health state snapshot. Not persisted — reconstructed on startup. Exposed via REST API. |
+| `IntegrationHealthRecord` (13 fields) | integrationId (IntegrationId), state (HealthState), healthScore (double 0.0–1.0), lastHeartbeat (Instant), lastKeepalive (Instant, nullable), stateChangedAt (Instant), consecutiveFailures (int), suspensionCycleCount (int), totalSuspendedTime (Duration), errorWindow (SlidingWindow), timeoutWindow (SlidingWindow), slowCallWindow (SlidingWindow), plannedRestart (boolean) | Per-integration health state snapshot. Not persisted — reconstructed on startup. Exposed via REST API. plannedRestart indicates the integration is in a supervisor-initiated restart cycle (Doc 05 §3.14). |
 
 **Health score formula:**
 ```
@@ -138,6 +139,7 @@ The `api` scope for integration-api is correct — integration-api types appear 
 - **stop() is synchronous; start() and individual operations are async.** The stop() method blocks the caller until shutdown is complete or timed out. This is required by the lifecycle module's ordered shutdown sequence — step 5 must complete before step 6 begins. start() returns CompletableFuture to allow the lifecycle module to continue with other boot phases while integrations initialize.
 - **Health record snapshots, not live objects.** All returned IntegrationHealthRecord instances and collections are immutable point-in-time snapshots. The REST API receives a consistent view even if the supervisor updates health concurrently.
 - **ExceptionClassification is consumed only by the Phase 3 supervisor implementation.** It is in the exported API so that the REST API can reference it for diagnostic endpoints, but the primary consumer is the supervisor's internal exception handling logic.
+- **`IntegrationHealthRecord.plannedRestart` is supervisor-internal state.** Core modules (automation, state-store) cannot read this field due to JPMS module boundaries — they learn about planned restarts via `integration_stopped(reason: planned_restart)` and `integration_restarted` events published through the event bus. Only REST API and observability consumers (which depend on integration-runtime) read the field directly.
 - **Three sliding windows per integration.** Error, timeout, and slow-call rates are tracked independently. Window capacity defaults to 20 (from HealthParameters.healthWindowSize()). The rates feed into the weighted health score formula.
 - **Lifecycle events produced by the supervisor flow through integration-api types.** The supervisor constructs IntegrationStarted, IntegrationStopped, IntegrationHealthChanged, IntegrationRestarted, and IntegrationResourceExceeded payloads (defined in integration-api) and publishes them via EventPublisher. The event types live in integration-api so consumers (REST API, automation engine, WebSocket) can pattern-match without depending on integration-runtime.
 
@@ -201,4 +203,6 @@ The `api` scope for integration-api is correct — integration-api types appear 
 - **Command dispatch subscription:** Subscribe to command_dispatched events on the event bus. Filter by integration ownership (entityId → integrationId lookup via EntityRegistry). Construct CommandEnvelope. Invoke adapter's CommandHandler on the adapter's thread.
 - **ManagedHttpClient implementation:** Wrap java.net.http.HttpClient with Semaphore for concurrency limiting, token bucket for rate limiting. Connection pool isolation per adapter. Lifecycle tied to adapter — close() cancels pending requests and releases the connection pool.
 - **Shutdown orchestration:** Set per-adapter shuttingDown flag, interrupt virtual threads / close serial ports, wait for grace period, log abandoned adapters, produce integration_stopped events for clean shutdowns.
+- **Planned restart lifecycle (Doc 05 §3.14):** When `restartIntegration()` is called, set `plannedRestart = true` on the IntegrationHealthRecord. While true: suppress `availability_changed` events for owned entities, queue inbound commands (do not drop), exclude owned devices from orphan detection (AMD-17). Clear the flag when the adapter reaches HEALTHY or when 60s timeout expires (whichever comes first). On timeout, treat as normal restart failure. The automation engine accesses planned restart state via event subscription (`integration_stopped` with reason `planned_restart`), NOT by reading `IntegrationHealthRecord.plannedRestart()` directly — JPMS prevents core modules from importing integration-runtime types.
+- **Health evaluation interval:** Default 15s, configurable range 5–60s (Doc 05 §3.4). The health score is recomputed on this interval, not on every health signal. This bounds CPU cost on the Pi but means state transitions can lag by up to one interval.
 - **Testing strategy:** Unit tests for ExceptionClassification logic (mock exception → expected classification), health state machine transitions (mock health signals → expected state), restart intensity (rapid restarts → FAILED). Integration tests for full supervisor lifecycle (start → health reporting → degradation → suspension → recovery). Performance test for startup time with multiple adapters.

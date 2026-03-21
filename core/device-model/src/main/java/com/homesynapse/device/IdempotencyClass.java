@@ -26,6 +26,16 @@ public enum IdempotencyClass {
     /** Unsafe to retry. Each invocation may produce a different effect (e.g., increment, trigger). */
     NOT_IDEMPOTENT,
 
-    /** Idempotent only when the pre-command state is known. A toggle command flips the current state, so retrying without state knowledge may produce the wrong outcome. */
-    TOGGLE
+    /**
+     * Re-issue decision is delegated to the integration adapter.
+     *
+     * <p>On crash recovery, the Pending Command Ledger offers the command to the
+     * integration adapter, which decides whether re-issuing is safe based on
+     * current device state. Used for commands where idempotency depends on
+     * runtime conditions (e.g., toggle operations where the current state
+     * determines whether re-issuing produces the intended outcome).</p>
+     *
+     * @see com.homesynapse.event.CommandIdempotency#CONDITIONAL
+     */
+    CONDITIONAL
 }

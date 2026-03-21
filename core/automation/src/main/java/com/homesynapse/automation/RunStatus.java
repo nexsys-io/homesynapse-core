@@ -9,8 +9,8 @@ package com.homesynapse.automation;
  *
  * <p>{@link #EVALUATING} and {@link #RUNNING} are transient (active) states — the Run
  * is consuming a concurrency mode slot. {@link #COMPLETED}, {@link #FAILED},
- * {@link #ABORTED}, and {@link #CONDITION_NOT_MET} are terminal states — the Run
- * has released its slot and will not transition again.</p>
+ * {@link #ABORTED}, {@link #CONDITION_NOT_MET}, and {@link #INTERRUPTED} are
+ * terminal states — the Run has released its slot and will not transition again.</p>
  *
  * <p>Defined in Doc 07 §3.7, §8.2.</p>
  *
@@ -61,5 +61,19 @@ public enum RunStatus {
      * preventing {@link ConcurrencyMode#SINGLE} automations from blocking on failed
      * conditions.</p>
      */
-    CONDITION_NOT_MET
+    CONDITION_NOT_MET,
+
+    /**
+     * The Run was interrupted by an external event before completion. Terminal state.
+     *
+     * <p>Produced during REPLAY→LIVE transition for Runs that were active at the
+     * time of an unclean shutdown (Doc 07 §3.10). The specific interruption reason
+     * (e.g., process crash) is recorded in the {@code automation_completed} event
+     * payload, not encoded in this enum value.</p>
+     *
+     * <p>Unlike {@link #ABORTED} (intentional cancellation by concurrency mode or
+     * shutdown), {@code INTERRUPTED} indicates the Run did not complete due to
+     * circumstances outside the automation engine's control.</p>
+     */
+    INTERRUPTED
 }

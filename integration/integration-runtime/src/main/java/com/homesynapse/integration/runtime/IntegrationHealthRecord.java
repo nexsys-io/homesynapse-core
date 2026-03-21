@@ -75,6 +75,19 @@ import java.util.Objects;
  *                            never {@code null}
  * @param slowCallWindow      slow-call rate sliding window snapshot;
  *                            never {@code null}
+ * @param plannedRestart      {@code true} if the integration is in a planned
+ *                            restart cycle initiated by
+ *                            {@link IntegrationSupervisor#restartIntegration(IntegrationId)};
+ *                            while {@code true}, the device model does not trigger
+ *                            orphaning (AMD-17), and availability-changed events are
+ *                            suppressed; cleared when the adapter reaches
+ *                            {@link HealthState#HEALTHY} or when the restart fails
+ *                            (Doc 05 §3.14). Note: the automation engine accesses
+ *                            planned restart state via event subscription
+ *                            ({@code integration_stopped} with reason
+ *                            {@code planned_restart}), not by reading this field
+ *                            directly — JPMS dependency direction prevents core
+ *                            modules from importing integration-runtime types
  *
  * @see IntegrationSupervisor#health(IntegrationId)
  * @see IntegrationSupervisor#allHealth()
@@ -95,7 +108,8 @@ public record IntegrationHealthRecord(
         Duration totalSuspendedTime,
         SlidingWindow errorWindow,
         SlidingWindow timeoutWindow,
-        SlidingWindow slowCallWindow
+        SlidingWindow slowCallWindow,
+        boolean plannedRestart
 ) {
 
     /**
