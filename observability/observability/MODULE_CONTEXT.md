@@ -120,6 +120,7 @@ The `requires transitive` on event-model provides transitive access to platform-
 5. **HealthTier defines the three tiers; the mapping of subsystem IDs to tiers is Phase 3 configuration.** The enum is the type system; the assignment is implementation.
 6. **No integration-runtime dependency in Phase 2.** Health data flows through HealthContributor.reportHealth(), not through direct IntegrationSupervisor calls.
 7. **`Map.copyOf()` on TraceEvent.payload does NOT accept null values.** Phase 2 contract: all values present or key absent. Phase 3 may need adjustment if nullable payload values are required.
+8. **The `requires transitive com.homesynapse.event` directive was incorrectly downgraded to `requires` during a codebase audit (pre-Block R) and had to be reverted.** The audit assumed that because no event-model types appeared directly in observability's exported API, `transitive` was unnecessary. However, platform-api types (`Ulid`, `EntityId`) reach this module's consumers ONLY through the transitive chain: observability → event-model → platform-api. `TraceQueryService` uses `Ulid` and `EntityId` in its method signatures, which are exported API. The `-Xlint:all -Werror` `[exports]` warning correctly caught this. **Lesson: transitive dependency analysis must trace the FULL type graph, not just direct imports from the immediately-required module.**
 
 ## Phase 3 Notes
 

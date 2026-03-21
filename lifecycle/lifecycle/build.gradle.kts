@@ -6,7 +6,8 @@ plugins {
 description = "Lifecycle management: startup sequencing, graceful shutdown, watchdog"
 
 dependencies {
-    implementation(project(":platform:platform-api"))
-    implementation(project(":core:event-model"))
-    implementation(project(":observability:observability"))
+    api(project(":observability:observability"))
+    api(project(":core:event-model"))
+    api(project(":platform:platform-api"))
+    implementation(project(":config:configuration"))
 }

@@ -7,7 +7,7 @@
  * Device model — Device, Entity, Capability, registries, and discovery.
  */
 module com.homesynapse.device {
-    requires transitive com.homesynapse.event;
+    requires com.homesynapse.event;
     requires transitive com.homesynapse.platform;
 
     exports com.homesynapse.device;
