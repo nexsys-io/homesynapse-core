@@ -1,3 +1,7 @@
+/*
+ * HomeSynapse Core
+ * Copyright (c) 2026 NexSys. All rights reserved.
+ */
 package com.homesynapse.integration.zigbee;
 
 import com.homesynapse.integration.IntegrationAdapter;
