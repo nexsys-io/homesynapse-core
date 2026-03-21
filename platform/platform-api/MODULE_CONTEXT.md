@@ -50,7 +50,7 @@ No `requires` clauses — this module depends only on `java.base`.
 | `PlatformPaths` | interface | Abstracts deployment-tier filesystem layout | Methods: `binaryDir()`, `configDir()`, `dataDir()`, `logDir()`, `backupDir()`, `tempDir()`. Returns absolute `Path` instances. Resolved once during Phase 0, cached, immutable after. `tempDir()` cleaned on each startup. |
 | `HealthReporter` | interface | Abstracts platform supervisor health reporting | Methods: `reportReady()`, `reportWatchdog()`, `reportStopping()`, `reportStatus(String)`. On Tier 1 (Linux/systemd): sends sd_notify messages. On other tiers: no-op. Watchdog must be called every WatchdogSec/2 (default 30s) after reportReady(). |
 
-**Total: 11 public types + 2 package-info.java files + 1 module-info.java = 15 Java files.**
+**Total: 12 public types + 2 package-info.java files + 1 module-info.java = 15 Java files.**
 
 ## Dependencies
 

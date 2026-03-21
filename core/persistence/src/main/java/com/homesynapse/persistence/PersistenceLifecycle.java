@@ -16,6 +16,11 @@ import java.util.concurrent.CompletableFuture;
  * consumed by the Startup &amp; Lifecycle subsystem (Doc 12) which coordinates
  * ordered initialization of all HomeSynapse subsystems.</p>
  *
+ * <p><strong>Virtual Thread Safety:</strong> All implementations MUST execute
+ * SQLite operations on a platform thread executor, not virtual threads.
+ * The sqlite-jdbc driver uses {@code synchronized native} JNI methods that
+ * pin virtual thread carrier threads. See Virtual Thread Risk Audit finding B-4.</p>
+ *
  * <h2>Startup Sequence</h2>
  *
  * <p>When {@link #start()} is called, the Persistence Layer performs the

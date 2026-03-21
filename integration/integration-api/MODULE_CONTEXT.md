@@ -6,7 +6,7 @@ The Integration API module defines the adapter-facing contract boundary between 
 
 This is the single module that every integration adapter depends on. It re-exports all the core modules an adapter needs (event-model, device-model, state-store, persistence, configuration, platform-api, java.net.http) via `requires transitive`, so adapter modules only need to declare `requires com.homesynapse.integration`.
 
-The Phase 2 specification contains 21 Java files: 3 enums, 7 records (5 lifecycle event payloads + IntegrationDescriptor + CommandEnvelope + IntegrationContext + HealthParameters), 1 sealed interface (IntegrationLifecycleEvent), 4 service interfaces (IntegrationAdapter, IntegrationFactory, HealthReporter, CommandHandler), 2 optional service interfaces (SchedulerService, ManagedHttpClient), 1 exception class (PermanentIntegrationException), and module-info.java.
+The Phase 2 specification contains 21 public Java types: 4 enums (HealthState, IoType, RequiredService, DataPath), 9 records (4 non-lifecycle: IntegrationDescriptor, HealthParameters, IntegrationContext, CommandEnvelope; 5 lifecycle event subtypes: IntegrationStarted, IntegrationStopped, IntegrationHealthChanged, IntegrationRestarted, IntegrationResourceExceeded), 1 sealed interface (IntegrationLifecycleEvent), 4 service interfaces (IntegrationFactory, IntegrationAdapter, HealthReporter, CommandHandler), 2 optional service interfaces (SchedulerService, ManagedHttpClient), and 1 exception class (PermanentIntegrationException).
 
 ## Design Doc Reference
 
@@ -50,10 +50,11 @@ All `requires transitive` because adapter modules use types from all these modul
 
 ## Complete Type Inventory
 
-### Enums (3)
+### Enums (4)
 
 | Type | Purpose |
 |---|---|
+| `HealthState` (4 values) | HEALTHY, DEGRADED, SUSPENDED, FAILED. Four-state health model for integration lifecycle (Doc 05 §4.3). |
 | `IoType` (2 values) | SERIAL (platform thread, JNI pinning), NETWORK (virtual thread). Determines supervisor thread allocation. |
 | `RequiredService` (3 values) | HTTP_CLIENT, SCHEDULER, TELEMETRY_WRITER. Gates optional service provisioning in IntegrationContext. |
 | `DataPath` (2 values) | DOMAIN (event store), TELEMETRY (ring buffer). Declares adapter data routing. |

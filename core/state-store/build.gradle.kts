@@ -6,6 +6,6 @@ plugins {
 description = "State store: projections, snapshots, query service"
 
 dependencies {
-    api(project(":core:event-model"))
+    implementation(project(":core:event-model"))
     api(project(":core:device-model"))
 }

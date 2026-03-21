@@ -33,6 +33,11 @@ package com.homesynapse.persistence;
  * incremental vacuum feature (Doc 04 §3.7), which frees pages without
  * rebuilding the entire database.</p>
  *
+ * <p><strong>Virtual Thread Safety:</strong> All implementations MUST execute
+ * SQLite operations on a platform thread executor, not virtual threads.
+ * The sqlite-jdbc driver uses {@code synchronized native} JNI methods that
+ * pin virtual thread carrier threads. See Virtual Thread Risk Audit finding B-4.</p>
+ *
  * <h2>Thread Safety</h2>
  *
  * <p>Implementations must be safe for concurrent use. The Observability

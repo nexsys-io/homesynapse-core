@@ -9,4 +9,5 @@ dependencies {
     api(project(":core:event-model"))
 
     implementation(libs.snakeyaml.engine)
+    implementation(libs.json.schema.validator)
 }

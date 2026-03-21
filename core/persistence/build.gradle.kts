@@ -6,8 +6,9 @@ plugins {
 description = "Persistence: SQLite event store, telemetry, checkpoints, migrations"
 
 dependencies {
-    api(project(":core:event-model"))
-    api(project(":core:state-store"))
+    api(project(":platform:platform-api"))
+    implementation(project(":core:event-model"))
+    implementation(project(":core:state-store"))
 
     implementation(libs.sqlite.jdbc)
 }

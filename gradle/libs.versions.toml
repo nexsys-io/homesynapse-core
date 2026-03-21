@@ -21,6 +21,10 @@ javalin            = "6.7.0"
 # Logging
 slf4j              = "2.0.17"
 logback            = "1.5.32"
+logstash-logback   = "8.0"
+
+# Validation
+json-schema-validator = "1.5.6"
 
 # Testing
 junit              = "5.14.3"
@@ -52,6 +56,10 @@ javalin                   = { module = "io.javalin:javalin", version.ref = "java
 slf4j-api                 = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 logback-classic           = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 logback-core              = { module = "ch.qos.logback:logback-core", version.ref = "logback" }
+logstash-logback-encoder  = { module = "net.logstash.logback:logstash-logback-encoder", version.ref = "logstash-logback" }
+
+# Validation
+json-schema-validator     = { module = "com.networknt:json-schema-validator", version.ref = "json-schema-validator" }
 
 # Testing
 junit-jupiter             = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }

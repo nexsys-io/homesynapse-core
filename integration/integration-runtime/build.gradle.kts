@@ -7,5 +7,4 @@ description = "Integration runtime: supervisor, health state machine, thread all
 
 dependencies {
     api(project(":integration:integration-api"))
-    implementation(project(":core:event-model"))
 }

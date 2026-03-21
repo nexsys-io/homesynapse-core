@@ -10,5 +10,4 @@ dependencies {
     api(project(":core:event-model"))
     api(project(":core:device-model"))
     api(project(":core:state-store"))
-    api(project(":config:configuration"))
 }

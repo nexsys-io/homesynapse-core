@@ -46,4 +46,5 @@ dependencies {
     // Logging implementation (only at the app level)
     runtimeOnly(libs.logback.classic)
     runtimeOnly(libs.logback.core)
+    runtimeOnly(libs.logstash.logback.encoder)
 }
