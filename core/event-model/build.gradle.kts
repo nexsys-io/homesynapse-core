@@ -12,4 +12,10 @@ dependencies {
     // expose SLF4J types, so api() scope was unjustified and created a Gradle/JPMS
     // mismatch (S4-01). Consumers must add their own SLF4J dependency.
     implementation(libs.slf4j.api)
+
+    // testFixtures dependencies — JUnit + AssertJ for the EventStoreContractTest
+    // abstract class. The java-conventions plugin only adds these to testImplementation,
+    // not testFixturesImplementation, so they must be declared explicitly here.
+    testFixturesImplementation(libs.junit.jupiter)
+    testFixturesImplementation(libs.assertj.core)
 }
