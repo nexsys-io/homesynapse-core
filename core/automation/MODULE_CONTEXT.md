@@ -208,6 +208,9 @@ All four upstream modules are `api` scope because their types appear in this mod
 | Constraint | Description |
 |---|---|
 | **LTD-01** | Virtual threads for all blocking operations. DelayAction, WaitForAction, and DurationTimer use virtual thread sleep. Each Run executes on its own virtual thread. |
+
+**SQLite operation exception.** "Virtual threads for all blocking operations" is correct for sleep, park, and network I/O but incorrect for SQLite JNI calls. EventStore reads, EventPublisher writes, and checkpoint writes route through the Persistence Layer's platform thread executor (LTD-03). The automation engine's three subscribers (automation_engine, command_dispatch_service, pending_command_ledger) park their virtual threads during database operations. DelayAction and WaitForAction virtual thread sleeps are unaffected — sleeping virtual threads do not pin carriers. DurationTimer wakeup evaluation reads from the State Store's ConcurrentHashMap (no SQLite), but if the timer fires and produces an event, that EventPublisher.publish() call routes through the executor. See Doc 07 §3.2 (Phase C correction) and AMD-25 §5 (implementation note S-12).
+
 | **LTD-04** | Typed ULID wrappers for all identifiers. AutomationId (from platform-api), RunId (new in automation), EntityId, EventId. |
 | **LTD-11** | No `synchronized` blocks. All concurrent state uses lock-free patterns or ReentrantLock (Phase 3). |
 | **INV-ES-04** | Write-ahead persistence. Events produced by the automation engine (automation_triggered, automation_completed, command_dispatched, state_confirmed, etc.) are durable before subscribers are notified. |

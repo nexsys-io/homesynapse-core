@@ -98,6 +98,8 @@ Both `requires transitive` declarations mean any module that reads `com.homesyna
 | **INV-ES-02** | State is always derivable from events. The state store is a materialized view that can be rebuilt by replaying the event log from a checkpoint. |
 | **INV-ES-05** | At-least-once delivery with subscriber idempotency. The state projection must handle duplicate events during recovery (stateVersion provides the idempotency cursor). |
 
+**Virtual thread threading model.** The State Projection subscriber processes events on a virtual thread. In-memory ConcurrentHashMap updates (the read path) execute directly on the virtual thread — no JNI, no carrier pinning. However, the projection subscriber's EventPublisher.publish() calls for derived state_changed events route through the Persistence Layer's platform thread write executor (LTD-03, Doc 04). The subscriber's virtual thread parks during each write. StateQueryService reads are pure ConcurrentHashMap lookups — fully virtual-thread-safe with no executor involvement. See Doc 03 §3.5 (AMD-29).
+
 ## Sealed Hierarchies
 
 None. This module contains no sealed types.

@@ -120,6 +120,8 @@ The `api` scope for event-model and state-store ensures types are transitively a
 | **INV-ES-04** | Write-ahead persistence. Events are durable before delivery. Persistence Layer provides the durability guarantee. |
 | **INV-PD-06** | Offline integrity. Write operations are transactional and crash-safe. Power loss is a normal operating condition. |
 
+**JNI carrier pinning and platform thread executor.** The persistence module owns the platform thread executor that isolates sqlite-jdbc's `synchronized native` JNI methods from the virtual thread carrier pool (LTD-03, AMD-27). Executor sizing: 1 write thread (single-writer model), 2–3 read threads (WAL concurrent readers). All other modules access SQLite exclusively through the EventStore and StateStore interfaces — they never interact with the executor directly. The executor is an internal implementation detail; if sqlite-jdbc is ever replaced with a pure-Java driver, the executor requirement changes. See Doc 04 §15 (Design Rationale) for the full justification.
+
 ## Sealed Hierarchies
 
 None. This module contains no sealed types.
