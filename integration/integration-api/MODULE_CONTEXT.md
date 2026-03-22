@@ -1,4 +1,4 @@
-# integration-api
+# integration-api — `com.homesynapse.integration` — 21 types — Adapter-facing API boundary, re-exports all core modules, IntegrationFactory/Adapter/Context
 
 ## Purpose
 

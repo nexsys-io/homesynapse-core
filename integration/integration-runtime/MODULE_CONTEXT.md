@@ -1,4 +1,4 @@
-# integration-runtime
+# integration-runtime — `com.homesynapse.integration.runtime` — Scaffold — OTP-style supervisor, adapter lifecycle, health monitoring, Kahn's startup ordering
 
 ## Purpose
 

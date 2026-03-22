@@ -1,4 +1,4 @@
-# configuration
+# configuration — `com.homesynapse.config` — 22 types — YAML 1.2 config loading, JSON Schema validation, AES-256-GCM secrets, hot reload
 
 ## Purpose
 

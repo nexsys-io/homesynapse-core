@@ -1,4 +1,4 @@
-# event-bus
+# event-bus — `com.homesynapse.event.bus` — 4 types — Pull-based event distribution, subscriber management, checkpoint persistence
 
 ## Purpose
 

@@ -1,4 +1,4 @@
-# platform-systemd
+# platform-systemd — `com.homesynapse.platform.systemd` — Scaffold — sd_notify integration, watchdog heartbeat, LinuxSystemPaths
 
 ## Design Doc Reference
 <!-- Link to the governing design document in homesynapse-core-docs -->

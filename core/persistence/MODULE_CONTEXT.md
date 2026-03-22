@@ -1,4 +1,4 @@
-# persistence
+# persistence — `com.homesynapse.persistence` — 11 types — SQLite WAL storage, telemetry ring buffer, WriteCoordinator, maintenance lifecycle
 
 ## Purpose
 

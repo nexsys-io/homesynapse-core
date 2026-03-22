@@ -1,4 +1,4 @@
-# state-store
+# state-store — `com.homesynapse.state` — 7 types — Materialized view over event stream, EntityState projection, availability tracking
 
 ## Purpose
 

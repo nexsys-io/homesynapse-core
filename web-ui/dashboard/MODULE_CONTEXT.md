@@ -1,4 +1,4 @@
-# dashboard
+# dashboard — Preact SPA — Scaffold — Observability web UI, static files served from Javalin, <100 KB gzipped, separate build pipeline
 
 ## Design Doc Reference
 <!-- Link to the governing design document in homesynapse-core-docs -->

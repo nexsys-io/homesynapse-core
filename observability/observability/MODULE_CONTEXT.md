@@ -1,4 +1,4 @@
-# observability
+# observability — `com.homesynapse.observability` — Scaffold — Health model, hierarchical aggregation, trace query, metrics, JFR integration
 
 ## Purpose
 

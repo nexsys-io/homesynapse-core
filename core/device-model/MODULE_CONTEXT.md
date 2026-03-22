@@ -1,4 +1,4 @@
-# device-model
+# device-model — `com.homesynapse.device` — 57 types — Entity/Device/Capability model, sealed hierarchies, registries, discovery pipeline
 
 ## Purpose
 

@@ -1,4 +1,4 @@
-# homesynapse-app
+# homesynapse-app — `com.homesynapse.app` — Scaffold — Assembly apex, manual DI wiring, all requires non-transitive, no exports
 
 ## Purpose
 

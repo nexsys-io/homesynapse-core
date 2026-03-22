@@ -1,4 +1,4 @@
-# integration-zigbee
+# integration-zigbee — `com.homesynapse.integration.zigbee` — Scaffold — Zigbee 3.0 coordinator, MVP protocol adapter, IEEEAddress (raw long, NOT ULID)
 
 ## Purpose
 

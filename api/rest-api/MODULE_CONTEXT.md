@@ -1,4 +1,4 @@
-# rest-api
+# rest-api — `com.homesynapse.api.rest` — Scaffold — HTTP command interface, RFC 9457 errors, 4-phase command lifecycle, idempotency keys
 
 ## Purpose
 

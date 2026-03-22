@@ -1,4 +1,4 @@
-# automation
+# automation — `com.homesynapse.automation` — ~52 types — Trigger→Condition→Action rule engine, 4 sealed hierarchies, cascade governance
 
 ## Purpose
 

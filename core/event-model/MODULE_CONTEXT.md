@@ -1,4 +1,4 @@
-# event-model
+# event-model — `com.homesynapse.event` — 46 types — Universal event vocabulary, EventEnvelope, EventPublisher, EventStore, all domain event payloads
 
 ## Purpose
 

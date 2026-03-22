@@ -1,4 +1,4 @@
-# platform-api
+# platform-api — `com.homesynapse.platform` — 12 types — Dependency root, zero project dependencies, typed ULID identity system
 
 ## Purpose
 

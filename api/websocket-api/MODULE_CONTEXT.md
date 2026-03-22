@@ -1,4 +1,4 @@
-# websocket-api
+# websocket-api — `com.homesynapse.api.websocket` — Scaffold — Real-time event streaming, 3-stage backpressure, read-only (no commands)
 
 ## Purpose
 

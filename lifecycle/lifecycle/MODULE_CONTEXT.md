@@ -1,4 +1,4 @@
-# lifecycle
+# lifecycle — `com.homesynapse.lifecycle` — Scaffold — 10-phase sequential startup, 30-second shutdown budget, fatal vs non-fatal classification
 
 ## Purpose
 
