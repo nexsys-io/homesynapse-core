@@ -42,4 +42,8 @@ dependencies {
     runtimeOnly(libs.logback.classic)
     runtimeOnly(libs.logback.core)
     runtimeOnly(libs.logstash.logback.encoder)
+
+    // Architecture enforcement tests — test-support provides ArchUnit rules
+    testImplementation(project(":testing:test-support"))
+    testImplementation(libs.archunit.junit5)
 }
