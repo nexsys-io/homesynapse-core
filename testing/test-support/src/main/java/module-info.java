@@ -19,4 +19,5 @@ module com.homesynapse.test {
     requires transitive org.assertj.core;
 
     exports com.homesynapse.test;
+    exports com.homesynapse.test.assertions;
 }
