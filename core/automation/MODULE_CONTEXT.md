@@ -151,7 +151,7 @@ module com.homesynapse.automation {
 | `SelectorResolver` | interface | Resolves selectors to entity ID sets (§3.12, §8.1) | `resolve(Selector)` → Set<EntityId>. Direct/slug → 0 or 1 entity. Area/label/type → 0+. Compound → intersection. Thread-safe. |
 | `ConflictDetector` | interface | Detects contradictory commands across Runs (§3.13, §8.1) | `scanForConflicts(EventId, List<RunContext>)`. Post-execution only. Both commands execute in Tier 1 (D6). Produces automation_conflict_detected DIAGNOSTIC events. Thread-safe. |
 
-**Total: 53 public types + 1 module-info.java + 1 package-info.java = 55 Java files.**
+**Total: ~52 public types + 1 module-info.java + 1 package-info.java = ~54 Java files.**
 
 ## Dependencies
 
