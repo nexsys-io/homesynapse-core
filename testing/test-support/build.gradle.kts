@@ -7,6 +7,7 @@ description = "Shared test infrastructure: in-memory stores, fixtures, test cloc
 dependencies {
     // Exposed as API so test consumers get these transitively
     api(project(":core:event-model"))
+    api(project(":core:event-bus"))
     api(project(":core:device-model"))
     api(project(":integration:integration-api"))
 
