@@ -1,6 +1,5 @@
 plugins {
-    id("homesynapse.java-conventions")
-    `java-library`
+    id("homesynapse.test-fixtures-conventions")
 }
 
 description = "Device model: Device, Entity, Capability, registries, discovery"

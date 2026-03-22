@@ -1,6 +1,5 @@
 plugins {
-    id("homesynapse.java-conventions")
-    `java-library`
+    id("homesynapse.library-conventions")
 }
 
 description = "WebSocket API: event relay, subscription management, backpressure"

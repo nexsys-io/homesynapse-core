@@ -1,6 +1,5 @@
 plugins {
-    id("homesynapse.java-conventions")
-    `java-library`
+    id("homesynapse.test-fixtures-conventions")
 }
 
 description = "Persistence: SQLite event store, telemetry, checkpoints, migrations"

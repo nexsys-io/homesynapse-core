@@ -1,6 +1,5 @@
 plugins {
-    id("homesynapse.java-conventions")
-    `java-library`
+    id("homesynapse.test-fixtures-conventions")
 }
 
 description = "Configuration: YAML loading, schema validation, secrets, hot reload"

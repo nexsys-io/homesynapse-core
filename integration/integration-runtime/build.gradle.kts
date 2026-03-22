@@ -1,6 +1,5 @@
 plugins {
-    id("homesynapse.java-conventions")
-    `java-library`
+    id("homesynapse.library-conventions")
 }
 
 description = "Integration runtime: supervisor, health state machine, thread allocation"

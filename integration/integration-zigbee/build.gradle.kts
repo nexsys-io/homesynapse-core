@@ -1,6 +1,5 @@
 plugins {
-    id("homesynapse.java-conventions")
-    `java-library`
+    id("homesynapse.library-conventions")
 }
 
 description = "Zigbee integration adapter (ZNP/EZSP transport, ZCL, device profiles)"

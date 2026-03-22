@@ -1,6 +1,5 @@
 plugins {
-    id("homesynapse.java-conventions")
-    `java-library`
+    id("homesynapse.test-fixtures-conventions")
 }
 
 description = "Integration API: adapter-facing contracts, health, command handling"

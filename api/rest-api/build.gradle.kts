@@ -1,6 +1,5 @@
 plugins {
-    id("homesynapse.java-conventions")
-    `java-library`
+    id("homesynapse.library-conventions")
 }
 
 description = "REST API: Javalin HTTP endpoints, RFC 9457 errors, pagination"

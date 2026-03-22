@@ -1,13 +1,8 @@
 plugins {
-    id("homesynapse.java-conventions")
-    application
+    id("homesynapse.application-conventions")
 }
 
 description = "Application assembly: main class, dependency wiring, jlink packaging"
-
-application {
-    mainClass.set("com.homesynapse.app.Main")
-}
 
 dependencies {
     // Platform layer
