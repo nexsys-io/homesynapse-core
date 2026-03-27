@@ -65,3 +65,8 @@ include("app:homesynapse-app")
 // Test infrastructure
 // ---------------------------------------------------------------------------
 include("testing:test-support")
+
+// ---------------------------------------------------------------------------
+// Spike subprojects (throwaway validation — not part of production build)
+// ---------------------------------------------------------------------------
+include("spike:wal-validation")
