@@ -6,4 +6,5 @@ description = "Platform abstraction API (health reporting, system paths)"
 
 dependencies {
     // No project dependencies — this is a leaf module
+    testImplementation(project(":testing:test-support"))
 }
