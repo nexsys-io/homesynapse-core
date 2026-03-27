@@ -153,3 +153,6 @@ _site/
 coverage/
 *.exec
 jacoco/
+
+# Claude
+.claude/
