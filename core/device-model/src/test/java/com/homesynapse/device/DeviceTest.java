@@ -1,4 +1,7 @@
-// HomeSynapse Core / Copyright (c) 2026 NexSys. All rights reserved.
+/*
+ * HomeSynapse Core
+ * Copyright (c) 2026 NexSys. All rights reserved.
+ */
 package com.homesynapse.device;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -13,7 +16,6 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 
 /**

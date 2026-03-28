@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 
 import com.homesynapse.event.test.EventStoreContractTest;
+import com.homesynapse.event.test.InMemoryEventStore;
 
 /**
  * Wires {@link InMemoryEventStore} into the

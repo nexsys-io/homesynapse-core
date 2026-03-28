@@ -1,4 +1,7 @@
-// HomeSynapse Core / Copyright (c) 2026 NexSys. All rights reserved.
+/*
+ * HomeSynapse Core
+ * Copyright (c) 2026 NexSys. All rights reserved.
+ */
 package com.homesynapse.event.bus;
 
 import static org.assertj.core.api.Assertions.assertThat;
