@@ -74,13 +74,14 @@ The `requires transitive com.homesynapse.platform` declaration is required becau
 
 ```kotlin
 dependencies {
-    api(project(":core:event-model"))
-    api(project(":core:state-store"))
+    api(project(":platform:platform-api"))
+    implementation(project(":core:event-model"))
+    implementation(project(":core:state-store"))
     implementation(libs.sqlite.jdbc)
 }
 ```
 
-The `api` scope for event-model and state-store ensures types are transitively available to consumers. The platform-api types are transitively available through event-model. SQLite JDBC is `implementation` scope because it is not exposed in the public API.
+Event-model and state-store are `implementation`-only dependencies — their types do not appear in persistence's public API. Platform-api is `api` scope because `EntityId` appears in public signatures (`TelemetrySample`, `TelemetryQueryService`). SQLite JDBC is `implementation` scope because it is not exposed in the public API.
 
 ## Consumers
 

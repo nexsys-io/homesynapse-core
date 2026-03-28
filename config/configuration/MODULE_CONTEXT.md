@@ -96,10 +96,11 @@ The `requires transitive com.homesynapse.event` declaration is required because 
 dependencies {
     api(project(":core:event-model"))
     implementation(libs.snakeyaml.engine)
+    implementation(libs.json.schema.validator)
 }
 ```
 
-The `api` scope for event-model ensures the `HomeSynapseException` and `ConfigurationValidationException` types are transitively available to consumers. SnakeYAML Engine is `implementation` scope — it is not exposed in the public API (Phase 3 internal dependency). `networknt:json-schema-validator` is NOT yet in the version catalog — flagged as [REVIEW] for Phase 3 addition.
+The `api` scope for event-model ensures the `HomeSynapseException` and `ConfigurationValidationException` types are transitively available to consumers. SnakeYAML Engine and `networknt:json-schema-validator` are `implementation` scope — they are not exposed in the public API.
 
 ## Consumers
 
@@ -182,7 +183,7 @@ None. This module contains no sealed types.
 
 **GOTCHA: `SchemaRegistry` parameters are JSON text strings, not file paths.** The Javadoc explicitly notes this. `registerCoreSchema("persistence", schemaJsonString)` — not `registerCoreSchema("persistence", "/path/to/schema.json")`. Phase 3 implementation parses the JSON string internally.
 
-**GOTCHA: `json-schema-validator` is NOT in the version catalog.** The `networknt:json-schema-validator` library is NOT yet in `gradle/libs.versions.toml`. This does not affect Phase 2 (no implementation code). It MUST be added before Phase 3 implementation of `ConfigValidator` and `SchemaRegistry`.
+**GOTCHA: `json-schema-validator` IS in the version catalog and build.gradle.kts.** The `networknt:json-schema-validator` library is present as `libs.json.schema.validator` with `implementation` scope. It is available for Phase 3 implementation of `ConfigValidator` and `SchemaRegistry`.
 
 **GOTCHA: IntegrationContext field ordering changed in Block K.** `configAccess` was inserted at position 7 (after `healthReporter`, before `schedulerService`) to group all required (non-null) fields together before optional (nullable) fields. Any code constructing IntegrationContext must include the new field.
 
@@ -203,6 +204,6 @@ None. This module contains no sealed types.
 - **Typed subsystem records needed:** `EventBusConfig`, `DeviceModelConfig`, `StateStoreConfig`, `PersistenceConfig`, `IntegrationRuntimeConfig`, `ConfigSystemConfig` — each mirrors the JSON Schema for its section. These replace the Phase 2 `Map<String, ConfigSection>` approach on `ConfigModel`.
 - **ConfigChangeSet convenience methods needed:** `hot()`, `integrationRestart()`, `processRestart()` — stream filters on the changes list by ReloadClassification.
 - **Event production:** Implementation must produce `config_changed` events via `EventPublisher.publishRoot()` with `EventOrigin.SYSTEM` and NORMAL priority on reload, and `config_error` events with DIAGNOSTIC priority for each ERROR issue at startup.
-- **`json-schema-validator` dependency:** Must be added to `gradle/libs.versions.toml` before implementation. Use `implementation` scope (not `api`) to keep it out of the public module API.
+- **`json-schema-validator` dependency:** Already present in `gradle/libs.versions.toml` and `build.gradle.kts` as `implementation(libs.json.schema.validator)`. Ready for Phase 3 implementation.
 - **Testing strategy:** Unit tests for record construction, field validation, Map.copyOf() defensive copying. Integration tests for full loading pipeline round-trip, reload atomicity (ERROR in candidate → active model unchanged), write path optimistic concurrency, secret resolution, schema composition. Performance targets from Doc 06 §10 should be investigation triggers for implementation.
 - **SecretStore.resolve() exception type:** Phase 3 decision — either introduce `SecretNotFoundException` or reuse `IllegalArgumentException`. Document in the implementation.

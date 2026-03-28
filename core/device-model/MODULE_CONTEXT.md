@@ -17,14 +17,14 @@ The Identity & Addressing Model (foundations) also governs DeviceId/EntityId lif
 
 ```
 module com.homesynapse.device {
-    requires transitive com.homesynapse.event;
+    requires com.homesynapse.event;
     requires transitive com.homesynapse.platform;
 
     exports com.homesynapse.device;
 }
 ```
 
-Both `requires transitive` declarations mean any module that reads `com.homesynapse.device` automatically gets access to all event types (`EventEnvelope`, `EventPublisher`, `EventId`, etc.) AND all identity types (`DeviceId`, `EntityId`, etc.) without needing to declare those dependencies themselves.
+The `requires transitive com.homesynapse.platform` declaration means any module that reads `com.homesynapse.device` automatically gets access to all identity types (`DeviceId`, `EntityId`, etc.) without needing to declare the dependency. Event-model is non-transitive because no event-model types (`EventEnvelope`, `EventPublisher`, etc.) appear in device-model's public API signatures — only Javadoc `@see` cross-references. Only platform-api is `requires transitive`.
 
 ## Package Structure
 
@@ -130,7 +130,7 @@ Both `requires transitive` declarations mean any module that reads `com.homesyna
 
 | Module | Why | Specific Types Used |
 |---|---|---|
-| **event-model** (`com.homesynapse.event`) | `requires transitive` — Event types referenced by device model types | `EventId` (in CommandDefinition/ExpectedOutcome cross-references), `CommandIdempotency` (mapped to device-model's `IdempotencyClass`). |
+| **event-model** (`com.homesynapse.event`) | `requires` (non-transitive) — Event types referenced only in Javadoc `@see` tags, not in public API signatures | `EventId` (in CommandDefinition/ExpectedOutcome cross-references), `CommandIdempotency` (mapped to device-model's `IdempotencyClass`). |
 | **platform-api** (`com.homesynapse.platform`) | `requires transitive` — Identity types for device/entity/area identification | `DeviceId`, `EntityId`, `IntegrationId`, `AreaId` (fields on Device, Entity, and discovery types), `Ulid` (underlying identity). |
 
 ## Consumers
@@ -248,7 +248,7 @@ switch (expectation) {
 
 **GOTCHA: `String` used for unit fields (`unitSymbol`) instead of JSR 385 `Unit<?>`.** This is a known Phase 2 simplification. Phase 3 adds the JSR 385 dependency. Do not introduce unit conversion logic using string comparison — wait for proper JSR 385 types.
 
-**GOTCHA: `module-info.java` uses `requires transitive` for BOTH event-model and platform-api.** This is because downstream consumers need types from both modules through device-model's public API. `Device` uses `DeviceId` (platform-api) and capability types reference `EventId` (event-model). Removing either `transitive` will break downstream compilation.
+**GOTCHA: `module-info.java` uses `requires transitive` for platform-api only.** Event-model is non-transitive (`requires com.homesynapse.event`) because no event-model types appear in device-model's public API signatures — only Javadoc `@see` cross-references. `Device` uses `DeviceId` (platform-api), which IS transitive. Removing `transitive` from platform-api will break downstream compilation, but event-model is correctly non-transitive.
 
 **GOTCHA: Nullable fields on `Device`.** `serialNumber`, `firmwareVersion`, `hardwareVersion` are nullable (not all hardware reports these). `areaId` is nullable (device not yet assigned to an area). `viaDeviceId` is nullable (only set for devices connected through a router/coordinator). These were audit findings against Doc 02 during Block G — do not regress them to non-null.
 

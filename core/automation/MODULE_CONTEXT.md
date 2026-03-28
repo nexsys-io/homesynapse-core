@@ -48,7 +48,7 @@ module com.homesynapse.automation {
 
 **NOT required in Phase 2:**
 - `com.homesynapse.event.bus` — EventBus, SubscriptionFilter, CheckpointStore are Phase 3 implementation details (subscriber registration). Not in any public API signature.
-- `com.homesynapse.config` — SchemaRegistry, ConfigurationService are Phase 3 implementation details (schema registration, reload callback). Not in any public API signature. The Gradle `api(project(":config:configuration"))` dependency remains for Phase 3 readiness but is NOT declared in module-info.java.
+- `com.homesynapse.config` — SchemaRegistry, ConfigurationService are Phase 3 implementation details (schema registration, reload callback). Not in any public API signature. Configuration dependency removed pre-Phase 3 (FIX-07). Will be re-added when automation implementation imports configuration types.
 
 ## Package Structure
 
@@ -170,11 +170,10 @@ dependencies {
     api(project(":core:event-model"))
     api(project(":core:device-model"))
     api(project(":core:state-store"))
-    api(project(":config:configuration"))
 }
 ```
 
-All four upstream modules are `api` scope because their types appear in this module's public API signatures. The `config:configuration` dependency remains for Phase 3 readiness — ConfigurationService and SchemaRegistry will be needed for automation schema registration and config access. However, no config types appear in the Phase 2 public API, so `com.homesynapse.config` is NOT declared in module-info.java.
+All four upstream modules are `api` scope because their types appear in this module's public API signatures. Configuration dependency removed pre-Phase 3 (FIX-07). Will be re-added when automation implementation imports configuration types (SchemaRegistry, ConfigurationService for schema registration and config access).
 
 ## Consumers
 
@@ -242,7 +241,7 @@ This module contains four sealed hierarchies — the largest concentration of se
 
 5. **`for_duration` fields use `java.time.Duration` and are nullable.** Present on StateChangeTrigger, StateTrigger, NumericThresholdTrigger, AvailabilityTrigger. NOT on EventTrigger (inherently instantaneous). Nullability documented in Javadoc `{@code null}` patterns, not annotation imports.
 
-6. **`config:configuration` is in build.gradle.kts but NOT in module-info.java.** The Gradle dependency stays for Phase 3 readiness. The JPMS module descriptor only declares modules whose types actually appear in public API signatures. Config types don't appear in automation's public API.
+6. **`config:configuration` dependency removed pre-Phase 3 (FIX-07).** Will be re-added when automation implementation imports configuration types. The JPMS module descriptor only declares modules whose types actually appear in public API signatures.
 
 7. **Recursive type references in sealed hierarchies are used.** `AndCondition` has `List<ConditionDefinition>`, `CompoundSelector` has `List<Selector>`, `ConditionBranchAction` has `List<ActionDefinition>` and `ConditionDefinition`. All valid Java 21.
 
@@ -270,7 +269,7 @@ This module contains four sealed hierarchies — the largest concentration of se
 
 **GOTCHA: Cross-hierarchy dependency ordering matters.** ConditionDefinition must be defined before ActionDefinition because WaitForAction and ConditionBranchAction reference ConditionDefinition. The Selector hierarchy has no cross-hierarchy dependencies and can be defined first.
 
-**GOTCHA: `config:configuration` in build.gradle.kts but NOT in module-info.java.** JPMS ignores Gradle dependencies that aren't required in module-info. Config types don't appear in automation's public API. Adding `requires com.homesynapse.config` would work but is incorrect — it would imply the public API depends on config types.
+**GOTCHA: `config:configuration` dependency removed pre-Phase 3 (FIX-07).** Will be re-added as `implementation` scope when automation Phase 3 implementation imports ConfigurationService and SchemaRegistry. Config types don't appear in automation's public API, so JPMS `requires` is also not needed until then.
 
 **GOTCHA: `DurationTimer.virtualThread` is `java.lang.Thread`, not a custom type.** No additional `requires` needed in module-info. Thread is in java.base.
 

@@ -10,7 +10,7 @@ import java.util.Objects;
 /**
  * A runtime-registered capability for devices with non-standard features.
  *
- * <p>Unlike the 14 standard capability records, {@code CustomCapability} is a
+ * <p>Unlike the 15 standard capability records, {@code CustomCapability} is a
  * {@code final class} because custom capabilities are constructed at runtime from
  * JSON schema definitions provided by integration adapters. The namespace must NOT
  * be {@code "core"} (reserved for standard capabilities).</p>

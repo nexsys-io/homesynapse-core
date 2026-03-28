@@ -24,7 +24,7 @@ No `requires` clauses — this module depends only on `java.base`.
 ## Package Structure
 
 - **`com.homesynapse.platform`** — Platform abstraction interfaces: `PlatformPaths` (filesystem layout contract) and `HealthReporter` (supervisor health reporting contract).
-- **`com.homesynapse.platform.identity`** — The ULID value type (`Ulid`), its generator (`UlidFactory`), and 9 typed ID wrapper records that provide compile-time type safety for domain object identity.
+- **`com.homesynapse.platform.identity`** — The ULID value type (`Ulid`), its generator (`UlidFactory`), and 8 typed ID wrapper records that provide compile-time type safety for domain object identity.
 
 ## Complete Type Inventory
 
@@ -87,7 +87,7 @@ None. This module has zero project dependencies. It depends only on `java.base` 
 |---|---|
 | **LTD-04** | ULID for all event and entity identity. 128-bit, BLOB(16) storage, Crockford Base32 text. |
 | **LTD-08** | Jackson JSON for all serialization. Typed ID wrappers need Jackson serializer/deserializer support (Phase 3). |
-| **LTD-11** | No `synchronized` — use `ReentrantLock` for virtual thread compatibility. `UlidFactory` already complies. |
+| **Virtual Thread Risk Audit (AMD-26)** | No `synchronized` blocks — use `ReentrantLock` for virtual thread compatibility (reinforced by LTD-04's carrier thread safety requirement). `UlidFactory` already complies. |
 | **INV-CS-02** | Entity identifiers are stable. EntityId never changes unless explicitly renamed. System upgrades and config changes must not alter identifiers. |
 | **INV-CE-04** | Protocol agnosticism in the device model. Typed IDs carry no protocol semantics — identity is opaque and stable (Principle P1 from Identity & Addressing Model). |
 | **INV-ES-07** | Event schema evolution. Typed ID text representations must remain forward-compatible within major version. |
@@ -100,9 +100,9 @@ None. This module contains no sealed types.
 
 1. **Typed ULID wrappers instead of raw String/UUID.** Each domain concept (Device, Entity, Integration, etc.) has its own record wrapping `Ulid`, preventing accidental cross-domain identity confusion at compile time. A raw `Ulid` or `String` can never be passed where a `DeviceId` is expected. The alternative (raw ULIDs with runtime checks) was rejected because it defers errors to runtime. Reference: Identity & Addressing Model §2.1.
 
-2. **`UlidFactory` uses `ReentrantLock` instead of `synchronized`.** `synchronized` blocks pin virtual threads to carrier threads. On a Raspberry Pi with 4 cores (4 carrier threads), one pinned carrier is a 25% capacity loss. `ReentrantLock` allows the virtual thread to unmount while waiting. Reference: LTD-11.
+2. **`UlidFactory` uses `ReentrantLock` instead of `synchronized`.** `synchronized` blocks pin virtual threads to carrier threads. On a Raspberry Pi with 4 cores (4 carrier threads), one pinned carrier is a 25% capacity loss. `ReentrantLock` allows the virtual thread to unmount while waiting. Reference: Virtual Thread Risk Audit (AMD-26).
 
-3. **9 typed ID wrappers in the identity package** (DeviceId, EntityId, IntegrationId, AreaId, AutomationId, PersonId, HomeId, SystemId). EventId is deliberately in event-model (`com.homesynapse.event`), not here, because it is event-specific. SubscriberId in event-bus is a plain `String`, not a typed wrapper, because subscribers are not domain objects.
+3. **8 typed ID wrappers in the identity package** (DeviceId, EntityId, IntegrationId, AreaId, AutomationId, PersonId, HomeId, SystemId). EventId is deliberately in event-model (`com.homesynapse.event`), not here, because it is event-specific. SubscriberId in event-bus is a plain `String`, not a typed wrapper, because subscribers are not domain objects.
 
 4. **No external ULID library dependency.** `Ulid` and `UlidFactory` are implemented from scratch rather than using an external library (e.g., ulid-creator). This eliminates an external dependency for the lowest-level module and ensures full control over the monotonic generation algorithm and virtual thread compatibility.
 

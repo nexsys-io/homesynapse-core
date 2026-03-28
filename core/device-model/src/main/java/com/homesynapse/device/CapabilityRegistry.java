@@ -36,7 +36,7 @@ public interface CapabilityRegistry {
     Capability getCapability(String capabilityId);
 
     /**
-     * Returns all 14 standard sealed capabilities.
+     * Returns all 15 standard sealed capabilities.
      *
      * @return an unmodifiable list of standard capabilities, never {@code null}
      */
