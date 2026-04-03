@@ -3,7 +3,7 @@
 # Copyright (c) 2026 NexSys. All rights reserved.
 #
 # kill-driver.sh — Orchestrates C3: Kill -9 Durability trials.
-# POSIX-compatible shell script for Debian Bookworm aarch64.
+# POSIX-compatible shell script for Debian Bookworm or later (aarch64).
 #
 # Usage: kill-driver.sh <classpath> <db_path> <num_trials>
 #

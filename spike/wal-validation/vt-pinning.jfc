@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  HomeSynapse Core — Custom JFR Settings for Virtual Thread Pinning Detection
+
+  This settings file enables jdk.VirtualThreadPinned with threshold=0ns to capture
+  EVERY carrier pinning event, regardless of duration. The default profile settings
+  use a 20ms threshold, which means sub-millisecond pinning (typical for sqlite-jdbc
+  operations completing in 10-45µs) is never recorded.
+
+  Usage:
+    java -XX:StartFlightRecording=filename=recording.jfr,settings=vt-pinning.jfc \
+         -cp ... com.homesynapse.spike.wal.V3ExecutorPatternTest <db-path>
+
+  Or from a running process:
+    jcmd <pid> JFR.start filename=recording.jfr settings=vt-pinning.jfc
+
+  See: homesynapse-core-docs/research/sqlite-wal-validation-spike-plan.md §5 V1-V3
+-->
+
+<configuration version="2.0" label="VT Pinning Detection" description="Captures all virtual thread pinning events with zero threshold" provider="HomeSynapse Spike">
+
+  <!-- Virtual thread pinning — the primary target of this settings file -->
+  <event name="jdk.VirtualThreadPinned">
+    <setting name="enabled">true</setting>
+    <setting name="stackTrace">true</setting>
+    <setting name="threshold">0 ns</setting>
+  </event>
+
+  <!-- Virtual thread submit failures — indicates carrier pool exhaustion -->
+  <event name="jdk.VirtualThreadSubmitFailed">
+    <setting name="enabled">true</setting>
+    <setting name="stackTrace">true</setting>
+  </event>
+
+  <!-- Thread context switch events for carrier utilization analysis -->
+  <event name="jdk.ThreadPark">
+    <setting name="enabled">true</setting>
+    <setting name="stackTrace">true</setting>
+    <setting name="threshold">0 ns</setting>
+  </event>
+
+  <!-- CPU load for overall system utilization -->
+  <event name="jdk.CPULoad">
+    <setting name="enabled">true</setting>
+    <setting name="period">1 s</setting>
+  </event>
+
+  <!-- Thread CPU load for per-thread analysis -->
+  <event name="jdk.ThreadCPULoad">
+    <setting name="enabled">true</setting>
+    <setting name="period">1 s</setting>
+  </event>
+
+  <!-- Java monitor events — captures synchronized block contention -->
+  <event name="jdk.JavaMonitorEnter">
+    <setting name="enabled">true</setting>
+    <setting name="stackTrace">true</setting>
+    <setting name="threshold">0 ns</setting>
+  </event>
+
+  <event name="jdk.JavaMonitorWait">
+    <setting name="enabled">true</setting>
+    <setting name="stackTrace">true</setting>
+    <setting name="threshold">0 ns</setting>
+  </event>
+
+</configuration>

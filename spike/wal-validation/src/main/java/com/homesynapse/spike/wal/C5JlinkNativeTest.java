@@ -31,7 +31,12 @@ import java.util.Locale;
  *   <li>Checks if the native library was extracted to the custom tmpdir
  * </ol>
  *
- * <p>Usage: {@code java -cp ... com.homesynapse.spike.wal.C5JlinkNativeTest <db-path>}
+ * <p>Usage: {@code java -cp ... com.homesynapse.spike.wal.C5JlinkNativeTest <db-path> [tmpdir-parent]}
+ *
+ * <p>If {@code tmpdir-parent} is omitted, defaults to {@code /tmp}. To test the
+ * production path, pass {@code /var/lib/homesynapse/tmp} — note this resolves through
+ * the FHS symlink to {@code /mnt/nvme/homesynapse/data/tmp/} and must exist before
+ * running. See the setup guide §4 for directory creation.
  */
 public final class C5JlinkNativeTest {
 
@@ -49,14 +54,25 @@ public final class C5JlinkNativeTest {
 
     public static void main(String[] args) throws Exception {
         if (args.length < 1) {
-            System.err.println("Usage: C5JlinkNativeTest <db-file-path>");
+            System.err.println(
+                    "Usage: C5JlinkNativeTest <db-file-path> [tmpdir-parent]");
             System.exit(1);
         }
         String dbPath = args[0];
+        // Default to /tmp; pass /var/lib/homesynapse/tmp for production path test
+        Path tmpdirParent = args.length >= 2
+                ? Path.of(args[1]) : Path.of("/tmp");
 
         // --- CRITICAL: set tmpdir BEFORE any sqlite-jdbc class loads ---
+        if (!Files.isDirectory(tmpdirParent)) {
+            System.err.println("WARNING: tmpdir parent does not exist: "
+                    + tmpdirParent + " — falling back to /tmp");
+            System.err.println("  (If testing /var/lib/homesynapse/tmp/, ensure"
+                    + " the setup guide §4 directory creation has been run.)");
+            tmpdirParent = Path.of("/tmp");
+        }
         Path customTmpDir = Files.createTempDirectory(
-                Path.of("/tmp"), TMPDIR_PREFIX);
+                tmpdirParent, TMPDIR_PREFIX);
         String previousTmpDir = System.getProperty("java.io.tmpdir");
         System.setProperty("java.io.tmpdir", customTmpDir.toString());
 
