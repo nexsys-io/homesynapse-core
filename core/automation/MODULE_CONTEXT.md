@@ -299,3 +299,37 @@ This module contains four sealed hierarchies — the largest concentration of se
 - **Schema registration needed:** Automation schema fragment registered via SchemaRegistry.registerCoreSchema() at startup.
 - **Testing strategy:** Unit tests for record construction, field validation, defensive copying. Integration tests for trigger evaluation (event matching, duration timer lifecycle), condition evaluation (all subtypes + combinators), action execution (sequential ordering, branching, delay/wait-for), Run lifecycle (mode enforcement, deduplication, cascade governance), command dispatch (routing, validation), pending command tracking (confirmation, timeout, expiry). Performance targets from Doc 07 §10 should be investigation triggers.
 - **`json-schema-validator` still needed in libs.versions.toml for Phase 3** (flagged in Block K, still outstanding).
+
+### Critical Review Integration (AUTOMATION_ENGINE_CRITICAL_REVIEW.md)
+
+The external critical review identified 28 issues. Four are resolved by amendments (AMD-03, AMD-04, AMD-25, AMD-31). Ten are deferred to Tier 2. The remaining implementation-level findings below must be addressed during Phase 3 coding.
+
+**Already resolved by amendments (no further action):**
+- Issue 2.1 (atomic condition snapshot) → AMD-03: StateSnapshot via `StateQueryService.getSnapshot()` at trigger time
+- Issue 2.4 / 1.3 (replay determinism) → Doc 07 §3.10: replay is reconstructive, not re-evaluative
+- Issue 10.1 (cascade loops) → AMD-04: cascade depth max 8, duplicate suppression, natural termination
+- Issues 3.1 / 3.2 (command execution order) → AMD-31: sequential within Run, ULID ascending multi-target, log-order dispatch
+
+**Implementation-level findings for Phase 3:**
+
+| Issue | Summary | Implementation Guidance |
+|---|---|---|
+| 1.1 | Event-time vs current-time state semantics | Condition evaluation uses StateSnapshot captured at trigger time (AMD-03). Document this clearly in ConditionEvaluator Javadoc. |
+| 1.2 | Atomic trigger evaluation | TriggerEvaluator.evaluate() runs per-event sequentially within the subscriber's pull loop. Document thread-safety guarantee: all triggers for one event evaluated atomically before the next event is processed. |
+| 1.4 | Startup behavior of level-triggered automations | Triggers fire on `state_changed` events only, not on initial state load. No catch-up evaluation at startup. Document in AutomationRegistry Javadoc. |
+| 2.2 | Read-time version tracking | Extend `automation_condition_evaluated` event payload with `last_changed_at` and `last_changed_by_event_id` for each evaluated entity state. Enables debugging "why didn't the automation run?" |
+| 2.3 | Short-circuit evaluation order | Implement left-to-right depth-first evaluation for `and`/`or`/`not` conditions. Order is stable across restarts and replays. Unevaluated conditions (due to short-circuit) do NOT produce `automation_condition_evaluated` events. |
+| 3.3 | No action rollback | Fail-fast semantics: if action N fails, actions N+1..M do not execute. No rollback of completed actions. Document in ActionExecutor Javadoc. |
+| 3.4 | Unavailable target semantics | `UnavailablePolicy` applies per-target: SKIP skips only the unavailable entity (others still receive commands), ERROR fails the Run, WARN dispatches anyway with DIAGNOSTIC event. |
+| 3.5 | Command dispatch timeout | Confirmation timeout is tracked by PendingCommandLedger (default 30s), not ActionExecutor. The Run completes independently of command confirmation. `command_confirmation_timed_out` is DIAGNOSTIC, not an error. |
+| 4.1 | Restart mode cancellation | When `restart` mode cancels an active Run, in-flight commands from the cancelled Run are NOT recalled. Commands are fire-and-forget at dispatch. Document in RunManager Javadoc. |
+| 4.2 | Run completion vs command status | Run status reflects automation lifecycle (COMPLETED/FAILED/ABORTED), NOT command confirmation status. A Run can be COMPLETED while its commands are still pending confirmation. |
+| 5.1 | Conflict detection timing | ConflictDetector runs after Run initiation, scanning for contradictory commands within the same correlation chain. Produces `conflict_detected` DIAGNOSTIC events. |
+| 5.2 | No conflict suppression | Tier 1: both conflicting commands execute. Conflict events are informational only. No automatic resolution. |
+| 6.1 | Tier 2 trigger graceful fallback | When a Tier 2 trigger type (zone, scheduled) is loaded in Tier 1, produce `config_warning` event (not error). Mark the trigger as inactive, set automation health to DEGRADED. |
+| 7.1/7.2 | Retry and auto-disable | No per-action retry in Tier 1. Auto-disable threshold (default 5 failures) treats all failure types equally. Document root cause analysis guidance in operator docs. |
+| 10.4 | Automation versioning | No built-in versioning. Recommend external Git for `automations.yaml`. `definition_hash` in RunContext detects config-change-vs-Run consistency. |
+| 10.8 | Selector performance | Selector resolution is cached at trigger time. Large selections (100+ entities) should be avoided in high-frequency automations. Future: build indices in EntityRegistry. |
+
+**Deferred to Tier 2 (no Phase 3 action):**
+Issues 4.3 (run cancellation API), 5.3 (cascade-aware conflict detection), 6.2/6.3 (location/scheduled catch-up), 7.3 (dead letter queue), 10.2 (automation dependencies), 10.3 (templating), 10.5 (dry-run mode), 10.6 (rate limiting), 10.7 (automation templates).

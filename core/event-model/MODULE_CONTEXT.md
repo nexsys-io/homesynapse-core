@@ -243,6 +243,8 @@ None currently. `DomainEvent` is a non-sealed marker interface. If sealed in Pha
 
 **GOTCHA: Planned decomposed interfaces (`EventAppender`, `EventReader`, `EventQuerier`) were never implemented.** The Refined Repo Architecture v2 planned to decompose the event store into three fine-grained interfaces. This decomposition was NOT implemented during Phase 2. The actual interfaces are `EventPublisher` (2 write methods) and `EventStore` (6 read methods). References to the decomposed names in planning documents are stale. `InMemoryEventStore` implements `EventPublisher` + `EventStore`.
 
+- **S4-01 (RESOLVED by DECIDE-01):** SLF4J was previously `api()` scope in Gradle without `requires org.slf4j` in module-info. Resolved: SLF4J is now `implementation` scope per module. Each module that uses logging declares its own SLF4J dependency.
+
 ## Phase 3 Notes
 
 - **`InMemoryEventStore` — IMPLEMENTED (2026-03-27).** Lives in `testFixtures` source set. Implements both `EventPublisher` and `EventStore`. Passes all 27 `EventStoreContractTest` methods. Uses `ReentrantReadWriteLock` for thread safety and `Clock` injection for testable time. Assigns `List.of(EventCategory.SYSTEM)` as a default category for all events — the full `eventType`→category mapping is deferred to the production `SQLiteEventPublisher`.

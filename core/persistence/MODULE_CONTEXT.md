@@ -163,6 +163,8 @@ None. This module contains no sealed types.
 
 **GOTCHA: The subscriber grace period default is 24 hours, not unbounded.** `subscriber_grace_period_hours: 24` (range 1–168) in Doc 04 §9. A subscriber that hasn't updated its checkpoint in 24 hours has its checkpoint protection stripped and retention proceeds past it. This is by design (INV-RF-05 — bounded storage), but means a module disabled for maintenance beyond 24 hours will lose checkpoint protection. Use the PAUSED subscriber state (Doc 04 §3.4) for intentional maintenance windows.
 
+- **S4-04 (Gradle/JPMS concordance):** `requires com.homesynapse.event` and `requires com.homesynapse.state` are non-transitive in module-info. Gradle scope is `implementation` for both (verified). `api(project(":platform:platform-api"))` is present for EntityId exposure.
+
 ## Phase 3 Notes
 
 - **TelemetryWriter implementation needed:** `SqliteTelemetryWriter` using `INSERT OR REPLACE INTO telemetry_samples (slot, seq, entity_ref, attribute_key, value, timestamp) VALUES (? % max_rows, ?, ?, ?, ?, ?)`. Thread-safe with single-writer serialization via SQLite's write lock. Batch transactions (configurable, default 100 samples per Doc 04 §9).

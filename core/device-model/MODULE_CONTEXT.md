@@ -266,6 +266,8 @@ switch (expectation) {
 
 **GOTCHA: Integration-initiated Display Name changes do NOT regenerate slugs.** When an integration adapter updates an entity's display name (e.g., from firmware metadata), the slug remains unchanged. Slug regeneration is a user-initiated action only (Identity Model §4.3). This prevents automations referencing slugs from silently breaking when an integration pushes a name update.
 
+- **S4-06 / S4-02:** `requires com.homesynapse.event` is intentionally non-transitive — event-model types do not appear in device-model's public API (only Javadoc `@see` references). `requires transitive com.homesynapse.platform` is explicit in module-info despite being implicitly available through event-model's transitivity — this is intentional for JPMS clarity.
+
 ## Phase 3 Notes
 
 - **Registry implementations needed:** `SqliteDeviceRegistry`, `SqliteEntityRegistry`, `InMemoryCapabilityRegistry` (standard capabilities are static; custom capabilities persisted to SQLite). All must be thread-safe.

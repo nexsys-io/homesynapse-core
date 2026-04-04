@@ -134,6 +134,9 @@ None. This module contains no sealed types.
 
 **GOTCHA: `StateStoreLifecycle.start()` blocks dependent subsystems.** The returned `CompletableFuture<Void>` is the readiness signal. Dependent subsystems (REST API, WebSocket API, Automation Engine) must not start serving until this future completes. The lifecycle module coordinates this ordering.
 
+- **S4-03 (Gradle/JPMS concordance):** `requires com.homesynapse.event` is non-transitive in module-info. Gradle scope should be `implementation`, not `api`. Verify `build.gradle.kts` matches before Phase 3 implementation.
+- **S5-CF2 (Phase 3 watch):** When an integration fails and triggers device orphan lifecycle (AMD-17), the orphan transition MUST set `stale:true` and `availability:UNAVAILABLE` immediately. The 30-second staleness scan (AMD-11) must treat already-stale orphaned devices as no-ops — do not emit duplicate stale events.
+
 ## Phase 3 Notes
 
 - **StateQueryService implementation needed:** `ConcurrentHashMapStateStore` or similar. Uses `ConcurrentHashMap<EntityId, EntityState>` for lock-free reads. `getSnapshot()` takes a read-consistent copy under a `StampedLock` or similar. Implements both `StateQueryService` and an internal `StateProjection` interface for write-side updates from event subscribers.
