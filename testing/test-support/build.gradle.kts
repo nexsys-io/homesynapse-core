@@ -13,4 +13,7 @@ dependencies {
 
     api(libs.junit.jupiter)
     api(libs.assertj.core)
+
+    // Test dependency for EventCollectorTest — needs InMemoryEventStore from event-model testFixtures
+    testImplementation(testFixtures(project(":core:event-model")))
 }
