@@ -19,6 +19,7 @@ import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.UlidFactory;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -55,6 +56,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * @see EventStore
  * @see EventPage
  */
+@DisplayName("EventStore Contract")
 public abstract class EventStoreContractTest {
 
     /** Subclass constructor. */
@@ -141,6 +143,7 @@ public abstract class EventStoreContractTest {
     // ──────────────────────────────────────────────────────────────────
 
     @Test
+    @DisplayName("publishRoot returns envelope with publisher-assigned fields")
     void publishRoot_returnsEnvelopeWithPublisherAssignedFields()
             throws SequenceConflictException {
         var subject = testSubject();
@@ -163,6 +166,7 @@ public abstract class EventStoreContractTest {
     }
 
     @Test
+    @DisplayName("publishRoot sets root causal context")
     void publishRoot_setsRootCausalContext()
             throws SequenceConflictException {
         var envelope = publisher().publishRoot(
@@ -176,6 +180,7 @@ public abstract class EventStoreContractTest {
     }
 
     @Test
+    @DisplayName("publish sets derived causal context")
     void publish_setsDerivedCausalContext()
             throws SequenceConflictException {
         var root = publisher().publishRoot(
@@ -195,6 +200,7 @@ public abstract class EventStoreContractTest {
     }
 
     @Test
+    @DisplayName("published event is readable via store")
     void publishedEvent_readableViaStore()
             throws SequenceConflictException {
         var envelope = publisher().publishRoot(
@@ -212,6 +218,7 @@ public abstract class EventStoreContractTest {
     // ──────────────────────────────────────────────────────────────────
 
     @Test
+    @DisplayName("global position increases monotonically")
     void globalPosition_monotonicallyIncreases()
             throws SequenceConflictException {
         var s1 = testSubject();
@@ -226,6 +233,7 @@ public abstract class EventStoreContractTest {
     }
 
     @Test
+    @DisplayName("readFrom returns events in global position order")
     void readFrom_returnsEventsInGlobalPositionOrder()
             throws SequenceConflictException {
         var s1 = testSubject();
@@ -248,6 +256,7 @@ public abstract class EventStoreContractTest {
     // ──────────────────────────────────────────────────────────────────
 
     @Test
+    @DisplayName("subject sequence increments per subject")
     void subjectSequence_incrementsPerSubject()
             throws SequenceConflictException {
         var subject = testSubject();
@@ -260,6 +269,7 @@ public abstract class EventStoreContractTest {
     }
 
     @Test
+    @DisplayName("subject sequence is independent across subjects")
     void subjectSequence_independentAcrossSubjects()
             throws SequenceConflictException {
         var s1 = testSubject();
@@ -277,6 +287,7 @@ public abstract class EventStoreContractTest {
     // ──────────────────────────────────────────────────────────────────
 
     @Test
+    @DisplayName("readFrom respects maxCount limit")
     void readFrom_respectsMaxCount()
             throws SequenceConflictException {
         var subject = testSubject();
@@ -291,6 +302,7 @@ public abstract class EventStoreContractTest {
     }
 
     @Test
+    @DisplayName("readFrom paginates correctly across multiple pages")
     void readFrom_paginatesCorrectly()
             throws SequenceConflictException {
         var subject = testSubject();
@@ -307,6 +319,7 @@ public abstract class EventStoreContractTest {
     }
 
     @Test
+    @DisplayName("readFrom after position filters correctly")
     void readFrom_afterPositionFiltersCorrectly()
             throws SequenceConflictException {
         var subject = testSubject();
@@ -320,6 +333,7 @@ public abstract class EventStoreContractTest {
     }
 
     @Test
+    @DisplayName("readFrom on empty store returns empty page")
     void readFrom_emptyStoreReturnsEmptyPage() {
         EventPage page = store().readFrom(0, 10);
 
@@ -332,6 +346,7 @@ public abstract class EventStoreContractTest {
     // ──────────────────────────────────────────────────────────────────
 
     @Test
+    @DisplayName("readBySubject filters to correct subject")
     void readBySubject_filtersToCorrectSubject()
             throws SequenceConflictException {
         var s1 = testSubject();
@@ -349,6 +364,7 @@ public abstract class EventStoreContractTest {
     }
 
     @Test
+    @DisplayName("readBySubject returns events ordered by subject sequence")
     void readBySubject_orderedBySubjectSequence()
             throws SequenceConflictException {
         var subject = testSubject();
@@ -366,6 +382,7 @@ public abstract class EventStoreContractTest {
     }
 
     @Test
+    @DisplayName("readBySubject after sequence filters correctly")
     void readBySubject_afterSequenceFilters()
             throws SequenceConflictException {
         var subject = testSubject();
@@ -385,6 +402,7 @@ public abstract class EventStoreContractTest {
     // ──────────────────────────────────────────────────────────────────
 
     @Test
+    @DisplayName("readByCorrelation returns full causal chain")
     void readByCorrelation_returnsFullCausalChain()
             throws SequenceConflictException {
         var subject = testSubject();
@@ -410,6 +428,7 @@ public abstract class EventStoreContractTest {
     }
 
     @Test
+    @DisplayName("readByCorrelation returns empty for unknown correlation id")
     void readByCorrelation_returnsEmptyForUnknownId() {
         List<EventEnvelope> chain = store().readByCorrelation(
                 UlidFactory.generate());
@@ -422,6 +441,7 @@ public abstract class EventStoreContractTest {
     // ──────────────────────────────────────────────────────────────────
 
     @Test
+    @DisplayName("readByType filters to matching event type")
     void readByType_filtersCorrectly()
             throws SequenceConflictException {
         var subject = testSubject();
@@ -442,6 +462,7 @@ public abstract class EventStoreContractTest {
     // ──────────────────────────────────────────────────────────────────
 
     @Test
+    @DisplayName("readByTimeRange filters within range boundaries")
     void readByTimeRange_filtersWithinRange()
             throws SequenceConflictException {
         var subject = testSubject();
@@ -467,11 +488,13 @@ public abstract class EventStoreContractTest {
     // ──────────────────────────────────────────────────────────────────
 
     @Test
+    @DisplayName("latestPosition is zero when store is empty")
     void latestPosition_zeroWhenEmpty() {
         assertThat(store().latestPosition()).isEqualTo(0L);
     }
 
     @Test
+    @DisplayName("latestPosition matches last appended event")
     void latestPosition_matchesLastAppendedEvent()
             throws SequenceConflictException {
         var subject = testSubject();
@@ -487,36 +510,42 @@ public abstract class EventStoreContractTest {
     // ──────────────────────────────────────────────────────────────────
 
     @Test
+    @DisplayName("readFrom rejects negative afterPosition")
     void readFrom_rejectsNegativePosition() {
         assertThatThrownBy(() -> store().readFrom(-1, 10))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
+    @DisplayName("readFrom rejects zero maxCount")
     void readFrom_rejectsZeroMaxCount() {
         assertThatThrownBy(() -> store().readFrom(0, 0))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
+    @DisplayName("readBySubject rejects null subject")
     void readBySubject_rejectsNullSubject() {
         assertThatThrownBy(() -> store().readBySubject(null, 0, 10))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
+    @DisplayName("readByCorrelation rejects null correlation id")
     void readByCorrelation_rejectsNullCorrelationId() {
         assertThatThrownBy(() -> store().readByCorrelation(null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
+    @DisplayName("readByType rejects null event type")
     void readByType_rejectsNullEventType() {
         assertThatThrownBy(() -> store().readByType(null, 0, 10))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
+    @DisplayName("readByTimeRange rejects from after to")
     void readByTimeRange_rejectsFromAfterTo() {
         var later = Instant.parse("2026-01-02T00:00:00Z");
         var earlier = Instant.parse("2026-01-01T00:00:00Z");
