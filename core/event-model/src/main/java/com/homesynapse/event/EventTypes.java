@@ -174,4 +174,21 @@ public final class EventTypes {
 
 	/** Event issued when causality depth reaches a warning threshold. */
 	public static final String CAUSALITY_DEPTH_WARNING = "causality_depth_warning";
+
+	// ========== Integration Lifecycle (Doc 05 §4.4) ==========
+
+	/** Event issued when an integration adapter transitions to the running state. */
+	public static final String INTEGRATION_STARTED = "integration_started";
+
+	/** Event issued when an integration adapter transitions from running to stopped. */
+	public static final String INTEGRATION_STOPPED = "integration_stopped";
+
+	/** Event issued when an integration adapter transitions between health states. */
+	public static final String INTEGRATION_HEALTH_CHANGED = "integration_health_changed";
+
+	/** Event issued when an integration adapter is successfully restarted after a failure. */
+	public static final String INTEGRATION_RESTARTED = "integration_restarted";
+
+	/** Event issued when an integration adapter exceeds a resource quota. */
+	public static final String INTEGRATION_RESOURCE_EXCEEDED = "integration_resource_exceeded";
 }

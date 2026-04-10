@@ -4,6 +4,8 @@
  */
 package com.homesynapse.integration;
 
+import com.homesynapse.event.EventType;
+import com.homesynapse.event.EventTypes;
 import com.homesynapse.platform.identity.IntegrationId;
 
 import java.util.Objects;
@@ -30,6 +32,7 @@ import java.util.Objects;
  * @see IntegrationLifecycleEvent
  * @see IntegrationStopped
  */
+@EventType(EventTypes.INTEGRATION_STARTED)
 public record IntegrationStarted(
         IntegrationId integrationId,
         String integrationType,

@@ -4,6 +4,8 @@
  */
 package com.homesynapse.integration;
 
+import com.homesynapse.event.EventType;
+import com.homesynapse.event.EventTypes;
 import com.homesynapse.platform.identity.IntegrationId;
 
 import java.util.Objects;
@@ -42,6 +44,7 @@ import java.util.Objects;
  * @see IntegrationLifecycleEvent
  * @see HealthState
  */
+@EventType(EventTypes.INTEGRATION_RESOURCE_EXCEEDED)
 public record IntegrationResourceExceeded(
         IntegrationId integrationId,
         String integrationType,

@@ -4,6 +4,8 @@
  */
 package com.homesynapse.integration;
 
+import com.homesynapse.event.EventType;
+import com.homesynapse.event.EventTypes;
 import com.homesynapse.platform.identity.IntegrationId;
 
 import java.util.Objects;
@@ -38,6 +40,7 @@ import java.util.Objects;
  * @see HealthState
  * @see HealthReporter
  */
+@EventType(EventTypes.INTEGRATION_HEALTH_CHANGED)
 public record IntegrationHealthChanged(
         IntegrationId integrationId,
         String integrationType,

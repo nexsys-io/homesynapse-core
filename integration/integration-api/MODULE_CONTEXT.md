@@ -78,11 +78,11 @@ All `requires transitive` because adapter modules use types from all these modul
 | Type | Purpose |
 |---|---|
 | `IntegrationLifecycleEvent` | Sealed root extending DomainEvent. 5 common accessor methods: integrationId(), integrationType(), previousState() (nullable for IntegrationStarted), newState(), reason(). |
-| `IntegrationStarted` | `integration_started` — initial startup. previousState() returns null. |
-| `IntegrationStopped` | `integration_stopped` — shutdown or health threshold breach. |
-| `IntegrationHealthChanged` | `integration_health_changed` — health state transition. Adds healthScore field. |
-| `IntegrationRestarted` | `integration_restarted` — successful restart after failure. Adds restartCount field. |
-| `IntegrationResourceExceeded` | `integration_resource_exceeded` — CRITICAL resource quota breach. Adds resourceType, currentValue, limitValue fields. |
+| `IntegrationStarted` | `integration_started` — initial startup. previousState() returns null. Carries `@EventType(EventTypes.INTEGRATION_STARTED)` (M2.i). |
+| `IntegrationStopped` | `integration_stopped` — shutdown or health threshold breach. Carries `@EventType(EventTypes.INTEGRATION_STOPPED)` (M2.i). |
+| `IntegrationHealthChanged` | `integration_health_changed` — health state transition. Adds healthScore field. Carries `@EventType(EventTypes.INTEGRATION_HEALTH_CHANGED)` (M2.i). |
+| `IntegrationRestarted` | `integration_restarted` — successful restart after failure. Adds restartCount field. Carries `@EventType(EventTypes.INTEGRATION_RESTARTED)` (M2.i). |
+| `IntegrationResourceExceeded` | `integration_resource_exceeded` — CRITICAL resource quota breach. Adds resourceType, currentValue, limitValue fields. Carries `@EventType(EventTypes.INTEGRATION_RESOURCE_EXCEEDED)` (M2.i). |
 
 ### Service Interfaces (6)
 
@@ -180,7 +180,11 @@ api(project(":config:configuration"))
 
 **GOTCHA: `IntegrationStarted.previousState()` always returns null.** This is by design — no previous health state exists at initial startup. Unlike all other IntegrationLifecycleEvent subtypes where previousState is non-null.
 
-**GOTCHA: `IntegrationLifecycleEvent` extends `DomainEvent`, which is in event-model.** This creates a compile-time dependency from integration-api to event-model. The dependency is correct — lifecycle events are domain events that flow through the standard event pipeline. Do not try to remove this dependency.
+**GOTCHA: `IntegrationLifecycleEvent` extends `DomainEvent`, which is in event-model.** This creates a compile-time dependency from integration-api to event-model. The dependency is correct — lifecycle events are domain events that flow through the standard event pipeline. Do not try to remove this dependency. It is also the direct reason `DomainEvent` is permanently non-sealed (AMD-33): JEP 409 requires a sealed interface and all its permits to live in the same JPMS module, and these lifecycle records live in `com.homesynapse.integration` rather than `com.homesynapse.event`.
+
+**GOTCHA: `@EventType` annotation lives on the 5 concrete subtypes only — NOT on the sealed `IntegrationLifecycleEvent` interface.** Only concrete records are serialized, so only concrete records are registered. The sealed parent is a dispatch root, not a registerable type. `IntegrationEventTypeAnnotationTest.sealedParent_doesNotHaveAnnotation` pins this.
+
+**GOTCHA: `@EventType` annotation values must use the `integration_` prefix.** This prevents collisions with core event types in `EventTypes` (which are in a flat namespace shared with integration lifecycle events). `IntegrationEventTypeAnnotationTest.annotationValues_doNotCollideWithCoreEvents` pins this.
 
 **GOTCHA: `IntegrationDescriptor.dependsOn()` uses `Set<String>` (integration type strings), not `Set<IntegrationId>`.** Dependencies are declared against software types ("zigbee"), not instance IDs (ULIDs). The supervisor resolves type→ID mapping at startup.
 
@@ -225,3 +229,4 @@ Both declarations are required for the same reason described in the event-model 
 - **ManagedHttpClient implementation:** Lives in integration-runtime. Wraps java.net.http.HttpClient with semaphore-based concurrency limiting and token bucket rate limiting.
 - **CommandHandler dispatch:** The supervisor subscribes to command_dispatched events on the event bus, filters by integration ownership, constructs CommandEnvelope, and invokes the adapter's handler on the adapter's thread.
 - **Event type namespace enforcement:** Phase 3 should validate that adapters only publish permitted event types (state_reported, command_result, availability_changed, device_discovered, presence_signal).
+- **`@EventType` annotation — IMPLEMENTED (M2.i, 2026-04-10).** The 5 `IntegrationLifecycleEvent` subtypes in this module now carry `@EventType(EventTypes.INTEGRATION_*)` from `com.homesynapse.event`. The annotation unblocks M2.4's `EventTypeRegistry`, which will discover these classes via a dedicated integration-api registration call alongside the 22 core event-model records. Coverage lives in `IntegrationEventTypeAnnotationTest` (6 methods: all-subtypes-annotated, sealed-parent-unannotated, values-unique, values-match-EventTypes-constants, values-use-integration_-prefix, exactly-5-subtypes). The hardcoded `EXPECTED_SUBTYPES` list in that test is the authoritative set of registrable integration lifecycle events — update it whenever a subtype is added, removed, or renamed. The 5 `INTEGRATION_*` constants live in `EventTypes` in event-model, not in this module.
