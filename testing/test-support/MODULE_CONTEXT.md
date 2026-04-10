@@ -30,6 +30,8 @@ Cross-cutting test infrastructure for all HomeSynapse modules. Provides determin
 | `NoRealIoExtension` | class (JUnit 5 extension) | Prevents accidental real network/filesystem I/O in unit tests | Registers as a JUnit 5 extension. Fails tests that attempt real I/O unless opted out with `@RealIo`. |
 | `@RealIo` | annotation | Opts a test class out of `NoRealIoExtension` enforcement | Applied at class level. Used for integration tests that legitimately need real I/O. |
 | `GivenWhenThen` | class | Event-sourced assertion DSL for command/event testing | Pattern: `given(events).when(command).then(expectedEvents)`. Simplifies event-sourced test setup and assertion. |
+| `EventCollector` | final class | Captures events delivered to a test subscriber for later assertion | Push-based collection: `add(EventEnvelope)` appends, `clear()` resets, `awaitCount(int, Duration)` blocks until N events have arrived (or times out), `lastEvent()` returns the most recent event, `eventsOfType(String)` filters by event type. Used in conjunction with `SynchronousEventBus` or `TestSubscriber` for event-driven test assertions. |
+| `TestSubscriber` | final class | Pull-based test subscriber that drives an `EventStore` directly without going through a real `EventBus` | Static factories: `create(String subscriberId, EventStore store)` and `create(String subscriberId, EventStore store, ...)` for additional configuration. Pull-based event processing with subscription filtering, manual checkpoint advancement, and configurable failure injection via `failOnNthEvent` for testing recovery and idempotency paths. Pairs naturally with `EventCollector` for assertion. |
 
 ### Package: `com.homesynapse.test.assertions`
 
@@ -40,7 +42,7 @@ Cross-cutting test infrastructure for all HomeSynapse modules. Provides determin
 | `SubjectRefAssert` | class extends `AbstractAssert` | Custom AssertJ assertions for `SubjectRef` | Provides fluent assertions: `hasSubjectType()`, `hasId()`, etc. |
 | `HomeSynapseAssertions` | class | AssertJ entry point for all custom assertions | Static `assertThat()` factory methods for domain types. Entry point for the custom assertion DSL. |
 
-**Total: 9 public types + 2 package-info.java files = 11 Java files.**
+**Total: 11 public types + 2 package-info.java files = 13 Java files.**
 
 ## Dependencies
 
@@ -75,6 +77,10 @@ All modules with test source sets are potential consumers. Any module adding `te
 **GOTCHA: `EventStoreContractTest` (27 methods) lives in event-model testFixtures, NOT test-support.** The contract test suite for EventStore implementations is in `core/event-model/src/testFixtures/`. `InMemoryEventStore` must pass all 27 contract test methods. This is separate from test-support because it tests a specific module contract, not cross-cutting infrastructure.
 
 **GOTCHA: No module-info.java means no JPMS enforcement in tests.** Test source sets run entirely on the classpath. Package visibility and module boundaries are not enforced at test time. ArchUnit rules in homesynapse-app partially compensate for this.
+
+## Test Coverage (M1.6)
+
+`EventCollectorTest` (`src/test/java/com/homesynapse/test/EventCollectorTest.java`) validates both `EventCollector` (`add`, `clear`, `awaitCount`, `lastEvent`, `eventsOfType`) and `TestSubscriber` (pull-based processing, subscription filtering, checkpoint advancement, failure injection via `failOnNthEvent`) in 14 `@Test` methods total. Together they prove that the M1.5 / M1.6 push-and-pull test infrastructure is contract-correct before downstream modules adopt it for their own assertions.
 
 ## Phase 3 Notes
 

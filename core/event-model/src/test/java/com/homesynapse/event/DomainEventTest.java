@@ -22,13 +22,13 @@ class DomainEventTest {
     }
 
     @Test
-    @DisplayName("DomainEvent is not sealed (currently non-sealed marker)")
+    @DisplayName("DomainEvent is permanently non-sealed (AMD-33: cross-module JPMS constraint)")
     void isNotSealed() {
         assertThat(DomainEvent.class.isSealed()).isFalse();
     }
 
     @Test
-    @DisplayName("any class can implement DomainEvent")
+    @DisplayName("any module can implement DomainEvent (required for IntegrationLifecycleEvent in integration-api)")
     void implementableByAnyClass() {
         record CustomEvent(String detail) implements DomainEvent {}
 

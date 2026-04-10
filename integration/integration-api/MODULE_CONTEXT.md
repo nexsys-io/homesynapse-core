@@ -190,6 +190,33 @@ api(project(":config:configuration"))
 
 **GOTCHA: No `@Nullable` annotations.** HomeSynapse uses Javadoc `{@code null} if...` patterns. No nullability annotation library in libs.versions.toml.
 
+## Test Fixtures and Contract Tests
+
+The `testFixtures` source set (`src/testFixtures/java/com/homesynapse/integration/test/`) provides three stub types that downstream modules use to construct valid `IntegrationContext` instances and exercise adapter / command-handler lifecycles without standing up real wiring.
+
+### testFixtures Type Inventory
+
+| Type | Kind | Package | Purpose |
+|---|---|---|---|
+| `StubIntegrationContext` | final utility class (private constructor) | `com.homesynapse.integration.test` | Factory producing valid `IntegrationContext` records. The static `defaults()` method returns a fully populated `IntegrationContext` whose required fields are non-null (an `InMemoryEventStore` from event-model testFixtures, a stub `EntityRegistry`, a stub `StateQueryService`, a stub `HealthReporter`, and an `InMemoryConfigAccess` from configuration testFixtures), and whose optional fields (`schedulerService`, `telemetryWriter`, `httpClient`) are `null`. A nested `Builder` enables targeted overrides for tests that need to substitute individual collaborators. Internal helpers (`StubEntityRegistry`, `StubStateQueryService`, `StubHealthReporter`, `StubConfigAccess`, plus `HealthSignal` records `Heartbeat`, `Keepalive`, `ErrorReport`, etc.) are package-private. |
+| `TestAdapter` | final class implementing `IntegrationAdapter` | `com.homesynapse.integration.test` | Minimal `IntegrationAdapter` implementation for testing adapter lifecycle. Exposes static factories for common shapes (`noop()`, `echo()`, `failing()`, `failing(String message)`) and a public nested `Builder` for fully configurable start/stop behavior. Used by integration-runtime and supervisor tests to drive lifecycle transitions without a real protocol implementation. |
+| `StubCommandHandler` | final class implementing `CommandHandler` | `com.homesynapse.integration.test` | Stub `CommandHandler` for testing command routing and supervisor error classification. Tracks received commands for assertion. Static factories: `accepting()` (always succeeds), `rejecting(Exception)` (always throws the supplied exception), `conditional(...)` (predicate-driven success / failure for permanent vs. transient error tests). |
+
+### Validation Coverage
+
+`StubIntegrationContextTest` (`src/test/java/com/homesynapse/integration/test/`) contains 39 `@Test` methods organized into 4 `@Nested` sections, validating that the fixtures produce structurally correct `IntegrationContext` records, that all required fields are non-null, that optional fields default to `null`, and that the builder correctly applies overrides without corrupting the rest of the context.
+
+### Consumption by Downstream Modules
+
+Downstream modules that depend on these fixtures must declare **both** of the following in their `build.gradle.kts`:
+
+```kotlin
+testFixturesImplementation(testFixtures(project(":integration:integration-api")))
+testImplementation(testFixtures(project(":integration:integration-api")))
+```
+
+Both declarations are required for the same reason described in the event-model MODULE_CONTEXT: the `java-conventions` plugin only adds JUnit / AssertJ to `testImplementation`, so any consuming module that writes contract or stub-based tests in its own `testFixtures` source set must re-declare both lines.
+
 ## Phase 3 Notes
 
 - **IntegrationContext construction:** The supervisor (integration-runtime) constructs IntegrationContext per adapter, assembling integration-scoped wrappers around core services (EntityRegistry filter, StateQueryService filter, integration-scoped SchedulerService, ManagedHttpClient with connection pool isolation).

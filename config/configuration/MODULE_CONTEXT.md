@@ -193,6 +193,32 @@ None. This module contains no sealed types.
 
 **GOTCHA: `package-info.java` was repurposed, not deleted.** The handoff said to delete the scaffold. Due to VM disk space constraints preventing bash execution, it was repurposed as a proper package-level Javadoc file. This is benign and arguably better practice.
 
+## Test Fixtures and Contract Tests
+
+The `testFixtures` source set (`src/testFixtures/java/com/homesynapse/config/test/`) provides two helper types so downstream modules can construct valid configuration values without standing up the YAML loader, schema validator, or secret store.
+
+### testFixtures Type Inventory
+
+| Type | Kind | Package | Purpose |
+|---|---|---|---|
+| `InMemoryConfigAccess` | final class implementing `ConfigurationAccess` | `com.homesynapse.config.test` | In-memory `ConfigurationAccess` implementation backed by a `Map<String, Object>`. Builder-pattern construction via the public nested `Builder` class, plus convenience static factories: `empty()`, `of(String key, Object value)`, `of(Map<String, Object> values)`, `builder()`. Supports `getConfig()`, `getSection()`, and a no-op `reload()` (the in-memory implementation has nothing to re-read from disk). |
+| `TestConfigFactory` | final utility class (private constructor) | `com.homesynapse.config.test` | Static factory methods returning valid `ConfigModel` and `ConfigSection` instances with sensible defaults. Public API includes `minimalModel()`, `minimalModel(Clock clock)`, `modelWithSection(String path, Map<String, Object> values)`, `section(String path, Map<String, Object> values)`, the 3-arg `section(...)` overload, `integrationConfig(String integrationType, ...)`, `zigbeeConfig()`, `automationConfig(int automationCount)`, and `emptyConfig()`. Each factory produces a `ConfigModel` whose required fields satisfy the validation rules established by the Phase 2 design doc. |
+
+### Validation Coverage
+
+`InMemoryConfigAccessTest` (`src/test/java/com/homesynapse/config/`) contains 13 `@Test` methods validating that the fixture round-trips values, isolates sections correctly, and respects the `ConfigurationAccess` contract.
+
+### Consumption by Downstream Modules
+
+Downstream modules that depend on these fixtures must declare **both** of the following in their `build.gradle.kts`:
+
+```kotlin
+testFixturesImplementation(testFixtures(project(":config:configuration")))
+testImplementation(testFixtures(project(":config:configuration")))
+```
+
+Both declarations are required for the same reason described in the event-model MODULE_CONTEXT: the `java-conventions` plugin only adds JUnit / AssertJ to `testImplementation`, so any consuming module that writes contract or stub-based tests in its own `testFixtures` source set must re-declare both lines.
+
 ## Phase 3 Notes
 
 - **ConfigurationService implementation needed:** `YamlConfigurationService` (or similar) implementing the full loading pipeline (§3.1), reload mechanism (§3.3), and write path (§3.5). Thread-safe with a single `ReentrantLock` for write serialization. The active ConfigModel is held via a `volatile` reference for lock-free reads.

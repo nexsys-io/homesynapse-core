@@ -137,6 +137,41 @@ None. This module contains no sealed types.
 - **S4-03 (Gradle/JPMS concordance):** `requires com.homesynapse.event` is non-transitive in module-info. Gradle scope should be `implementation`, not `api`. Verify `build.gradle.kts` matches before Phase 3 implementation.
 - **S5-CF2 (Phase 3 watch):** When an integration fails and triggers device orphan lifecycle (AMD-17), the orphan transition MUST set `stale:true` and `availability:UNAVAILABLE` immediately. The 30-second staleness scan (AMD-11) must treat already-stale orphaned devices as no-ops — do not emit duplicate stale events.
 
+## Test Fixtures and Contract Tests
+
+The `testFixtures` source set (`src/testFixtures/java/com/homesynapse/state/test/`) provides one abstract contract test and one in-memory implementation for the `ViewCheckpointStore` interface. The remaining unit tests live in `src/test/java/com/homesynapse/state/` and validate the data records and service interface shapes.
+
+### testFixtures Type Inventory
+
+| Type | Kind | Package | Purpose |
+|---|---|---|---|
+| `ViewCheckpointStoreContractTest` | abstract class (10 `@Test` methods) | `com.homesynapse.state.test` | Defines the behavioral contract for `ViewCheckpointStore`. Both `InMemoryViewCheckpointStore` and the future `SqliteViewCheckpointStore` must pass this suite. Covers: write/read round-trip; overwrite semantics (latest write per view name wins); per-view isolation; position validation; empty/missing data behavior; byte array aliasing protection (defensive copy on both write and read so that mutating the input or output array does not corrupt the stored checkpoint); `Clock`-injected `writtenAt` value; missing checkpoint returns `Optional.empty()`. |
+| `InMemoryViewCheckpointStore` | class implementing `ViewCheckpointStore` | `com.homesynapse.state.test` | `ConcurrentHashMap`-based, thread-safe implementation. `Clock`-injected for deterministic `writtenAt` assignment. Performs defensive `byte[]` copies on both `writeCheckpoint` (input copy) and `readLatestCheckpoint` (output copy) to prevent aliasing bugs. `reset()` for test isolation. |
+
+### Unit Test Coverage Summary
+
+The `src/test/java/com/homesynapse/state/` source set proves the data-level contracts of the M1 type set without requiring a Phase 3 projection implementation. Each class focuses on a single record or interface:
+
+| Test Class | `@Test` Count | What It Proves |
+|---|---|---|
+| `EntityStateTest` | 12 | 9-field record construction; staleness model (`staleAfter` + `Clock` derivation); three-timestamp independence (`lastChanged`, `lastUpdated`, `lastReported`); `stateVersion` idempotency semantics (advances on every event, not just mutations); `equals` / `hashCode` correctness across all 9 fields. |
+| `StateSnapshotTest` | 7 | 5-field record construction; `replaying` flag semantics; `disabledEntities` set tracking; `viewPosition` monotonicity contract; defensive map / set copies. |
+| `AvailabilityTest` | 4 | Enum shape (3 values: `AVAILABLE`, `UNAVAILABLE`, `UNKNOWN`); `UNKNOWN` is the documented initial state at entity adoption. |
+| `StateQueryServiceTest` | 4 | Interface shape verification (5 methods, correct signatures and return types). No implementation is exercised — this is a Phase 2 spec lock. |
+| `InMemoryViewCheckpointStoreTest` | 1 + 10 inherited | Adds one local test for `Clock` advancement behavior on top of the 10 inherited `ViewCheckpointStoreContractTest` methods. |
+
+### Staleness Model Proven at Data Level (M1.9)
+
+The staleness model is HomeSynapse's #1 architectural differentiator and deserves explicit callout. `EntityStateTest` contains 5 dedicated tests for the `staleAfter` + `Clock` staleness model:
+
+- `staleAfter == null` means the entity is never stale (correct for actuators and event-driven reporters).
+- `staleAfter` in the past means the entity is stale.
+- `staleAfter` in the future means the entity is not stale.
+- The derivation matches the `clock.instant().isAfter(staleAfter)` pattern that the Phase 3 `StateQueryService` will use at read time.
+- The intentional inconsistency gap is exercised: the `EntityState` record itself accepts `staleAfter == null` together with `stale == true` (because the record is a pure data carrier), and the Phase 3 `StateQueryService` is responsible for preventing this combination at read time by recomputing `stale` from `staleAfter` against the injected `Clock`.
+
+These 5 tests serve as executable documentation of a contract that no other smart home platform implements at the data-model level. Future Phase 3 work that touches `EntityState` or the projection must keep these tests green.
+
 ## Phase 3 Notes
 
 - **StateQueryService implementation needed:** `ConcurrentHashMapStateStore` or similar. Uses `ConcurrentHashMap<EntityId, EntityState>` for lock-free reads. `getSnapshot()` takes a read-consistent copy under a `StampedLock` or similar. Implements both `StateQueryService` and an internal `StateProjection` interface for write-side updates from event subscribers.

@@ -65,8 +65,8 @@ These decisions are final and must be followed exactly:
 ### Decision 3: List<EventCategory> for Categories
 `EventEnvelope` carries `List<EventCategory> categories` (not a Set, not a single value). The list is copied defensively in the compact constructor via `List.copyOf()` to guarantee immutability.
 
-### Decision 4: DomainEvent is Non-Sealed Initially
-`DomainEvent` starts as a plain (non-sealed) marker interface in Phase 2. It becomes `sealed` when payload records are defined in Phase 3. This avoids creating an artificial sealed hierarchy with only `DegradedEvent` as a permitted subtype.
+### Decision 4: DomainEvent is Permanently Non-Sealed (AMD-33)
+`DomainEvent` is a permanently non-sealed marker interface (AMD-33). It cannot be sealed because `IntegrationLifecycleEvent` extends `DomainEvent` from a different JPMS module (`com.homesynapse.integration`), and JEP 409 requires all permitted subtypes of a sealed type to reside in the same module. Event type discovery uses `@EventType` annotations with explicit registration.
 
 ---
 
@@ -146,7 +146,7 @@ A marker interface. Non-sealed (Decision 4). No methods.
 **Javadoc must explain:**
 - Marker interface for all event payloads carried by EventEnvelope (Doc 01 §4.1)
 - Every event type in the taxonomy (Doc 01 §4.3) is represented by a record that implements DomainEvent
-- Currently non-sealed; will become a sealed interface when concrete payload records are defined in Phase 3
+- Permanently non-sealed (AMD-33); cannot be sealed because `IntegrationLifecycleEvent` in `com.homesynapse.integration` extends `DomainEvent` across a JPMS module boundary (JEP 409 forbids cross-module permits)
 - Subscribers use pattern matching on DomainEvent subtypes for type-safe dispatch:
   ```
   switch (envelope.payload()) {

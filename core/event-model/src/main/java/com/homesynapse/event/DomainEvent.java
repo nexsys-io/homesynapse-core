@@ -20,9 +20,12 @@ package com.homesynapse.event;
  * }
  * }</pre>
  *
- * <p>This interface is currently non-sealed. It will become a {@code sealed} interface when
- * concrete payload records are defined in Phase 3, at which point the compiler will enforce
- * exhaustiveness in {@code switch} expressions over the permitted subtypes.</p>
+ * <p>This interface is permanently non-sealed (AMD-33). {@code IntegrationLifecycleEvent}
+ * in module {@code com.homesynapse.integration} extends {@code DomainEvent} from a different
+ * JPMS module, and JEP 409 requires all permitted subtypes of a sealed type to reside in the
+ * same module. Subscribers use pattern matching with a {@code default} branch rather than
+ * exhaustive {@code switch}. Subsystem-level sealed hierarchies (e.g.,
+ * {@code IntegrationLifecycleEvent}) provide exhaustive matching where it matters.</p>
  *
  * <p>{@link DegradedEvent} implements this interface for events whose payload could not be
  * upcast to the current schema version (Doc 01 §3.10), allowing diagnostic tools to process

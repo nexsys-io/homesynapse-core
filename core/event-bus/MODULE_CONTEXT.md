@@ -103,6 +103,55 @@ None. This module contains no sealed types.
 
 **GOTCHA: Subscriber registration order matters at startup.** Subscribers must be registered with the EventBus BEFORE the publisher starts accepting events. If events are published before subscribers register, those events will not trigger notifications (though they are still persisted and will be processed on the next catch-up read). The startup-lifecycle module coordinates this ordering.
 
+**GOTCHA: `InMemoryEventBus` is NOT `SynchronousEventBus`.** Two separate EventBus test fixtures exist in the codebase. `SynchronousEventBus` (in the `test-support` module) is a lightweight bus that invokes all handlers regardless of filter — suitable for simple unit tests where filter evaluation is not the focus. `InMemoryEventBus` (in `event-bus` testFixtures) is a contract-complete bus that evaluates `SubscriptionFilter.matches()`, checks checkpoint positions, and requires `EventStore` + `CheckpointStore` injection — suitable for contract tests and integration-level testing. Use the right tool for the right fidelity level.
+
+## Test Fixtures and Contract Tests
+
+The `testFixtures` source set (`src/testFixtures/java/com/homesynapse/event/bus/test/`) provides four types: two abstract contract tests and two in-memory implementations. Together they form a layered test infrastructure where the in-memory implementations satisfy the contract tests, and downstream modules can reuse both layers.
+
+### testFixtures Type Inventory
+
+| Type | Kind | Package | Purpose |
+|---|---|---|---|
+| `CheckpointStoreContractTest` | abstract class (9 `@Test` methods) | `com.homesynapse.event.bus.test` | Defines the behavioral contract for `CheckpointStore`. Both `InMemoryCheckpointStore` and the future `SqliteCheckpointStore` must pass this suite. |
+| `InMemoryCheckpointStore` | class implementing `CheckpointStore` | `com.homesynapse.event.bus.test` | `ConcurrentHashMap`-based implementation. Thread-safe. `reset()` method clears all checkpoints for test isolation. |
+| `EventBusContractTest` | abstract class (18 `@Test` methods, 4 `@Nested` tiers) | `com.homesynapse.event.bus.test` | Defines the behavioral contract for `EventBus`. Both `InMemoryEventBus` and the future production bus must pass this suite. |
+| `InMemoryEventBus` | class implementing `EventBus` | `com.homesynapse.event.bus.test` | Full-fidelity in-memory implementation with synchronous delivery and full `SubscriptionFilter.matches(envelope)` evaluation. |
+
+### CheckpointStoreContractTest Coverage
+
+The 9 `@Test` methods cover: unknown subscriber returns 0; write/read round-trip; overwrite semantics (latest write wins); per-subscriber isolation (writes for one subscriber do not affect another); position zero is a valid value; negative position rejected with `IllegalArgumentException`; null subscriber ID rejected on read; null subscriber ID rejected on write; `Long.MAX_VALUE` accepted as boundary value.
+
+### EventBusContractTest Coverage — 4 Nested Tiers
+
+The 18 `@Test` methods are organized into four `@Nested` classes that map to layered concerns:
+
+- **Tier 1 — Subscription Lifecycle (5 tests):** register a subscriber; replace an existing subscriber registration with the same ID; unsubscribe removes a subscriber; `unsubscribe` is a no-op for unknown subscriber IDs; checkpoint retention semantics across re-subscription.
+- **Tier 2 — Notification and Filtering (7 tests):** matching filter delivers event; non-matching event type is filtered out; non-matching priority is filtered out; non-matching subject type is filtered out; empty `eventTypes` set matches all event types (wildcard); when multiple subscribers are registered, only those with matching filters are notified; `coalesceExempt` flag is respected by the bus.
+- **Tier 3 — Checkpoint Integration (4 tests):** unknown subscriber returns checkpoint 0; checkpoint write is reflected on subsequent reads; subscribing loads the existing checkpoint as the subscriber's starting position; events at positions below the checkpoint are skipped on delivery.
+- **Tier 4 — Concurrency Safety (2 tests):** concurrent `subscribe` and `notifyEvent` operations do not corrupt state; concurrent `subscribe` and `unsubscribe` operations are safe.
+
+### `InMemoryEventBus` Critical Implementation Details
+
+`InMemoryEventBus` is more than a stub — it is the contract-complete reference implementation that downstream modules use for integration-level testing. Key facts:
+
+- **Constructor:** `InMemoryEventBus(EventStore eventStore, CheckpointStore checkpointStore)`. The bus requires an `EventStore` for filter-relevant metadata lookup and a `CheckpointStore` for position tracking. This mirrors the wiring that the production `SqliteEventBus` will use, so contract tests written against `InMemoryEventBus` exercise the same dependency graph as production.
+- **`subscribeWithHandler(SubscriberInfo info, Consumer<Long> handler)`** — a test-fixture-only callback bridge. The standard `subscribe()` method registers a subscriber for filter evaluation but does NOT invoke any callback, because the production bus is pull-based (subscribers wake on `LockSupport.unpark()` and pull events from the store). For test ergonomics, `subscribeWithHandler` lets a test register a `Consumer<Long>` that fires synchronously when a matching event is published, eliminating the need to spin up virtual threads in unit tests.
+- **Synchronous delivery with full filter evaluation.** When `notifyEvent(globalPosition)` is called, the bus loads the envelope from the injected `EventStore` and evaluates `SubscriptionFilter.matches(envelope)` against every registered subscriber. Matching subscribers' handlers are invoked synchronously on the calling thread.
+- **Re-entrant notification allowed.** A handler may itself publish events that trigger further notifications. There is no anti-recursion guard — tests that need to assert on chain depth must check explicitly.
+- **Thread safety via `ReentrantReadWriteLock`.** Subscriber registry mutations acquire the write lock; notification fan-out acquires the read lock. This matches the concurrency model expected by virtual-thread-based subscribers (LTD-11).
+
+### Consumption by Downstream Modules
+
+Downstream modules that depend on these fixtures must declare **both** of the following in their `build.gradle.kts`:
+
+```kotlin
+testFixturesImplementation(testFixtures(project(":core:event-bus")))
+testImplementation(testFixtures(project(":core:event-bus")))
+```
+
+Both declarations are required for the same reason described in the event-model MODULE_CONTEXT: the `java-conventions` plugin only adds JUnit/AssertJ to `testImplementation`, and any consuming module that writes its own contract tests in its own `testFixtures` source set must re-declare both lines so the dependencies resolve in both source sets.
+
 ## Phase 3 Notes
 
 - **EventBus needs an implementation:** `InProcessEventBus` in the core or persistence module. Must implement: subscriber registry (concurrent map), filter evaluation per notification, `LockSupport.unpark()` for matched subscribers, backpressure coalescing logic for non-exempt subscribers.

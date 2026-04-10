@@ -1,4 +1,4 @@
-# persistence — `com.homesynapse.persistence` — 11 types — SQLite WAL storage, telemetry ring buffer, WriteCoordinator, maintenance lifecycle
+# persistence — `com.homesynapse.persistence` — 13 types — SQLite WAL storage, telemetry ring buffer, WriteCoordinator, maintenance lifecycle
 
 ## Purpose
 
@@ -61,6 +61,17 @@ The `requires transitive com.homesynapse.platform` declaration is required becau
 | `MaintenanceService` | interface | Storage maintenance — retention, vacuum, health monitoring | `runRetention()` → `RetentionResult`, `runVacuum()` → `VacuumResult`, `getStorageHealth()` → `StorageHealth`. |
 
 **Total: 11 public types + 1 module-info.java = 12 Java files.**
+
+### Internal Types (Package-Private)
+
+In addition to the 11 public types above, the persistence module declares 2 package-private types that govern the internal write path. These are not part of the public API — external modules cannot reference them directly — but they are documented here because all SQLite write paths in the module are required to route through them.
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `WriteCoordinator` | interface (package-private) | Serializes all write operations through a bounded priority queue, ensuring single-writer SQLite semantics and isolating sqlite-jdbc JNI calls from the virtual thread carrier pool | Methods: `<T> T submit(WritePriority priority, Callable<T> operation)` (synchronous, returns the operation's result; throws `IllegalStateException` after `shutdown()`), `void shutdown()`. Thread-safe — `submit` may be called from any thread, including virtual threads. All SQLite write paths (`SqliteEventPublisher`, `SqliteCheckpointStore`, `SqliteViewCheckpointStore`, retention, vacuum, backup) route through this interface. |
+| `WritePriority` | enum (package-private, 5 values) | Priority ordering for write operations submitted to the `WriteCoordinator`. Lower rank = higher priority. | Values with rank: `EVENT_PUBLISH(1)`, `STATE_PROJECTION(2)`, `WAL_CHECKPOINT(3)`, `RETENTION(4)`, `BACKUP(5)`. Method: `int rank()` returns the rank value (also package-private). Reflects the operational priorities of Doc 04 §3 (AMD-06): user-facing latency wins over background maintenance. |
+
+**Total including internal types: 13 types** (11 public + 2 package-private).
 
 ## Dependencies
 
@@ -164,6 +175,32 @@ None. This module contains no sealed types.
 **GOTCHA: The subscriber grace period default is 24 hours, not unbounded.** `subscriber_grace_period_hours: 24` (range 1–168) in Doc 04 §9. A subscriber that hasn't updated its checkpoint in 24 hours has its checkpoint protection stripped and retention proceeds past it. This is by design (INV-RF-05 — bounded storage), but means a module disabled for maintenance beyond 24 hours will lose checkpoint protection. Use the PAUSED subscriber state (Doc 04 §3.4) for intentional maintenance windows.
 
 - **S4-04 (Gradle/JPMS concordance):** `requires com.homesynapse.event` and `requires com.homesynapse.state` are non-transitive in module-info. Gradle scope is `implementation` for both (verified). `api(project(":platform:platform-api"))` is present for EntityId exposure.
+
+## Test Fixtures and Contract Tests
+
+The `testFixtures` source set (`src/testFixtures/java/com/homesynapse/persistence/`) provides one abstract contract test and one in-memory implementation for the package-private `WriteCoordinator` interface.
+
+### testFixtures Type Inventory
+
+| Type | Kind | Package | Purpose |
+|---|---|---|---|
+| `WriteCoordinatorContractTest` | abstract class (11 `@Test` methods, 4 `@Nested` tiers) | `com.homesynapse.persistence` | Defines the behavioral contract for `WriteCoordinator`. Both `InMemoryWriteCoordinator` and the future `SqliteWriteCoordinator` (Phase 3) must pass this suite. |
+| `InMemoryWriteCoordinator` | class implementing `WriteCoordinator` | `com.homesynapse.persistence` | `ReentrantLock`-based serializing implementation. Volatile shutdown flag with double-check after lock acquisition (lock-free fast path on the live state, defensive re-check inside the critical section). Executes operations synchronously on the calling thread inside the lock — no background queue, no executor. Used by contract tests and as a stand-in for the SQLite coordinator in upstream module tests. |
+
+### WriteCoordinatorContractTest Coverage — 4 Nested Tiers
+
+The 11 `@Test` methods are organized into four `@Nested` classes:
+
+- **Tier 1 — Per-Priority Submission (5 tests):** one test per `WritePriority` value (`EVENT_PUBLISH`, `STATE_PROJECTION`, `WAL_CHECKPOINT`, `RETENTION`, `BACKUP`). Each verifies that an operation submitted at that priority executes and returns its result.
+- **Tier 2 — Generic Return Types (1 test):** verifies the `<T> T submit(...)` generic correctly handles `String`, `Integer`, `Long`, `Boolean`, and `Void` return types in a single test that exercises all five.
+- **Tier 3 — Error Handling (3 tests):** `RuntimeException` thrown by the operation propagates to the caller; checked exception thrown by the operation is wrapped (rather than silently swallowed); a failure in one operation does not corrupt the coordinator's state — subsequent submissions succeed (failure isolation).
+- **Tier 4 — Lifecycle and Concurrency (2 tests):** after `shutdown()`, subsequent `submit` calls throw `IllegalStateException`; concurrent 4-thread stress test with simultaneous submissions verifies serialization correctness and absence of races.
+
+### Package-Private Access Pattern
+
+`WriteCoordinatorContractTest` and `InMemoryWriteCoordinator` live in the `com.homesynapse.persistence` package — **NOT** in a `.test` subpackage. This is deliberate: `WriteCoordinator` and `WritePriority` are package-private, and Java's package-private visibility rules require any test code that references them to live in the same package. Gradle's `testFixtures` source set shares the same package namespace as the `main` source set within a single module, so placing the testFixtures files at `src/testFixtures/java/com/homesynapse/persistence/` is the established pattern for testing package-private internal types.
+
+This pattern is intentional and should be reused by any future Phase 3 work that needs to test other package-private types in the persistence module.
 
 ## Phase 3 Notes
 
