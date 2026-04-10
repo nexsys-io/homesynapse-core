@@ -14,6 +14,7 @@ import java.util.Objects;
  * Priority: NORMAL
  * Doc 01 §4.3
  */
+@EventType(EventTypes.DEVICE_DISCOVERED)
 public record DeviceDiscoveredEvent(
         Ulid integrationId,
         String protocolAddress,

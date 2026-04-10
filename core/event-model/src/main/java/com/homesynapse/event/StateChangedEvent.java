@@ -27,6 +27,7 @@ import java.util.Objects;
  * @see StateConfirmedEvent
  * @see EventTypes#STATE_CHANGED
  */
+@EventType(EventTypes.STATE_CHANGED)
 public record StateChangedEvent(
         String attributeKey,
         String oldValue,

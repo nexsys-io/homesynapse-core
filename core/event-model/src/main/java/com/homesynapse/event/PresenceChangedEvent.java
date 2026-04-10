@@ -13,6 +13,7 @@ import java.util.Objects;
  * Priority: NORMAL
  * Doc 01 §4.3
  */
+@EventType(EventTypes.PRESENCE_CHANGED)
 public record PresenceChangedEvent(
         String previousState,
         String newState

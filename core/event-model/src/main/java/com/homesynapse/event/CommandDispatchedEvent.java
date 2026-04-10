@@ -19,6 +19,7 @@ import java.util.Objects;
  * @param integrationId ULID of the integration adapter that accepted the command. Non-null.
  * @param protocolMetadata JSON string of protocol-specific dispatch metadata. Non-null.
  */
+@EventType(EventTypes.COMMAND_DISPATCHED)
 public record CommandDispatchedEvent(
         Ulid targetEntityRef,
         Ulid integrationId,

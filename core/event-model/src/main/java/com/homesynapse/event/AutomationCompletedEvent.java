@@ -27,6 +27,7 @@ import java.util.Objects;
  * @see DomainEvent
  * @see EventTypes#AUTOMATION_COMPLETED
  */
+@EventType(EventTypes.AUTOMATION_COMPLETED)
 public record AutomationCompletedEvent(
         String status,
         String failureReason,

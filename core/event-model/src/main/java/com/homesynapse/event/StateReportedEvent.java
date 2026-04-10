@@ -26,6 +26,7 @@ import java.util.Objects;
  * @param rawProtocolUnit the protocol-native unit; {@code null} when rawProtocolValue is null.
  *                        Present alongside rawProtocolValue.
  */
+@EventType(EventTypes.STATE_REPORTED)
 public record StateReportedEvent(
         String attributeKey,
         String value,

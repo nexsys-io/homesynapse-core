@@ -22,6 +22,7 @@ import java.util.Objects;
  * @param matchType one of "exact", "within_tolerance", "enum_transition", "any_change".
  *                  Non-null, not blank.
  */
+@EventType(EventTypes.STATE_CONFIRMED)
 public record StateConfirmedEvent(
         EventId commandEventId,
         EventId reportEventId,

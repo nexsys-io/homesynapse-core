@@ -19,6 +19,7 @@ import java.util.Objects;
  * @param reason human-readable description of why the value was rejected. Non-null.
  * @param validationRule the specific validation constraint that was violated. Non-null.
  */
+@EventType(EventTypes.STATE_REPORT_REJECTED)
 public record StateReportRejectedEvent(
         String attributeKey,
         String reportedValue,

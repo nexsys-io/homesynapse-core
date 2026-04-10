@@ -36,6 +36,7 @@ import java.util.Objects;
  * @see DomainEvent
  * @see EventTypes#TELEMETRY_SUMMARY
  */
+@EventType(EventTypes.TELEMETRY_SUMMARY)
 public record TelemetrySummaryEvent(
         String attributeKey,
         double min,

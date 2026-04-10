@@ -21,6 +21,7 @@ import java.util.Objects;
  * @param failureReason human-readable reason for rejection or timeout. May be {@code null}
  *                      when outcome is "acknowledged".
  */
+@EventType(EventTypes.COMMAND_RESULT)
 public record CommandResultEvent(
         Ulid targetEntityRef,
         String commandType,

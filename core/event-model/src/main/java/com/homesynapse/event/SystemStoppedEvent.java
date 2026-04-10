@@ -12,6 +12,7 @@ import java.util.Objects;
  * Priority: CRITICAL
  * Doc 01 §4.3
  */
+@EventType(EventTypes.SYSTEM_STOPPED)
 public record SystemStoppedEvent(
         String reason,
         boolean cleanShutdown

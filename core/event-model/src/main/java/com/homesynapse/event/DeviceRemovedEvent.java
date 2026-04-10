@@ -12,6 +12,7 @@ import java.util.Objects;
  * Priority: NORMAL
  * Doc 01 §4.3
  */
+@EventType(EventTypes.DEVICE_REMOVED)
 public record DeviceRemovedEvent(
         String reason
 ) implements DomainEvent {

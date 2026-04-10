@@ -12,6 +12,7 @@ import java.util.Objects;
  * Priority: DIAGNOSTIC
  * Doc 01 §4.3
  */
+@EventType(EventTypes.CONFIG_ERROR)
 public record ConfigErrorEvent(
         String path,
         String severity,

@@ -14,6 +14,7 @@ import java.util.Objects;
  * Priority: NORMAL
  * Doc 01 §4.3
  */
+@EventType(EventTypes.DEVICE_ADOPTED)
 public record DeviceAdoptedEvent(
         Ulid entityId
 ) implements DomainEvent {

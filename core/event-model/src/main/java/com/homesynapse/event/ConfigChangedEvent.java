@@ -13,6 +13,7 @@ import java.util.Objects;
  * Priority: NORMAL
  * Doc 01 §4.3
  */
+@EventType(EventTypes.CONFIG_CHANGED)
 public record ConfigChangedEvent(
         String configPath,
         String previousValue,

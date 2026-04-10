@@ -26,6 +26,7 @@ import java.util.Objects;
  * @param idempotencyClass one of IDEMPOTENT, NOT_IDEMPOTENT, or CONDITIONAL.
  *                         Non-null. Sourced from capability's CommandDefinition.
  */
+@EventType(EventTypes.COMMAND_ISSUED)
 public record CommandIssuedEvent(
         Ulid targetEntityRef,
         String commandType,

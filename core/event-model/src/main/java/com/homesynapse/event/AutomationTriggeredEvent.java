@@ -12,6 +12,7 @@ import java.util.Objects;
  * Priority: NORMAL
  * Doc 01 §4.3
  */
+@EventType(EventTypes.AUTOMATION_TRIGGERED)
 public record AutomationTriggeredEvent(
         String triggerType,
         String triggerDetail

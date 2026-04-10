@@ -19,6 +19,7 @@ import java.util.Objects;
  * @param resultEventId event ID of the command_result event if one was received;
  *                      {@code null} if no result arrived before timeout.
  */
+@EventType(EventTypes.COMMAND_CONFIRMATION_TIMED_OUT)
 public record CommandConfirmationTimedOutEvent(
         EventId commandEventId,
         EventId resultEventId

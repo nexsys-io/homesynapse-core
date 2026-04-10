@@ -13,6 +13,7 @@ import java.util.Objects;
  * Priority: NORMAL
  * Doc 01 §4.3
  */
+@EventType(EventTypes.STORAGE_PRESSURE_CHANGED)
 public record StoragePressureChangedEvent(
         String oldLevel,
         String newLevel,

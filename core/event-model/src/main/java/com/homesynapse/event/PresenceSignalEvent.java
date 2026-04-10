@@ -13,6 +13,7 @@ import java.util.Objects;
  * Priority: DIAGNOSTIC
  * Doc 01 §4.3
  */
+@EventType(EventTypes.PRESENCE_SIGNAL)
 public record PresenceSignalEvent(
         String signalType,
         String signalSource,

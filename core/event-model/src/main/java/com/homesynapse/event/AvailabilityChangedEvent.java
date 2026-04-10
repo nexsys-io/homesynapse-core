@@ -13,6 +13,7 @@ import java.util.Objects;
  * Priority: CRITICAL when transitioning to offline, NORMAL when to online.
  * Doc 01 §4.3
  */
+@EventType(EventTypes.AVAILABILITY_CHANGED)
 public record AvailabilityChangedEvent(
         String previousStatus,
         String newStatus
