@@ -1,4 +1,4 @@
-# persistence — `com.homesynapse.persistence` — 13 types — SQLite WAL storage, telemetry ring buffer, WriteCoordinator, maintenance lifecycle
+# persistence — `com.homesynapse.persistence` — 16 types — SQLite WAL storage, telemetry ring buffer, WriteCoordinator, migration framework, maintenance lifecycle
 
 ## Purpose
 
@@ -27,9 +27,14 @@ module com.homesynapse.persistence {
     requires com.homesynapse.state;
     requires com.homesynapse.event;
 
+    requires java.sql;
+    requires org.slf4j;
+
     exports com.homesynapse.persistence;
 }
 ```
+
+`requires java.sql;` and `requires org.slf4j;` were added for M2.2. `java.sql` is required because `MigrationRunner` uses JDBC (`Connection`, `PreparedStatement`, `ResultSet`, `Statement`, `SQLException`). SLF4J is required for `MigrationRunner` logging per LTD-15. All subsequent Phase 3 implementation classes in this module should use SLF4J as the single logging API.
 
 The `requires transitive com.homesynapse.platform` declaration is required because `EntityId` (from platform-api) appears in `TelemetrySample`'s public API signature. Any module that reads `com.homesynapse.persistence` automatically gets access to all identity types without needing to declare the dependency. The non-transitive `requires com.homesynapse.state` provides access to `ViewCheckpointStore` which this module implements. The non-transitive `requires com.homesynapse.event` provides access to event types referenced in Javadoc.
 
@@ -70,8 +75,11 @@ In addition to the 11 public types above, the persistence module declares 2 pack
 |---|---|---|---|
 | `WriteCoordinator` | interface (package-private) | Serializes all write operations through a bounded priority queue, ensuring single-writer SQLite semantics and isolating sqlite-jdbc JNI calls from the virtual thread carrier pool | Methods: `<T> T submit(WritePriority priority, Callable<T> operation)` (synchronous, returns the operation's result; throws `IllegalStateException` after `shutdown()`), `void shutdown()`. Thread-safe — `submit` may be called from any thread, including virtual threads. All SQLite write paths (`SqliteEventPublisher`, `SqliteCheckpointStore`, `SqliteViewCheckpointStore`, retention, vacuum, backup) route through this interface. |
 | `WritePriority` | enum (package-private, 5 values) | Priority ordering for write operations submitted to the `WriteCoordinator`. Lower rank = higher priority. | Values with rank: `EVENT_PUBLISH(1)`, `STATE_PROJECTION(2)`, `WAL_CHECKPOINT(3)`, `RETENTION(4)`, `BACKUP(5)`. Method: `int rank()` returns the rank value (also package-private). Reflects the operational priorities of Doc 04 §3 (AMD-06): user-facing latency wins over background maintenance. |
+| `MigrationRunner` | class (package-private, final) | Applies forward-only SQL migrations to a single SQLite database and tracks applied versions in an `hs_schema_version` table (LTD-07). **M2.2 — Phase 3 complete.** | Constructor: `MigrationRunner(Connection)`. Primary method: `void migrate(String migrationPath, List<String> migrationFiles, MigrationConfig config)`. Creates `hs_schema_version(version PK, checksum, description, applied_at, success)` on first run. Computes SHA-256 (lowercase hex) over each file's UTF-8 content. Halts on: checksum mismatch of an applied version, version gap (union of tracked+parsed must form contiguous [1..N]), database schema ahead of application, SQL execution failure (records `success=0` via explicit commit after rollback), previously-failed version without `forceRetryFailed`, or `backupRequired && !backupVerified` on a non-empty database. Transactional per-migration (auto-commit disabled, rollback on failure). Lightweight `;`-delimited SQL splitter with line-comment awareness. Not thread-safe — concurrent-startup safety is provided by SQLite's own write-lock contention, verified by contract test. |
+| `MigrationConfig` | record (package-private, 3 boolean fields) | Configuration for a single `MigrationRunner.migrate` invocation | Fields: `backupRequired`, `backupVerified`, `forceRetryFailed`. Factories: `freshInstall()` (all false), `upgrade(boolean backupVerified)` (backupRequired=true), `recovery()` (forceRetryFailed=true). |
+| `MigrationException` | class (package-private, final) extends RuntimeException | Thrown when a migration cannot be applied | Fatal — `PersistenceLifecycle.start()` aborts on any `MigrationException`. `RuntimeException` (not checked) because there is no in-process recovery path during startup. Two constructors: message-only and message+cause. `serialVersionUID = 1L`. |
 
-**Total including internal types: 13 types** (11 public + 2 package-private).
+**Total including internal types: 16 types** (11 public + 5 package-private).
 
 ## Dependencies
 
@@ -89,10 +97,11 @@ dependencies {
     implementation(project(":core:event-model"))
     implementation(project(":core:state-store"))
     implementation(libs.sqlite.jdbc)
+    implementation(libs.slf4j.api)
 }
 ```
 
-Event-model and state-store are `implementation`-only dependencies — their types do not appear in persistence's public API. Platform-api is `api` scope because `EntityId` appears in public signatures (`TelemetrySample`, `TelemetryQueryService`). SQLite JDBC is `implementation` scope because it is not exposed in the public API.
+Event-model and state-store are `implementation`-only dependencies — their types do not appear in persistence's public API. Platform-api is `api` scope because `EntityId` appears in public signatures (`TelemetrySample`, `TelemetryQueryService`). SQLite JDBC and SLF4J are `implementation` scope because neither is exposed in the public API.
 
 ## Consumers
 
@@ -134,6 +143,25 @@ Event-model and state-store are `implementation`-only dependencies — their typ
 
 **JNI carrier pinning and platform thread executor.** The persistence module owns the platform thread executor that isolates sqlite-jdbc's `synchronized native` JNI methods from the virtual thread carrier pool (LTD-03, AMD-27). Executor sizing: 1 write thread (single-writer model), 2–3 read threads (WAL concurrent readers). All other modules access SQLite exclusively through the EventStore and StateStore interfaces — they never interact with the executor directly. The executor is an internal implementation detail; if sqlite-jdbc is ever replaced with a pure-Java driver, the executor requirement changes. See Doc 04 §15 (Design Rationale) for the full justification.
 
+## Migration Resources Layout
+
+SQL migration files live under `src/main/resources/db/migration/` in two parallel tracks — one per SQLite database managed by `PersistenceLifecycle`:
+
+```
+src/main/resources/db/migration/
+├── events/
+│   └── V001__initial_event_store_schema.sql   # events, subscriber_checkpoints, view_checkpoints
+└── telemetry/
+    └── .gitkeep                               # scaffolding only — first real migration ships with M2.8
+```
+
+- **`events/`** — migrations for `homesynapse-events.db`. V001 creates the canonical `events` table (16 columns, AUTOINCREMENT `global_position`), `subscriber_checkpoints`, `view_checkpoints`, and 6 indexes including a partial index on `actor_ref`. Payload column is `BLOB` per DECIDE-M2-06. All table creation uses `IF NOT EXISTS` as a belt-and-braces safety layer (the runner's tracking-table check is the authoritative guard).
+- **`telemetry/`** — scaffolded directory, intentionally empty except for `.gitkeep`. First real migration ships with M2.8 (telemetry ring store implementation).
+
+Test-only SQL fixtures live under `src/test/resources/db/migration/` in sibling subdirectories (`test/`, `tampered/`, `bad/`, `recovery/`). The `tampered/` directory intentionally contains a file at the same version number as `test/V001__test_create_table.sql` but with different content — this is how the `checksumMismatch` test produces a mismatch without needing to mutate files on disk.
+
+**PersistenceLifecycle contract (future Phase 3 M2.3+):** the lifecycle implementation will invoke `MigrationRunner` once per database during `start()`, passing an explicit ordered list of filenames (no classpath scanning under JPMS). The list becomes the authoritative manifest — adding a new migration requires adding the filename to the lifecycle's call site, which is a deliberate forcing function for code review.
+
 ## Sealed Hierarchies
 
 None. This module contains no sealed types.
@@ -170,6 +198,20 @@ None. This module contains no sealed types.
 
 **GOTCHA: `MaintenanceService.runVacuum()` is INCREMENTAL vacuum, not full VACUUM.** Incremental vacuum frees pages without rebuilding the entire database. Full VACUUM is opt-in quarterly maintenance (Doc 04 §3.3). Do not confuse the two.
 
+<!-- Added 2026-04-10: M2.2 Migration Framework implementation -->
+
+**GOTCHA: `MigrationRunner.recordFailure()` explicitly commits.** When a migration's SQL fails, the runner calls `connection.rollback()` to undo the partial changes, then inserts a `success=0` row into `hs_schema_version` and calls `connection.commit()` on that insert. Without the explicit commit, the failure record would sit in a never-committed implicit transaction (because `setAutoCommit(false)` is still in effect) and disappear when the connection closes. The tests verify this by checking that a failed migration leaves exactly one `success=0` row behind, and that a subsequent run without `forceRetryFailed` halts with the "previously failed" error.
+
+**GOTCHA: `MigrationRunner.enforceVersionAgainstTrackedState` checks ahead BEFORE gap.** When a database has version 5 but the application only knows about V001 and V002, the condition is strictly "schema ahead" — reporting it as a gap would be misleading. The runner checks `maxTracked > maxParsed` first and short-circuits with the "ahead" error; only if that passes does it perform the union-based contiguous-range check. The order matters for the error message.
+
+**GOTCHA: `MigrationRunner` filename parsing uses `^V(\\d+)__(.+)\\.sql$`.** Exactly two underscores separate the version from the description, and the description is stored in the tracking table with underscores converted to spaces. `V001__initial_event_store_schema.sql` becomes description `"initial event store schema"`. Any migration file that doesn't match the pattern triggers a `MigrationException` with the filename quoted.
+
+**GOTCHA: `MigrationRunner` is NOT thread-safe within a single JVM.** The class is documented as single-threaded. Concurrent-startup safety across processes or JVM instances is provided by SQLite's own write-lock contention, not by any synchronization inside the runner. The tests verify this: two threads racing to run the same migration against a shared file-based SQLite database produce either (a) both succeed idempotently, because thread B sees the committed `hs_schema_version` row after A commits, or (b) one succeeds and one fails on a UNIQUE constraint — the test asserts "at least one succeeds, database stays valid" rather than "exactly one succeeds."
+
+**GOTCHA: Migration resources require an explicit filename list — no classpath scanning.** `MigrationRunner.migrate()` takes `List<String> migrationFiles`. Classpath scanning is unreliable under JPMS and would be hostile to code review; the explicit manifest is a deliberate forcing function. The caller (eventually `PersistenceLifecycle.start()`) hardcodes the ordered list, and adding a new migration requires editing that list.
+
+**GOTCHA: SLF4J is required in module-info.** `module-info.java` declares `requires org.slf4j;` (non-transitive) as of M2.2. Any Phase 3 implementation class that uses a logger will find it already available — do not re-add the dependency.
+
 <!-- Added 2026-03-21: Architecture benchmark assessment finding R-5 -->
 
 **GOTCHA: The subscriber grace period default is 24 hours, not unbounded.** `subscriber_grace_period_hours: 24` (range 1–168) in Doc 04 §9. A subscriber that hasn't updated its checkpoint in 24 hours has its checkpoint protection stripped and retention proceeds past it. This is by design (INV-RF-05 — bounded storage), but means a module disabled for maintenance beyond 24 hours will lose checkpoint protection. Use the PAUSED subscriber state (Doc 04 §3.4) for intentional maintenance windows.
@@ -204,6 +246,7 @@ This pattern is intentional and should be reused by any future Phase 3 work that
 
 ## Phase 3 Notes
 
+- **M2.2 — Migration Framework + V001 Initial Schema — COMPLETE (2026-04-10).** `MigrationRunner`, `MigrationConfig`, `MigrationException`, and `V001__initial_event_store_schema.sql` are in place. Covered by `MigrationRunnerTest` (14 tests across 7 tiers: fresh install, idempotency, validation/error detection, multi-migration sequence, real V001 verification, backup gating, concurrent startup). The local build gate (`./gradlew :core:persistence:check`) was deferred to Nick — the sandbox ran out of disk space and no JDK 21 was available. `PersistenceLifecycle.start()` (next milestone) will be the sole call site for `MigrationRunner.migrate()`.
 - **TelemetryWriter implementation needed:** `SqliteTelemetryWriter` using `INSERT OR REPLACE INTO telemetry_samples (slot, seq, entity_ref, attribute_key, value, timestamp) VALUES (? % max_rows, ?, ?, ?, ?, ?)`. Thread-safe with single-writer serialization via SQLite's write lock. Batch transactions (configurable, default 100 samples per Doc 04 §9).
 - **TelemetryQueryService implementation needed:** Read-only queries against `telemetry_samples` table. `querySamples` uses `WHERE entity_ref = ? AND attribute_key = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC LIMIT ?`. `getRingStats` queries `SELECT MAX(seq), MIN(seq), COUNT(DISTINCT entity_ref), MIN(timestamp), MAX(timestamp) FROM telemetry_samples`.
 - **PersistenceLifecycle implementation needed:** Opens SQLite connections with PRAGMAs (WAL mode, synchronous=NORMAL, cache_size per LTD-03), runs schema migrations, starts maintenance threads. `start()` returns CompletableFuture that completes when databases are ready.

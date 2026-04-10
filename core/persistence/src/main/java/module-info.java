@@ -22,5 +22,8 @@ module com.homesynapse.persistence {
     requires com.homesynapse.state;
     requires com.homesynapse.event;
 
+    requires java.sql;
+    requires org.slf4j;
+
     exports com.homesynapse.persistence;
 }

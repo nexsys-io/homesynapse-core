@@ -10,6 +10,7 @@ dependencies {
     implementation(project(":core:state-store"))
 
     implementation(libs.sqlite.jdbc)
+    implementation(libs.slf4j.api)
 
     // testFixtures dependencies — JUnit + AssertJ for the WriteCoordinatorContractTest
     // abstract class. The java-conventions plugin only adds these to testImplementation,

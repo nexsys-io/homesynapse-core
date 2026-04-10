@@ -1,0 +1,3 @@
+# Telemetry migration track directory.
+# Empty for now — the telemetry V001 migration ships with M2.8
+# (SqliteTelemetryWriter). Placeholder keeps the directory under version control.
