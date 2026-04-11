@@ -14,8 +14,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -82,6 +82,7 @@ final class MigrationRunner {
         """;
 
     private final Connection connection;
+    private final Clock clock;
 
     /**
      * Creates a migration runner bound to an open SQLite connection.
@@ -89,9 +90,16 @@ final class MigrationRunner {
      * @param connection an open JDBC connection to the target SQLite database;
      *                   must not be {@code null}. Caller retains ownership and
      *                   is responsible for closing it.
+     * @param clock      the clock used for timestamp generation (the
+     *                   {@code applied_at} column in {@code hs_schema_version}
+     *                   and diagnostic duration logging). Inject
+     *                   {@code Clock.systemUTC()} in production; use
+     *                   {@code Clock.fixed(...)} in tests for deterministic
+     *                   timestamps. Must not be {@code null}.
      */
-    MigrationRunner(Connection connection) {
+    MigrationRunner(Connection connection, Clock clock) {
         this.connection = Objects.requireNonNull(connection, "connection");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     /**
@@ -146,7 +154,7 @@ final class MigrationRunner {
         Objects.requireNonNull(migrationFiles, "migrationFiles");
         Objects.requireNonNull(config, "config");
 
-        var runStart = Instant.now();
+        var runStart = clock.instant();
         log.info("Migration run starting: path={} files={}", migrationPath, migrationFiles.size());
 
         try {
@@ -188,7 +196,7 @@ final class MigrationRunner {
                 }
             }
 
-            var runDuration = Duration.between(runStart, Instant.now());
+            var runDuration = Duration.between(runStart, clock.instant());
             log.info("Migration run complete: applied={} skipped={} duration={}ms",
                 applied, skipped, runDuration.toMillis());
         } catch (MigrationException e) {
@@ -242,7 +250,7 @@ final class MigrationRunner {
             ps.setInt(1, migration.version());
             ps.setString(2, migration.checksum());
             ps.setString(3, migration.description());
-            ps.setString(4, DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+            ps.setString(4, DateTimeFormatter.ISO_INSTANT.format(clock.instant()));
             ps.executeUpdate();
         }
     }
@@ -258,7 +266,7 @@ final class MigrationRunner {
             ps.setInt(1, migration.version());
             ps.setString(2, migration.checksum());
             ps.setString(3, migration.description());
-            ps.setString(4, DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+            ps.setString(4, DateTimeFormatter.ISO_INSTANT.format(clock.instant()));
             ps.executeUpdate();
             connection.commit();
         } catch (SQLException recordError) {
@@ -371,7 +379,7 @@ final class MigrationRunner {
     private void applyMigration(ParsedMigration migration) throws SQLException {
         log.info("Applying migration: version={} description='{}'",
             migration.version(), migration.description());
-        var migrationStart = Instant.now();
+        var migrationStart = clock.instant();
 
         boolean previousAutoCommit = connection.getAutoCommit();
         try {
@@ -383,7 +391,7 @@ final class MigrationRunner {
             }
             recordSuccess(migration);
             connection.commit();
-            var migrationDuration = Duration.between(migrationStart, Instant.now());
+            var migrationDuration = Duration.between(migrationStart, clock.instant());
             log.info("Applied migration: version={} description='{}' duration={}ms",
                 migration.version(), migration.description(), migrationDuration.toMillis());
         } catch (SQLException sqlError) {

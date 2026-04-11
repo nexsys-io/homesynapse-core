@@ -10,7 +10,6 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.homesynapse.event.DomainEvent;
 
-import java.time.Duration;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -109,7 +108,6 @@ final class JacksonWarmup {
         Objects.requireNonNull(mapper, "mapper must not be null");
         Objects.requireNonNull(registry, "registry must not be null");
 
-        long startNanos = System.nanoTime();
         Map<Class<? extends DomainEvent>, ObjectWriter> writers =
                 new LinkedHashMap<>();
         Map<Class<? extends DomainEvent>, ObjectReader> readers =
@@ -141,11 +139,7 @@ final class JacksonWarmup {
             LOG.debug("Warmed Jackson caches for {}", eventClass.getName());
         }
 
-        Duration elapsed = Duration.ofNanos(System.nanoTime() - startNanos);
-        LOG.info(
-                "JacksonWarmup pre-populated {} event type(s) in {} ms",
-                writers.size(),
-                elapsed.toMillis());
+        LOG.info("JacksonWarmup pre-populated {} event type(s)", writers.size());
 
         return new JacksonWarmup(writers, readers);
     }

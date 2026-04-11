@@ -9,6 +9,9 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -55,6 +58,9 @@ final class DatabaseExecutorTest {
     private static final List<String> EVENTS_MIGRATION_FILES = List.of(
             "V001__initial_event_store_schema.sql");
 
+    private static final Clock TEST_CLOCK =
+            Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+
     @TempDir
     Path tempDir;
 
@@ -67,7 +73,7 @@ final class DatabaseExecutorTest {
 
     @BeforeEach
     void setUp() {
-        executor = new DatabaseExecutor(2);
+        executor = new DatabaseExecutor(2, TEST_CLOCK);
     }
 
     @AfterEach
@@ -274,7 +280,7 @@ final class DatabaseExecutorTest {
         if (executor != null) {
             executor.shutdown();
         }
-        executor = new DatabaseExecutor(3);
+        executor = new DatabaseExecutor(3, TEST_CLOCK);
         executor.start(dbPath, EVENTS_MIGRATION_PATH, EVENTS_MIGRATION_FILES,
                 MigrationConfig.freshInstall());
 

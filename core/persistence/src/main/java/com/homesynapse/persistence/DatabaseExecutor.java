@@ -10,7 +10,9 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
@@ -74,6 +76,7 @@ final class DatabaseExecutor {
             "cell_size_check = ON");
 
     private final int readThreadCount;
+    private final Clock clock;
     private final ReentrantLock lifecycleLock = new ReentrantLock();
 
     private volatile boolean started;
@@ -91,14 +94,21 @@ final class DatabaseExecutor {
      *
      * @param readThreadCount number of platform read threads; must be
      *                        {@code >= 1}. AMD-27 default is 2.
+     * @param clock           clock forwarded to {@link MigrationRunner} for
+     *                        {@code hs_schema_version.applied_at} timestamp
+     *                        generation and diagnostic duration logging.
+     *                        Inject {@code Clock.systemUTC()} in production;
+     *                        use {@code Clock.fixed(...)} in tests.
      * @throws IllegalArgumentException if {@code readThreadCount < 1}
+     * @throws NullPointerException     if {@code clock} is {@code null}
      */
-    DatabaseExecutor(int readThreadCount) {
+    DatabaseExecutor(int readThreadCount, Clock clock) {
         if (readThreadCount < 1) {
             throw new IllegalArgumentException(
                     "readThreadCount must be >= 1, got " + readThreadCount);
         }
         this.readThreadCount = readThreadCount;
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     /**
@@ -170,7 +180,7 @@ final class DatabaseExecutor {
                 applyConnectionPragmas(writeConnection);
 
                 // 4. Run migrations on the write connection.
-                new MigrationRunner(writeConnection)
+                new MigrationRunner(writeConnection, clock)
                         .migrate(migrationPath, migrationFiles, migrationConfig);
 
                 // 5. Open N read connections and apply the same connection
@@ -277,6 +287,32 @@ final class DatabaseExecutor {
     Connection writeConnection() {
         checkStarted();
         return writeConnection;
+    }
+
+    /**
+     * Returns the list of read connections opened at {@link #start} time, in
+     * insertion order (matching the index of the corresponding read thread in
+     * {@link PlatformThreadReadExecutor}).
+     *
+     * <p>The returned list is an unmodifiable view — callers cannot add, remove,
+     * or reorder connections. Callers must never issue JDBC calls on these
+     * connections from a thread other than the owning read thread, for the same
+     * AMD-26/AMD-27 carrier-pinning reason that applies to
+     * {@link #writeConnection()}. The typical consumer is a higher-level store
+     * (e.g., {@code SqliteEventStore}) that owns a {@link java.lang.ThreadLocal}
+     * mapping from read thread to connection and populates it lazily on first
+     * access using a round-robin index into this list.</p>
+     *
+     * <p>The list size always equals the {@code readThreadCount} passed to the
+     * constructor.</p>
+     *
+     * @return an unmodifiable view of the read connections, never {@code null}
+     * @throws IllegalStateException if {@link #start} has not been called
+     *                               or {@link #shutdown} has been called
+     */
+    List<Connection> readConnections() {
+        checkStarted();
+        return Collections.unmodifiableList(readConnections);
     }
 
     // ------------------------------------------------------------------

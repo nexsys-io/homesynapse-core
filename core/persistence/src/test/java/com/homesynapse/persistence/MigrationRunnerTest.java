@@ -15,6 +15,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -53,6 +56,9 @@ final class MigrationRunnerTest {
     private static final String V001_BAD = "V001__bad_migration.sql";
     private static final String V001_EVENTS = "V001__initial_event_store_schema.sql";
 
+    private static final Clock TEST_CLOCK =
+        Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+
     @TempDir
     Path tempDir;
 
@@ -84,7 +90,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("fresh database — creates hs_schema_version tracking table")
     void migrate_freshDatabase_createsSchemaVersionTable() throws SQLException {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
 
         runner.migrate(TEST_PATH, List.of(V001_TEST), MigrationConfig.freshInstall());
 
@@ -101,7 +107,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("fresh database — applies V001 successfully")
     void migrate_freshDatabase_appliesV001Successfully() throws SQLException {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
 
         runner.migrate(TEST_PATH, List.of(V001_TEST), MigrationConfig.freshInstall());
 
@@ -115,7 +121,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("already applied — skips on second run, no error")
     void migrate_alreadyApplied_isIdempotent() throws SQLException {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
         runner.migrate(TEST_PATH, List.of(V001_TEST), MigrationConfig.freshInstall());
 
         runner.migrate(TEST_PATH, List.of(V001_TEST), MigrationConfig.freshInstall());
@@ -130,7 +136,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("checksum mismatch on applied version — throws and halts")
     void migrate_checksumMismatch_throwsAndHalts() {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
         runner.migrate(TEST_PATH, List.of(V001_TEST), MigrationConfig.freshInstall());
 
         assertThatThrownBy(() ->
@@ -142,7 +148,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("version gap in pending list — throws and halts")
     void migrate_versionGap_throwsAndHalts() {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
 
         assertThatThrownBy(() ->
             runner.migrate(TEST_PATH, List.of(V002_TEST), MigrationConfig.freshInstall()))
@@ -153,7 +159,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("database schema ahead of application — throws and halts")
     void migrate_versionAheadOfApplication_throwsAndHalts() throws SQLException {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
         // Seed the tracking table with a version higher than anything we will provide.
         runner.migrate(TEST_PATH, List.of(V001_TEST), MigrationConfig.freshInstall());
         insertFakeAppliedMigration(connection, 5, "future version");
@@ -167,7 +173,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("sql execution failure — records success=0 then throws")
     void migrate_sqlFailure_recordsWithSuccessZero() throws SQLException {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
 
         assertThatThrownBy(() ->
             runner.migrate(BAD_PATH, List.of(V001_BAD), MigrationConfig.freshInstall()))
@@ -182,7 +188,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("previous failure without recovery — halts")
     void migrate_previousFailure_haltsWithoutForce() {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
         try {
             runner.migrate(BAD_PATH, List.of(V001_BAD), MigrationConfig.freshInstall());
         } catch (MigrationException expected) {
@@ -198,7 +204,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("previous failure with recovery — retries successfully")
     void migrate_previousFailure_retriesWithForce() throws SQLException {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
         try {
             runner.migrate(BAD_PATH, List.of(V001_BAD), MigrationConfig.freshInstall());
         } catch (MigrationException expected) {
@@ -221,7 +227,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("multiple migrations applied in version order")
     void migrate_multiMigrationSequence_appliesInOrder() throws SQLException {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
 
         runner.migrate(TEST_PATH, List.of(V001_TEST, V002_TEST), MigrationConfig.freshInstall());
 
@@ -235,7 +241,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("empty migration list — no-op, tracking table created")
     void migrate_emptyMigrationList_isNoOp() throws SQLException {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
 
         assertThatCode(() ->
             runner.migrate(TEST_PATH, List.of(), MigrationConfig.freshInstall()))
@@ -252,7 +258,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("real events V001 — creates all tables, indexes, and AUTOINCREMENT")
     void migrate_eventsV001_createsAllTablesAndIndexes() throws SQLException {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
 
         runner.migrate(EVENTS_PATH, List.of(V001_EVENTS), MigrationConfig.freshInstall());
 
@@ -290,7 +296,7 @@ final class MigrationRunnerTest {
     @Test
     @DisplayName("backup required but not verified — throws")
     void migrate_backupRequired_throwsWhenNotVerified() {
-        var runner = new MigrationRunner(connection);
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
         runner.migrate(TEST_PATH, List.of(V001_TEST), MigrationConfig.freshInstall());
 
         assertThatThrownBy(() ->
@@ -318,7 +324,7 @@ final class MigrationRunnerTest {
                 results.add(executor.submit(() -> {
                     try (Connection threadConn = openConnection(dbFile)) {
                         latch.await();
-                        new MigrationRunner(threadConn)
+                        new MigrationRunner(threadConn, TEST_CLOCK)
                             .migrate(TEST_PATH, List.of(V001_TEST),
                                 MigrationConfig.freshInstall());
                         return Boolean.TRUE;
