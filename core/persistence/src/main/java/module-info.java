@@ -25,5 +25,13 @@ module com.homesynapse.persistence {
     requires java.sql;
     requires org.slf4j;
 
+    // M2.4: Jackson serialization infrastructure for DomainEvent payload
+    // encode/decode in the SQLite event store BLOB column (DECIDE-M2-04).
+    // jackson-databind transitively requires jackson-core and jackson-annotations.
+    requires com.fasterxml.jackson.core;
+    requires com.fasterxml.jackson.databind;
+    requires com.fasterxml.jackson.datatype.jsr310;
+    requires com.fasterxml.jackson.module.blackbird;
+
     exports com.homesynapse.persistence;
 }
