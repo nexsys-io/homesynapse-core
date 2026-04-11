@@ -24,6 +24,12 @@ dependencies {
     // `requires com.homesynapse.integration` in module-info.java.
     testImplementation(project(":integration:integration-api"))
 
+    // M2.5: SqliteEventStoreTest extends the abstract EventStoreContractTest
+    // from core:event-model's test fixtures source set. That fixture also
+    // provides TestEventTypes and the @EventType-annotated TestPayload record
+    // used by the persistence wiring in SqliteEventStoreTest.setUp().
+    testImplementation(testFixtures(project(":core:event-model")))
+
     // testFixtures dependencies — JUnit + AssertJ for the WriteCoordinatorContractTest
     // abstract class. The java-conventions plugin only adds these to testImplementation,
     // not testFixturesImplementation, so they must be declared explicitly here.

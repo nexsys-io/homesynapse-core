@@ -13,6 +13,7 @@ import com.homesynapse.event.EventPage;
 import com.homesynapse.event.EventPriority;
 import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.EventStore;
+import com.homesynapse.event.EventType;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.platform.identity.EntityId;
@@ -94,9 +95,16 @@ public abstract class EventStoreContractTest {
 
     /**
      * A minimal DomainEvent implementation for contract tests.
-     * DomainEvent is a pure marker interface — no methods required.
+     *
+     * <p>DomainEvent is a pure marker interface — no methods required. The
+     * {@link EventType} annotation carries the canonical type string so that
+     * SQLite-backed implementations can round-trip the payload through the
+     * {@code EventTypeRegistry} (LTD-19 / DECIDE-M2-01). The constant lives in
+     * {@link TestEventTypes} to satisfy the "no literal strings in
+     * {@code @EventType}" discipline enforced on production event records.</p>
      */
-    record TestPayload(String value) implements DomainEvent {}
+    @EventType(TestEventTypes.TEST_EVENT)
+    public record TestPayload(String value) implements DomainEvent {}
 
     /**
      * Creates a basic EventDraft for the given subject with NORMAL priority.

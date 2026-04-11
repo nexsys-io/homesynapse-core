@@ -268,9 +268,10 @@ final class MigrationRunnerTest {
 
         assertThat(columnNames(connection, "events")).containsExactlyInAnyOrder(
             "global_position", "event_id", "event_type", "schema_version",
-            "ingest_time", "event_time", "subject_ref", "subject_sequence",
-            "priority", "origin", "actor_ref", "correlation_id",
-            "causation_id", "event_category", "payload", "chain_hash");
+            "ingest_time", "event_time", "subject_ref", "subject_type",
+            "subject_sequence", "priority", "origin", "actor_ref",
+            "correlation_id", "causation_id", "event_category", "payload",
+            "chain_hash");
         assertThat(columnNames(connection, "subscriber_checkpoints"))
             .containsExactlyInAnyOrder("subscriber_id", "last_position", "last_updated");
         assertThat(columnNames(connection, "view_checkpoints"))

@@ -1,5 +1,15 @@
 -- HomeSynapse Core / V001 — Initial Event Store Schema
 -- Creates the domain event store, subscriber checkpoints, and view checkpoints.
+--
+-- AMENDED 2026-04-10 (M2.5):
+--   Added `subject_type TEXT NOT NULL` column between `subject_ref` and
+--   `subject_sequence`. The subject's SubjectType discriminator is stored
+--   alongside the ULID so that bus-side subscription filtering (Doc 01 §3.4)
+--   can resolve the subject's type category at append time without a
+--   registry lookup. This amendment lands in V001 rather than a V00X
+--   migration because the schema has not yet shipped to any production
+--   database — all existing databases are empty test instances, and the
+--   migration framework is still pre-M2.9.
 
 -- === Domain Event Store ===
 
@@ -11,6 +21,7 @@ CREATE TABLE IF NOT EXISTS events (
     ingest_time       INTEGER  NOT NULL,
     event_time        INTEGER,
     subject_ref       BLOB(16) NOT NULL,
+    subject_type      TEXT     NOT NULL,
     subject_sequence  INTEGER  NOT NULL,
     priority          TEXT     NOT NULL DEFAULT 'NORMAL',
     origin            TEXT     NOT NULL DEFAULT 'UNKNOWN',
