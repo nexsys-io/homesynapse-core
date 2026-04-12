@@ -211,3 +211,20 @@ None in Phase 2.
 - **AvailabilityTracker restart initialization (Doc 08, Doc 05 §3.14):** On adapter restart, the AvailabilityTracker must initialize from pre-restart state persisted in the device registry, not only from in-memory state. During a planned restart (§3.14 flag set), entity availability is not published as changed — the tracker must carry forward the last-known availability from the device registry and only emit `availability_changed` after the restart completes and fresh state is confirmed from the coordinator. This prevents false unavailable→available transitions that would trigger automations during planned restarts.
 - **jSerialComm dependency:** Will need to be added to libs.versions.toml. CoordinatorTransport.open() parameter changes from Object to SerialPort.
 - **Testing strategy:** Transport layer tested with byte-level frame fixtures. Protocol layer tested with mock transport. Cluster handlers tested with ZCL attribute maps → AttributeReport assertions. Device profile registry tested with JSON loading and wildcard matching.
+
+
+---
+
+## Phase 3 Cross-Module Context
+
+*Added 2026-04-11 (Alignment Pass #2). Phase 3 implementation is active — M2.5 `SqliteEventStore` landed 2026-04-11 (commit `5279e7a`), next milestone M2.6 + M2.7 (combined) pending from Nick.*
+
+**Phase 3 cross-module decisions register:** `nexsys-hivemind/context/decisions/phase-3-cross-module-decisions.md` is the running list of decisions made during Phase 3 implementation that cross module boundaries. Read this file before starting Phase 3 work on this module — it closes questions the Phase 2 interface spec left open and establishes patterns that every Phase 3 implementation must follow.
+
+**Decisions directly relevant to this module:**
+
+- **D-01** — *DomainEvent non-sealed*: dispatch on `@EventType` string, not sealed-switch
+- **D-04** — *Clock must be injected*: frame-timing, retry schedules, and join-window expiry all use injected `Clock`
+- **D-05** — *`@EventType` on every event record*: integration-namespaced events like `zigbee.device_announce` carry `@EventType` and resolve to `[SYSTEM]` category by INV-PD-07 fallback unless added to `EventCategoryMapping`
+
+**Read also:** `nexsys-hivemind/context/status/PROJECT_SNAPSHOT.md` for current milestone state; `nexsys-hivemind/context/lessons/coder-lessons.md` for recent Phase 3 pattern discoveries (especially the 2026-04-10 entries on `NO_DIRECT_TIME_ACCESS` and JUnit 5 `@BeforeEach` ordering).

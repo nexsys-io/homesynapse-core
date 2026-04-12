@@ -278,3 +278,19 @@ switch (expectation) {
 - **JSR 385 integration (Phase 3):** Add `javax.measure` dependency for proper unit conversion. Replace `String unitSymbol` with `Unit<?>` where appropriate. Backward-compatible — existing String values remain valid.
 - **Testing strategy:** Unit tests for all record validation, sealed hierarchy exhaustiveness (ArchUnit), capability schema correctness. Integration tests for registry CRUD through SQLite. Property-based tests for `AttributeValidator` boundary conditions.
 - **Performance targets (from Doc 02 §8):** EntityRegistry.getEntity() must complete within 1ms. CapabilityRegistry lookups must be sub-millisecond (in-memory). DiscoveryPipeline.adopt() may take up to 50ms including event publication.
+
+
+---
+
+## Phase 3 Cross-Module Context
+
+*Added 2026-04-11 (Alignment Pass #2). Phase 3 implementation is active — M2.5 `SqliteEventStore` landed 2026-04-11 (commit `5279e7a`), next milestone M2.6 + M2.7 (combined) pending from Nick.*
+
+**Phase 3 cross-module decisions register:** `nexsys-hivemind/context/decisions/phase-3-cross-module-decisions.md` is the running list of decisions made during Phase 3 implementation that cross module boundaries. Read this file before starting Phase 3 work on this module — it closes questions the Phase 2 interface spec left open and establishes patterns that every Phase 3 implementation must follow.
+
+**Decisions directly relevant to this module:**
+
+- **D-01** — *DomainEvent non-sealed*: consumers that need to dispatch on device-related event types use registry lookup keyed by `@EventType` string
+- **D-05** — *`@EventType` on every event record*: device state events (`state_changed`, `state_reported`, `command_issued`, etc.) are annotated in event-model and mapped to `[DEVICE_STATE]` category
+
+**Read also:** `nexsys-hivemind/context/status/PROJECT_SNAPSHOT.md` for current milestone state; `nexsys-hivemind/context/lessons/coder-lessons.md` for recent Phase 3 pattern discoveries (especially the 2026-04-10 entries on `NO_DIRECT_TIME_ACCESS` and JUnit 5 `@BeforeEach` ordering).

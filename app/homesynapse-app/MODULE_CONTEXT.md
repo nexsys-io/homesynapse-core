@@ -163,3 +163,21 @@ None. This module contains no sealed types.
 - **jlink packaging:** Add jlink Gradle tasks, custom runtime image configuration, and systemd unit generation to build.gradle.kts.
 - **Signal handling:** Register `Runtime.getRuntime().addShutdownHook()` for SIGTERM handling. May also register SIGHUP for config reload trigger.
 - **JVM flags:** Configure G1GC (100ms pause target), AppCDS (Class Data Sharing), and module-path resolution in the jlink-generated launch script.
+
+
+---
+
+## Phase 3 Cross-Module Context
+
+*Added 2026-04-11 (Alignment Pass #2). Phase 3 implementation is active — M2.5 `SqliteEventStore` landed 2026-04-11 (commit `5279e7a`), next milestone M2.6 + M2.7 (combined) pending from Nick.*
+
+**Phase 3 cross-module decisions register:** `nexsys-hivemind/context/decisions/phase-3-cross-module-decisions.md` is the running list of decisions made during Phase 3 implementation that cross module boundaries. Read this file before starting Phase 3 work on this module — it closes questions the Phase 2 interface spec left open and establishes patterns that every Phase 3 implementation must follow.
+
+**Decisions directly relevant to this module:**
+
+- **D-02** — *Persistence uses platform threads*: this module is the composition root — owns `DatabaseExecutor` construction, passes it into `SqliteEventStore`, wires both into `PersistenceLifecycle`
+- **D-03** — *Persistence internals are package-private*: app is one of the few modules that may reach persistence internals via same-package composition if needed; prefer exported interfaces even here
+- **D-04** — *Clock must be injected*: app is inside the `com.homesynapse.app..` ArchUnit whitelist — it MAY read time directly, but should still prefer `Clock` injection for testability
+- **D-06** — *V001 schema may be amended pre-launch*: app drives first-boot migration; developers wipe local `events.db` after pulling a V001 amendment
+
+**Read also:** `nexsys-hivemind/context/status/PROJECT_SNAPSHOT.md` for current milestone state; `nexsys-hivemind/context/lessons/coder-lessons.md` for recent Phase 3 pattern discoveries (especially the 2026-04-10 entries on `NO_DIRECT_TIME_ACCESS` and JUnit 5 `@BeforeEach` ordering).

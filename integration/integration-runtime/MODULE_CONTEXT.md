@@ -206,3 +206,21 @@ The `api` scope for integration-api is correct — integration-api types appear 
 - **Planned restart lifecycle (Doc 05 §3.14):** When `restartIntegration()` is called, set `plannedRestart = true` on the IntegrationHealthRecord. While true: suppress `availability_changed` events for owned entities, queue inbound commands (do not drop), exclude owned devices from orphan detection (AMD-17). Clear the flag when the adapter reaches HEALTHY or when 60s timeout expires (whichever comes first). On timeout, treat as normal restart failure. The automation engine accesses planned restart state via event subscription (`integration_stopped` with reason `planned_restart`), NOT by reading `IntegrationHealthRecord.plannedRestart()` directly — JPMS prevents core modules from importing integration-runtime types.
 - **Health evaluation interval:** Default 15s, configurable range 5–60s (Doc 05 §3.4). The health score is recomputed on this interval, not on every health signal. This bounds CPU cost on the Pi but means state transitions can lag by up to one interval.
 - **Testing strategy:** Unit tests for ExceptionClassification logic (mock exception → expected classification), health state machine transitions (mock health signals → expected state), restart intensity (rapid restarts → FAILED). Integration tests for full supervisor lifecycle (start → health reporting → degradation → suspension → recovery). Performance test for startup time with multiple adapters.
+
+
+---
+
+## Phase 3 Cross-Module Context
+
+*Added 2026-04-11 (Alignment Pass #2). Phase 3 implementation is active — M2.5 `SqliteEventStore` landed 2026-04-11 (commit `5279e7a`), next milestone M2.6 + M2.7 (combined) pending from Nick.*
+
+**Phase 3 cross-module decisions register:** `nexsys-hivemind/context/decisions/phase-3-cross-module-decisions.md` is the running list of decisions made during Phase 3 implementation that cross module boundaries. Read this file before starting Phase 3 work on this module — it closes questions the Phase 2 interface spec left open and establishes patterns that every Phase 3 implementation must follow.
+
+**Decisions directly relevant to this module:**
+
+- **D-01** — *DomainEvent non-sealed*: use `@EventType` + `EventTypeRegistry` for command/lifecycle event dispatch; integration events must be annotated
+- **D-02** — *Persistence uses platform threads*: when this module persists state or health records, submit through `DatabaseExecutor` — do not hold `Connection` across virtual-thread boundaries
+- **D-04** — *Clock must be injected*: supervisor health-window timestamps, restart-intensity timers, and backoff schedules all take `Clock` via constructor injection — no `Instant.now()` or `System.nanoTime()`
+- **D-05** — *`@EventType` on every event record*: IntegrationLifecycleEvent subtypes are annotated (M2.i); any new lifecycle event type added here needs the annotation + an `EventCategoryMapping` entry
+
+**Read also:** `nexsys-hivemind/context/status/PROJECT_SNAPSHOT.md` for current milestone state; `nexsys-hivemind/context/lessons/coder-lessons.md` for recent Phase 3 pattern discoveries (especially the 2026-04-10 entries on `NO_DIRECT_TIME_ACCESS` and JUnit 5 `@BeforeEach` ordering).

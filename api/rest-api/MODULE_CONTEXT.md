@@ -277,3 +277,19 @@ None. This module contains no sealed types.
 - **OpenAPI 3.1 spec generation (Tier 2):** Not in Phase 3 MVP scope. The types defined here will eventually drive OpenAPI generation.
 - **CORS middleware (Phase 3):** Not defined in Phase 2. Web UI access will require CORS headers.
 - **Testing strategy:** Integration tests for full request lifecycle (parse → auth → rate limit → handle → serialize). Unit tests for ProblemDetailMapper (each HomeSynapseException subtype → correct ProblemType). Performance targets from Doc 09: p99 response time for State Query endpoints.
+
+
+---
+
+## Phase 3 Cross-Module Context
+
+*Added 2026-04-11 (Alignment Pass #2). Phase 3 implementation is active — M2.5 `SqliteEventStore` landed 2026-04-11 (commit `5279e7a`), next milestone M2.6 + M2.7 (combined) pending from Nick.*
+
+**Phase 3 cross-module decisions register:** `nexsys-hivemind/context/decisions/phase-3-cross-module-decisions.md` is the running list of decisions made during Phase 3 implementation that cross module boundaries. Read this file before starting Phase 3 work on this module — it closes questions the Phase 2 interface spec left open and establishes patterns that every Phase 3 implementation must follow.
+
+**Decisions directly relevant to this module:**
+
+- **D-01** — *DomainEvent non-sealed*: event subscription handlers dispatch on `@EventType` string, not sealed-switch
+- **D-04** — *Clock must be injected*: rate limiters, auth token TTL checks, and audit-log timestamps all take `Clock` — no direct time access
+
+**Read also:** `nexsys-hivemind/context/status/PROJECT_SNAPSHOT.md` for current milestone state; `nexsys-hivemind/context/lessons/coder-lessons.md` for recent Phase 3 pattern discoveries (especially the 2026-04-10 entries on `NO_DIRECT_TIME_ACCESS` and JUnit 5 `@BeforeEach` ordering).

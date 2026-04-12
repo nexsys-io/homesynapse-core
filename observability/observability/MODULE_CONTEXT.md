@@ -131,3 +131,20 @@ The `requires transitive` on event-model provides transitive access to platform-
 - Trace chain assembly SQL queries and TraceCompleteness classification are Phase 3
 - MetricSnapshot pre-aggregation from JFR events and bounded queue management are Phase 3
 - LogLevelController allowed prefix validation against configuration is Phase 3
+
+
+---
+
+## Phase 3 Cross-Module Context
+
+*Added 2026-04-11 (Alignment Pass #2). Phase 3 implementation is active — M2.5 `SqliteEventStore` landed 2026-04-11 (commit `5279e7a`), next milestone M2.6 + M2.7 (combined) pending from Nick.*
+
+**Phase 3 cross-module decisions register:** `nexsys-hivemind/context/decisions/phase-3-cross-module-decisions.md` is the running list of decisions made during Phase 3 implementation that cross module boundaries. Read this file before starting Phase 3 work on this module — it closes questions the Phase 2 interface spec left open and establishes patterns that every Phase 3 implementation must follow.
+
+**Decisions directly relevant to this module:**
+
+- **D-01** — *DomainEvent non-sealed*: trace event emission dispatches on `@EventType`
+- **D-02** — *Persistence uses platform threads*: trace storage writes go through `DatabaseExecutor`; queries via `ReadExecutor`
+- **D-04** — *Clock must be injected*: `TraceEvent.timestamp` and health-probe intervals all take `Clock` — this is the module with the largest time-access surface
+
+**Read also:** `nexsys-hivemind/context/status/PROJECT_SNAPSHOT.md` for current milestone state; `nexsys-hivemind/context/lessons/coder-lessons.md` for recent Phase 3 pattern discoveries (especially the 2026-04-10 entries on `NO_DIRECT_TIME_ACCESS` and JUnit 5 `@BeforeEach` ordering).
