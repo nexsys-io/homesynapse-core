@@ -37,6 +37,12 @@ dependencies {
     // CheckpointStore implementations must satisfy.
     testImplementation(testFixtures(project(":core:event-bus")))
 
+    // M2.7: SqliteViewCheckpointStoreTest extends the abstract
+    // ViewCheckpointStoreContractTest from core:state-store's test fixtures
+    // source set, which defines the 10-method behavioral contract that all
+    // ViewCheckpointStore implementations must satisfy.
+    testImplementation(testFixtures(project(":core:state-store")))
+
     // testFixtures dependencies — JUnit + AssertJ for the WriteCoordinatorContractTest
     // abstract class. The java-conventions plugin only adds these to testImplementation,
     // not testFixturesImplementation, so they must be declared explicitly here.
