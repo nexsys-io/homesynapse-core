@@ -7,6 +7,7 @@ description = "Persistence: SQLite event store, telemetry, checkpoints, migratio
 dependencies {
     api(project(":platform:platform-api"))
     implementation(project(":core:event-model"))
+    implementation(project(":core:event-bus"))
     implementation(project(":core:state-store"))
 
     implementation(libs.sqlite.jdbc)
@@ -29,6 +30,12 @@ dependencies {
     // provides TestEventTypes and the @EventType-annotated TestPayload record
     // used by the persistence wiring in SqliteEventStoreTest.setUp().
     testImplementation(testFixtures(project(":core:event-model")))
+
+    // M2.6: SqliteCheckpointStoreTest extends the abstract
+    // CheckpointStoreContractTest from core:event-bus's test fixtures source
+    // set, which defines the 9-method behavioral contract that all
+    // CheckpointStore implementations must satisfy.
+    testImplementation(testFixtures(project(":core:event-bus")))
 
     // testFixtures dependencies — JUnit + AssertJ for the WriteCoordinatorContractTest
     // abstract class. The java-conventions plugin only adds these to testImplementation,

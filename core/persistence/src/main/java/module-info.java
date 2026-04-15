@@ -12,15 +12,27 @@
  * WAL management, retention scheduler) lives in this module's Phase 3
  * implementation classes.</p>
  *
- * <p>The Persistence Layer implements
- * {@link com.homesynapse.state.ViewCheckpointStore} from the state-store
- * module — it provides the durable storage behind the State Store's
- * checkpoint mechanism.</p>
+ * <p>The Persistence Layer implements two checkpoint contracts from two
+ * different subsystems:</p>
+ * <ul>
+ *   <li>{@link com.homesynapse.state.ViewCheckpointStore} from the
+ *       state-store module — durable storage behind the State Store's
+ *       view-checkpoint mechanism (M2 scope placeholder).</li>
+ *   <li>{@link com.homesynapse.event.bus.CheckpointStore} from the
+ *       event-bus module — durable storage for every event-bus
+ *       subscriber's {@code last_delivered_position} against the
+ *       {@code subscriber_checkpoints} table (M2.6).</li>
+ * </ul>
  */
 module com.homesynapse.persistence {
     requires transitive com.homesynapse.platform;
     requires com.homesynapse.state;
     requires com.homesynapse.event;
+    // M2.6: SqliteCheckpointStore implements
+    // com.homesynapse.event.bus.CheckpointStore — the subscriber checkpoint
+    // contract owned by the event-bus module (distinct from
+    // com.homesynapse.state.ViewCheckpointStore which covers view state).
+    requires com.homesynapse.event.bus;
 
     requires java.sql;
     requires org.slf4j;
