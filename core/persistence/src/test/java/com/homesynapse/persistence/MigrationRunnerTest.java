@@ -55,6 +55,7 @@ final class MigrationRunnerTest {
     private static final String V002_TEST = "V002__test_add_column.sql";
     private static final String V001_BAD = "V001__bad_migration.sql";
     private static final String V001_EVENTS = "V001__initial_event_store_schema.sql";
+    private static final String V002_DLQ = "V002__subscriber_dead_letter_queue.sql";
 
     private static final Clock TEST_CLOCK =
         Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
@@ -267,10 +268,12 @@ final class MigrationRunnerTest {
         assertThat(tableExists(connection, "view_checkpoints")).isTrue();
 
         assertThat(columnNames(connection, "events")).containsExactlyInAnyOrder(
-            "global_position", "event_id", "event_type", "schema_version",
-            "ingest_time", "event_time", "subject_ref", "subject_type",
-            "subject_sequence", "priority", "origin", "actor_ref",
-            "correlation_id", "causation_id", "event_category", "payload",
+            "global_position", "event_id", "home_id", "event_type",
+            "schema_version", "ingest_time", "event_time", "subject_ref",
+            "subject_type", "subject_sequence", "priority", "origin",
+            "actor_ref", "idempotency_key", "correlation_id", "causation_id",
+            "event_category", "payload_size", "batch_id", "external_ref",
+            "intent_kind", "logical_time", "node_id", "payload",
             "chain_hash");
         assertThat(columnNames(connection, "subscriber_checkpoints"))
             .containsExactlyInAnyOrder("subscriber_id", "last_position", "last_updated");
@@ -284,10 +287,247 @@ final class MigrationRunnerTest {
             "idx_events_correlation",
             "idx_events_ingest_time",
             "idx_events_event_time",
-            "idx_events_actor");
+            "idx_events_actor",
+            "idx_events_idempotency");
 
         // AUTOINCREMENT creates sqlite_sequence automatically.
         assertThat(tableExists(connection, "sqlite_sequence")).isTrue();
+    }
+
+    // ------------------------------------------------------------------
+    // Tier 5b — V001 amendment-specific verifications (M2-bridge)
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("V001 chain_hash is NOT NULL with zero-hash default (AMD-37)")
+    void migrate_eventsV001_chainHashIsNotNullWithZeroDefault() throws SQLException {
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
+        runner.migrate(EVENTS_PATH, List.of(V001_EVENTS), MigrationConfig.freshInstall());
+
+        // Insert a row omitting chain_hash — the DEFAULT should provide 32 zero bytes.
+        try (Statement stmt = connection.createStatement()) {
+            stmt.executeUpdate("""
+                INSERT INTO events (
+                    event_id, home_id, event_type, ingest_time,
+                    subject_ref, subject_type, subject_sequence,
+                    correlation_id, event_category, payload_size, payload
+                ) VALUES (
+                    x'0180000000000000000000000000AAAA',
+                    x'0180000000000000000000000000BBBB',
+                    'test.event', 1700000000000000,
+                    x'0180000000000000000000000000CCCC',
+                    'DEVICE', 1,
+                    x'0180000000000000000000000000DDDD',
+                    'device_state', 5, x'7B7D'
+                )
+                """);
+        }
+
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT chain_hash, length(chain_hash) AS len FROM events WHERE global_position = 1")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                assertThat(rs.next()).isTrue();
+                byte[] chainHash = rs.getBytes("chain_hash");
+                assertThat(chainHash).isNotNull();
+                assertThat(chainHash).hasSize(32);
+                assertThat(chainHash).isEqualTo(new byte[32]);
+                assertThat(rs.getInt("len")).isEqualTo(32);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("V001 chain_hash NOT NULL rejects explicit NULL insert (AMD-37)")
+    void migrate_eventsV001_chainHashRejectsNull() throws SQLException {
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
+        runner.migrate(EVENTS_PATH, List.of(V001_EVENTS), MigrationConfig.freshInstall());
+
+        assertThatThrownBy(() -> {
+            try (Statement stmt = connection.createStatement()) {
+                stmt.executeUpdate("""
+                    INSERT INTO events (
+                        event_id, home_id, event_type, ingest_time,
+                        subject_ref, subject_type, subject_sequence,
+                        correlation_id, event_category, payload_size, payload,
+                        chain_hash
+                    ) VALUES (
+                        x'0180000000000000000000000000AAAA',
+                        x'0180000000000000000000000000BBBB',
+                        'test.event', 1700000000000000,
+                        x'0180000000000000000000000000CCCC',
+                        'DEVICE', 1,
+                        x'0180000000000000000000000000DDDD',
+                        'device_state', 5, x'7B7D',
+                        NULL
+                    )
+                    """);
+            }
+        }).isInstanceOf(SQLException.class);
+    }
+
+    @Test
+    @DisplayName("V001 idempotency partial unique index rejects duplicate non-null keys (AMD-35)")
+    void migrate_eventsV001_idempotencyIndexRejectsDuplicateKey() throws SQLException {
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
+        runner.migrate(EVENTS_PATH, List.of(V001_EVENTS), MigrationConfig.freshInstall());
+
+        byte[] homeId = new byte[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        String insertSql = """
+            INSERT INTO events (
+                event_id, home_id, event_type, ingest_time,
+                subject_ref, subject_type, subject_sequence,
+                correlation_id, event_category, payload_size, payload,
+                idempotency_key
+            ) VALUES (?, ?, 'test.event', 1700000000000000,
+                ?, 'DEVICE', ?,
+                ?, 'device_state', 5, x'7B7D',
+                ?)
+            """;
+
+        // First insert succeeds.
+        try (PreparedStatement ps = connection.prepareStatement(insertSql)) {
+            ps.setBytes(1, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1});
+            ps.setBytes(2, homeId);
+            ps.setBytes(3, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1});
+            ps.setLong(4, 1L);
+            ps.setBytes(5, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1});
+            ps.setString(6, "my-idempotency-key");
+            ps.executeUpdate();
+        }
+
+        // Second insert with same home_id + idempotency_key fails.
+        assertThatThrownBy(() -> {
+            try (PreparedStatement ps = connection.prepareStatement(insertSql)) {
+                ps.setBytes(1, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2});
+                ps.setBytes(2, homeId);
+                ps.setBytes(3, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2});
+                ps.setLong(4, 2L);
+                ps.setBytes(5, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2});
+                ps.setString(6, "my-idempotency-key");
+                ps.executeUpdate();
+            }
+        }).isInstanceOf(SQLException.class);
+    }
+
+    @Test
+    @DisplayName("V001 idempotency partial unique index allows duplicate NULL keys (AMD-35)")
+    void migrate_eventsV001_idempotencyIndexAllowsNullKeys() throws SQLException {
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
+        runner.migrate(EVENTS_PATH, List.of(V001_EVENTS), MigrationConfig.freshInstall());
+
+        byte[] homeId = new byte[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        String insertSql = """
+            INSERT INTO events (
+                event_id, home_id, event_type, ingest_time,
+                subject_ref, subject_type, subject_sequence,
+                correlation_id, event_category, payload_size, payload
+            ) VALUES (?, ?, 'test.event', 1700000000000000,
+                ?, 'DEVICE', ?,
+                ?, 'device_state', 5, x'7B7D')
+            """;
+
+        // Two inserts with NULL idempotency_key should both succeed.
+        try (PreparedStatement ps = connection.prepareStatement(insertSql)) {
+            ps.setBytes(1, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1});
+            ps.setBytes(2, homeId);
+            ps.setBytes(3, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1});
+            ps.setLong(4, 1L);
+            ps.setBytes(5, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1});
+            ps.executeUpdate();
+        }
+        try (PreparedStatement ps = connection.prepareStatement(insertSql)) {
+            ps.setBytes(1, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2});
+            ps.setBytes(2, homeId);
+            ps.setBytes(3, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2});
+            ps.setLong(4, 2L);
+            ps.setBytes(5, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2});
+            ps.executeUpdate();
+        }
+
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM events")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getInt(1)).isEqualTo(2);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Tier 5c — V002 dead-letter queue table (AMD-36)
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("V002 applies cleanly after V001 — creates subscriber_dead_letters table")
+    void migrate_eventsV002_createsDeadLetterTable() throws SQLException {
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
+
+        runner.migrate(EVENTS_PATH, List.of(V001_EVENTS, V002_DLQ),
+            MigrationConfig.freshInstall());
+
+        assertThat(tableExists(connection, "subscriber_dead_letters")).isTrue();
+        assertThat(columnNames(connection, "subscriber_dead_letters"))
+            .containsExactlyInAnyOrder(
+                "dlq_id", "subscriber_id", "sequence_key", "event_position",
+                "event_id", "cause_class", "cause_message", "attempt_count",
+                "first_seen_at", "last_attempt_at", "diagnostics");
+    }
+
+    @Test
+    @DisplayName("V002 — DLQ UNIQUE(subscriber_id, event_position) rejects duplicates")
+    void migrate_eventsV002_dlqUniqueConstraintRejectsDuplicates() throws SQLException {
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
+        runner.migrate(EVENTS_PATH, List.of(V001_EVENTS, V002_DLQ),
+            MigrationConfig.freshInstall());
+
+        String insertSql = """
+            INSERT INTO subscriber_dead_letters (
+                subscriber_id, sequence_key, event_position, event_id,
+                cause_class, cause_message, first_seen_at, last_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """;
+
+        // First insert succeeds.
+        try (PreparedStatement ps = connection.prepareStatement(insertSql)) {
+            ps.setString(1, "state-projection");
+            ps.setString(2, "0180000000000000000000000000CCCC");
+            ps.setLong(3, 42L);
+            ps.setBytes(4, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1});
+            ps.setString(5, "java.lang.ClassCastException");
+            ps.setString(6, "Cannot cast String to Integer");
+            ps.setLong(7, 1700000000000000L);
+            ps.setLong(8, 1700000000000000L);
+            ps.executeUpdate();
+        }
+
+        // Duplicate (same subscriber_id + event_position) fails.
+        assertThatThrownBy(() -> {
+            try (PreparedStatement ps = connection.prepareStatement(insertSql)) {
+                ps.setString(1, "state-projection");
+                ps.setString(2, "0180000000000000000000000000CCCC");
+                ps.setLong(3, 42L);
+                ps.setBytes(4, new byte[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2});
+                ps.setString(5, "java.lang.NullPointerException");
+                ps.setString(6, "Null value in required field");
+                ps.setLong(7, 1700000001000000L);
+                ps.setLong(8, 1700000001000000L);
+                ps.executeUpdate();
+            }
+        }).isInstanceOf(SQLException.class);
+    }
+
+    @Test
+    @DisplayName("V002 — migration tracking records both V001 and V002")
+    void migrate_eventsV002_trackingRecordsBothVersions() throws SQLException {
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
+
+        runner.migrate(EVENTS_PATH, List.of(V001_EVENTS, V002_DLQ),
+            MigrationConfig.freshInstall());
+
+        var rows = queryAllSchemaVersions(connection);
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0).version).isEqualTo(1);
+        assertThat(rows.get(0).success).isEqualTo(1);
+        assertThat(rows.get(1).version).isEqualTo(2);
+        assertThat(rows.get(1).success).isEqualTo(1);
     }
 
     // ------------------------------------------------------------------
