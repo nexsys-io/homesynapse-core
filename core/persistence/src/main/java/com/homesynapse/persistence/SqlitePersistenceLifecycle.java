@@ -6,6 +6,7 @@ package com.homesynapse.persistence;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.homesynapse.event.DomainEvent;
+import com.homesynapse.platform.identity.HomeId;
 
 import java.io.IOException;
 import java.nio.file.FileStore;
@@ -74,6 +75,7 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
     private final Path databasePath;
     private final int readThreadCount;
     private final Clock clock;
+    private final HomeId homeId;
     private final List<Class<? extends DomainEvent>> eventClasses;
 
     // Constructed during start()
@@ -95,6 +97,9 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
      * @param clock          injected clock for all timestamp operations;
      *                       use {@code Clock.systemUTC()} in production,
      *                       {@code Clock.fixed(...)} in tests
+     * @param homeId         the home identity for this installation (AMD-34);
+     *                       passed to {@link SqliteEventStore} for the
+     *                       {@code home_id} column; never {@code null}
      * @param eventClasses   the explicit list of {@link DomainEvent} record
      *                       classes to register for polymorphic serialization;
      *                       must not be empty (no classpath scanning per LTD-07)
@@ -105,6 +110,7 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
             Path databasePath,
             int readThreadCount,
             Clock clock,
+            HomeId homeId,
             List<Class<? extends DomainEvent>> eventClasses) {
         this.databasePath = Objects.requireNonNull(databasePath, "databasePath");
         if (readThreadCount < 1) {
@@ -113,6 +119,7 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
         }
         this.readThreadCount = readThreadCount;
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.homeId = Objects.requireNonNull(homeId, "homeId");
         this.eventClasses = List.copyOf(
                 Objects.requireNonNull(eventClasses, "eventClasses"));
     }
@@ -182,7 +189,7 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
 
             // 4. Construct stores on top of the initialized executor.
             eventStore = new SqliteEventStore(
-                    databaseExecutor, codec, registry, clock);
+                    databaseExecutor, codec, registry, clock, homeId);
             checkpointStore = new SqliteCheckpointStore(
                     databaseExecutor, clock);
             viewCheckpointStore = new SqliteViewCheckpointStore(

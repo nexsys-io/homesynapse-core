@@ -118,6 +118,7 @@ public abstract class EventStoreContractTest {
                 EventPriority.NORMAL,
                 EventOrigin.SYSTEM,
                 new TestPayload("test"),
+                null,
                 null
         );
     }
@@ -135,6 +136,7 @@ public abstract class EventStoreContractTest {
                 EventPriority.NORMAL,
                 EventOrigin.SYSTEM,
                 new TestPayload("test"),
+                null,
                 null
         );
     }

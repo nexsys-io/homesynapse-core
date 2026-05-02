@@ -30,7 +30,7 @@ import com.homesynapse.platform.identity.UlidFactory;
  * {@link EventEnvelope} instances with sensible defaults in tests.
  *
  * <p>Without this class, every test that needs an {@code EventDraft} must construct
- * the full 8-field record manually, and every test that needs an {@code EventEnvelope}
+ * the full 9-field record manually, and every test that needs an {@code EventEnvelope}
  * must construct all 14 fields. This class provides one-liner defaults for the common
  * case and builders for full customization.</p>
  *
@@ -82,7 +82,7 @@ public final class TestEventFactory {
      *
      * <p>Defaults: eventType {@code "test.event"}, schemaVersion 1, eventTime null,
      * a fresh unique entity subject, priority NORMAL, origin SYSTEM,
-     * payload {@code Payload("test")}, actorRef null.</p>
+     * payload {@code Payload("test")}, actorRef null, idempotencyKey null.</p>
      *
      * @return a valid EventDraft with sensible defaults
      */
@@ -95,6 +95,7 @@ public final class TestEventFactory {
                 EventPriority.NORMAL,
                 EventOrigin.SYSTEM,
                 new Payload("test"),
+                null,
                 null
         );
     }
@@ -114,6 +115,7 @@ public final class TestEventFactory {
                 EventPriority.NORMAL,
                 EventOrigin.SYSTEM,
                 new Payload("test"),
+                null,
                 null
         );
     }
@@ -137,6 +139,7 @@ public final class TestEventFactory {
                 EventPriority.NORMAL,
                 EventOrigin.SYSTEM,
                 new Payload("test"),
+                null,
                 null
         );
     }
@@ -307,6 +310,7 @@ public final class TestEventFactory {
         private EventOrigin origin = EventOrigin.SYSTEM;
         private DomainEvent payload = new Payload("test");
         private Ulid actorRef;
+        private String idempotencyKey;
 
         DraftBuilder() {
             // Package-private — created via TestEventFactory.draftBuilder()
@@ -360,6 +364,12 @@ public final class TestEventFactory {
             return this;
         }
 
+        /** Sets the idempotency key ({@code null} for no idempotency guarantee). */
+        public DraftBuilder idempotencyKey(String idempotencyKey) {
+            this.idempotencyKey = idempotencyKey;
+            return this;
+        }
+
         /**
          * Builds the {@link EventDraft} record.
          *
@@ -380,7 +390,8 @@ public final class TestEventFactory {
                     priority,
                     origin,
                     payload,
-                    actorRef
+                    actorRef,
+                    idempotencyKey
             );
         }
     }

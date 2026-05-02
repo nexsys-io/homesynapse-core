@@ -14,6 +14,8 @@ import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.test.EventStoreContractTest;
 import com.homesynapse.event.test.TestEventTypes;
 import com.homesynapse.platform.identity.EntityId;
+import com.homesynapse.platform.identity.HomeId;
+import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.platform.identity.UlidFactory;
 import com.homesynapse.state.CheckpointRecord;
 
@@ -66,6 +68,10 @@ final class SqlitePersistenceLifecycleTest {
      */
     private static final Clock FIXED_CLOCK = Clock.fixed(
             Instant.parse("2026-01-15T12:00:00Z"), ZoneOffset.UTC);
+
+    /** Test home identity (AMD-34). */
+    private static final HomeId TEST_HOME_ID =
+            HomeId.of(Ulid.parse("01JAAAAAAAAAAAAAAAAAAAAAAA"));
 
     /**
      * All event classes for the registry: production events + the contract
@@ -398,6 +404,7 @@ final class SqlitePersistenceLifecycleTest {
                 dir.resolve("events.db"),
                 READ_THREAD_COUNT,
                 FIXED_CLOCK,
+                TEST_HOME_ID,
                 ALL_TEST_CLASSES);
     }
 
@@ -417,6 +424,7 @@ final class SqlitePersistenceLifecycleTest {
                 EventPriority.NORMAL,
                 EventOrigin.SYSTEM,
                 new EventStoreContractTest.TestPayload("lifecycle-test"),
+                null,
                 null);
         return lc.eventStore().publishRoot(draft);
     }

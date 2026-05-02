@@ -54,6 +54,12 @@ import com.homesynapse.platform.identity.Ulid;
  *                      {@code null} when no user is attributable (e.g., device-autonomous
  *                      or system-originated events). Copied to
  *                      {@link EventEnvelope#actorRef()} by the publisher.
+ * @param idempotencyKey caller-supplied idempotency key for at-most-once delivery
+ *                       (AMD-35); {@code null} when no idempotency guarantee is
+ *                       requested. If non-null, must not be blank and must be at
+ *                       most 128 characters. Stored in the {@code idempotency_key}
+ *                       column and enforced by a partial unique index
+ *                       {@code (home_id, idempotency_key) WHERE idempotency_key IS NOT NULL}.
  * @see EventPublisher
  * @see EventEnvelope
  */
@@ -65,18 +71,24 @@ public record EventDraft(
         EventPriority priority,
         EventOrigin origin,
         DomainEvent payload,
-        Ulid actorRef
+        Ulid actorRef,
+        String idempotencyKey
 ) {
+
+    /** Maximum length for {@link #idempotencyKey()} (AMD-35 / REST API contract). */
+    private static final int MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 
     /**
      * Validates all draft fields according to their documented constraints.
-     * The {@code actorRef} field is nullable and requires no validation.
+     * The {@code actorRef} and {@code idempotencyKey} fields are nullable.
      *
      * @throws NullPointerException     if {@code eventType}, {@code subjectRef},
      *                                  {@code priority}, {@code origin}, or
      *                                  {@code payload} is {@code null}
-     * @throws IllegalArgumentException if {@code eventType} is blank or
-     *                                  {@code schemaVersion} is less than 1
+     * @throws IllegalArgumentException if {@code eventType} is blank,
+     *                                  {@code schemaVersion} is less than 1,
+     *                                  or {@code idempotencyKey} is non-null and
+     *                                  blank or exceeds 128 characters
      */
     public EventDraft {
         Objects.requireNonNull(eventType, "eventType must not be null");
@@ -91,6 +103,17 @@ public record EventDraft(
         if (schemaVersion < 1) {
             throw new IllegalArgumentException(
                     "schemaVersion must be >= 1, got " + schemaVersion);
+        }
+        if (idempotencyKey != null) {
+            if (idempotencyKey.isBlank()) {
+                throw new IllegalArgumentException(
+                        "idempotencyKey must not be blank when provided");
+            }
+            if (idempotencyKey.length() > MAX_IDEMPOTENCY_KEY_LENGTH) {
+                throw new IllegalArgumentException(
+                        "idempotencyKey must be at most " + MAX_IDEMPOTENCY_KEY_LENGTH
+                                + " characters, got " + idempotencyKey.length());
+            }
         }
     }
 }

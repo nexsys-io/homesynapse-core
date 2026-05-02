@@ -9,6 +9,8 @@ import com.homesynapse.event.DomainEvent;
 import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.EventStore;
 import com.homesynapse.event.test.EventStoreContractTest;
+import com.homesynapse.platform.identity.HomeId;
+import com.homesynapse.platform.identity.Ulid;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
@@ -98,6 +100,13 @@ final class SqliteEventStoreTest extends EventStoreContractTest {
     private static final Clock FIXED_CLOCK =
             Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC);
 
+    /**
+     * Test home identity (AMD-34). Uses a deterministic ULID so that
+     * raw-JDBC assertions can verify the stored {@code home_id} bytes.
+     */
+    private static final HomeId TEST_HOME_ID =
+            HomeId.of(Ulid.parse("01JAAAAAAAAAAAAAAAAAAAAAAA"));
+
     @TempDir
     Path tempDir;
 
@@ -162,7 +171,7 @@ final class SqliteEventStoreTest extends EventStoreContractTest {
         JacksonWarmup warmup = JacksonWarmup.warmup(mapper, registry);
         EventPayloadCodec codec = new EventPayloadCodec(registry, warmup);
 
-        store = new SqliteEventStore(dbExecutor, codec, registry, FIXED_CLOCK);
+        store = new SqliteEventStore(dbExecutor, codec, registry, FIXED_CLOCK, TEST_HOME_ID);
     }
 
     /**

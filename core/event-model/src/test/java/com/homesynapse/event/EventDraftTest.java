@@ -36,7 +36,7 @@ class EventDraftTest {
     private static EventDraft validDraft() {
         return new EventDraft(
                 "device.state_changed", 1, EVENT_TIME, SUBJECT_REF,
-                EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR);
+                EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR, null);
     }
 
     // ── Construction ─────────────────────────────────────────────────────
@@ -46,13 +46,13 @@ class EventDraftTest {
     class ConstructionTests {
 
         @Test
-        @DisplayName("record has exactly 8 components")
-        void exactlyEightFields() {
-            assertThat(EventDraft.class.getRecordComponents()).hasSize(8);
+        @DisplayName("record has exactly 9 components")
+        void exactlyNineFields() {
+            assertThat(EventDraft.class.getRecordComponents()).hasSize(9);
         }
 
         @Test
-        @DisplayName("all 8 fields are accessible and return correct values")
+        @DisplayName("all 9 fields are accessible and return correct values")
         void allFieldsAccessible() {
             var draft = validDraft();
 
@@ -64,6 +64,7 @@ class EventDraftTest {
             assertThat(draft.origin()).isEqualTo(EventOrigin.PHYSICAL);
             assertThat(draft.payload()).isEqualTo(PAYLOAD);
             assertThat(draft.actorRef()).isEqualTo(ULID_ACTOR);
+            assertThat(draft.idempotencyKey()).isNull();
         }
 
         @Test
@@ -71,7 +72,7 @@ class EventDraftTest {
         void eventTimeNullable() {
             var draft = new EventDraft(
                     "device.state_changed", 1, null, SUBJECT_REF,
-                    EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, null);
+                    EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, null, null);
 
             assertThat(draft.eventTime()).isNull();
         }
@@ -81,7 +82,7 @@ class EventDraftTest {
         void actorRefNullable() {
             var draft = new EventDraft(
                     "system.started", 1, null, SUBJECT_REF,
-                    EventPriority.CRITICAL, EventOrigin.SYSTEM, PAYLOAD, null);
+                    EventPriority.CRITICAL, EventOrigin.SYSTEM, PAYLOAD, null, null);
 
             assertThat(draft.actorRef()).isNull();
         }
@@ -98,7 +99,7 @@ class EventDraftTest {
         void nullEventType() {
             assertThatNullPointerException().isThrownBy(() ->
                     new EventDraft(null, 1, EVENT_TIME, SUBJECT_REF,
-                            EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR))
+                            EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR, null))
                     .withMessageContaining("eventType");
         }
 
@@ -107,7 +108,7 @@ class EventDraftTest {
         void nullSubjectRef() {
             assertThatNullPointerException().isThrownBy(() ->
                     new EventDraft("type", 1, EVENT_TIME, null,
-                            EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR))
+                            EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR, null))
                     .withMessageContaining("subjectRef");
         }
 
@@ -116,7 +117,7 @@ class EventDraftTest {
         void nullPriority() {
             assertThatNullPointerException().isThrownBy(() ->
                     new EventDraft("type", 1, EVENT_TIME, SUBJECT_REF,
-                            null, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR))
+                            null, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR, null))
                     .withMessageContaining("priority");
         }
 
@@ -125,7 +126,7 @@ class EventDraftTest {
         void nullOrigin() {
             assertThatNullPointerException().isThrownBy(() ->
                     new EventDraft("type", 1, EVENT_TIME, SUBJECT_REF,
-                            EventPriority.NORMAL, null, PAYLOAD, ULID_ACTOR))
+                            EventPriority.NORMAL, null, PAYLOAD, ULID_ACTOR, null))
                     .withMessageContaining("origin");
         }
 
@@ -134,7 +135,7 @@ class EventDraftTest {
         void nullPayload() {
             assertThatNullPointerException().isThrownBy(() ->
                     new EventDraft("type", 1, EVENT_TIME, SUBJECT_REF,
-                            EventPriority.NORMAL, EventOrigin.PHYSICAL, null, ULID_ACTOR))
+                            EventPriority.NORMAL, EventOrigin.PHYSICAL, null, ULID_ACTOR, null))
                     .withMessageContaining("payload");
         }
     }
@@ -150,7 +151,7 @@ class EventDraftTest {
         void blankEventType() {
             assertThatThrownBy(() ->
                     new EventDraft("   ", 1, EVENT_TIME, SUBJECT_REF,
-                            EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR))
+                            EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR, null))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("blank");
         }
@@ -160,9 +161,77 @@ class EventDraftTest {
         void schemaVersionZero() {
             assertThatThrownBy(() ->
                     new EventDraft("type", 0, EVENT_TIME, SUBJECT_REF,
-                            EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR))
+                            EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR, null))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("schemaVersion");
+        }
+    }
+
+    // ── IdempotencyKey validation ──────────────────────────────────────────
+
+    @Nested
+    @DisplayName("IdempotencyKey validation")
+    class IdempotencyKeyTests {
+
+        @Test
+        @DisplayName("idempotencyKey null is accepted")
+        void idempotencyKey_null_isAccepted() {
+            var draft = new EventDraft(
+                    "device.state_changed", 1, EVENT_TIME, SUBJECT_REF,
+                    EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR, null);
+
+            assertThat(draft.idempotencyKey()).isNull();
+        }
+
+        @Test
+        @DisplayName("idempotencyKey valid string is accepted")
+        void idempotencyKey_validString_isAccepted() {
+            var draft = new EventDraft(
+                    "device.state_changed", 1, EVENT_TIME, SUBJECT_REF,
+                    EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR,
+                    "request-abc-123");
+
+            assertThat(draft.idempotencyKey()).isEqualTo("request-abc-123");
+        }
+
+        @Test
+        @DisplayName("idempotencyKey blank is rejected")
+        void idempotencyKey_blank_isRejected() {
+            assertThatThrownBy(() ->
+                    new EventDraft("device.state_changed", 1, EVENT_TIME, SUBJECT_REF,
+                            EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR, ""))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("blank");
+
+            assertThatThrownBy(() ->
+                    new EventDraft("device.state_changed", 1, EVENT_TIME, SUBJECT_REF,
+                            EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR, "   "))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("blank");
+        }
+
+        @Test
+        @DisplayName("idempotencyKey too long is rejected")
+        void idempotencyKey_tooLong_isRejected() {
+            String tooLong = "x".repeat(129);
+            assertThatThrownBy(() ->
+                    new EventDraft("device.state_changed", 1, EVENT_TIME, SUBJECT_REF,
+                            EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR,
+                            tooLong))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("128");
+        }
+
+        @Test
+        @DisplayName("idempotencyKey exactly 128 characters is accepted")
+        void idempotencyKey_exactly128_isAccepted() {
+            String exactly128 = "k".repeat(128);
+            var draft = new EventDraft(
+                    "device.state_changed", 1, EVENT_TIME, SUBJECT_REF,
+                    EventPriority.NORMAL, EventOrigin.PHYSICAL, PAYLOAD, ULID_ACTOR,
+                    exactly128);
+
+            assertThat(draft.idempotencyKey()).hasSize(128);
         }
     }
 

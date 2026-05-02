@@ -18,6 +18,7 @@ import com.homesynapse.event.EventStore;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.SubjectType;
+import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.platform.identity.UlidFactory;
 
@@ -87,8 +88,9 @@ import org.slf4j.LoggerFactory;
  * read always succeeds (DECIDE-M2-06 / DECIDE-M2-07).</p>
  *
  * <p><strong>Chain hash.</strong> The {@code chain_hash} column is declared
- * but not yet populated — it is reserved for the future crypto milestone.
- * Inserts bind {@code NULL} for this column.</p>
+ * {@code NOT NULL DEFAULT x'00...00'} (AMD-37). Inserts bind a 32-byte
+ * zero vector. Actual hash computation is deferred to the crypto
+ * milestone.</p>
  *
  * <p>Package-private — external modules construct and consume this store
  * through the higher-level {@code PersistenceLifecycle} facade, which returns
@@ -107,17 +109,32 @@ final class SqliteEventStore implements EventPublisher, EventStore {
     private static final String CATEGORY_DELIMITER = ",";
 
     /**
+     * 32-byte zero vector for the {@code chain_hash} column (AMD-37).
+     * The chain hash column is {@code NOT NULL DEFAULT x'00...00'} in V001;
+     * actual hash computation is deferred to the crypto milestone.
+     */
+    private static final byte[] ZERO_HASH = new byte[32];
+
+    /**
      * INSERT statement for a new event row. The {@code global_position} column
      * is not listed — SQLite assigns it via AUTOINCREMENT and we retrieve the
      * generated rowid via {@link Statement#getGeneratedKeys()}.
+     *
+     * <p>Binds all 24 data columns in the V001 schema column order (AMD-34
+     * through AMD-37, Tier 2 addendum). Reservation columns ({@code batch_id},
+     * {@code external_ref}, {@code intent_kind}, {@code logical_time},
+     * {@code node_id}) are bound to their default values until behavioral
+     * wiring in M3.</p>
      */
     private static final String INSERT_SQL = """
             INSERT INTO events (
-                event_id, event_type, schema_version, ingest_time, event_time,
-                subject_ref, subject_type, subject_sequence, priority, origin,
-                actor_ref, correlation_id, causation_id, event_category, payload,
-                chain_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                event_id, home_id, event_type, schema_version,
+                ingest_time, event_time, subject_ref, subject_type,
+                subject_sequence, priority, origin, actor_ref,
+                idempotency_key, correlation_id, causation_id, event_category,
+                payload_size, batch_id, external_ref, intent_kind,
+                logical_time, node_id, payload, chain_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
 
     /**
@@ -169,6 +186,7 @@ final class SqliteEventStore implements EventPublisher, EventStore {
     private final DatabaseExecutor dbExecutor;
     private final EventPayloadCodec codec;
     private final Clock clock;
+    private final HomeId homeId;
 
     /**
      * Round-robin index used to assign a read {@link Connection} to each
@@ -203,17 +221,22 @@ final class SqliteEventStore implements EventPublisher, EventStore {
      *                   level — the codec already holds a reference); accepted
      *                   for API stability; never {@code null}
      * @param clock      the clock for {@code ingestTime} assignment; never {@code null}
+     * @param homeId     the home identity for this installation (AMD-34); written
+     *                   to the {@code home_id} column of every persisted event;
+     *                   never {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     SqliteEventStore(
             DatabaseExecutor dbExecutor,
             EventPayloadCodec codec,
             EventTypeRegistry registry,
-            Clock clock) {
+            Clock clock,
+            HomeId homeId) {
         this.dbExecutor = Objects.requireNonNull(dbExecutor, "dbExecutor must not be null");
         this.codec = Objects.requireNonNull(codec, "codec must not be null");
         Objects.requireNonNull(registry, "registry must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
+        this.homeId = Objects.requireNonNull(homeId, "homeId must not be null");
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -286,35 +309,48 @@ final class SqliteEventStore implements EventPublisher, EventStore {
 
         try (PreparedStatement ps = conn.prepareStatement(
                 INSERT_SQL, Statement.RETURN_GENERATED_KEYS)) {
-            ps.setBytes(1, eventId.value().toBytes());
-            ps.setString(2, draft.eventType());
-            ps.setInt(3, draft.schemaVersion());
-            ps.setLong(4, TimeConversion.toMicros(ingestTime));
+            // Bind positions 1–24 match the V001 column order (minus global_position).
+            ps.setBytes(1, eventId.value().toBytes());                  // event_id
+            ps.setBytes(2, homeId.value().toBytes());                   // home_id (AMD-34)
+            ps.setString(3, draft.eventType());                         // event_type
+            ps.setInt(4, draft.schemaVersion());                        // schema_version
+            ps.setLong(5, TimeConversion.toMicros(ingestTime));         // ingest_time
             Long eventTimeMicros = TimeConversion.toMicrosOrNull(draft.eventTime());
             if (eventTimeMicros == null) {
-                ps.setNull(5, Types.INTEGER);
+                ps.setNull(6, Types.INTEGER);                           // event_time
             } else {
-                ps.setLong(5, eventTimeMicros);
+                ps.setLong(6, eventTimeMicros);
             }
-            ps.setBytes(6, subject.id().toBytes());
-            ps.setString(7, subject.type().name());
-            ps.setLong(8, nextSequence);
-            ps.setString(9, draft.priority().name());
-            ps.setString(10, draft.origin().name());
+            ps.setBytes(7, subject.id().toBytes());                     // subject_ref
+            ps.setString(8, subject.type().name());                     // subject_type
+            ps.setLong(9, nextSequence);                                // subject_sequence
+            ps.setString(10, draft.priority().name());                  // priority
+            ps.setString(11, draft.origin().name());                    // origin
             if (draft.actorRef() == null) {
-                ps.setNull(11, Types.BLOB);
+                ps.setNull(12, Types.BLOB);                             // actor_ref
             } else {
-                ps.setBytes(11, draft.actorRef().toBytes());
+                ps.setBytes(12, draft.actorRef().toBytes());
             }
-            ps.setBytes(12, causalContext.correlationId().toBytes());
+            if (draft.idempotencyKey() == null) {
+                ps.setNull(13, Types.VARCHAR);                          // idempotency_key (AMD-35)
+            } else {
+                ps.setString(13, draft.idempotencyKey());
+            }
+            ps.setBytes(14, causalContext.correlationId().toBytes());    // correlation_id
             if (causalContext.causationId() == null) {
-                ps.setNull(13, Types.BLOB);
+                ps.setNull(15, Types.BLOB);                             // causation_id
             } else {
-                ps.setBytes(13, causalContext.causationId().toBytes());
+                ps.setBytes(15, causalContext.causationId().toBytes());
             }
-            ps.setString(14, encodeCategories(categories));
-            ps.setBytes(15, payloadBytes);
-            ps.setNull(16, Types.BLOB); // chain_hash deferred to crypto milestone
+            ps.setString(16, encodeCategories(categories));             // event_category
+            ps.setInt(17, payloadBytes.length);                         // payload_size (Tier 2)
+            ps.setNull(18, Types.BLOB);                                 // batch_id (reserved)
+            ps.setNull(19, Types.VARCHAR);                              // external_ref (reserved)
+            ps.setString(20, "UNSPECIFIED");                            // intent_kind (reserved)
+            ps.setLong(21, 0L);                                         // logical_time (reserved)
+            ps.setInt(22, 0);                                           // node_id (reserved)
+            ps.setBytes(23, payloadBytes);                              // payload
+            ps.setBytes(24, ZERO_HASH);                                 // chain_hash (AMD-37)
 
             try {
                 ps.executeUpdate();
