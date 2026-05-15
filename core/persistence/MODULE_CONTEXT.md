@@ -1,4 +1,4 @@
-# persistence — `com.homesynapse.persistence` — 36 types — SQLite WAL storage, telemetry ring buffer, WriteCoordinator, migration framework, database executor, Jackson serialization infrastructure, SqliteEventStore, SqliteCheckpointStore, SqliteViewCheckpointStore, AtomicCheckpointWriter, SqlitePersistenceLifecycle, maintenance lifecycle
+# persistence — `com.homesynapse.persistence` — 41 types — SQLite WAL storage, telemetry ring buffer, WriteCoordinator, migration framework, database executor, Jackson serialization infrastructure, SqliteEventStore, SqliteCheckpointStore, SqliteViewCheckpointStore, AtomicCheckpointWriter, SqlitePersistenceLifecycle, maintenance lifecycle, deployment profile + persistence config + retention policy + maintenance subscriber (M2→M3 bridge)
 
 ## Purpose
 
@@ -73,7 +73,19 @@ The `requires transitive com.homesynapse.platform` declaration is required becau
 | `PersistenceLifecycle` | interface | Lifecycle management — startup, shutdown, backup, restore | `start()` → `CompletableFuture<Void>`, `stop()`, `createBackup(BackupOptions)` → `BackupResult`, `restoreFromBackup(Path)`. |
 | `MaintenanceService` | interface | Storage maintenance — retention, vacuum, health monitoring | `runRetention()` → `RetentionResult`, `runVacuum()` → `VacuumResult`, `getStorageHealth()` → `StorageHealth`. |
 
-**Total: 11 public types + 1 module-info.java = 12 Java files.**
+### Configuration, Profile, and Maintenance Subscriber (M2→M3 bridge, 2026-05-15)
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `DeploymentProfile` | enum (3 values) | Hardware deployment profile with pre-validated PRAGMA values. Auto-detection is M3 scope; `HOME` is the MVP default. | Values: `STUDIO(cacheSizeKiB=2_000, mmapSizeBytes=67_108_864, journalSizeLimitBytes=33_554_432)`, `HOME(16_000, 268_435_456, 67_108_864)`, `PERFORMANCE(65_536, 1_073_741_824, 268_435_456)`. Accessors: `cacheSizeKiB() → int`, `mmapSizeBytes() → long`, `journalSizeLimitBytes() → long`. `HOME.journalSizeLimitBytes()` carries AMD-39 (provisional pending D1 spike). |
+| `PersistenceConfig` | record (2 fields) | Bundles `DeploymentProfile` with operator-overridable `RetentionPolicy`. | Fields: `profile` (`DeploymentProfile`, non-null), `retentionPolicy` (`RetentionPolicy`, non-null). Constant: `HOME_DEFAULT = PersistenceConfig(DeploymentProfile.HOME, RetentionPolicy.SOURCE_DEFAULT)`. Compact constructor validates non-null. Phase 3 adds a factory method for YAML override loading. |
+| `RetentionPolicy` | record (3 fields) | Per-priority retention durations in days. | Fields: `diagnosticDays` (int, ≥ 1), `normalDays` (int, ≥ 1), `criticalDays` (int, ≥ 1). Constant: `SOURCE_DEFAULT = RetentionPolicy(7, 90, 365)` — verified against `EventPriority` Javadoc on 2026-05-15. Compact constructor enforces the floor of 1. |
+| `MaintenanceSubscriber` | interface | Retention purge + WAL checkpoint management. | Single method: `runMaintenance() → MaintenanceResult`. Constants: `DEFAULT_PURGE_BATCH_SIZE = 1_000`, `DEFAULT_MAINTENANCE_INTERVAL = Duration.ofHours(6)`. Contract (AMD-40): runs on the persistence write executor (AMD-26/27 compliance), interval-based scheduling (NOT nightly cron), bounded 1K-row purge chunks, ≤ 2 s lock-hold per chunk, yields write executor between chunks. Storage-pressure-triggered runs may break the interval. |
+| `MaintenanceResult` | record (4 fields) | Result of one `runMaintenance` pass. | Fields: `eventsDeleted` (long, ≥ 0), `batchesExecuted` (int, ≥ 0), `walCheckpointTriggered` (boolean), `durationMs` (long, ≥ 0). Compact constructor validates non-negativity. Logged at INFO at end of maintenance pass; exposed to JFR / metrics. |
+
+**Total (M2→M3 bridge): 16 public types + 25 package-private = 41 types.** Five new public types added in the M2→M3 bridge work unit (DeploymentProfile, PersistenceConfig, RetentionPolicy, MaintenanceSubscriber, MaintenanceResult).
+
+**Total: 11 public types + 1 module-info.java = 12 Java files.** (Pre-bridge baseline retained for reference; current total is 16 public + 1 module-info = 17 Java files in main source set.)
 
 ### Internal Types (Package-Private)
 
@@ -247,6 +259,16 @@ All persistence-managed tables in `homesynapse-events.db` classified by sync sco
 **Rule:** Do NOT add cr-sqlite replication to `subscriber_checkpoints` or `view_checkpoints`. Replicating projection state between instances would create conflicts (each instance processes events at different rates) and is architecturally wrong — the event log is the single source of truth; projections are derived locally.
 
 ## Gotchas
+
+<!-- Added 2026-05-15: M2→M3 bridge — AMD-40 retention execution model -->
+
+**GOTCHA: AMD-40 retention execution — the maintenance subscriber MUST submit all write operations to the persistence write executor.** Do NOT open a separate database connection for retention. Doing so re-introduces the JNI carrier pinning that AMD-26/27's executor mandate exists to eliminate, and re-races the `WriteCoordinator`'s priority ordering. All purge DELETE statements are `Callable`s submitted as `WritePriority.RETENTION` (rank 4), placing retention behind event publishes (rank 1) and checkpoint writes (rank 2) so it never starves foreground operations. The nightly-cron scheduling pattern (e.g., `04:12` local time) is explicitly prohibited — use interval-based scheduling (`DEFAULT_MAINTENANCE_INTERVAL = 6 hours`) to avoid concentrating destructive I/O during sustained-write windows. The failure mode of the cron pattern is documented in Home Assistant `recorder` issues #88780, #94134, #115765, #123348. Storage-pressure-triggered purge may run outside the normal interval (when free disk < 2× database size) but still respects the bounded-chunk discipline (`DEFAULT_PURGE_BATCH_SIZE = 1_000` rows, ≤ 2 s lock-hold per chunk).
+
+**GOTCHA: AMD-38/39 are DRAFT pending D1 WAL pathology spike on hs-dev-1.** `FixedCheckpointPolicy.HOME_DEFAULT = (200 events, 2 seconds)` and `DeploymentProfile.HOME.journalSizeLimitBytes() = 67_108_864L` (64 MB) are provisional values. They take effect immediately for Phase 2 interface contracts (the constants are real and consumed by Phase 3 code), but the underlying amendments do not move from DRAFT to APPLIED until D1 results validate the WAL starvation pathology and the chosen values. The current `DatabaseExecutor.CONNECTION_PRAGMAS` still has `journal_size_limit = 6144000` (6 MB, V001 era); the AMD-39 update to 64 MB is a Phase 3 code change still pending. Do not assume the Java constant and the active PRAGMA value match until that Phase 3 code change lands.
+
+**GOTCHA: `RetentionPolicy.SOURCE_DEFAULT` values come from `EventPriority` Javadoc, not from this module's design.** The (7, 90, 365) values are the authoritative defaults from `com.homesynapse.event.EventPriority` (lines 47/58/69 of the source as of 2026-05-15: CRITICAL=365d, NORMAL=90d, DIAGNOSTIC=7d). If those Javadoc values ever change, the constant in this module must be updated to match — there is no automated check, so any change to `EventPriority`'s retention defaults must include a `RetentionPolicy.SOURCE_DEFAULT` update.
+
+**GOTCHA: `DeploymentProfile.cacheSizeKiB()` returns a MAGNITUDE, not a PRAGMA-ready value.** The SQLite `PRAGMA cache_size` syntax expects a negative number for a KiB-denominated cache size. Phase 3 code that applies this PRAGMA must format the value as `"PRAGMA cache_size = -" + profile.cacheSizeKiB()`. Using `cacheSizeKiB()` directly (positive value) tells SQLite to allocate that many pages, which is a completely different and much larger memory footprint.
 
 **GOTCHA: `TelemetrySample.entityRef` field type is `EntityId`, not `EntityRef`.** Doc 04 uses `EntityRef` as a conceptual name. The codebase type is `EntityId`. Do not create an `EntityRef` type — it does not exist in the type system.
 

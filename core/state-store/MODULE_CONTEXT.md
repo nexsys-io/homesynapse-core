@@ -1,4 +1,4 @@
-# state-store — `com.homesynapse.state` — 7 types — Materialized view over event stream, EntityState projection, availability tracking
+# state-store — `com.homesynapse.state` — 12 types — Materialized view over event stream, EntityState projection, availability tracking, checkpoint policy (sealed), bounded-window projection advancer
 
 ## Purpose
 
@@ -55,7 +55,17 @@ Both `requires transitive` declarations mean any module that reads `com.homesyna
 | `StateStoreLifecycle` | interface | Lifecycle management — startup replay and shutdown checkpointing | `start()` → `CompletableFuture<Void>`, `stop()`. |
 | `ViewCheckpointStore` | interface | Durable storage for materialized view checkpoints | `writeCheckpoint(String viewName, long position, byte[] data)`, `readLatestCheckpoint(String viewName)` → `Optional<CheckpointRecord>`. |
 
-**Total: 7 public types + 1 module-info.java = 8 Java files.**
+### Checkpoint Policy and Projection Cursor (M2→M3 bridge, 2026-05-15)
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `CheckpointPolicy` | sealed interface | Determines when a subscriber should flush its checkpoint to durable storage. | Permits: `FixedCheckpointPolicy`, `AdaptiveCheckpointPolicy`. Single method: `shouldCheckpoint(long eventsSinceLastCheckpoint, Duration timeSinceLastCheckpoint, long readerLag) → boolean`. Carries the dual-purpose model: crash-recovery bounds AND WAL release (AMD-38). Subscribers must remain idempotent for up to `eventThreshold` events. |
+| `FixedCheckpointPolicy` | record (2 fields) implements `CheckpointPolicy` | Static max(N, T) checkpoint policy. Ignores `readerLag`. | Fields: `eventThreshold` (int, &gt; 0), `maxInterval` (`Duration`, positive). Compact constructor validates both. Public constant: `HOME_DEFAULT = FixedCheckpointPolicy(200, Duration.ofSeconds(2))` per AMD-38 (provisional pending D1 WAL pathology spike). `shouldCheckpoint` returns true when either threshold is met. |
+| `AdaptiveCheckpointPolicy` | record (3 fields) implements `CheckpointPolicy` | Pressure-aware policy: switches between two `FixedCheckpointPolicy` instances based on reader lag. Reserved for post-MVP. | Fields: `normalMode` (`FixedCheckpointPolicy`, non-null), `pressureMode` (`FixedCheckpointPolicy`, non-null), `pressureThreshold` (long, &gt; 0). `shouldCheckpoint` delegates to `normalMode` when `readerLag < pressureThreshold`, else `pressureMode`. M3 ships with `FixedCheckpointPolicy` only — this type exists in the sealed hierarchy to keep the interface stable. |
+| `ProjectionAdvancer` | interface | Cursor runner for the State Projection. Reads a bounded chunk of events and applies them to the projection's state model. | Single method: `advance(long fromPosition, int maxRows) → AdvanceResult`. Constant: `DEFAULT_MAX_ROWS = 500`. Contract: each call is an independent short-lived read transaction (≤ 2 s, ≤ 500 rows). No cursors held between calls — bounded-window discipline prevents WAL checkpoint starvation (AMD-38). Caller drives the checkpoint loop via the active `CheckpointPolicy`. |
+| `AdvanceResult` | record (3 fields) | Result of one `ProjectionAdvancer.advance` call. | Fields: `lastProcessedPosition` (long, ≥ 0), `eventsProcessed` (int, ≥ 0), `hasMore` (boolean). Compact constructor validates non-negativity. `hasMore = false` AND `eventsProcessed = 0` signals "caught up to writer head"; caller may park until next event publishes. |
+
+**Total: 12 public types + 1 module-info.java = 13 Java files.** (Five new types added in the M2→M3 bridge work unit.)
 
 ## Dependencies
 
