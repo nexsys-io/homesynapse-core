@@ -13,9 +13,14 @@ package com.homesynapse.persistence;
  * {@link #HOME} is the default — operators may override via configuration.
  *
  * <p>Each profile carries pre-validated PRAGMA values derived from the
- * M2→M3 storage efficiency research. The {@link #HOME} profile's
- * {@code journalSizeLimitBytes} reflects AMD-39 (provisional pending D1
- * spike validation on hs-dev-1).
+ * M2→M3 storage efficiency research. The {@code cacheSizeKiB} and
+ * {@code mmapSizeBytes} values are tuned per profile for RAM availability.
+ * The {@code journalSizeLimitBytes} value is uniform across profiles at
+ * 6,144,000 bytes (6 MB) per LTD-03, empirically validated by the D1 WAL
+ * Pathology Validation Spike (2026-05-15): the bounded-window reader pattern
+ * (AMD-38) keeps the WAL at ~4 MB peak under nominal load, so the 6 MB ceiling
+ * remains correct. AMD-39 (proposed raise to 64 MB) was WITHDRAWN on the same
+ * date as unnecessary.
  *
  * <p>The values are designed for the following hardware targets:
  * <ul>
@@ -32,9 +37,9 @@ public enum DeploymentProfile {
      *
      * <p>PRAGMA values: {@code cache_size=-2000} (2 MB),
      * {@code mmap_size=67108864} (64 MB),
-     * {@code journal_size_limit=33554432} (32 MB).
+     * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike).
      */
-    STUDIO(2_000, 67_108_864L, 33_554_432L),
+    STUDIO(2_000, 67_108_864L, 6_144_000L),
 
     /**
      * Pi 5 or equivalent with NVMe SSD, 4–8 GB RAM.
@@ -42,9 +47,9 @@ public enum DeploymentProfile {
      *
      * <p>PRAGMA values: {@code cache_size=-16000} (16 MB),
      * {@code mmap_size=268435456} (256 MB),
-     * {@code journal_size_limit=67108864} (64 MB, per AMD-39 provisional).
+     * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike).
      */
-    HOME(16_000, 268_435_456L, 67_108_864L),
+    HOME(16_000, 268_435_456L, 6_144_000L),
 
     /**
      * x86 mini-PC or high-spec ARM, ≥16 GB RAM, NVMe/SATA SSD.
@@ -52,9 +57,9 @@ public enum DeploymentProfile {
      *
      * <p>PRAGMA values: {@code cache_size=-65536} (64 MB),
      * {@code mmap_size=1073741824} (1 GB),
-     * {@code journal_size_limit=268435456} (256 MB).
+     * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike).
      */
-    PERFORMANCE(65_536, 1_073_741_824L, 268_435_456L);
+    PERFORMANCE(65_536, 1_073_741_824L, 6_144_000L);
 
     private final int cacheSizeKiB;
     private final long mmapSizeBytes;
@@ -91,8 +96,10 @@ public enum DeploymentProfile {
     /**
      * Returns the value for {@code PRAGMA journal_size_limit} in bytes.
      *
-     * <p>The {@link #HOME} value (64 MB) reflects AMD-39 (provisional pending
-     * D1 WAL pathology spike validation).
+     * <p>Uniform across all profiles at 6,144,000 bytes (6 MB) per LTD-03,
+     * empirically validated by the D1 WAL Pathology Validation Spike
+     * (2026-05-15). The bounded-window reader pattern (AMD-38) keeps the WAL
+     * within this ceiling under nominal load.
      *
      * @return the journal size limit in bytes
      */

@@ -79,3 +79,14 @@ tasks.register<JavaExec>("runV3Jfr") {
         "-XX:StartFlightRecording=filename=spike-v3-pinning.jfr,settings=${projectDir}/vt-pinning.jfc"
     )
 }
+
+// D1: WAL Checkpoint Starvation Under Concurrent Reader.
+// Runs three scenarios sequentially against three separate DB files:
+//   spike-d1-run1.db (continuous reader — pathology), spike-d1-run2.db (full mitigation),
+//   spike-d1-run3.db (bounded reader at 6 MB — AMD-39 load-bearing test).
+tasks.register<JavaExec>("runD1") {
+    description = "Run D1: WAL Checkpoint Starvation under concurrent reader"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.homesynapse.spike.wal.D1WalStarvationTest")
+    args = listOf("spike-d1")
+}
