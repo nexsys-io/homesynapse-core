@@ -126,6 +126,11 @@ spike/**/build/
 spike/**/out/
 spike/**/.gradle/
 
+# Spike database artifacts (throwaway empirical validation)
+spike/**/*.db
+spike/**/*.db-wal
+spike/**/*.db-shm
+
 # ----------------------------------------------------------------------------
 # Documentation build artifacts
 # ----------------------------------------------------------------------------
