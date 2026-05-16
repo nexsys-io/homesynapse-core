@@ -77,6 +77,14 @@ None directly — event-bus defines contracts that are consumed by the persisten
 | **INV-ES-05** | At-least-once delivery with subscriber idempotency. Duplicate delivery expected during crash recovery. |
 | **INV-ES-03** | Per-entity ordering with causal consistency. Subscribers that care about per-entity ordering must process events in `globalPosition` order and use `subjectSequence` for per-entity conflict detection. |
 
+## Amendments in force
+
+| Amendment | Status | Relevance to this module |
+|---|---|---|
+| **AMD-42** — Subscriber Lifecycle and Isolation | APPLIED (2026-05-16) | Mandates the `COLD → REPLAY → TRANSITION → LIVE → SUSPENDED` mode state machine, the three-phase REPLAY→LIVE transition (§3.4.2), `onCaughtUp()` single-shot semantics (§3.4.3), the per-subscriber resources catalog INV-SUB-ISO-01..06 (§3.4.4), the `SubscriberSupervisor` discipline with `MIN=3s/MAX=30s/jitter=0.2` backoff (§3.4.5), and the cross-subscriber isolation guarantees (§3.4.6). M3.1 lands the bus skeleton; M3.2 lands the REPLAY→LIVE algorithm. The `EventBus` interface gains `subscribeRuntime`, `resume`, `subscriberInfo`, `subscribers` introspection — but does NOT gain a `publish()` method (the bus remains notification-only; publishing is `EventPublisher`'s job). |
+| **AMD-43** — Backpressure and Observability | APPLIED (2026-05-16) | Mandates that `EventPublisher.publish()` is non-blocking on writer queue depth (§3.6.1, INV-BUS-02 normative), defines the seven canonical bus/writer metric names (§3.6.2), the `QueueSaturationHealthCheck` 1-second tick algorithm with WARN at 5000 / CRITICAL at 10000 (§3.6.3), the per-subscriber `DerivedWriteRateLimit` 200/s token bucket (§3.6.4), and the coalescing-deferred-past-M3 status (§3.6.5). M3.3 lands the metrics surface and the queue-saturation health check. The chosen observability emission path (JFR events vs new typed primitives) is an open M3.3 decision per the caveat in AMD-43. |
+| **NO_DIRECT_TIME_ACCESS** (ArchUnit rule in `app/homesynapse-app/src/test/.../HomeSynapseArchRules.java`, extended to M3 per DEC-M3-09) | ENFORCED | All time access in the bus implementation (supervisor scheduler, rate-limit refill ticks, replay-window timestamps, DLQ `first_seen_at` / `last_attempt_at`) must go through an injected `java.time.Clock`. Direct `Instant.now()`, `System.currentTimeMillis()`, `Clock.systemUTC()` are forbidden by the rule. |
+
 ## Sealed Hierarchies
 
 None. This module contains no sealed types.
