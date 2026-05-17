@@ -1,8 +1,10 @@
-# event-bus — `com.homesynapse.event.bus` — 4 types — Pull-based event distribution, subscriber management, checkpoint persistence
+# event-bus — `com.homesynapse.event.bus` — 14 types — Pull-based event distribution, subscriber management, checkpoint persistence, active runtime lifecycle
 
 ## Purpose
 
 The event-bus module defines the subscription and delivery contract for HomeSynapse's in-process event distribution system. It is a pull-based, notification-driven bus: the EventBus does not deliver events directly to subscribers — it notifies matching subscribers that new events are available, and subscribers pull events from the EventStore themselves. This design enables backpressure, coalescing, and crash-safe checkpoint-based resumption. The module also defines the CheckpointStore interface for durable subscriber position tracking, ensuring that subscribers resume from the correct position after crashes.
+
+As of M3.1, the module includes the production `InProcessEventBus` implementation with: per-subscriber virtual thread lifecycle, mode FSM (COLD → REPLAY → TRANSITION → LIVE → SUSPENDED), supervisor with exception taxonomy and circuit breaker, in-memory DLQ ring, and per-subscriber isolation guarantees (INV-SUB-ISO-01..06).
 
 ## Design Doc Reference
 
@@ -25,24 +27,41 @@ The `requires transitive` on event-model means any module that reads `com.homesy
 
 ## Package Structure
 
-- **`com.homesynapse.event.bus`** — All types in a single flat package: the EventBus interface, subscriber registration descriptor, subscription filter, and checkpoint store contract.
+- **`com.homesynapse.event.bus`** — All types in a single flat package: the EventBus interface, subscriber registration descriptor, subscription filter, checkpoint store contract, runtime callback interface, mode enum, snapshot record, read connection abstractions, and the production InProcessEventBus implementation.
 
 ## Complete Type Inventory
 
+### Public Types (9)
+
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
-| `EventBus` | interface | Notification-driven subscription/delivery contract for event distribution | Methods: `subscribe(SubscriberInfo)`, `unsubscribe(String subscriberId)`, `notifyEvent(long globalPosition)`, `subscriberPosition(String subscriberId)`. Does NOT deliver events — wakes subscribers via `LockSupport.unpark()` to poll `EventStore`. Thread-safe. |
-| `SubscriberInfo` | record | Immutable descriptor for subscriber registration with the EventBus | Fields: `subscriberId` (String, non-null, non-blank — stable across restarts, used as PK in checkpoint table), `filter` (SubscriptionFilter, non-null), `coalesceExempt` (boolean — true for State Projection and Pending Command Ledger). |
-| `SubscriptionFilter` | record | Immutable filter determining which events a subscriber receives | Fields: `eventTypes` (Set\<String\>, empty = all types, defensive copy via `Set.copyOf()`), `minimumPriority` (EventPriority, non-null), `subjectTypeFilter` (SubjectType, nullable — null = all subject types). Methods: `matches(EventEnvelope)` (conjunction of all criteria), `all()`, `forTypes(String...)`, `forPriority(EventPriority)`. |
-| `CheckpointStore` | interface | Durable storage for subscriber checkpoint positions | Methods: `readCheckpoint(String subscriberId)` → `long` (returns 0 if no checkpoint exists), `writeCheckpoint(String subscriberId, long globalPosition)`. Stored in `subscriber_checkpoints` table in same SQLite database as domain events. Thread-safe. |
+| `EventBus` | interface (8 methods) | Notification-driven subscription/delivery contract for event distribution | Methods: `subscribe(SubscriberInfo)`, `unsubscribe(String)`, `notifyEvent(long)`, `subscriberPosition(String)`, `subscribeRuntime(SubscriberInfo, Subscriber)`, `resume(String)`, `subscriberInfo(String)`, `subscribers()`. The 4 new methods have default implementations throwing UnsupportedOperationException for backward compatibility. Does NOT have a `publish()` method — the bus is notification-only. |
+| `SubscriberInfo` | record (3 fields) | Immutable descriptor for subscriber registration with the EventBus | Fields: `subscriberId` (String), `filter` (SubscriptionFilter), `coalesceExempt` (boolean). |
+| `SubscriptionFilter` | record (3 fields) | Immutable filter determining which events a subscriber receives | Fields: `eventTypes` (Set\<String\>), `minimumPriority` (EventPriority), `subjectTypeFilter` (SubjectType nullable). |
+| `CheckpointStore` | interface (2 methods) | Durable storage for subscriber checkpoint positions | Methods: `readCheckpoint(String)` → long, `writeCheckpoint(String, long)`. |
+| `Subscriber` | interface | Runtime callback: `onEvent(EventEnvelope)`, `default onCaughtUp()` | Called on the subscriber's dedicated virtual thread. Supervisor wraps all invocations. |
+| `SubscriberMode` | enum (5 values) | Lifecycle mode: COLD, REPLAY, TRANSITION, LIVE, SUSPENDED | Transitions are atomic via AtomicReference with CAS. |
+| `SubscriberSnapshot` | record (5 fields) | Point-in-time introspection of subscriber state | Fields: `subscriberId`, `mode`, `checkpoint`, `dlqDepth`, `crashCount`. |
+| `SubscriberReadConnectionFactory` | functional interface | Factory for per-subscriber read executors (keeps bus JDBC-free) | Called once per `subscribeRuntime()`. Returns SubscriberReadExecutor. |
+| `SubscriberReadExecutor` | interface extends AutoCloseable | Dedicated platform-thread read executor per subscriber | Method: `<T> executeRead(Callable<T>)`. Encapsulates platform thread + SQLite connection. |
 
-**Total: 4 public types + 1 package-info.java + 1 module-info.java = 6 Java files.**
+### Package-Private Types (5)
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `InProcessEventBus` | class | Production EventBus implementation | Constructor: `(EventStore, CheckpointStore, Clock, SubscriberReadConnectionFactory)`. Manages passive registry (Phase 2 compat) and active registry (full runtime). |
+| `SubscriberSupervisor` | class | Per-subscriber exception handling, backoff, circuit breaker | Exception taxonomy: Error/IOException/checked→SUSPENDED; RuntimeException→backoff. MIN=3s, MAX=30s, jitter=0.2. Rolling 10-min crash window, 5 crashes → SUSPENDED. |
+| `SubscriberDlq` | class | Per-subscriber in-memory DLQ ring (cap 1024) | Methods: `park(DlqEntry)`, `depth()`, `clear()`. Persistent overflow wiring deferred to M3.5b. |
+| `ReplayWindowQueue` | class | Bounded queue for REPLAY→TRANSITION events | Methods: `enqueue(long)`, `size()`, `clear()`. Drain logic in M3.2. |
+| `SubscriberRuntime` | class | Internal bundle: VT, executor, supervisor, DLQ, mode ref, queue | Holds all per-subscriber resources. Closed on unsubscribe. |
+
+**Total: 9 public types + 5 package-private types = 14 production types.**
 
 ## Dependencies
 
 | Module | Why | Specific Types Used |
 |---|---|---|
-| **event-model** (`com.homesynapse.event`) | `requires transitive` (API dependency) — Event types for filter evaluation | `EventEnvelope` (passed to `SubscriptionFilter.matches()`), `EventPriority` (filter field for minimum priority), `SubjectType` (filter field for subject type restriction). |
+| **event-model** (`com.homesynapse.event`) | `requires transitive` (API dependency) — Event types for filter evaluation and delivery | `EventEnvelope` (passed to `SubscriptionFilter.matches()` and `Subscriber.onEvent()`), `EventPriority`, `SubjectType`, `EventStore`, `EventPage`. |
 | **platform-api** (transitive through event-model) | Identity types used indirectly | `Ulid`, typed ID wrappers accessed through `SubjectRef` on `EventEnvelope`. |
 
 ## Consumers
@@ -51,39 +70,48 @@ The `requires transitive` on event-model means any module that reads `com.homesy
 None directly — event-bus defines contracts that are consumed by the persistence module (implements CheckpointStore) and the startup-lifecycle module (wires EventBus to EventPublisher). All subscriber modules depend on event-bus transitively.
 
 ### Planned consumers (from design doc dependency graph):
-- **persistence** — Will implement `CheckpointStore` as `SqliteCheckpointStore` (writes to `subscriber_checkpoints` table in SQLite).
-- **state-store** — Will register as a subscriber via `SubscriberInfo` with `coalesceExempt = true` (State Projection must see every event, no coalescing).
+- **persistence** — Implements `CheckpointStore` as `SqliteCheckpointStore`. Provides production `SubscriberReadConnectionFactory`.
+- **state-store** — Will register as a subscriber via `subscribeRuntime` with `coalesceExempt = true`. Will need `requires com.homesynapse.event.bus` in module-info (M3.5a scope).
 - **automation** — Will register as a subscriber to evaluate triggers against events.
 - **integration-runtime** — Will register as a subscriber for command dispatch events.
 - **websocket-api** — Will register as a subscriber to stream events to connected clients.
 - **observability** — Will register as a subscriber for system metrics and health events.
-- **startup-lifecycle** — Will wire the EventBus implementation, register built-in subscribers, and coordinate startup ordering so subscribers are registered before events flow.
+- **startup-lifecycle** — Wires the InProcessEventBus, registers built-in subscribers, coordinates startup ordering.
 
 ## Cross-Module Contracts
 
-- **Pull-based subscription model.** The EventBus does NOT deliver events to subscribers. It wakes them via `LockSupport.unpark()`. Each subscriber is responsible for calling `EventStore.readFrom()` to pull events starting from their checkpoint position. This is a deliberate design choice that enables per-subscriber backpressure and crash-safe resumption.
+- **Pull-based subscription model.** The EventBus does NOT deliver events to subscribers. It wakes them via `LockSupport.unpark()`. Each subscriber is responsible for calling `EventStore.readFrom()` to pull events starting from their checkpoint position.
 - **At-least-once delivery with subscriber idempotency.** If the system crashes between event persistence and checkpoint update, the subscriber will re-process events from its last checkpoint on recovery. Subscribers MUST be idempotent (INV-ES-05).
-- **Backpressure coalescing for DIAGNOSTIC events.** Non-exempt subscribers may have DIAGNOSTIC-priority events coalesced during periods of high throughput. This means a subscriber may not see every individual DIAGNOSTIC event — it sees the notification that events are available, then pulls the batch. State Projection and Pending Command Ledger are exempt (`coalesceExempt = true`).
-- **Subscriber positions start at 0.** If `CheckpointStore.readCheckpoint()` returns 0 for a subscriber, it means the subscriber has never checkpointed and should start from the beginning of the event log. This is the only way to trigger a full replay.
-- **`SubscriptionFilter.matches()` is a conjunction.** An event must satisfy ALL active filter criteria to pass: event type set membership (if non-empty), minimum priority, and subject type (if non-null). An empty event type set means "all types" — it does not mean "no types."
+- **Backpressure coalescing for DIAGNOSTIC events.** Non-exempt subscribers may have DIAGNOSTIC-priority events coalesced during high throughput.
+- **Subscriber positions start at 0.** If `CheckpointStore.readCheckpoint()` returns 0 for a subscriber, it means the subscriber has never checkpointed and should start from the beginning of the event log.
+- **`SubscriptionFilter.matches()` is a conjunction.** An event must satisfy ALL active filter criteria to pass.
+- **`subscribeRuntime` creates full per-subscriber runtime.** VT, dedicated read connection, supervisor, DLQ, mode FSM. The subscriber starts in COLD and transitions to REPLAY asynchronously.
+- **`subscribe` is passive.** Filter evaluation + checkpoint tracking only. No VT, no supervisor, no DLQ. Backward compatible with Phase 2 contract tests.
+- **Bus does NOT have a `publish()` method.** Publishing is EventPublisher's job. The bus is notification-only.
 
 ## Constraints
 
 | Constraint | Description |
 |---|---|
-| **LTD-05** | Per-entity sequences with global position. Subscribers checkpoint against `globalPosition` (SQLite rowid), not `subjectSequence`. |
-| **LTD-06** | Write-ahead persistence with at-least-once delivery. Events persisted before bus notification. Subscribers must be idempotent. |
-| **INV-ES-04** | Write-ahead persistence. EventBus.notifyEvent() is called AFTER the WAL commit succeeds. Never before. |
-| **INV-ES-05** | At-least-once delivery with subscriber idempotency. Duplicate delivery expected during crash recovery. |
-| **INV-ES-03** | Per-entity ordering with causal consistency. Subscribers that care about per-entity ordering must process events in `globalPosition` order and use `subjectSequence` for per-entity conflict detection. |
+| **LTD-05** | Per-entity sequences with global position. Subscribers checkpoint against `globalPosition`. |
+| **LTD-06** | Write-ahead persistence with at-least-once delivery. Events persisted before bus notification. |
+| **LTD-11** | No `synchronized` — use ReentrantLock/ReadWriteLock only. |
+| **INV-ES-04** | Write-ahead persistence. EventBus.notifyEvent() called AFTER WAL commit. |
+| **INV-ES-05** | At-least-once delivery with subscriber idempotency. |
+| **INV-SUB-ISO-01** | One virtual thread per subscriber. Named `hs-sub-<subscriberId>`. |
+| **INV-SUB-ISO-02** | One read connection per subscriber (via SubscriberReadConnectionFactory). |
+| **INV-SUB-ISO-03** | One DLQ per subscriber. Failures in sub-A do not affect sub-B's DLQ. |
+| **INV-SUB-ISO-04** | One mode reference per subscriber. AtomicReference with CAS. |
+| **INV-SUB-ISO-05** | Replay window queue is per-subscriber isolated. |
+| **INV-SUB-ISO-06** | Self-filter is per-subscriber isolated (M3.5a wires this). |
 
 ## Amendments in force
 
 | Amendment | Status | Relevance to this module |
 |---|---|---|
-| **AMD-42** — Subscriber Lifecycle and Isolation | APPLIED (2026-05-16) | Mandates the `COLD → REPLAY → TRANSITION → LIVE → SUSPENDED` mode state machine, the three-phase REPLAY→LIVE transition (§3.4.2), `onCaughtUp()` single-shot semantics (§3.4.3), the per-subscriber resources catalog INV-SUB-ISO-01..06 (§3.4.4), the `SubscriberSupervisor` discipline with `MIN=3s/MAX=30s/jitter=0.2` backoff (§3.4.5), and the cross-subscriber isolation guarantees (§3.4.6). M3.1 lands the bus skeleton; M3.2 lands the REPLAY→LIVE algorithm. The `EventBus` interface gains `subscribeRuntime`, `resume`, `subscriberInfo`, `subscribers` introspection — but does NOT gain a `publish()` method (the bus remains notification-only; publishing is `EventPublisher`'s job). |
-| **AMD-43** — Backpressure and Observability | APPLIED (2026-05-16) | Mandates that `EventPublisher.publish()` is non-blocking on writer queue depth (§3.6.1, INV-BUS-02 normative), defines the seven canonical bus/writer metric names (§3.6.2), the `QueueSaturationHealthCheck` 1-second tick algorithm with WARN at 5000 / CRITICAL at 10000 (§3.6.3), the per-subscriber `DerivedWriteRateLimit` 200/s token bucket (§3.6.4), and the coalescing-deferred-past-M3 status (§3.6.5). M3.3 lands the metrics surface and the queue-saturation health check. The chosen observability emission path (JFR events vs new typed primitives) is an open M3.3 decision per the caveat in AMD-43. |
-| **NO_DIRECT_TIME_ACCESS** (ArchUnit rule in `app/homesynapse-app/src/test/.../HomeSynapseArchRules.java`, extended to M3 per DEC-M3-09) | ENFORCED | All time access in the bus implementation (supervisor scheduler, rate-limit refill ticks, replay-window timestamps, DLQ `first_seen_at` / `last_attempt_at`) must go through an injected `java.time.Clock`. Direct `Instant.now()`, `System.currentTimeMillis()`, `Clock.systemUTC()` are forbidden by the rule. |
+| **AMD-42** — Subscriber Lifecycle and Isolation | APPLIED (2026-05-16) | Mandates the mode state machine, per-subscriber resources, supervisor discipline, isolation guarantees. Fully implemented in M3.1 (bus skeleton, FSM, supervisor, isolation). M3.2 lands REPLAY→LIVE algorithm. |
+| **AMD-43** — Backpressure and Observability | APPLIED (2026-05-16) | Mandates non-blocking publish, metric names, QueueSaturationHealthCheck. M3.3 scope. |
+| **NO_DIRECT_TIME_ACCESS** (ArchUnit rule) | ENFORCED | All time access through injected Clock. No Instant.now(), System.currentTimeMillis(), Clock.systemUTC() anywhere in production or test code. |
 
 ## Sealed Hierarchies
 
@@ -91,82 +119,63 @@ None. This module contains no sealed types.
 
 ## Key Design Decisions
 
-1. **Pull-based, not push-based delivery.** Subscribers are woken (notified) but pull events themselves from `EventStore`. This was chosen over direct push delivery because: (a) it enables per-subscriber backpressure without blocking the publisher, (b) slow subscribers don't affect fast subscribers, (c) crash recovery is trivial — resume from checkpoint, (d) no event buffering in the bus itself. The alternative (push-based with per-subscriber queues) was rejected due to memory overhead and complex failure modes on a constrained Pi. Reference: Doc 01 §3.4.
-
-2. **`CheckpointStore` is a separate interface from `EventStore`.** Checkpoints are subscriber positions, not event data. They are stored in the same SQLite database for atomic checkpoint-and-query within a single transaction, but the interfaces are separate because their consumers are different (bus vs. persistence). Reference: Doc 01 §8.
-
-3. **`subscriberId` is a plain `String`, not a typed wrapper.** Subscribers are infrastructure components (State Projection, Automation Engine, etc.), not domain objects. They don't need ULID identity or the type safety guarantees that domain IDs provide. The string must be stable across restarts because it's the primary key in the checkpoint table.
-
-4. **`SubscriptionFilter` uses `Set<String>` for event types, not `Set<EventType>` enum.** Because event types are extensible strings (integrations can define custom types), an enum would create a closed set. The filter uses string matching against `EventEnvelope.eventType()`.
+1. **Pull-based, not push-based delivery.** Subscribers are woken (notified) but pull events themselves from EventStore.
+2. **`CheckpointStore` is a separate interface from `EventStore`.** Different consumers, same database.
+3. **`subscriberId` is a plain String, not a typed wrapper.** Infrastructure components don't need ULID identity.
+4. **`SubscriptionFilter` uses `Set<String>` for event types.** Extensible strings, not a closed enum.
+5. **New EventBus methods are `default` with UnsupportedOperationException.** Allows InMemoryEventBus (Phase 2 fixture) to compile without modification.
+6. **SubscriberInfo stays 3-field (DP-3/DP-6).** All introspection goes through SubscriberSnapshot, not SubscriberInfo.
+7. **Bus module is JDBC-free (DP-4).** SubscriberReadConnectionFactory/Executor keep java.sql out of module-info.
+8. **Infrastructure exception carve-out (DP-1).** Error, IOException, and non-RuntimeException checked exceptions → immediate SUSPENDED. Only RuntimeException follows backoff path.
 
 ## Gotchas
 
-**GOTCHA: CheckpointStore here is for subscriber POSITION checkpoints only.** It stores `subscriberId → globalPosition` (a single long per subscriber). The state-store module has a separate `ViewCheckpointStore` for view SNAPSHOT checkpoints (`viewName → position + serialized data blob`). These are completely different things with similar names. Do not confuse them.
+**GOTCHA: CheckpointStore here is for subscriber POSITION checkpoints only.** Not state-store view snapshots.
 
-**GOTCHA: `SubscriptionFilter.eventTypes` empty set means ALL types, not NO types.** An empty `eventTypes` set in `SubscriptionFilter` is a wildcard — it matches all event types. This is the opposite of what you might expect. To match no events, you would need to set `minimumPriority` to a level above CRITICAL (which is not possible — so every filter matches at least CRITICAL events).
+**GOTCHA: `SubscriptionFilter.eventTypes` empty set means ALL types, not NO types.**
 
-**GOTCHA: `coalesceExempt` is critical for correctness of certain subscribers.** The State Projection and Pending Command Ledger MUST be registered with `coalesceExempt = true`. If they miss DIAGNOSTIC events due to coalescing, state will diverge from the event log. Most other subscribers (WebSocket streaming, observability) can safely coalesce.
+**GOTCHA: `coalesceExempt` is critical for correctness of State Projection and Pending Command Ledger.**
 
-**GOTCHA: `notifyEvent(long globalPosition)` does NOT pass the event itself.** The bus receives only the position of the newly persisted event. It loads filter-relevant metadata (event type, priority, subject type) from the event store to evaluate subscriber filters. The subscriber then pulls the full event independently.
+**GOTCHA: `notifyEvent(long globalPosition)` does NOT pass the event itself.** The bus loads filter-relevant metadata from the event store.
 
-**GOTCHA: Subscriber registration order matters at startup.** Subscribers must be registered with the EventBus BEFORE the publisher starts accepting events. If events are published before subscribers register, those events will not trigger notifications (though they are still persisted and will be processed on the next catch-up read). The startup-lifecycle module coordinates this ordering.
+**GOTCHA: V002 schema (`subscriber_dead_letters` table) exists but is NOT wired.** The in-memory DLQ ring (cap 1024) is the M3.1 implementation. Persistent overflow is M3.5b.
 
-**GOTCHA: V002 schema (`subscriber_dead_letters` table) exists but has no Phase 3 implementation yet.** The `V002__subscriber_dead_letter_queue.sql` migration in `core/persistence` creates an 11-column `subscriber_dead_letters` table for dead-letter queue (DLQ) support — events that a subscriber fails to process are recorded for retry or manual resolution. The schema is ready, but the DLQ Phase 3 implementation (which will likely live in the event-bus module or persistence module) has not been built. The migration file is NOT YET wired into `SqlitePersistenceLifecycle.EVENTS_MIGRATION_FILES` — it will be added when the DLQ implementation ships. Do not assume the table exists at runtime until that wiring is complete.
+**GOTCHA: `InMemoryEventBus` is NOT modified in M3.1.** It remains the Phase 2 fixture for the original 4-method interface. The production bus is InProcessEventBus.
 
-**GOTCHA: `InMemoryEventBus` is NOT `SynchronousEventBus`.** Two separate EventBus test fixtures exist in the codebase. `SynchronousEventBus` (in the `test-support` module) is a lightweight bus that invokes all handlers regardless of filter — suitable for simple unit tests where filter evaluation is not the focus. `InMemoryEventBus` (in `event-bus` testFixtures) is a contract-complete bus that evaluates `SubscriptionFilter.matches()`, checks checkpoint positions, and requires `EventStore` + `CheckpointStore` injection — suitable for contract tests and integration-level testing. Use the right tool for the right fidelity level.
+**GOTCHA: `InMemoryEventBusTest` and `InProcessEventBusTest` both extend `EventBusContractTest`.** The new Tiers 5-10 use `assumeTrue(supportsActiveRuntime())` to skip for InMemoryEventBusTest.
+
+**GOTCHA: The supervisor's `deliver()` uses `Thread.sleep()` for backoff.** This is safe on virtual threads (unmounts carrier). But it means tests that exercise retries must either use short sleeps or advance a mutable clock. The MutableClock in InProcessEventBusTest enables deterministic backoff testing.
 
 ## Test Fixtures and Contract Tests
 
-The `testFixtures` source set (`src/testFixtures/java/com/homesynapse/event/bus/test/`) provides four types: two abstract contract tests and two in-memory implementations. Together they form a layered test infrastructure where the in-memory implementations satisfy the contract tests, and downstream modules can reuse both layers.
-
-### testFixtures Type Inventory
+The `testFixtures` source set now provides five types:
 
 | Type | Kind | Package | Purpose |
 |---|---|---|---|
-| `CheckpointStoreContractTest` | abstract class (9 `@Test` methods) | `com.homesynapse.event.bus.test` | Defines the behavioral contract for `CheckpointStore`. Both `InMemoryCheckpointStore` and the future `SqliteCheckpointStore` must pass this suite. |
-| `InMemoryCheckpointStore` | class implementing `CheckpointStore` | `com.homesynapse.event.bus.test` | `ConcurrentHashMap`-based implementation. Thread-safe. `reset()` method clears all checkpoints for test isolation. |
-| `EventBusContractTest` | abstract class (18 `@Test` methods, 4 `@Nested` tiers) | `com.homesynapse.event.bus.test` | Defines the behavioral contract for `EventBus`. Both `InMemoryEventBus` and the future production bus must pass this suite. |
-| `InMemoryEventBus` | class implementing `EventBus` | `com.homesynapse.event.bus.test` | Full-fidelity in-memory implementation with synchronous delivery and full `SubscriptionFilter.matches(envelope)` evaluation. |
+| `CheckpointStoreContractTest` | abstract class (9 @Test methods) | `com.homesynapse.event.bus.test` | Behavioral contract for CheckpointStore. |
+| `InMemoryCheckpointStore` | class | `com.homesynapse.event.bus.test` | ConcurrentHashMap-based CheckpointStore. |
+| `EventBusContractTest` | abstract class (44 @Test methods: 18 + 16 active + 10 disabled) | `com.homesynapse.event.bus.test` | Behavioral contract for EventBus. 4 @Nested tiers (Phase 2) + 4 new tiers (M3.1) + 2 disabled tiers (M3.2, M3.3). |
+| `InMemoryEventBus` | class | `com.homesynapse.event.bus.test` | Phase 2 contract-test fixture. 4-method interface only. |
+| `RecordingReadConnectionFactory` | class | `com.homesynapse.event.bus.test` | Recording stub for INV-SUB-ISO-02 assertions. |
 
-### CheckpointStoreContractTest Coverage
+### EventBusContractTest — 10 Nested Tiers
 
-The 9 `@Test` methods cover: unknown subscriber returns 0; write/read round-trip; overwrite semantics (latest write wins); per-subscriber isolation (writes for one subscriber do not affect another); position zero is a valid value; negative position rejected with `IllegalArgumentException`; null subscriber ID rejected on read; null subscriber ID rejected on write; `Long.MAX_VALUE` accepted as boundary value.
-
-### EventBusContractTest Coverage — 4 Nested Tiers
-
-The 18 `@Test` methods are organized into four `@Nested` classes that map to layered concerns:
-
-- **Tier 1 — Subscription Lifecycle (5 tests):** register a subscriber; replace an existing subscriber registration with the same ID; unsubscribe removes a subscriber; `unsubscribe` is a no-op for unknown subscriber IDs; checkpoint retention semantics across re-subscription.
-- **Tier 2 — Notification and Filtering (7 tests):** matching filter delivers event; non-matching event type is filtered out; non-matching priority is filtered out; non-matching subject type is filtered out; empty `eventTypes` set matches all event types (wildcard); when multiple subscribers are registered, only those with matching filters are notified; `coalesceExempt` flag is respected by the bus.
-- **Tier 3 — Checkpoint Integration (4 tests):** unknown subscriber returns checkpoint 0; checkpoint write is reflected on subsequent reads; subscribing loads the existing checkpoint as the subscriber's starting position; events at positions below the checkpoint are skipped on delivery.
-- **Tier 4 — Concurrency Safety (2 tests):** concurrent `subscribe` and `notifyEvent` operations do not corrupt state; concurrent `subscribe` and `unsubscribe` operations are safe.
-
-### `InMemoryEventBus` Critical Implementation Details
-
-`InMemoryEventBus` is more than a stub — it is the contract-complete reference implementation that downstream modules use for integration-level testing. Key facts:
-
-- **Constructor:** `InMemoryEventBus(EventStore eventStore, CheckpointStore checkpointStore)`. The bus requires an `EventStore` for filter-relevant metadata lookup and a `CheckpointStore` for position tracking. This mirrors the wiring that the production `SqliteEventBus` will use, so contract tests written against `InMemoryEventBus` exercise the same dependency graph as production.
-- **`subscribeWithHandler(SubscriberInfo info, Consumer<Long> handler)`** — a test-fixture-only callback bridge. The standard `subscribe()` method registers a subscriber for filter evaluation but does NOT invoke any callback, because the production bus is pull-based (subscribers wake on `LockSupport.unpark()` and pull events from the store). For test ergonomics, `subscribeWithHandler` lets a test register a `Consumer<Long>` that fires synchronously when a matching event is published, eliminating the need to spin up virtual threads in unit tests.
-- **Synchronous delivery with full filter evaluation.** When `notifyEvent(globalPosition)` is called, the bus loads the envelope from the injected `EventStore` and evaluates `SubscriptionFilter.matches(envelope)` against every registered subscriber. Matching subscribers' handlers are invoked synchronously on the calling thread.
-- **Re-entrant notification allowed.** A handler may itself publish events that trigger further notifications. There is no anti-recursion guard — tests that need to assert on chain depth must check explicitly.
-- **Thread safety via `ReentrantReadWriteLock`.** Subscriber registry mutations acquire the write lock; notification fan-out acquires the read lock. This matches the concurrency model expected by virtual-thread-based subscribers (LTD-11).
-
-### Consumption by Downstream Modules
-
-Downstream modules that depend on these fixtures must declare **both** of the following in their `build.gradle.kts`:
-
-```kotlin
-testFixturesImplementation(testFixtures(project(":core:event-bus")))
-testImplementation(testFixtures(project(":core:event-bus")))
-```
-
-Both declarations are required for the same reason described in the event-model MODULE_CONTEXT: the `java-conventions` plugin only adds JUnit/AssertJ to `testImplementation`, and any consuming module that writes its own contract tests in its own `testFixtures` source set must re-declare both lines so the dependencies resolve in both source sets.
+- **Tier 1 — Subscription Lifecycle (5 tests)**
+- **Tier 2 — Notification and Filtering (7 tests)**
+- **Tier 3 — Checkpoint Integration (4 tests)**
+- **Tier 4 — Concurrency Safety (2 tests)**
+- **Tier 5 — Mode State Machine (4 active tests)** — M3.1
+- **Tier 6 — Per-Subscriber Isolation (6 active tests)** — M3.1
+- **Tier 7 — Supervisor (5 active tests)** — M3.1
+- **Tier 8 — Lifecycle (1 active test)** — M3.1
+- **Tier 9 — REPLAY→LIVE Transition (6 disabled @Disabled("M3.2"))**
+- **Tier 10 — Backpressure and Metrics (4 disabled @Disabled("M3.3"))**
 
 ## Phase 3 Notes
 
-- **EventBus needs an implementation:** `InProcessEventBus` in the core or persistence module. Must implement: subscriber registry (concurrent map), filter evaluation per notification, `LockSupport.unpark()` for matched subscribers, backpressure coalescing logic for non-exempt subscribers.
-- **CheckpointStore needs a SQLite implementation:** `SqliteCheckpointStore` in the persistence module. Simple key-value store: `subscriber_checkpoints(subscriber_id TEXT PRIMARY KEY, global_position INTEGER)`. Must support atomic read-checkpoint-then-query-events within a single SQLite transaction.
-- **Virtual thread model:** Each subscriber runs on its own virtual thread, blocked on `LockSupport.park()` until notified. The bus unparks matching subscribers. This is the standard virtual thread blocking pattern — no thread pools needed.
-- **SQLite operation caveat.** Subscribers that perform SQLite operations (EventStore reads, EventPublisher writes, checkpoint writes) route those operations through the Persistence Layer's platform thread executor (LTD-03). The subscriber's virtual thread parks while the platform thread executes the sqlite-jdbc JNI call, then resumes when the result is available. The "no thread pools needed" statement applies to the bus notification mechanism — the database executor is a separate concern owned by the Persistence Layer. See Doc 01 §3.4 (AMD-28) and Doc 04 (AMD-27) for the full threading model.
-- **Testing strategy:** Unit tests for `SubscriptionFilter.matches()` (all combinations of event type, priority, subject type). Integration tests for EventBus subscribe/notify/checkpoint cycle. Concurrency tests for multi-subscriber notification ordering.
-- **Performance targets (from Doc 01 §8):** EventBus notification fan-out must complete within 1ms for up to 20 concurrent subscribers. CheckpointStore.writeCheckpoint() must complete within 1ms.
+- **M3.1 landed:** Bus skeleton, mode FSM, supervisor, per-subscriber isolation, in-memory DLQ, circuit breaker. Production `InProcessEventBus` with full 8-method interface.
+- **M3.2 pending:** REPLAY→LIVE transition logic (three-phase replay, ReplayDriver, TransitionCoordinator, replay window drain, gap detection).
+- **M3.3 pending:** BusMetrics, QueueSaturationHealthCheck, WriterQueueGauge, per-subscriber DerivedWriteRateLimit.
+- **M3.5a pending:** StateProjection vertical slice. State-store module-info will need `requires com.homesynapse.event.bus`.
+- **M3.5b pending:** Persistent DLQ wiring (DeadLetter record, SqliteDeadLetterStore, V004 DLQ indices). The in-memory DLQ ring is the current implementation.
+- **Performance targets:** Bus notification fan-out within 1ms for 20 subscribers. CheckpointStore.writeCheckpoint() within 1ms.

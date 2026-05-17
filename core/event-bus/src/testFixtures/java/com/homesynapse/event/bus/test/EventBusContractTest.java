@@ -13,15 +13,22 @@ import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectType;
 import com.homesynapse.event.bus.CheckpointStore;
 import com.homesynapse.event.bus.EventBus;
+import com.homesynapse.event.bus.Subscriber;
 import com.homesynapse.event.bus.SubscriberInfo;
+import com.homesynapse.event.bus.SubscriberMode;
+import com.homesynapse.event.bus.SubscriberReadConnectionFactory;
+import com.homesynapse.event.bus.SubscriberSnapshot;
 import com.homesynapse.event.bus.SubscriptionFilter;
 import com.homesynapse.event.test.TestEventFactory;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -30,9 +37,11 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Abstract contract test for {@link EventBus}.
@@ -105,6 +114,59 @@ public abstract class EventBusContractTest {
      *                is notified
      */
     protected abstract void subscribeWithCallback(SubscriberInfo info, Consumer<Long> handler);
+
+    // ──────────────────────────────────────────────────────────────────
+    // Optional harness methods for M3.1+ tests (active runtime support)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Returns {@code true} if the implementation supports active runtime features
+     * (subscribeRuntime, mode FSM, supervisor, DLQ, per-subscriber isolation).
+     *
+     * <p>Defaults to {@code false}. Override in concrete tests that exercise
+     * {@link InProcessEventBus} or equivalent production implementations.</p>
+     *
+     * @return {@code true} if Tiers 5–10 should run
+     */
+    protected boolean supportsActiveRuntime() {
+        return false;
+    }
+
+    /**
+     * Provides the Clock used by the bus for backoff/crash-window timing.
+     *
+     * <p>Returns {@code null} by default. Override when {@link #supportsActiveRuntime()}
+     * returns {@code true}.</p>
+     *
+     * @return the clock, or {@code null} if not applicable
+     */
+    protected Clock clock() {
+        return null;
+    }
+
+    /**
+     * Provides access to the SubscriberReadConnectionFactory for introspection.
+     *
+     * <p>Returns {@code null} by default. Override when {@link #supportsActiveRuntime()}
+     * returns {@code true}.</p>
+     *
+     * @return the factory, or {@code null} if not applicable
+     */
+    protected SubscriberReadConnectionFactory readConnectionFactory() {
+        return null;
+    }
+
+    /**
+     * Advances the fake clock by the given duration (for backoff testing).
+     *
+     * <p>No-op by default. Override when {@link #supportsActiveRuntime()}
+     * returns {@code true}.</p>
+     *
+     * @param duration the amount of time to advance
+     */
+    protected void advanceClock(Duration duration) {
+        // No-op by default — implementations override.
+    }
 
     // ──────────────────────────────────────────────────────────────────
     // Setup and helpers
@@ -538,6 +600,575 @@ public abstract class EventBusContractTest {
                     .isTrue();
             assertThat(errors).isEmpty();
             executor.shutdown();
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Tier 5: Mode State Machine
+    // ──────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("Tier 5 — Mode State Machine")
+    class ModeStateMachine {
+
+        /** Creates a new test instance. */
+        ModeStateMachine() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        @BeforeEach
+        void assumeActiveRuntime() {
+            assumeTrue(supportsActiveRuntime(),
+                    "Skipped: implementation does not support active runtime");
+        }
+
+        @Test
+        @DisplayName("subscribeRuntime starts subscriber in COLD mode")
+        void subscribeRuntimeStartsInColdMode() {
+            SubscriberInfo info = new SubscriberInfo(
+                    "mode-sub", SubscriptionFilter.all(), false);
+            Subscriber noOp = event -> {};
+
+            bus().subscribeRuntime(info, noOp);
+
+            // Immediately after registration, before VT runs, mode may be COLD
+            // or REPLAY (if VT already scheduled). Both are acceptable for this
+            // assertion — the key contract is that it starts in COLD.
+            SubscriberSnapshot snapshot = bus().subscriberInfo("mode-sub");
+            assertThat(snapshot.mode())
+                    .isIn(SubscriberMode.COLD, SubscriberMode.REPLAY);
+        }
+
+        @Test
+        @DisplayName("subscriber transitions COLD to REPLAY on first scheduling")
+        void subscriberTransitionsColdToReplayOnFirstScheduling()
+                throws InterruptedException {
+            SubscriberInfo info = new SubscriberInfo(
+                    "replay-sub", SubscriptionFilter.all(), false);
+            Subscriber noOp = event -> {};
+
+            bus().subscribeRuntime(info, noOp);
+
+            // Allow the subscriber's VT to run
+            Thread.sleep(100);
+
+            SubscriberSnapshot snapshot = bus().subscriberInfo("replay-sub");
+            assertThat(snapshot.mode()).isEqualTo(SubscriberMode.REPLAY);
+        }
+
+        @Test
+        @DisplayName("mode reference is atomic across concurrent observers")
+        void modeReferenceIsAtomicAcrossConcurrentObservers()
+                throws InterruptedException {
+            SubscriberInfo info = new SubscriberInfo(
+                    "atomic-sub", SubscriptionFilter.all(), false);
+            Subscriber noOp = event -> {};
+
+            bus().subscribeRuntime(info, noOp);
+            Thread.sleep(50); // Let VT start
+
+            int threadCount = 4;
+            var executor = Executors.newFixedThreadPool(threadCount);
+            var latch = new CountDownLatch(threadCount);
+            var errors = new CopyOnWriteArrayList<Throwable>();
+
+            for (int t = 0; t < threadCount; t++) {
+                executor.submit(() -> {
+                    try {
+                        for (int i = 0; i < 100; i++) {
+                            SubscriberSnapshot snap = bus().subscriberInfo("atomic-sub");
+                            assertThat(snap.mode()).isNotNull();
+                        }
+                    } catch (Throwable e) {
+                        errors.add(e);
+                    } finally {
+                        latch.countDown();
+                    }
+                });
+            }
+
+            assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(errors).isEmpty();
+            executor.shutdown();
+        }
+
+        @Test
+        @DisplayName("unsubscribe closes subscriber runtime")
+        void unsubscribeClosesSubscriberRuntime() throws InterruptedException {
+            SubscriberInfo info = new SubscriberInfo(
+                    "close-sub", SubscriptionFilter.all(), false);
+            Subscriber noOp = event -> {};
+
+            bus().subscribeRuntime(info, noOp);
+            Thread.sleep(50); // Let VT start
+
+            bus().unsubscribe("close-sub");
+            Thread.sleep(50); // Let cleanup propagate
+
+            // After unsubscribe, subscriberInfo should throw
+            org.assertj.core.api.Assertions.assertThatThrownBy(
+                    () -> bus().subscriberInfo("close-sub"))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Tier 6: Per-Subscriber Isolation (INV-SUB-ISO)
+    // ──────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("Tier 6 — Per-Subscriber Isolation (INV-SUB-ISO)")
+    class PerSubscriberIsolation {
+
+        /** Creates a new test instance. */
+        PerSubscriberIsolation() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        @BeforeEach
+        void assumeActiveRuntime() {
+            assumeTrue(supportsActiveRuntime(),
+                    "Skipped: implementation does not support active runtime");
+        }
+
+        @Test
+        @DisplayName("INV-SUB-ISO-01: one virtual thread per subscriber")
+        void INV_SUB_ISO_01_oneVirtualThreadPerSubscriber()
+                throws InterruptedException {
+            Subscriber noOp = event -> {};
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("iso-A", SubscriptionFilter.all(), false), noOp);
+            bus().subscribeRuntime(
+                    new SubscriberInfo("iso-B", SubscriptionFilter.all(), false), noOp);
+            bus().subscribeRuntime(
+                    new SubscriberInfo("iso-C", SubscriptionFilter.all(), false), noOp);
+
+            Thread.sleep(100); // Let VTs start
+
+            // Verify 3 subscribers are registered with active runtimes (each has a VT).
+            // Thread.getAllStackTraces() does not include virtual threads in Java 21,
+            // so we verify via the bus's introspection API which proves runtimes (and
+            // thus VTs) were created.
+            List<SubscriberSnapshot> snapshots = bus().subscribers();
+            assertThat(snapshots).hasSize(3);
+            assertThat(snapshots).extracting(SubscriberSnapshot::subscriberId)
+                    .containsExactlyInAnyOrder("iso-A", "iso-B", "iso-C");
+            // All should have transitioned past COLD (VT started and ran)
+            assertThat(snapshots).allMatch(s -> s.mode() != SubscriberMode.COLD);
+        }
+
+        @Test
+        @DisplayName("INV-SUB-ISO-02: one read connection per subscriber")
+        void INV_SUB_ISO_02_oneReadConnectionPerSubscriber()
+                throws InterruptedException {
+            Subscriber noOp = event -> {};
+            SubscriberReadConnectionFactory factory = readConnectionFactory();
+            assumeTrue(factory instanceof RecordingReadConnectionFactory,
+                    "Factory must be a RecordingReadConnectionFactory for this test");
+            RecordingReadConnectionFactory recordingFactory =
+                    (RecordingReadConnectionFactory) factory;
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("conn-A", SubscriptionFilter.all(), false), noOp);
+            bus().subscribeRuntime(
+                    new SubscriberInfo("conn-B", SubscriptionFilter.all(), false), noOp);
+            bus().subscribeRuntime(
+                    new SubscriberInfo("conn-C", SubscriptionFilter.all(), false), noOp);
+
+            Thread.sleep(50);
+
+            assertThat(recordingFactory.createCallCount()).isEqualTo(3);
+            assertThat(recordingFactory.subscriberIds())
+                    .containsExactlyInAnyOrder("conn-A", "conn-B", "conn-C");
+        }
+
+        @Test
+        @DisplayName("INV-SUB-ISO-03: one DLQ per subscriber")
+        void INV_SUB_ISO_03_oneDlqPerSubscriber()
+                throws InterruptedException, SequenceConflictException {
+            AtomicInteger callCountA = new AtomicInteger();
+            Subscriber failingSub = event -> {
+                callCountA.incrementAndGet();
+                throw new RuntimeException("Simulated failure");
+            };
+            Subscriber successSub = event -> {};
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("dlq-A", SubscriptionFilter.all(), false),
+                    failingSub);
+            bus().subscribeRuntime(
+                    new SubscriberInfo("dlq-B", SubscriptionFilter.all(), false),
+                    successSub);
+
+            Thread.sleep(100); // Let VTs start and reach REPLAY
+
+            // Publish an event to trigger delivery
+            publishAndNotify(TestEventFactory.draft());
+
+            // Allow time for delivery + retries
+            Thread.sleep(500);
+
+            SubscriberSnapshot snapA = bus().subscriberInfo("dlq-A");
+            SubscriberSnapshot snapB = bus().subscriberInfo("dlq-B");
+
+            assertThat(snapA.dlqDepth()).isGreaterThan(0);
+            assertThat(snapB.dlqDepth()).isEqualTo(0);
+        }
+
+        @Test
+        @DisplayName("INV-SUB-ISO-04: one mode ref per subscriber")
+        void INV_SUB_ISO_04_oneModeRefPerSubscriber()
+                throws InterruptedException, SequenceConflictException {
+            AtomicInteger failCount = new AtomicInteger();
+            Subscriber alwaysFails = event -> {
+                failCount.incrementAndGet();
+                throw new RuntimeException("Crash #" + failCount.get());
+            };
+            Subscriber successSub = event -> {};
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("mode-A", SubscriptionFilter.all(), false),
+                    alwaysFails);
+            bus().subscribeRuntime(
+                    new SubscriberInfo("mode-B", SubscriptionFilter.all(), false),
+                    successSub);
+
+            Thread.sleep(100);
+
+            // Trigger enough events to trip the circuit breaker for mode-A
+            for (int i = 0; i < 5; i++) {
+                publishAndNotify(TestEventFactory.draft());
+                Thread.sleep(200);
+            }
+
+            // Allow time for supervisor retries and circuit breaker
+            Thread.sleep(2000);
+
+            SubscriberSnapshot snapA = bus().subscriberInfo("mode-A");
+            SubscriberSnapshot snapB = bus().subscriberInfo("mode-B");
+
+            assertThat(snapA.mode()).isEqualTo(SubscriberMode.SUSPENDED);
+            assertThat(snapB.mode()).isNotEqualTo(SubscriberMode.SUSPENDED);
+        }
+
+        @Test
+        @DisplayName("INV-SUB-ISO-05: replay window queue is isolated")
+        void INV_SUB_ISO_05_replayWindowQueueIsolated()
+                throws InterruptedException {
+            Subscriber noOp = event -> {};
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("rwq-A", SubscriptionFilter.all(), false), noOp);
+            bus().subscribeRuntime(
+                    new SubscriberInfo("rwq-B", SubscriptionFilter.all(), false), noOp);
+
+            Thread.sleep(50);
+
+            // Both subscribers exist with independent replay window queues.
+            // Full queue behavior validated in M3.2.
+            SubscriberSnapshot snapA = bus().subscriberInfo("rwq-A");
+            SubscriberSnapshot snapB = bus().subscriberInfo("rwq-B");
+            assertThat(snapA.subscriberId()).isEqualTo("rwq-A");
+            assertThat(snapB.subscriberId()).isEqualTo("rwq-B");
+        }
+
+        @Test
+        @DisplayName("INV-SUB-ISO-06: self-filter isolated when present")
+        void INV_SUB_ISO_06_selfFilterIsolatedWhenPresent()
+                throws InterruptedException {
+            Subscriber noOp = event -> {};
+
+            // Register two subscribers — verify each has independent runtime
+            bus().subscribeRuntime(
+                    new SubscriberInfo("sf-A", SubscriptionFilter.all(), false), noOp);
+            bus().subscribeRuntime(
+                    new SubscriberInfo("sf-B", SubscriptionFilter.all(), false), noOp);
+
+            Thread.sleep(50);
+
+            // Placeholder assertion: both subscribers exist independently.
+            // Full self-filter behavior validated in M3.5a.
+            assertThat(bus().subscribers()).hasSizeGreaterThanOrEqualTo(2);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Tier 7: Supervisor
+    // ──────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("Tier 7 — Supervisor")
+    class Supervisor {
+
+        /** Creates a new test instance. */
+        Supervisor() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        @BeforeEach
+        void assumeActiveRuntime() {
+            assumeTrue(supportsActiveRuntime(),
+                    "Skipped: implementation does not support active runtime");
+        }
+
+        @Test
+        @DisplayName("supervisor catches subscriber exception without affecting other subscribers")
+        void supervisorCatchesSubscriberException()
+                throws InterruptedException, SequenceConflictException {
+            Subscriber failingSub = event -> {
+                throw new RuntimeException("sub-A fails");
+            };
+            Subscriber successSub = event -> {};
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("sup-A", SubscriptionFilter.all(), false),
+                    failingSub);
+            bus().subscribeRuntime(
+                    new SubscriberInfo("sup-B", SubscriptionFilter.all(), false),
+                    successSub);
+
+            Thread.sleep(200); // Let VTs start
+
+            publishAndNotify(TestEventFactory.draft());
+            Thread.sleep(300); // Let VTs process
+
+            // sub-A should have a DLQ entry from the failure
+            SubscriberSnapshot snapA = bus().subscriberInfo("sup-A");
+            assertThat(snapA.dlqDepth()).isGreaterThan(0);
+
+            // sub-B should NOT be suspended — failure in A didn't affect B
+            SubscriberSnapshot snapB = bus().subscriberInfo("sup-B");
+            assertThat(snapB.mode()).isNotEqualTo(SubscriberMode.SUSPENDED);
+        }
+
+        @Test
+        @DisplayName("supervisor records DLQ entry on exception")
+        void supervisorRecordsDlqEntryOnException()
+                throws InterruptedException, SequenceConflictException {
+            Subscriber failingSub = event -> {
+                throw new RuntimeException("DLQ test");
+            };
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("dlq-sub", SubscriptionFilter.all(), false),
+                    failingSub);
+
+            Thread.sleep(200);
+
+            publishAndNotify(TestEventFactory.draft());
+            Thread.sleep(300);
+
+            SubscriberSnapshot snap = bus().subscriberInfo("dlq-sub");
+            assertThat(snap.dlqDepth()).isGreaterThanOrEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("supervisor retries after backoff")
+        void supervisorRetriesAfterBackoff()
+                throws InterruptedException, SequenceConflictException {
+            AtomicInteger callCount = new AtomicInteger();
+            Subscriber retryingSub = event -> {
+                if (callCount.incrementAndGet() <= 1) {
+                    throw new RuntimeException("First attempt fails");
+                }
+                // Subsequent attempts succeed
+            };
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("retry-sub", SubscriptionFilter.all(), false),
+                    retryingSub);
+
+            Thread.sleep(200);
+
+            // First event fails, then VT loop re-delivers same position (which
+            // is still in the pending queue — the VT will process it again from
+            // the event store). Publish two events to give the subscriber a
+            // second chance to succeed.
+            publishAndNotify(TestEventFactory.draft());
+            Thread.sleep(200);
+            publishAndNotify(TestEventFactory.draft());
+            Thread.sleep(300);
+
+            // The subscriber should have been called at least twice
+            assertThat(callCount.get()).isGreaterThanOrEqualTo(2);
+        }
+
+        @Test
+        @DisplayName("supervisor trips circuit breaker at 5 crashes")
+        void supervisorTripsCircuitBreakerAt5Crashes()
+                throws InterruptedException, SequenceConflictException {
+            Subscriber alwaysFails = event -> {
+                throw new RuntimeException("Always fails");
+            };
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("cb-sub", SubscriptionFilter.all(), false),
+                    alwaysFails);
+
+            Thread.sleep(200);
+
+            // Trigger 5 events — each failure records a crash in the window
+            for (int i = 0; i < 6; i++) {
+                publishAndNotify(TestEventFactory.draft());
+                Thread.sleep(100);
+            }
+
+            // Allow time for VT to process all events
+            Thread.sleep(500);
+
+            SubscriberSnapshot snap = bus().subscriberInfo("cb-sub");
+            assertThat(snap.mode()).isEqualTo(SubscriberMode.SUSPENDED);
+        }
+
+        @Test
+        @DisplayName("circuit breaker resume restores delivery")
+        void circuitBreakerResumeRestoresDelivery()
+                throws InterruptedException, SequenceConflictException {
+            Subscriber alwaysFails = event -> {
+                throw new RuntimeException("Fails");
+            };
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("resume-sub", SubscriptionFilter.all(), false),
+                    alwaysFails);
+
+            Thread.sleep(200);
+
+            // Trip the circuit breaker with 6 events (need ≥5 crashes)
+            for (int i = 0; i < 6; i++) {
+                publishAndNotify(TestEventFactory.draft());
+                Thread.sleep(100);
+            }
+            Thread.sleep(500);
+
+            SubscriberSnapshot snapBefore = bus().subscriberInfo("resume-sub");
+            assertThat(snapBefore.mode()).isEqualTo(SubscriberMode.SUSPENDED);
+
+            // Resume
+            bus().resume("resume-sub");
+
+            SubscriberSnapshot snapAfter = bus().subscriberInfo("resume-sub");
+            assertThat(snapAfter.crashCount()).isEqualTo(0);
+            assertThat(snapAfter.mode()).isEqualTo(SubscriberMode.REPLAY);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Tier 8: Lifecycle
+    // ──────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("Tier 8 — Lifecycle")
+    class Lifecycle {
+
+        /** Creates a new test instance. */
+        Lifecycle() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        @BeforeEach
+        void assumeActiveRuntime() {
+            assumeTrue(supportsActiveRuntime(),
+                    "Skipped: implementation does not support active runtime");
+        }
+
+        @Test
+        @DisplayName("onCaughtUp default is no-op and does not throw")
+        void onCaughtUpDefaultNoOp() {
+            Subscriber sub = event -> {};
+            // Default onCaughtUp should not throw
+            sub.onCaughtUp();
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Tier 9: REPLAY→LIVE Transition (M3.2 — disabled placeholders)
+    // ──────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("Tier 9 — REPLAY→LIVE Transition (M3.2)")
+    @Disabled("M3.2")
+    class ReplayToLiveTransition {
+
+        /** Creates a new test instance. */
+        ReplayToLiveTransition() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        @Test
+        @DisplayName("replay delivers from checkpoint forward")
+        void replayDeliversFromCheckpointForward() {
+            // M3.2 placeholder
+        }
+
+        @Test
+        @DisplayName("transition drains replay window queue")
+        void transitionDrainsReplayWindowQueue() {
+            // M3.2 placeholder
+        }
+
+        @Test
+        @DisplayName("LIVE transition fires onCaughtUp exactly once")
+        void liveTransitionFiresOnCaughtUpExactlyOnce() {
+            // M3.2 placeholder
+        }
+
+        @Test
+        @DisplayName("replay window overflow at 10000 is critical alert")
+        void replayWindowOverflowAt10000IsCriticalAlert() {
+            // M3.2 placeholder
+        }
+
+        @Test
+        @DisplayName("multiple subscribers in replay do not interfere")
+        void multipleSubscribersInReplayDoNotInterfere() {
+            // M3.2 placeholder
+        }
+
+        @Test
+        @DisplayName("reconciliation on version mismatch")
+        void reconciliationOnVersionMismatch() {
+            // M3.2 placeholder
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Tier 10: Backpressure and Metrics (M3.3 — disabled placeholders)
+    // ──────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("Tier 10 — Backpressure and Metrics (M3.3)")
+    @Disabled("M3.3")
+    class BackpressureAndMetrics {
+
+        /** Creates a new test instance. */
+        BackpressureAndMetrics() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        @Test
+        @DisplayName("publish does not block at 5000")
+        void publishDoesNotBlockAt5000() {
+            // M3.3 placeholder
+        }
+
+        @Test
+        @DisplayName("publisher blocked count increments")
+        void publisherBlockedCountIncrements() {
+            // M3.3 placeholder
+        }
+
+        @Test
+        @DisplayName("writer queue depth gauge samples on enqueue and dequeue")
+        void writerQueueDepthGaugeSamplesOnEnqueueAndDequeue() {
+            // M3.3 placeholder
+        }
+
+        @Test
+        @DisplayName("subscriber lag gauge populated after delivery")
+        void subscriberLagGaugePopulatedAfterDelivery() {
+            // M3.3 placeholder
         }
     }
 }

@@ -38,22 +38,28 @@ class EventBusTest {
         }
 
         @Test
-        @DisplayName("exactly 4 declared methods")
-        void exactlyFourMethods() {
-            assertThat(EventBus.class.getDeclaredMethods()).hasSize(4);
+        @DisplayName("exactly 8 declared methods (4 abstract + 4 default)")
+        void exactlyEightMethods() {
+            assertThat(EventBus.class.getDeclaredMethods()).hasSize(8);
         }
 
         @Test
-        @DisplayName("all methods are public and abstract")
-        void allMethodsPublicAbstract() {
+        @DisplayName("all methods are public")
+        void allMethodsPublic() {
             for (Method method : EventBus.class.getDeclaredMethods()) {
                 assertThat(Modifier.isPublic(method.getModifiers()))
                         .as("method %s should be public", method.getName())
                         .isTrue();
-                assertThat(Modifier.isAbstract(method.getModifiers()))
-                        .as("method %s should be abstract", method.getName())
-                        .isTrue();
             }
+        }
+
+        @Test
+        @DisplayName("original 4 methods are abstract")
+        void originalFourMethodsAbstract() {
+            long abstractCount = Arrays.stream(EventBus.class.getDeclaredMethods())
+                    .filter(m -> Modifier.isAbstract(m.getModifiers()))
+                    .count();
+            assertThat(abstractCount).isEqualTo(4);
         }
     }
 

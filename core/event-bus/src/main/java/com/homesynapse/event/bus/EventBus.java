@@ -41,6 +41,7 @@ package com.homesynapse.event.bus;
  * notification are safe under concurrent access.</p>
  *
  * @see SubscriberInfo
+ * @see Subscriber
  * @see SubscriptionFilter
  * @see CheckpointStore
  * @see com.homesynapse.event.EventStore
@@ -49,6 +50,8 @@ package com.homesynapse.event.bus;
  * @see <a href="Doc 01 §3.7">Processing Modes</a>
  */
 public interface EventBus {
+
+    // ── Existing Phase 2 contract (preserved) ──────────────────────────
 
     /**
      * Registers a subscriber with the bus.
@@ -112,4 +115,52 @@ public interface EventBus {
      * @throws NullPointerException if {@code subscriberId} is {@code null}
      */
     long subscriberPosition(String subscriberId);
+
+    // ── New in M3.1 (AMD-42 lifecycle introspection and active runtime) ─
+
+    /**
+     * Registers a subscriber with an active runtime callback. The bus creates
+     * the per-subscriber VT, connection, DLQ, supervisor, and (for derivation-
+     * producing subscribers) self-filter. Returns immediately in COLD mode;
+     * transition to REPLAY begins asynchronously on the subscriber's VT.
+     *
+     * @param info    the subscriber registration metadata; never {@code null}
+     * @param runtime the subscriber callback; never {@code null}
+     * @throws NullPointerException if either parameter is {@code null}
+     */
+    default void subscribeRuntime(SubscriberInfo info, Subscriber runtime) {
+        throw new UnsupportedOperationException("subscribeRuntime not supported");
+    }
+
+    /**
+     * Operator action: exits SUSPENDED, resets crash window, re-enters REPLAY.
+     *
+     * @param subscriberId the subscriber to resume; never {@code null}
+     * @throws IllegalStateException if the subscriber is not in SUSPENDED mode
+     * @throws NullPointerException if {@code subscriberId} is {@code null}
+     */
+    default void resume(String subscriberId) {
+        throw new UnsupportedOperationException("resume not supported");
+    }
+
+    /**
+     * Read-only introspection of a single subscriber.
+     *
+     * @param subscriberId the subscriber to query; never {@code null}
+     * @return the subscriber's current snapshot
+     * @throws IllegalArgumentException if no subscriber with that ID is registered
+     * @throws NullPointerException if {@code subscriberId} is {@code null}
+     */
+    default SubscriberSnapshot subscriberInfo(String subscriberId) {
+        throw new UnsupportedOperationException("subscriberInfo not supported");
+    }
+
+    /**
+     * Read-only introspection of all registered subscribers.
+     *
+     * @return an unmodifiable list of subscriber snapshots (may be empty)
+     */
+    default java.util.List<SubscriberSnapshot> subscribers() {
+        throw new UnsupportedOperationException("subscribers not supported");
+    }
 }
