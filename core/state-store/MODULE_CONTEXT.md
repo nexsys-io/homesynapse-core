@@ -200,3 +200,17 @@ These 5 tests serve as executable documentation of a contract that no other smar
 - **Staleness computation:** `EntityState.stale` must be computed at read time in `StateQueryService.getState()` and `getSnapshot()`. The projection stores `staleAfter` but the `stale` boolean is derived from `Instant.now().isAfter(staleAfter)` at query time.
 - **Testing strategy:** Unit tests for EntityState/StateSnapshot record construction and field validation. Integration tests for StateQueryService round-trip (write via projection, read via query). Concurrency tests for lock-free read safety. Checkpoint round-trip tests (serialize → store → retrieve → deserialize).
 - **Performance targets (from Doc 03 §8):** `StateQueryService.getState()` must complete within 100μs. `getSnapshot()` O(N) but acceptable up to 10,000 entities within 10ms. Projection throughput: 50,000 events/second sustained during replay.
+
+## Phase 3 Cross-Module Context
+
+*Added 2026-05-17 (Post-M3.1 refresh). Phase 3 active — M3.1 `InProcessEventBus` landed 2026-05-17. Next milestone: M3.5a (StateProjection vertical slice). M3 governance: AMD-41/42/43 APPLIED. See `homesynapse-core-docs/design/HomeSynapse_Core_M3_Implementation_Plan_PLAN-M3-CONSOLIDATED-02.md` for the full M3 implementation plan.*
+
+**Phase 3 cross-module decisions register:** `nexsys-hivemind/context/decisions/phase-3-cross-module-decisions.md` is the running list of decisions made during Phase 3 implementation that cross module boundaries. Read this file before starting Phase 3 work on this module — it closes questions the Phase 2 interface spec left open and establishes patterns that every Phase 3 implementation must follow.
+
+**Decisions directly relevant to this module:**
+
+- **D-01** — *DomainEvent non-sealed*: state projection dispatches on event types via `@EventType` registry lookup
+- **AMD-41** — *State Projection Execution Model*: defines how StateProjection processes events, checkpoints, and recovers
+- **M3.5a prerequisite** — *state-store module-info needs `requires com.homesynapse.event.bus`*: When `StateProjection` implements `Subscriber` (M3.5a), the state-store module must gain a `requires` directive for the event-bus module. Currently absent. See M3.1 cross-agent note.
+
+**Read also:** `nexsys-hivemind/context/status/PROJECT_SNAPSHOT.md` for current milestone state; `nexsys-hivemind/context/lessons/coder-lessons.md` for Phase 3 pattern discoveries (including M3.1 entries on default interface methods, contract test capability hooks, and JPMS-enforced JDBC-free constraints).

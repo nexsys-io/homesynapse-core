@@ -471,3 +471,18 @@ This pattern is intentional and should be reused by any future Phase 3 work that
 - **Jackson SerializerCache synchronization under virtual threads.** Jackson's internal `SerializerCache` and `DeserializerCache` use `synchronized` for cache-miss paths. With 7+ subscribers deserializing events concurrently on virtual threads, a cache miss for a rare event type can pin carrier threads during cache population. Mitigation: pre-build all `ObjectReader`/`ObjectWriter` instances at startup for every registered event type (extends the ObjectMapper pre-warm from VT Risk Audit Finding S-08). Use explicit per-type deserialization (`objectReader.readValue(bytes)`) rather than polymorphic `@JsonTypeInfo` dispatch. Validate steady-state deserialization latency during initial throughput testing.
 <!-- Added 2026-04-02: V3 spike validation results -->
 - **Platform thread executor validated (V3 spike, 2026-04-02).** Executor sizing of 1 write + 2 read platform threads validated on Pi 5 NVMe. Per-submission overhead: p50=0.029 ms, p95=0.068 ms, p99=0.105 ms (well below the 1 ms investigation threshold from Doc 04 §10). Burst throughput through executor: 24,473 events/sec (244× design sustained rate). Concurrency test: zero SQLITE_BUSY errors, zero deadlocks across 21 VTs / 60 seconds. JFR pinning confirmation run (`runV3Jfr`) pending — expected zero `jdk.VirtualThreadPinned` events since all sqlite-jdbc calls are confined to platform threads.
+
+## Phase 3 Cross-Module Context
+
+*Added 2026-05-17 (Post-M3.1 refresh). Phase 3 active — M3.1 `InProcessEventBus` landed 2026-05-17. Next milestone: M3.5a (StateProjection vertical slice). M3 governance: AMD-41/42/43 APPLIED. See `homesynapse-core-docs/design/HomeSynapse_Core_M3_Implementation_Plan_PLAN-M3-CONSOLIDATED-02.md` for the full M3 implementation plan.*
+
+**Phase 3 cross-module decisions register:** `nexsys-hivemind/context/decisions/phase-3-cross-module-decisions.md` is the running list of decisions made during Phase 3 implementation that cross module boundaries. Read this file before starting Phase 3 work on this module — it closes questions the Phase 2 interface spec left open and establishes patterns that every Phase 3 implementation must follow.
+
+**Decisions directly relevant to this module:**
+
+- **D-05** — *`@EventType` on every event record*: persistence module's EventTypeRegistry maps annotation strings to event classes
+- **AMD-34..37** — *V001 schema expansion*: V001 now has 25 columns. INSERT_SQL must bind all columns including reservation columns (see coder-lessons.md 2026-05-02 entry on schema reservation column pattern).
+- **AMD-38** — *Checkpoint policy (APPLIED)*: `FixedCheckpointPolicy.HOME_DEFAULT = (200, Duration.ofSeconds(2))` validated by D1 spike.
+- **AMD-40** — *Retention execution model (APPLIED)*: `MaintenanceSubscriber` contract governs purge batch size and maintenance interval.
+
+**Read also:** `nexsys-hivemind/context/status/PROJECT_SNAPSHOT.md` for current milestone state; `nexsys-hivemind/context/lessons/coder-lessons.md` for Phase 3 pattern discoveries (including M3.1 entries on default interface methods, contract test capability hooks, and JPMS-enforced JDBC-free constraints).

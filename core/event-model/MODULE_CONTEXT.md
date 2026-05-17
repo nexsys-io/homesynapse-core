@@ -318,3 +318,17 @@ The stale `InMemoryEventStore` copy at `com.homesynapse.event.InMemoryEventStore
 - **Schema evolution:** `DegradedEvent` is the fallback when upcast fails. Phase 3 must implement upcasters for payload migration between schema versions.
 - **Testing strategy:** Unit tests for all record validation (null rejection, defensive copies). Integration tests for EventPublisher/EventStore round-trip through SQLite. Property-based tests for CausalContext chain integrity. Test that actorRef flows correctly from EventDraft through EventPublisher to EventEnvelope. `EventStoreContractTest` (27 methods) already exists and should be used for `SqliteEventStore` validation.
 - **Performance targets (from Doc 01 §8):** EventPublisher.publish() must complete within 5ms at p99 including WAL sync. EventStore.readFrom() must handle 10K events/second for catch-up reads.
+
+## Phase 3 Cross-Module Context
+
+*Added 2026-05-17 (Post-M3.1 refresh). Phase 3 active — M3.1 `InProcessEventBus` landed 2026-05-17. Next milestone: M3.5a (StateProjection vertical slice). M3 governance: AMD-41/42/43 APPLIED. See `homesynapse-core-docs/design/HomeSynapse_Core_M3_Implementation_Plan_PLAN-M3-CONSOLIDATED-02.md` for the full M3 implementation plan.*
+
+**Phase 3 cross-module decisions register:** `nexsys-hivemind/context/decisions/phase-3-cross-module-decisions.md` is the running list of decisions made during Phase 3 implementation that cross module boundaries. Read this file before starting Phase 3 work on this module — it closes questions the Phase 2 interface spec left open and establishes patterns that every Phase 3 implementation must follow.
+
+**Decisions directly relevant to this module:**
+
+- **D-01** — *DomainEvent non-sealed*: AMD-33 ratified permanently. Event dispatch uses `@EventType` registry lookup, not sealed pattern matching.
+- **D-05** — *`@EventType` on every event record*: All 22+ event records carry `@EventType` annotations. EventTypeRegistry maps strings to classes.
+- **AMD-35** — *EventDraft idempotency key*: EventDraft has 9 fields (9th is `idempotencyKey`, nullable, max 128 chars).
+
+**Read also:** `nexsys-hivemind/context/status/PROJECT_SNAPSHOT.md` for current milestone state; `nexsys-hivemind/context/lessons/coder-lessons.md` for Phase 3 pattern discoveries (including M3.1 entries on default interface methods, contract test capability hooks, and JPMS-enforced JDBC-free constraints).

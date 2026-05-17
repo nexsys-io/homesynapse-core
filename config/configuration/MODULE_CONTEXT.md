@@ -233,3 +233,15 @@ Both declarations are required for the same reason described in the event-model 
 - **`json-schema-validator` dependency:** Already present in `gradle/libs.versions.toml` and `build.gradle.kts` as `implementation(libs.json.schema.validator)`. Ready for Phase 3 implementation.
 - **Testing strategy:** Unit tests for record construction, field validation, Map.copyOf() defensive copying. Integration tests for full loading pipeline round-trip, reload atomicity (ERROR in candidate → active model unchanged), write path optimistic concurrency, secret resolution, schema composition. Performance targets from Doc 06 §10 should be investigation triggers for implementation.
 - **SecretStore.resolve() exception type:** Phase 3 decision — either introduce `SecretNotFoundException` or reuse `IllegalArgumentException`. Document in the implementation.
+
+## Phase 3 Cross-Module Context
+
+*Added 2026-05-17 (Post-M3.1 refresh). Phase 3 active — M3.1 `InProcessEventBus` landed 2026-05-17. Next milestone: M3.5a (StateProjection vertical slice). M3 governance: AMD-41/42/43 APPLIED. See `homesynapse-core-docs/design/HomeSynapse_Core_M3_Implementation_Plan_PLAN-M3-CONSOLIDATED-02.md` for the full M3 implementation plan.*
+
+**Phase 3 cross-module decisions register:** `nexsys-hivemind/context/decisions/phase-3-cross-module-decisions.md` is the running list of decisions made during Phase 3 implementation that cross module boundaries. Read this file before starting Phase 3 work on this module — it closes questions the Phase 2 interface spec left open and establishes patterns that every Phase 3 implementation must follow.
+
+**Decisions directly relevant to this module:**
+
+- **D-01** — *DomainEvent non-sealed*: config change events dispatched via registry lookup
+
+**Read also:** `nexsys-hivemind/context/status/PROJECT_SNAPSHOT.md` for current milestone state; `nexsys-hivemind/context/lessons/coder-lessons.md` for Phase 3 pattern discoveries (including M3.1 entries on default interface methods, contract test capability hooks, and JPMS-enforced JDBC-free constraints).
