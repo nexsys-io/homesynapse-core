@@ -9,7 +9,7 @@
 module com.homesynapse.state {
     requires transitive com.homesynapse.platform;
     requires transitive com.homesynapse.device;
-    requires com.homesynapse.event;
+    requires transitive com.homesynapse.event;
 
     exports com.homesynapse.state;
 }
