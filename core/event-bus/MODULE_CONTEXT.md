@@ -1,10 +1,12 @@
-# event-bus — `com.homesynapse.event.bus` — 16 types — Pull-based event distribution, subscriber management, checkpoint persistence, active runtime lifecycle
+# event-bus — `com.homesynapse.event.bus` — 29 types — Pull-based event distribution, subscriber management, checkpoint persistence, active runtime lifecycle, backpressure metrics
 
 ## Purpose
 
 The event-bus module defines the subscription and delivery contract for HomeSynapse's in-process event distribution system. It is a pull-based, notification-driven bus: the EventBus does not deliver events directly to subscribers — it notifies matching subscribers that new events are available, and subscribers pull events from the EventStore themselves. This design enables backpressure, coalescing, and crash-safe checkpoint-based resumption. The module also defines the CheckpointStore interface for durable subscriber position tracking, ensuring that subscribers resume from the correct position after crashes.
 
 As of M3.2, the module implements the full three-phase REPLAY→TRANSITION→LIVE algorithm (AMD-42 §3.4.2). M3.1 landed the bus skeleton: per-subscriber virtual thread lifecycle, mode FSM (COLD → REPLAY → TRANSITION → LIVE → SUSPENDED), supervisor with exception taxonomy and circuit breaker, in-memory DLQ ring, and per-subscriber isolation guarantees (INV-SUB-ISO-01..06). M3.2 added: `ReplayDriver` (page-replay loop from persisted checkpoint with AMD-38 checkpoint cadence and overflow restart), `TransitionCoordinator` (drains the `ReplayWindowQueue` with gap detection, atomically promotes to LIVE, fires `onCaughtUp()` exactly once), the bounded thread-safe `ReplayWindowQueue` (10,000-entry cap, latched overflow flag), and the LIVE pull loop with per-event checkpointing.
+
+M3.3 adds backpressure metrics and observability (AMD-43): the `BusMetrics` typed facade with JFR-native production implementation, the seven canonical bus metric names (Decision 1 of M3.3 deliberation), hysteresis-based `QueueSaturationHealthCheck`, and per-subscriber `DerivedWriteRateLimit` token-bucket. The bus's notification path now samples writer queue depth via an injected `IntSupplier` (DEC-M3-14), emits the depth gauge on every notification, increments a publisher-blocked counter when depth exceeds 5000 (INV-BUS-02 — record only, never block), and records subscriber lag after each successful LIVE delivery. No new ArchUnit rules; no new `requires` directives (jdk.jfr is a platform module).
 
 ## Design Doc Reference
 
@@ -18,6 +20,7 @@ As of M3.2, the module implements the full three-phase REPLAY→TRANSITION→LIV
 ```
 module com.homesynapse.event.bus {
     requires transitive com.homesynapse.event;
+    requires jdk.jfr;
 
     exports com.homesynapse.event.bus;
 }
@@ -25,13 +28,15 @@ module com.homesynapse.event.bus {
 
 The `requires transitive` on event-model means any module that reads `com.homesynapse.event.bus` automatically gets access to all event types, `EventEnvelope`, `EventPublisher`, `EventStore`, and (transitively) all platform-api identity types.
 
+The non-transitive `requires jdk.jfr` (added M3.3) lets the bus emit JFR custom events from `BusMetricsJfr`. Despite shipping with the JDK, `jdk.jfr` is NOT in `java.base` and is NOT auto-required — JPMS demands the explicit directive. Consumers of `com.homesynapse.event.bus` do NOT see `jdk.jfr` transitively: the JFR event classes are package-private implementation details and never appear in exported API signatures.
+
 ## Package Structure
 
 - **`com.homesynapse.event.bus`** — All types in a single flat package: the EventBus interface, subscriber registration descriptor, subscription filter, checkpoint store contract, runtime callback interface, mode enum, snapshot record, read connection abstractions, and the production InProcessEventBus implementation.
 
 ## Complete Type Inventory
 
-### Public Types (9)
+### Public Types (10)
 
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
@@ -44,20 +49,33 @@ The `requires transitive` on event-model means any module that reads `com.homesy
 | `SubscriberSnapshot` | record (5 fields) | Point-in-time introspection of subscriber state | Fields: `subscriberId`, `mode`, `checkpoint`, `dlqDepth`, `crashCount`. |
 | `SubscriberReadConnectionFactory` | functional interface | Factory for per-subscriber read executors (keeps bus JDBC-free) | Called once per `subscribeRuntime()`. Returns SubscriberReadExecutor. |
 | `SubscriberReadExecutor` | interface extends AutoCloseable | Dedicated platform-thread read executor per subscriber | Method: `<T> executeRead(Callable<T>)`. Encapsulates platform thread + SQLite connection. |
+| `BusMetrics` | interface (6 methods + 2 factories) | M3.3 — typed facade for the seven canonical bus metric emissions (AMD-43 §3.6.2) | Methods: `recordPublishLatency`, `incrementPublisherBlocked`, `recordWriterQueueDepth`, `recordSubscriberLag`, `recordDerivedWriteAccepted`, `recordDerivedWriteParked`. Static factories: `noop()` and `jfr()`. All emissions are fire-and-forget; thread-safe. |
 
-### Package-Private Types (7)
+### Package-Private Types (19)
 
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
-| `InProcessEventBus` | class | Production EventBus implementation | Constructor: `(EventStore, CheckpointStore, Clock, SubscriberReadConnectionFactory)`. Manages passive registry (Phase 2 compat) and active registry (full runtime). `notifyEvent` routes by subscriber mode: REPLAY/TRANSITION → ReplayWindowQueue; LIVE → pendingPositions + unpark; COLD/SUSPENDED → skip. The queue's lock is held across the mode-read + routing decision to close the race with the TRANSITION→LIVE CAS. |
+| `InProcessEventBus` | class | Production EventBus implementation | Constructors: `(EventStore, CheckpointStore, Clock, SubscriberReadConnectionFactory)` (convenience — wires `BusMetrics.noop()` and `() -> 0`) and `(EventStore, CheckpointStore, Clock, SubscriberReadConnectionFactory, BusMetrics, IntSupplier)` (production, M3.3). `notifyEvent` samples the IntSupplier on entry, emits depth gauge + publisher-blocked counter (DEC-M3-14, AMD-43 §3.6.2), and records publish latency on exit. `liveLoop` records subscriber lag after each successful supervisor delivery. Routes by subscriber mode: REPLAY/TRANSITION → ReplayWindowQueue; LIVE → pendingPositions + unpark; COLD/SUSPENDED → skip. The queue's lock is held across the mode-read + routing decision. Constant: `PUBLISHER_BLOCKED_DEPTH_THRESHOLD = 5000` (AMD-43 §3.6.2). |
 | `SubscriberSupervisor` | class | Per-subscriber exception handling, backoff, circuit breaker | Exception taxonomy: Error/IOException/checked→SUSPENDED; RuntimeException→backoff. MIN=3s, MAX=30s, jitter=0.2. Rolling 10-min crash window, 5 crashes → SUSPENDED. |
 | `SubscriberDlq` | class | Per-subscriber in-memory DLQ ring (cap 1024) | Methods: `park(DlqEntry)`, `depth()`, `clear()`. Persistent overflow wiring deferred to M3.5b. Also receives `CAUGHT_UP_TRANSITION` synthetic entries on `onCaughtUp()` exceptions (AMD-42 §3.4.3). |
 | `ReplayWindowQueue` | class | Bounded thread-safe queue for events arriving during REPLAY/TRANSITION | Bound `MAX_CAPACITY = 10_000`. Internal `ReentrantLock` (LTD-11). Methods: `enqueue(long)→boolean` (false on overflow, latches `overflowed` flag), `poll()→Long`, `size()`, `isEmpty()`, `clear()`, `overflowed()`, `lock()/unlock()` for compound atomic operations. The `ReplayDriver` polls `overflowed()` and restarts REPLAY from the persisted checkpoint on overflow. |
-| `SubscriberRuntime` | class | Internal bundle: VT, executor, supervisor, DLQ, mode ref, queue, lastReplayedPosition | Holds all per-subscriber resources. `lastReplayedPosition` (AtomicLong) is the gap-detection high-water mark consumed by `TransitionCoordinator`. Closed on unsubscribe. |
-| `ReplayDriver` | class | Drives the REPLAY phase: pages event log from persisted checkpoint to live tail, delivers matches via supervisor, writes checkpoints per AMD-38 cadence (200 events OR 2 s), handles `ReplayWindowQueue` overflow restart, CASes mode REPLAY→TRANSITION on tail. Constants: `MAX_REPLAY_PAGE = 500`, `CHECKPOINT_EVENT_THRESHOLD = 200`, `CHECKPOINT_MAX_INTERVAL_SECONDS = 2`. Reads route through `SubscriberReadExecutor` (AMD-26/27, INV-SUB-ISO-02). | One instance per subscriber-VT activation. |
-| `TransitionCoordinator` | class | Drains `ReplayWindowQueue` with gap detection (`globalPosition > lastReplayedPosition`), atomically CASes mode TRANSITION→LIVE under the queue's lock (closes race with concurrent `notifyEvent` enqueues), fires `onCaughtUp()` exactly once per process per subscriber. `onCaughtUp` exceptions become a synthetic DLQ entry at marker position `CAUGHT_UP_TRANSITION_MARKER = -1L` (AMD-42 §3.4.3). | One instance per subscriber-VT activation. |
+| `SubscriberRuntime` | class | Internal bundle: VT, executor, supervisor, DLQ, mode ref, queue, lastReplayedPosition, optional rateLimit | Holds all per-subscriber resources. M3.3 adds a nullable `DerivedWriteRateLimit` field (only derivation-producing subscribers carry one; wired in M3.5a). `lastReplayedPosition` (AtomicLong) is the gap-detection high-water mark consumed by `TransitionCoordinator`. Closed on unsubscribe (closes rateLimit if present). |
+| `ReplayDriver` | class | Drives the REPLAY phase | Pages event log from persisted checkpoint to live tail, delivers matches via supervisor, writes checkpoints per AMD-38 cadence (200 events OR 2 s), handles `ReplayWindowQueue` overflow restart, CASes mode REPLAY→TRANSITION on tail. Constants: `MAX_REPLAY_PAGE = 500`, `CHECKPOINT_EVENT_THRESHOLD = 200`, `CHECKPOINT_MAX_INTERVAL_SECONDS = 2`. Reads route through `SubscriberReadExecutor` (AMD-26/27, INV-SUB-ISO-02). One instance per subscriber-VT activation. |
+| `TransitionCoordinator` | class | Drains `ReplayWindowQueue` with gap detection (`globalPosition > lastReplayedPosition`), atomically CASes mode TRANSITION→LIVE under the queue's lock (closes race with concurrent `notifyEvent` enqueues), fires `onCaughtUp()` exactly once per process per subscriber. `onCaughtUp` exceptions become a synthetic DLQ entry at marker position `CAUGHT_UP_TRANSITION_MARKER = -1L` (AMD-42 §3.4.3). One instance per subscriber-VT activation. |
+| `NoopBusMetrics` | class | M3.3 — singleton no-op BusMetrics implementation | Used by the convenience `InProcessEventBus` constructor and `InMemoryEventBus`. Returned by `BusMetrics.noop()`. All methods are no-ops. |
+| `BusMetricsJfr` | class | M3.3 — JFR-native BusMetrics implementation (Decision 1) | Each method constructs and commits the corresponding `jdk.jfr.Event` subclass. Thread-local buffer write, no synchronization, no I/O. Returned by `BusMetrics.jfr()`. Consumed by the existing `MetricsStreamBridge` in `observability/observability` via its `RecordingStream`. |
+| `BusPublishLatencyEvent` | class extends jdk.jfr.Event | M3.3 — `homesynapse.bus.publish.latency` histogram | Field: `long latencyMicros`. `@StackTrace(false)` mandatory for hot-path performance. |
+| `BusPublisherBlockedEvent` | class extends jdk.jfr.Event | M3.3 — `homesynapse.bus.publisher.blocked.count` counter | Instant event, no payload beyond JFR timestamp. |
+| `BusWriterQueueDepthEvent` | class extends jdk.jfr.Event | M3.3 — `homesynapse.bus.writer.queue.depth` gauge | Field: `int depth`. Sampled on every publish notification (fresh value per DEC-M3-14). |
+| `BusSubscriberLagEvent` | class extends jdk.jfr.Event | M3.3 — combined event for `homesynapse.bus.subscriber.lag.events` and `homesynapse.bus.subscriber.lag.millis` | Fields: `String subscriberId, long lagEvents, long lagMillis`. Two logical metric names share a single JFR event class because they share an observation point. |
+| `BusWriteAcceptedEvent` | class extends jdk.jfr.Event | M3.3 — `homesynapse.bus.subscriber.derived_writes.accepted` counter | Field: `String subscriberId`. Emitted by `DerivedWriteRateLimit.acquire()` on token availability. |
+| `BusWriteParkedEvent` | class extends jdk.jfr.Event | M3.3 — `homesynapse.bus.subscriber.derived_writes.parked` counter | Field: `String subscriberId`. Emitted by `DerivedWriteRateLimit.acquire()` when a thread must park. |
+| `QueueSaturationHealthCheck` | class | M3.3 — hysteresis health check on writer queue depth (AMD-43 §3.6.3) | Constructor: `(IntSupplier, Clock, int warnDepth, int criticalDepth, int saturationTicks, Consumer<HealthSignal>)`. Defaults: warn=5000, critical=10000, saturationTicks=5. `tick()` advances the state machine by one tick — call from a 1-second scheduler in production. Re-emit cadence: CRITICAL 10 s, WARN 30 s. Recovery requires 5 consecutive below-threshold ticks. |
+| `HealthSignal` | record (4 fields) | M3.3 — payload of a health emission | Fields: `level` (HealthLevel), `channel` (String), `depth` (int), `timestamp` (Instant). |
+| `HealthLevel` | enum (3 values) | M3.3 — bus-internal severity level: INFO, WARN, CRITICAL | Distinct from the observability module's HealthStatus — that translation happens in the lifecycle/observability bridge layer. |
+| `DerivedWriteRateLimit` | class implements AutoCloseable | M3.3 — per-subscriber token bucket for derived-write throttling (AMD-43 §3.6.4) | Constructors: `(int capacity, Clock, BusMetrics, String)` and `(Clock, BusMetrics, String)` using default capacity 200. Bucket capacity 200, refill 10 tokens/50 ms (200 tokens/sec effective). `acquire()` blocks on a `Semaphore` when empty (VT-safe — no carrier pinning). `refill()` adds tokens and releases parked threads. `close()` releases parked threads and marks closed. M3.3 only lands the standalone primitive; M3.5a wires it onto StateProjection per DEC-M3-15. |
 
-**Total: 9 public types + 7 package-private types = 16 production types.**
+**Total: 10 public types + 19 package-private types = 29 production types.**
 
 ## Dependencies
 
@@ -112,7 +130,7 @@ None directly — event-bus defines contracts that are consumed by the persisten
 | Amendment | Status | Relevance to this module |
 |---|---|---|
 | **AMD-42** — Subscriber Lifecycle and Isolation | APPLIED (2026-05-16) | Mandates the mode state machine, per-subscriber resources, supervisor discipline, isolation guarantees. Fully implemented in M3.1 (bus skeleton, FSM, supervisor, isolation). M3.2 lands REPLAY→LIVE algorithm. |
-| **AMD-43** — Backpressure and Observability | APPLIED (2026-05-16) | Mandates non-blocking publish, metric names, QueueSaturationHealthCheck. M3.3 scope. |
+| **AMD-43** — Backpressure and Observability | APPLIED (2026-05-16) | M3.3 implemented: JFR-native emission (Decision 1), `BusMetrics` typed facade, six JFR event classes for the seven canonical metric names, IntSupplier queue depth (DEC-M3-14), `QueueSaturationHealthCheck` with 5-tick hysteresis, `DerivedWriteRateLimit` standalone (DEC-M3-15). No new ArchUnit rules added. |
 | **NO_DIRECT_TIME_ACCESS** (ArchUnit rule) | ENFORCED | All time access through injected Clock. No Instant.now(), System.currentTimeMillis(), Clock.systemUTC() anywhere in production or test code. |
 
 ## Sealed Hierarchies
@@ -158,6 +176,24 @@ None. This module contains no sealed types.
 
 **GOTCHA: M3.2's LIVE loop writes a per-event checkpoint after each successful delivery.** This differs from REPLAY's AMD-38 batched cadence (200 events OR 2 s). Rationale: LIVE delivery is event-by-event with single-position reads, so per-event checkpointing has negligible overhead and minimises lag against the log head. AMD-38's WAL-pressure concern applies to the continuous-reader pattern in REPLAY, not to LIVE.
 
+**GOTCHA: JFR-native emission is the M3.3 decision (Decision 1).** A typed primitive adapter layer (Counter/Gauge/Histogram interfaces in observability module) will be needed when a pull-based metrics consumer (Prometheus, OTLP) is introduced — likely M4+. The adapter wraps the JFR events; it does not replace the emission path. This is **accepted design debt, not a gap**.
+
+**GOTCHA: Hysteresis 5-tick recovery threshold is not conservative — it is architecturally correct for single-node deployment.** HomeSynapse has no redundancy. A false recovery means the operator sees INFO `writer.queue.recovered`, stops investigating, and is blindsided by the next CRITICAL. The 5-tick symmetric threshold prevents flapping in the failure domain where flapping is most dangerous: a system with no redundancy. Do not reduce recovery ticks below 5 without a deliberate amendment.
+
+**GOTCHA: `BusMetricsJfr` is package-private.** Construct via `BusMetrics.jfr()` from the lifecycle module's composition root. The same applies to `NoopBusMetrics` (use `BusMetrics.noop()`). Tests can construct their own `BusMetrics` implementation directly (e.g. `BusMetricsRecorder` in `EventBusContractTest`).
+
+**GOTCHA: Writer queue depth is observed via `IntSupplier` injection (DEC-M3-14), NOT through `core/observability`.** The lifecycle module passes `() -> writeCoordinator.queueSize()` to `InProcessEventBus` at construction time. The bus holds no reference to persistence types. This overrides PLAN-M3-CONSOLIDATED-02 §7.2 and §7.9 which prescribed routing through observability. The justification is the single-value, zero-observability-module-impact tradeoff documented in the M3.3 deliberation.
+
+**GOTCHA: `DerivedWriteRateLimit` is standalone-independent (DEC-M3-15).** The class has no compile-time dependency on StateProjection — it depends only on `Clock`, `BusMetrics`, and `Semaphore`. The M3.5a STOP gate prescribed by PLAN-M3 §7.9 does NOT apply to this milestone because the component is independently testable with mock collaborators. The pattern formalised here: M3.5a STOP gates are removed whenever the gated component is independently testable without StateProjection.
+
+**GOTCHA: `BusMetrics.recordPublishLatency` is recorded by `InProcessEventBus.notifyEvent` itself, not by the upstream `EventPublisher`.** The bus measures the wall-clock duration of its notification fan-out as the bus-side contribution to overall publish latency. End-to-end publish latency from `EventPublisher.publish()` (persist + notify) is a future production-wiring concern. The metric name is canonical (AMD-43 §3.6.2); the measurement point is a deliberate scope-trimmed choice for M3.3.
+
+**GOTCHA: `BusSubscriberLagEvent` carries both lag-events and lag-millis in a single JFR event.** The seven logical metric names map to six JFR event classes because subscriber lag has both observations emitted from a single observation point in `liveLoop` after successful supervisor delivery. The JFR consumer (`MetricsStreamBridge`) can produce two separate `MetricSnapshot`s from one event payload.
+
+**GOTCHA: `lagEvents` approximates the queue-tail distance via `runtime.pendingPositions().size()`.** This avoids an extra event-store query on every successful delivery (which would burn carrier-thread budget on the read executor). The approximation is correct in the steady state but lags an extra catch-up burst by one delivery interval. Production wiring may revisit this if a direct writer-tail observation becomes available cheaply.
+
+**GOTCHA: `QueueSaturationHealthCheck` does NOT own a scheduler.** Production wiring (M3.5a or later lifecycle work) calls `tick()` from a 1-second `ScheduledExecutorService` task. Tests call `tick()` directly with a fixed clock to keep timing deterministic — the constructor takes only the algorithm parameters, not a scheduler. The brief's reference to a "shared supervisor scheduler" is forward-looking; the supervisor does not currently own one.
+
 **GOTCHA: `subscriberTransitionsColdToReplayOnFirstScheduling` was relaxed in M3.2.** With M3.2's full algorithm, an empty store completes COLD→REPLAY→TRANSITION→LIVE in microseconds — the test now asserts `isIn(REPLAY, TRANSITION, LIVE)` rather than `isEqualTo(REPLAY)`. The same broadening applies to `subscribeRuntimeStartsInColdMode`. The original strict mode equality was an M3.1 artifact of the placeholder loop that never advanced past REPLAY.
 
 ## Test Fixtures and Contract Tests
@@ -183,13 +219,13 @@ The `testFixtures` source set now provides five types:
 - **Tier 7 — Supervisor (5 active tests)** — M3.1
 - **Tier 8 — Lifecycle (1 active test)** — M3.1
 - **Tier 9 — REPLAY→LIVE Transition (5 active tests + 1 disabled @Disabled("M3.5a") for `reconciliationOnVersionMismatch`)** — M3.2
-- **Tier 10 — Backpressure and Metrics (4 disabled @Disabled("M3.3"))**
+- **Tier 10 — Backpressure and Metrics (6 active tests, M3.3)** — `publishDoesNotBlockAt5000` (INV-BUS-02), `busMetricsRecordPublishLatency`, `publisherBlockedCountIncrementsAbove5000`, `publisherBlockedCountNotIncrementedBelow5000`, `writerQueueDepthGaugeSampledOnNotify`, `subscriberLagPopulatedAfterDelivery`. All gated on active runtime AND access to `BusMetricsRecorder` + `AtomicInteger queueDepth()` harness hooks. `BusMetricsRecorder` is a public static nested class on `EventBusContractTest` that records all 7 canonical metric emissions for assertion.
 
 ## Phase 3 Notes
 
 - **M3.1 landed:** Bus skeleton, mode FSM, supervisor, per-subscriber isolation, in-memory DLQ, circuit breaker. Production `InProcessEventBus` with full 8-method interface.
 - **M3.2 complete (2026-05-17):** REPLAY→TRANSITION→LIVE algorithm landed. New types `ReplayDriver` and `TransitionCoordinator`. `ReplayWindowQueue` completed with bounded 10,000-entry capacity, latched overflow flag, and lock exposure for compound atomic operations. `SubscriberRuntime` gained `lastReplayedPosition` (AtomicLong) for gap detection. `InProcessEventBus` `subscriberLoop` now drives Driver → Coordinator → LIVE pull loop; `notifyEvent` routes by mode (REPLAY/TRANSITION → queue, LIVE → pendingPositions, COLD/SUSPENDED → skip). LIVE delivery writes a per-event checkpoint. REPLAY follows AMD-38 cadence (200 events OR 2 s). Tier 9 contract suite: 5 active tests + 1 retagged to `@Disabled("M3.5a")` for `reconciliationOnVersionMismatch`. New `ReplayTransitionIT` exercises 1,000 + 500 event end-to-end run across a simulated restart with concurrent publish.
-- **M3.3 pending:** BusMetrics, QueueSaturationHealthCheck, WriterQueueGauge, per-subscriber DerivedWriteRateLimit.
-- **M3.5a pending:** StateProjection vertical slice. State-store module-info will need `requires com.homesynapse.event.bus`. The Tier 9 `reconciliationOnVersionMismatch` test re-tagged to `@Disabled("M3.5a")` will activate when StateProjection and ReconciliationPass land.
+- **M3.3 complete (2026-05-17):** Backpressure metrics and observability landed (AMD-43). New types: `BusMetrics` (public interface + `noop()`/`jfr()` factories), `NoopBusMetrics`, `BusMetricsJfr`, six JFR custom event classes (`BusPublishLatencyEvent`, `BusPublisherBlockedEvent`, `BusWriterQueueDepthEvent`, `BusSubscriberLagEvent`, `BusWriteAcceptedEvent`, `BusWriteParkedEvent`), `QueueSaturationHealthCheck`, `HealthSignal` (record), `HealthLevel` (enum), `DerivedWriteRateLimit`. `InProcessEventBus` constructor extended with `(BusMetrics, IntSupplier)` parameters (DEC-M3-14 — no persistence module dependency); `notifyEvent` samples depth, emits depth gauge + publisher-blocked counter, and records bus-side publish latency; `liveLoop` records subscriber lag after each successful supervisor delivery. `SubscriberRuntime` gains a nullable `DerivedWriteRateLimit` field (wired in M3.5a per DEC-M3-15). Tier 10 contract suite: 5 active tests (busMetricsRecordPublishLatency, publisherBlockedCountIncrementsAbove5000, publisherBlockedCountNotIncrementedBelow5000, writerQueueDepthGaugeSampledOnNotify, subscriberLagPopulatedAfterDelivery) with a `BusMetricsRecorder` public static fixture nested in `EventBusContractTest`. New unit tests: `BusMetricsJfrTest`, `QueueSaturationHealthCheckTest`, `DerivedWriteRateLimitTest`. No new ArchUnit rules; no new `requires` directives in module-info.
+- **M3.5a pending:** StateProjection vertical slice. State-store module-info will need `requires com.homesynapse.event.bus`. The Tier 9 `reconciliationOnVersionMismatch` test re-tagged to `@Disabled("M3.5a")` will activate when StateProjection and ReconciliationPass land. M3.5a is also where StateProjection's `SubscriberRuntime` will carry a `DerivedWriteRateLimit` instance (the field exists in M3.3 but is `null` for all subscribers).
 - **M3.5b pending:** Persistent DLQ wiring (DeadLetter record, SqliteDeadLetterStore, V004 DLQ indices). The in-memory DLQ ring is the current implementation. M3.2's synthetic `CAUGHT_UP_TRANSITION` marker (`eventPosition = -1L`) is recorded in the in-memory DLQ on `onCaughtUp()` exceptions per AMD-42 §3.4.3; persistent wiring is part of M3.5b.
 - **Performance targets:** Bus notification fan-out within 1ms for 20 subscribers. CheckpointStore.writeCheckpoint() within 1ms.

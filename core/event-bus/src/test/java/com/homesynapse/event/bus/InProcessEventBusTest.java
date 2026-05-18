@@ -15,6 +15,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -39,6 +40,8 @@ class InProcessEventBusTest extends EventBusContractTest {
     private InMemoryEventStore eventStore;
     private InMemoryCheckpointStore checkpointStore;
     private RecordingReadConnectionFactory recordingFactory;
+    private BusMetricsRecorder metricsRecorder;
+    private AtomicInteger queueDepth;
     private InProcessEventBus bus;
 
     /** Creates a new test instance. */
@@ -75,8 +78,11 @@ class InProcessEventBusTest extends EventBusContractTest {
         eventStore = new InMemoryEventStore(mutableClock);
         checkpointStore = new InMemoryCheckpointStore();
         recordingFactory = new RecordingReadConnectionFactory();
+        metricsRecorder = new BusMetricsRecorder();
+        queueDepth = new AtomicInteger(0);
         bus = new InProcessEventBus(eventStore, checkpointStore,
-                mutableClock, recordingFactory);
+                mutableClock, recordingFactory,
+                metricsRecorder, queueDepth::get);
     }
 
     @Override
@@ -102,6 +108,16 @@ class InProcessEventBusTest extends EventBusContractTest {
     @Override
     protected void advanceClock(Duration duration) {
         mutableClock.advance(duration);
+    }
+
+    @Override
+    protected BusMetricsRecorder metrics() {
+        return metricsRecorder;
+    }
+
+    @Override
+    protected AtomicInteger queueDepth() {
+        return queueDepth;
     }
 
     // ──────────────────────────────────────────────────────────────────

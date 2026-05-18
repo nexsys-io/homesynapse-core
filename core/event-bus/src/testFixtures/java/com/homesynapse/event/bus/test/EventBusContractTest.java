@@ -12,6 +12,7 @@ import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.EventStore;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectType;
+import com.homesynapse.event.bus.BusMetrics;
 import com.homesynapse.event.bus.CheckpointStore;
 import com.homesynapse.event.bus.EventBus;
 import com.homesynapse.event.bus.Subscriber;
@@ -167,6 +168,35 @@ public abstract class EventBusContractTest {
      */
     protected void advanceClock(Duration duration) {
         // No-op by default — implementations override.
+    }
+
+    /**
+     * Provides the recording metrics view for Tier 10 assertions (M3.3).
+     *
+     * <p>Returns {@code null} by default. Active-runtime implementations
+     * override to expose the {@link BusMetricsRecorder} wired into the bus
+     * under test, allowing per-test inspection of the seven canonical
+     * metric emissions (AMD-43 §3.6.2).</p>
+     *
+     * @return the recorder, or {@code null} if not applicable
+     */
+    protected BusMetricsRecorder metrics() {
+        return null;
+    }
+
+    /**
+     * Provides the controllable queue-depth source the bus reads on every
+     * publish notification (DEC-M3-14, M3.3). Tests mutate this to drive the
+     * publisher-blocked counter and the writer-queue-depth gauge.
+     *
+     * <p>Returns {@code null} by default. Active-runtime implementations
+     * override to expose the {@link AtomicInteger} wired into the bus's
+     * {@link java.util.function.IntSupplier IntSupplier}.</p>
+     *
+     * @return the mutable depth source, or {@code null} if not applicable
+     */
+    protected AtomicInteger queueDepth() {
+        return null;
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1440,12 +1470,11 @@ public abstract class EventBusContractTest {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Tier 10: Backpressure and Metrics (M3.3 — disabled placeholders)
+    // Tier 10: Backpressure and Metrics (M3.3 — AMD-43 §3.6.2)
     // ──────────────────────────────────────────────────────────────────
 
     @Nested
     @DisplayName("Tier 10 — Backpressure and Metrics (M3.3)")
-    @Disabled("M3.3")
     class BackpressureAndMetrics {
 
         /** Creates a new test instance. */
@@ -1453,28 +1482,235 @@ public abstract class EventBusContractTest {
             // Explicit constructor per -Xlint:all -Werror requirement.
         }
 
-        @Test
-        @DisplayName("publish does not block at 5000")
-        void publishDoesNotBlockAt5000() {
-            // M3.3 placeholder
+        @BeforeEach
+        void assumeActiveRuntime() {
+            assumeTrue(supportsActiveRuntime(),
+                    "Skipped: implementation does not support active runtime");
+            assumeTrue(metrics() != null,
+                    "Skipped: implementation does not expose BusMetricsRecorder");
+            assumeTrue(queueDepth() != null,
+                    "Skipped: implementation does not expose queue depth control");
         }
 
         @Test
-        @DisplayName("publisher blocked count increments")
-        void publisherBlockedCountIncrements() {
-            // M3.3 placeholder
+        @DisplayName("busMetrics record publish latency")
+        void busMetricsRecordPublishLatency() throws SequenceConflictException {
+            subscribeAndTrack("lat-sub", SubscriptionFilter.all(), false);
+
+            publishAndNotify(TestEventFactory.draft());
+
+            assertThat(metrics().publishLatencyRecorded())
+                    .as("Publish-latency metric recorded at least once")
+                    .isTrue();
+            // Duration is non-negative by definition (Duration.between of clock instants).
+            assertThat(metrics().lastPublishLatency())
+                    .isNotNull()
+                    .satisfies(d -> assertThat(d.isNegative()).isFalse());
         }
 
         @Test
-        @DisplayName("writer queue depth gauge samples on enqueue and dequeue")
-        void writerQueueDepthGaugeSamplesOnEnqueueAndDequeue() {
-            // M3.3 placeholder
+        @DisplayName("publisher blocked count increments when queue depth above 5000")
+        void publisherBlockedCountIncrementsAbove5000() throws SequenceConflictException {
+            subscribeAndTrack("block-sub", SubscriptionFilter.all(), false);
+            queueDepth().set(6000);
+
+            publishAndNotify(TestEventFactory.draft());
+
+            assertThat(metrics().publisherBlockedCount())
+                    .as("publisherBlocked increments when queue depth > 5000")
+                    .isGreaterThanOrEqualTo(1);
         }
 
         @Test
-        @DisplayName("subscriber lag gauge populated after delivery")
-        void subscriberLagGaugePopulatedAfterDelivery() {
-            // M3.3 placeholder
+        @DisplayName("publisher blocked count NOT incremented when queue depth below 5000")
+        void publisherBlockedCountNotIncrementedBelow5000() throws SequenceConflictException {
+            subscribeAndTrack("nonblock-sub", SubscriptionFilter.all(), false);
+            queueDepth().set(4000);
+
+            publishAndNotify(TestEventFactory.draft());
+
+            assertThat(metrics().publisherBlockedCount())
+                    .as("publisherBlocked must NOT increment at depth 4000")
+                    .isZero();
         }
+
+        @Test
+        @DisplayName("writer queue depth gauge sampled on notify")
+        void writerQueueDepthGaugeSampledOnNotify() throws SequenceConflictException {
+            subscribeAndTrack("depth-sub", SubscriptionFilter.all(), false);
+            queueDepth().set(123);
+
+            publishAndNotify(TestEventFactory.draft());
+
+            assertThat(metrics().recordedDepths())
+                    .as("Depth gauge sampled with the supplier's current value")
+                    .contains(123);
+        }
+
+        @Test
+        @DisplayName("publish does not block at depth 5000 (INV-BUS-02)")
+        void publishDoesNotBlockAt5000() throws SequenceConflictException {
+            subscribeAndTrack("nonblock-sub", SubscriptionFilter.all(), false);
+
+            // Steady-state publish baseline at depth 0.
+            queueDepth().set(0);
+            publishAndNotify(TestEventFactory.draft());
+            // High-pressure publish at depth above blocked threshold.
+            queueDepth().set(8000);
+            publishAndNotify(TestEventFactory.draft());
+
+            // INV-BUS-02 contract: depth above threshold does NOT cause publish
+            // to throw, block indefinitely, or alter its return semantics. Both
+            // publishes completed and returned envelopes without error.
+            assertThat(metrics().publishLatencyRecorded())
+                    .as("Both publishes completed without blocking")
+                    .isTrue();
+            assertThat(metrics().publisherBlockedCount())
+                    .as("Second publish observed depth above 5000 and recorded the counter")
+                    .isGreaterThanOrEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("subscriber lag populated after delivery")
+        void subscriberLagPopulatedAfterDelivery()
+                throws SequenceConflictException, InterruptedException {
+            CopyOnWriteArrayList<Long> delivered = new CopyOnWriteArrayList<>();
+            Subscriber recorder = env -> delivered.add(env.globalPosition());
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("lag-sub", SubscriptionFilter.all(), false),
+                    recorder);
+            awaitMode("lag-sub", SubscriberMode.LIVE);
+
+            EventEnvelope env = publishAndNotify(TestEventFactory.draft());
+
+            // Wait briefly for the LIVE delivery loop to process.
+            for (int i = 0; i < 50 && delivered.isEmpty(); i++) {
+                Thread.sleep(40);
+            }
+            assertThat(delivered).contains(env.globalPosition());
+
+            // Wait briefly for the lag metric to surface after delivery.
+            for (int i = 0; i < 50 && metrics().lagRecordsFor("lag-sub").isEmpty(); i++) {
+                Thread.sleep(40);
+            }
+            assertThat(metrics().lagRecordsFor("lag-sub"))
+                    .as("Lag metric recorded after successful delivery")
+                    .isNotEmpty();
+            BusMetricsRecorder.LagRecord rec = metrics().lagRecordsFor("lag-sub").get(0);
+            assertThat(rec.lagEvents()).isGreaterThanOrEqualTo(0L);
+            assertThat(rec.lagMillis().isNegative()).isFalse();
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // BusMetricsRecorder — recording test fixture for AMD-43 §3.6.2 metrics
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Recording {@link BusMetrics} implementation for contract-test assertions.
+     *
+     * <p>Captures the seven canonical bus metric emissions in thread-safe
+     * collections so Tier 10 tests can assert against them. Concrete contract
+     * subclasses construct one in their reset hook and pass it into the bus's
+     * production constructor.</p>
+     */
+    public static final class BusMetricsRecorder implements BusMetrics {
+
+        private final AtomicInteger publisherBlocked = new AtomicInteger(0);
+        private final java.util.List<Integer> depths =
+                new CopyOnWriteArrayList<>();
+        private final java.util.List<Duration> publishLatencies =
+                new CopyOnWriteArrayList<>();
+        private final Map<String, java.util.List<LagRecord>> lagBySubscriber =
+                new ConcurrentHashMap<>();
+        private final java.util.List<String> derivedWritesAccepted =
+                new CopyOnWriteArrayList<>();
+        private final java.util.List<String> derivedWritesParked =
+                new CopyOnWriteArrayList<>();
+
+        /** Public constructor — used by contract test subclasses. */
+        public BusMetricsRecorder() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        @Override
+        public void recordPublishLatency(Duration duration) {
+            publishLatencies.add(duration);
+        }
+
+        @Override
+        public void incrementPublisherBlocked() {
+            publisherBlocked.incrementAndGet();
+        }
+
+        @Override
+        public void recordWriterQueueDepth(int depth) {
+            depths.add(depth);
+        }
+
+        @Override
+        public void recordSubscriberLag(String subscriberId, long lagEvents,
+                                        Duration lagMillis) {
+            lagBySubscriber
+                    .computeIfAbsent(subscriberId, k -> new CopyOnWriteArrayList<>())
+                    .add(new LagRecord(lagEvents, lagMillis));
+        }
+
+        @Override
+        public void recordDerivedWriteAccepted(String subscriberId) {
+            derivedWritesAccepted.add(subscriberId);
+        }
+
+        @Override
+        public void recordDerivedWriteParked(String subscriberId) {
+            derivedWritesParked.add(subscriberId);
+        }
+
+        /** @return the count of publisherBlocked emissions. */
+        public int publisherBlockedCount() {
+            return publisherBlocked.get();
+        }
+
+        /** @return the recorded queue depth observations (in emission order). */
+        public java.util.List<Integer> recordedDepths() {
+            return java.util.List.copyOf(depths);
+        }
+
+        /** @return {@code true} if any publish-latency emission has occurred. */
+        public boolean publishLatencyRecorded() {
+            return !publishLatencies.isEmpty();
+        }
+
+        /** @return the most recent publish-latency emission, or {@code null}. */
+        public Duration lastPublishLatency() {
+            return publishLatencies.isEmpty() ? null
+                    : publishLatencies.get(publishLatencies.size() - 1);
+        }
+
+        /** @param subscriberId the subscriber id
+         *  @return lag records emitted for that subscriber (possibly empty). */
+        public java.util.List<LagRecord> lagRecordsFor(String subscriberId) {
+            return java.util.List.copyOf(
+                    lagBySubscriber.getOrDefault(subscriberId, java.util.List.of()));
+        }
+
+        /** @return all derived-write accepted subscriber ids in emission order. */
+        public java.util.List<String> derivedWritesAccepted() {
+            return java.util.List.copyOf(derivedWritesAccepted);
+        }
+
+        /** @return all derived-write parked subscriber ids in emission order. */
+        public java.util.List<String> derivedWritesParked() {
+            return java.util.List.copyOf(derivedWritesParked);
+        }
+
+        /**
+         * One recorded subscriber-lag emission.
+         *
+         * @param lagEvents the lag in events
+         * @param lagMillis the lag duration
+         */
+        public record LagRecord(long lagEvents, Duration lagMillis) {}
     }
 }

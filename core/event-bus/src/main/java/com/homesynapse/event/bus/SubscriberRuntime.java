@@ -37,10 +37,20 @@ final class SubscriberRuntime {
     private final ReplayWindowQueue replayWindowQueue;
     private final LinkedBlockingQueue<Long> pendingPositions = new LinkedBlockingQueue<>();
     private final AtomicLong lastReplayedPosition = new AtomicLong(0L);
+    /**
+     * Per-subscriber derived-write rate limit (AMD-43 §3.6.4).
+     * Nullable — only derivation-producing subscribers (e.g. State Projection,
+     * wired in M3.5a) carry one. M3.3 sets this to {@code null} for all
+     * subscribers; the field exists to keep the runtime bundle stable across
+     * milestones.
+     */
+    private final DerivedWriteRateLimit rateLimit;
     private volatile Thread virtualThread;
 
     /**
-     * Creates a new subscriber runtime bundle.
+     * Creates a new subscriber runtime bundle without a rate limit (the common
+     * M3.3 case — only derivation-producing subscribers carry one, and those
+     * are wired in M3.5a).
      *
      * @param info              the subscriber registration metadata
      * @param subscriber        the subscriber callback
@@ -55,13 +65,46 @@ final class SubscriberRuntime {
                       SubscriberSupervisor supervisor,
                       SubscriberDlq dlq,
                       ReplayWindowQueue replayWindowQueue) {
+        this(info, subscriber, readExecutor, supervisor, dlq, replayWindowQueue, null);
+    }
+
+    /**
+     * Creates a new subscriber runtime bundle with an optional rate limit.
+     *
+     * @param info              the subscriber registration metadata
+     * @param subscriber        the subscriber callback
+     * @param readExecutor      the dedicated read executor
+     * @param supervisor        the exception-handling supervisor
+     * @param dlq               the in-memory DLQ ring
+     * @param replayWindowQueue the replay window buffer
+     * @param rateLimit         per-subscriber derived-write rate limit, or
+     *                          {@code null} for non-derivation-producing subscribers
+     */
+    SubscriberRuntime(SubscriberInfo info,
+                      Subscriber subscriber,
+                      SubscriberReadExecutor readExecutor,
+                      SubscriberSupervisor supervisor,
+                      SubscriberDlq dlq,
+                      ReplayWindowQueue replayWindowQueue,
+                      DerivedWriteRateLimit rateLimit) {
         this.info = Objects.requireNonNull(info, "info");
         this.subscriber = Objects.requireNonNull(subscriber, "subscriber");
         this.readExecutor = Objects.requireNonNull(readExecutor, "readExecutor");
         this.supervisor = Objects.requireNonNull(supervisor, "supervisor");
         this.dlq = Objects.requireNonNull(dlq, "dlq");
         this.replayWindowQueue = Objects.requireNonNull(replayWindowQueue, "replayWindowQueue");
+        this.rateLimit = rateLimit; // nullable
         this.mode = new AtomicReference<>(SubscriberMode.COLD);
+    }
+
+    /**
+     * Returns the per-subscriber derived-write rate limit, or {@code null}
+     * if this subscriber does not produce derived writes.
+     *
+     * @return the rate limit, or {@code null}
+     */
+    DerivedWriteRateLimit rateLimit() {
+        return rateLimit;
     }
 
     /**
@@ -217,5 +260,8 @@ final class SubscriberRuntime {
         readExecutor.close();
         dlq.clear();
         replayWindowQueue.clear();
+        if (rateLimit != null) {
+            rateLimit.close();
+        }
     }
 }

@@ -9,6 +9,8 @@ import com.homesynapse.event.EventPage;
 import com.homesynapse.event.EventStore;
 
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -16,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
+import java.util.function.IntSupplier;
 
 /**
  * Production {@link EventBus} implementation (AMD-42, PLAN-M3-CONSOLIDATED-02 §4, §6).
@@ -48,10 +51,15 @@ import java.util.function.Consumer;
  */
 final class InProcessEventBus implements EventBus {
 
+    /** AMD-43 §3.6.2 threshold above which the publisher-blocked counter increments. */
+    static final int PUBLISHER_BLOCKED_DEPTH_THRESHOLD = 5000;
+
     private final EventStore eventStore;
     private final CheckpointStore checkpointStore;
     private final Clock clock;
     private final SubscriberReadConnectionFactory readConnectionFactory;
+    private final BusMetrics metrics;
+    private final IntSupplier queueDepthSupplier;
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
 
     /**
@@ -67,7 +75,8 @@ final class InProcessEventBus implements EventBus {
             new ConcurrentHashMap<>();
 
     /**
-     * Creates a new in-process event bus.
+     * Creates a new in-process event bus with no-op metrics and a zero queue-depth
+     * supplier. Convenience constructor for tests that don't exercise M3.3 paths.
      *
      * @param eventStore            the event store for loading event metadata
      * @param checkpointStore       the checkpoint store for position tracking
@@ -79,12 +88,37 @@ final class InProcessEventBus implements EventBus {
                       CheckpointStore checkpointStore,
                       Clock clock,
                       SubscriberReadConnectionFactory readConnectionFactory) {
+        this(eventStore, checkpointStore, clock, readConnectionFactory,
+                BusMetrics.noop(), () -> 0);
+    }
+
+    /**
+     * Creates a new in-process event bus.
+     *
+     * @param eventStore            the event store for loading event metadata
+     * @param checkpointStore       the checkpoint store for position tracking
+     * @param clock                 the clock for supervisor timing (never {@code null})
+     * @param readConnectionFactory factory for per-subscriber read executors
+     * @param metrics               the bus metrics emitter (AMD-43 §3.6.2)
+     * @param queueDepthSupplier    supplier of the writer queue depth (DEC-M3-14 —
+     *                              the bus holds no reference to persistence types)
+     * @throws NullPointerException if any parameter is {@code null}
+     */
+    InProcessEventBus(EventStore eventStore,
+                      CheckpointStore checkpointStore,
+                      Clock clock,
+                      SubscriberReadConnectionFactory readConnectionFactory,
+                      BusMetrics metrics,
+                      IntSupplier queueDepthSupplier) {
         this.eventStore = Objects.requireNonNull(eventStore, "eventStore must not be null");
         this.checkpointStore = Objects.requireNonNull(checkpointStore,
                 "checkpointStore must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         this.readConnectionFactory = Objects.requireNonNull(readConnectionFactory,
                 "readConnectionFactory must not be null");
+        this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
+        this.queueDepthSupplier = Objects.requireNonNull(queueDepthSupplier,
+                "queueDepthSupplier must not be null");
     }
 
     // ── Existing Phase 2 contract (passive registration) ─────────────
@@ -118,15 +152,27 @@ final class InProcessEventBus implements EventBus {
 
     @Override
     public void notifyEvent(long globalPosition) {
-        // Load the event at globalPosition from the store for filter evaluation.
-        EventPage page = eventStore.readFrom(globalPosition - 1, 1);
-        if (page.events().isEmpty()) {
-            return;
+        // M3.3: sample writer queue depth at notification entry. The supplier is
+        // injected (DEC-M3-14) so the bus holds no reference to persistence types.
+        // Per INV-BUS-02, this is a record-only observation — the publisher does
+        // NOT block on depth.
+        Instant notifyStart = clock.instant();
+        int depth = queueDepthSupplier.getAsInt();
+        metrics.recordWriterQueueDepth(depth);
+        if (depth > PUBLISHER_BLOCKED_DEPTH_THRESHOLD) {
+            metrics.incrementPublisherBlocked();
         }
-        EventEnvelope envelope = page.events().get(0);
 
-        rwLock.readLock().lock();
         try {
+            // Load the event at globalPosition from the store for filter evaluation.
+            EventPage page = eventStore.readFrom(globalPosition - 1, 1);
+            if (page.events().isEmpty()) {
+                return;
+            }
+            EventEnvelope envelope = page.events().get(0);
+
+            rwLock.readLock().lock();
+            try {
             // Notify passive subscribers (callback bridge)
             for (PassiveRegistration reg : passiveRegistry.values()) {
                 if (!reg.info().filter().matches(envelope)) {
@@ -181,8 +227,15 @@ final class InProcessEventBus implements EventBus {
                     queue.unlock();
                 }
             }
+            } finally {
+                rwLock.readLock().unlock();
+            }
         } finally {
-            rwLock.readLock().unlock();
+            // M3.3: record the bus's notification fan-out duration as the
+            // bus-side publish latency contribution. EventPublisher orchestrates
+            // the full publish path (persist + notify) above this layer;
+            // production wiring may add end-to-end timing in a later milestone.
+            metrics.recordPublishLatency(Duration.between(notifyStart, clock.instant()));
         }
     }
 
@@ -362,6 +415,18 @@ final class InProcessEventBus implements EventBus {
                             runtime.subscriber(), envelope, runtime);
             if (result == SubscriberSupervisor.DeliveryResult.SUCCESS) {
                 checkpointStore.writeCheckpoint(subscriberId, envelope.globalPosition());
+                // M3.3 (AMD-43 §3.6.2): record subscriber lag after delivery.
+                // lagEvents — the count of further enqueued positions ahead of
+                // this delivery in the subscriber's pending queue (approximates
+                // the distance to the writer tail without an extra store query).
+                // lagMillis — wall-clock between event ingestion and observation.
+                long lagEvents = runtime.pendingPositions().size();
+                Duration lagMillis = Duration.between(envelope.ingestTime(),
+                        clock.instant());
+                if (lagMillis.isNegative()) {
+                    lagMillis = Duration.ZERO;
+                }
+                metrics.recordSubscriberLag(subscriberId, lagEvents, lagMillis);
             }
         }
     }
