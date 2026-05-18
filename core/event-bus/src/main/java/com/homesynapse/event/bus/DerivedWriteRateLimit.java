@@ -44,7 +44,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * closed — subsequent {@link #acquire()} calls return immediately with the
  * limiter in a degraded state (the subscriber is being torn down anyway).</p>
  */
-final class DerivedWriteRateLimit implements AutoCloseable {
+public final class DerivedWriteRateLimit implements AutoCloseable {
 
     /** Default capacity per AMD-43 §3.6.4. */
     static final int DEFAULT_CAPACITY = 200;
@@ -76,7 +76,7 @@ final class DerivedWriteRateLimit implements AutoCloseable {
      * @param metrics      the metrics emitter; never {@code null}
      * @param subscriberId the subscriber's stable identifier; never {@code null}
      */
-    DerivedWriteRateLimit(Clock clock, BusMetrics metrics, String subscriberId) {
+    public DerivedWriteRateLimit(Clock clock, BusMetrics metrics, String subscriberId) {
         this(DEFAULT_CAPACITY, clock, metrics, subscriberId);
     }
 
@@ -88,7 +88,7 @@ final class DerivedWriteRateLimit implements AutoCloseable {
      * @param metrics      the metrics emitter; never {@code null}
      * @param subscriberId the subscriber's stable identifier; never {@code null}
      */
-    DerivedWriteRateLimit(int capacity, Clock clock, BusMetrics metrics, String subscriberId) {
+    public DerivedWriteRateLimit(int capacity, Clock clock, BusMetrics metrics, String subscriberId) {
         if (capacity <= 0) {
             throw new IllegalArgumentException("capacity must be positive: " + capacity);
         }
@@ -112,7 +112,7 @@ final class DerivedWriteRateLimit implements AutoCloseable {
      *
      * @throws InterruptedException if the calling thread is interrupted while parked
      */
-    void acquire() throws InterruptedException {
+    public void acquire() throws InterruptedException {
         if (closed.get()) {
             return;
         }
@@ -152,7 +152,7 @@ final class DerivedWriteRateLimit implements AutoCloseable {
      * by the injected {@link Clock} when production wiring lands; in this
      * revision the clock is used only to anchor future tuning decisions.</p>
      */
-    void refill() {
+    public void refill() {
         if (closed.get()) {
             return;
         }
