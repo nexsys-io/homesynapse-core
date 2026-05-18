@@ -10,6 +10,9 @@ module com.homesynapse.state {
     requires transitive com.homesynapse.platform;
     requires transitive com.homesynapse.device;
     requires transitive com.homesynapse.event;
+    requires transitive com.homesynapse.event.bus;
+
+    requires org.slf4j;
 
     exports com.homesynapse.state;
 }

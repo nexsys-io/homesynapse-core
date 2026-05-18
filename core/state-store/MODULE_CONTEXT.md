@@ -1,4 +1,4 @@
-# state-store — `com.homesynapse.state` — 12 types — Materialized view over event stream, EntityState projection, availability tracking, checkpoint policy (sealed), bounded-window projection advancer
+# state-store — `com.homesynapse.state` — 18 public + 1 package-private types — Materialized view over event stream, EntityState projection, availability tracking, checkpoint policy (sealed), bounded-window projection advancer, M3.5a vertical-slice StateProjection subscriber
 
 ## Purpose
 
@@ -19,13 +19,16 @@ The state-store module defines the materialized view layer of HomeSynapse's even
 module com.homesynapse.state {
     requires transitive com.homesynapse.platform;
     requires transitive com.homesynapse.device;
-    requires com.homesynapse.event;
+    requires transitive com.homesynapse.event;
+    requires transitive com.homesynapse.event.bus;
+
+    requires org.slf4j;
 
     exports com.homesynapse.state;
 }
 ```
 
-All three `requires transitive` declarations mean any module that reads `com.homesynapse.state` automatically gets access to all identity types (`EntityId`, etc.), all device model types (`AttributeValue`, etc.), and all event types (`EventEnvelope`, etc.) without needing to declare those dependencies themselves. The transitive event-model dependency is load-bearing: `EventEnvelope` is the parameter type for `ProjectionAdvancer.advance`'s processor callback (AMD-41 §3.2.1), surfacing event-model in state-store's public API. This declaration is also consistent with LD#10 (inter-module `requires` are `requires transitive` by default).
+All four `requires transitive` declarations mean any module that reads `com.homesynapse.state` automatically gets access to all identity types (`EntityId`, etc.), all device model types (`AttributeValue`, etc.), all event types (`EventEnvelope`, etc.), and the event-bus runtime types (`Subscriber`, `SubscriberMode`, etc.) without needing to declare those dependencies themselves. The transitive event-model dependency is load-bearing: `EventEnvelope` is the parameter type for `ProjectionAdvancer.advance`'s processor callback (AMD-41 §3.2.1), surfacing event-model in state-store's public API. The transitive event-bus dependency (added M3.5a, 2026-05-18) is required because `StateProjection` implements `Subscriber` and exposes `SubscriberMode` on its public `setMode`/`currentMode` API. This is consistent with LD#10 (inter-module `requires` are `requires transitive` by default). The `requires org.slf4j` directive is non-transitive — `StateProjection` uses SLF4J internally for logging, but no public API exposes SLF4J types.
 
 ## Package Structure
 
@@ -65,15 +68,35 @@ All three `requires transitive` declarations mean any module that reads `com.hom
 | `ProjectionAdvancer` | interface | Cursor runner for the State Projection. Reads a bounded chunk of events and applies them to the projection's state model. | Single method: `advance(long fromPosition, int maxRows, Consumer<EventEnvelope> processor) → AdvanceResult`. Constant: `DEFAULT_MAX_ROWS = 500`. Contract: each call opens an independent short-lived read transaction (≤ 2 s, ≤ 500 rows), invokes `processor.accept(envelope)` for each event in `globalPosition` order inside the read tx, then closes the tx before returning. Processor MUST NOT call `EventPublisher.publish` or perform writes (AMD-41 §3.2.1 enforcement point). Derived publishes are buffered by the processor and emitted after `advance` returns (two-phase discipline). No cursors held between calls — bounded-window discipline prevents WAL checkpoint starvation (AMD-38). |
 | `AdvanceResult` | record (3 fields) | Result of one `ProjectionAdvancer.advance` call. | Fields: `lastProcessedPosition` (long, ≥ 0), `eventsProcessed` (int, ≥ 0), `hasMore` (boolean). Compact constructor validates non-negativity. `hasMore = false` AND `eventsProcessed = 0` signals "caught up to writer head"; caller may park until next event publishes. |
 
-**Total: 12 public types + 1 module-info.java = 13 Java files.** (Five new types added in the M2→M3 bridge work unit.)
+### M3.5a — Vertical-Slice StateProjection Types (2026-05-18)
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `ProjectionId` | record (1 field) | Typed wrapper for projection view identifiers | Single field: `value` (String, non-null, non-blank). Used as the view name passed to `ViewCheckpointStore.writeCheckpoint`/`readLatestCheckpoint`. Plain String (not Ulid) because projection names are stable infrastructure identifiers. |
+| `StateStore` | interface (4 methods) | Port for materialized entity state storage | Methods: `get(EntityId) → Optional<EntityState>`, `put(EntityId, EntityState)`, `getAll() → Map<EntityId, EntityState>`, `clear()`. The `clear()` method supports the reconciliation pass (AMD-41 §3.2.4) by atomically wiping all entries when the persisted checkpoint's `projectionVersion` mismatches the running code. M3.5a fixture: `InMemoryStateStore` (testFixtures). M3.5b adds `SqliteStateStore`. |
+| `DerivationContext` | record (3 fields) | Read-only context passed to `DerivationRule.evaluate` | Fields: `priorState` (`EntityState`, **nullable** — null for first event on a new entity), `envelope` (`EventEnvelope`, the inbound event), `clock` (`Clock`, for time-dependent derivation). Compact constructor validates non-null on `envelope` and `clock`. |
+| `DerivationRule` | functional interface | Strategy for deriving downstream events from inbound envelopes (DEC-M3-10) | Single method: `evaluate(DerivationContext) → List<EventDraft>`. Contract: MUST NOT call `EventPublisher.publish()`, MUST NOT mutate `StateStore`, MUST be deterministic per INV-PROJ-01. Returns an empty list when no derivation applies. |
+| `DerivedPublishGate` | functional interface | Throttling gate for derived publishes from `StateProjection` (AMD-43 §3.6.4, DEC-M3-08) | Single method: `acquire() throws InterruptedException`. Static factory `unbounded()` returns a no-op gate. **Exists because the event-bus's `DerivedWriteRateLimit` is package-private (M3.3) and cannot be referenced from this module — see Gotchas.** |
+| `SelfProducedFilter` | **package-private** final class | Per-subscriber filter suppressing re-entrant delivery of derived events (AMD-41 §3.2.2, INV-SUB-ISO-06) | Constructor `(Clock, Duration)`. Methods: `record(Ulid)`, `isSelfProduced(Ulid, SubscriberMode)`, `size()` (test-only). Static constant: `DEFAULT_TTL = Duration.ofSeconds(60)`. Internal `HashMap<Ulid, Instant>` — single-threaded on subscriber VT. Lazy eviction sweeps O(N) on every `isSelfProduced` call. REPLAY/TRANSITION bypass returns `false` unconditionally. |
+| `StateProjection` | public final class implements `Subscriber` | M3.5a core: state-store projection subscriber that materializes EntityState from the event log | Public static factory `create(...)`. Package-private constructor takes an explicit `SelfProducedFilter` for in-package tests. Public methods: `onEvent(EventEnvelope)`, `onCaughtUp()`, `setMode(SubscriberMode)`, `currentMode()`, `projectionId()`, `projectionVersion()`, `cursorPosition()`, `processBatch(int) → AdvanceResult`. Two-phase discipline (AMD-41 §3.2.1): READ → apply inbound to state → PUBLISH (LIVE only) → apply derived to state → CHECKPOINT. Lazy initialization on first `onEvent` (no I/O in constructor). Reconciliation on `projectionVersion` mismatch (AMD-41 §3.2.4). System property `homesynapse.projection.allow_stale_snapshots` controls the reconciliation escape hatch. |
+
+**Total: 18 public types + 1 package-private type (`SelfProducedFilter`) + 1 module-info.java = 20 production Java files** (M3.5a added 7 types: 6 public + 1 package-private).
+
+**testFixtures additions (M3.5a):**
+- `InMemoryStateStore` (`com.homesynapse.state` package — **not** the `.test` sub-package per the brief's convention for fixture implementations)
+- `InMemoryProjectionAdvancer` (`com.homesynapse.state` package)
+- `SubscriberContractTest` (`com.homesynapse.state.test`, abstract, 4 tests + `SpyPublisher` recording wrapper)
+- `StateProjectionContractTest extends SubscriberContractTest` (`com.homesynapse.state.test`, abstract, 9 additional tests)
 
 ## Dependencies
 
 | Module | Why | Specific Types Used |
 |---|---|---|
-| **platform-api** (`com.homesynapse.platform`) | `requires transitive` — Identity types for state map keys and query parameters | `EntityId` (fields on EntityState, StateSnapshot; parameters on StateQueryService). |
-| **device-model** (`com.homesynapse.device`) | `requires transitive` — AttributeValue hierarchy for entity attribute storage | `AttributeValue` (values in EntityState.attributes map). |
-| **event-model** (`com.homesynapse.event`) | `requires` (non-transitive) — Event types referenced in Javadoc only | `EventEnvelope`, `EventTypes` (referenced in `@see` tags and prose Javadoc). Not used in public API signatures. |
+| **platform-api** (`com.homesynapse.platform`) | `requires transitive` — Identity types for state map keys and query parameters | `EntityId` (fields on EntityState, StateSnapshot; parameters on StateQueryService; field on `StateProjection.applyToState`). `Ulid` (used internally by SelfProducedFilter). |
+| **device-model** (`com.homesynapse.device`) | `requires transitive` — AttributeValue hierarchy for entity attribute storage | `AttributeValue`, `StringValue` (`StateProjection.applyToState` constructs `StringValue` from state_changed payloads). |
+| **event-model** (`com.homesynapse.event`) | `requires transitive` (M3.5a — upgraded from non-transitive) — Event types in public API | `EventEnvelope` (Subscriber.onEvent parameter, ProjectionAdvancer processor callback), `EventDraft` (DerivationRule return), `EventPublisher` (StateProjection constructor), `CausalContext` (chain construction for derived publishes), `StateReportedEvent`/`StateChangedEvent`/`AvailabilityChangedEvent` (pattern matched in `StateProjection.applyToState`), `SubjectRef`/`SubjectType` (subject entity resolution), `EventTypes` (string constants for derived drafts), `SequenceConflictException` (caught when publish loses sequence race). |
+| **event-bus** (`com.homesynapse.event.bus`) | `requires transitive` (added M3.5a, 2026-05-18) — Subscriber callback contract and lifecycle mode | `Subscriber` (implemented by StateProjection), `SubscriberMode` (mode FSM tracked by StateProjection, exposed on public `setMode`/`currentMode`). **Not used directly:** `DerivedWriteRateLimit` (package-private to event-bus; state-store works around via the `DerivedPublishGate` interface — see Gotchas). |
+| **slf4j-api** | `requires` (non-transitive, implementation scope) — Logging only | `Logger`, `LoggerFactory` (used internally by StateProjection). No public API exposure. |
 
 ## Consumers
 
@@ -153,7 +176,19 @@ None. This module contains no sealed types.
 
 **GOTCHA: `StateStoreLifecycle.start()` blocks dependent subsystems.** The returned `CompletableFuture<Void>` is the readiness signal. Dependent subsystems (REST API, WebSocket API, Automation Engine) must not start serving until this future completes. The lifecycle module coordinates this ordering.
 
-- **S4-03 (Gradle/JPMS concordance):** `requires com.homesynapse.event` is non-transitive in module-info. Gradle scope should be `implementation`, not `api`. Verify `build.gradle.kts` matches before Phase 3 implementation.
+- **GOTCHA (M3.5a, 2026-05-18): `DerivedWriteRateLimit` is package-private to `com.homesynapse.event.bus`.** PLAN-M3 originally specified that `StateProjection` would accept a `DerivedWriteRateLimit` instance directly via its constructor. The actual M3.3 implementation lands `DerivedWriteRateLimit` as a package-private class (visibility `final class DerivedWriteRateLimit ...`, not `public`), with package-private `acquire()` and `refill()` methods. This means state-store cannot reference the type by name. The M3.5a resolution: introduce a new `DerivedPublishGate` interface in state-store with a single `acquire() throws InterruptedException` method. `StateProjection` depends on this interface, not on `DerivedWriteRateLimit` directly. Production wiring (lifecycle module or composition root in `homesynapse-app`) will need a small adapter that bridges from `DerivedWriteRateLimit` to `DerivedPublishGate`. The adapter can live either in event-bus (requires exporting a public adapter type) or in the composition root if it can reach into event-bus's package-private types. **Follow-up: M3.5b or a bus-internal task should add a public adapter or promote `DerivedWriteRateLimit` (and its `acquire()`/`refill()` methods) to public visibility.** This deviation preserves the behavioral contract (rate-limited at 200/s per subscriber) and isolates the projection from event-bus internals.
+
+- **GOTCHA (M3.5a): The reconciliation pass uses lazy init on first `onEvent`, NOT in the constructor.** `StateProjection`'s constructor stores parameters only — no I/O, no checkpoint reads, no `StateStore` mutations. The first `onEvent` call triggers `initialize()`: load checkpoint, check `projectionVersion`, reconcile if needed (clear state, reset cursor to 0) OR restore cursor from checkpoint, set `initialized = true`. Rationale: cheap construction, simpler tests, and a projection constructed but never subscribed does not perform I/O.
+
+- **GOTCHA (M3.5a): `StateProjection.processBatch(int)` exists alongside `onEvent` for the batch path.** LIVE delivery goes through `onEvent` (single-event, no advancer). The batch path (`processBatch`) drives the `ProjectionAdvancer` and demonstrates the two-phase discipline: the processor callback runs inside the read tx and BUFFERS derived drafts; the buffered drafts are published AFTER `advance` returns (tx closed). The contract test `readTxClosesBeforePublish` uses this path. In production (M3.5b+), `processBatch` is the entry point for batch catch-up; the bus's per-subscriber VT loop calls `processBatch` when it pulls events from the event store under the AMD-38 cadence.
+
+- **GOTCHA (M3.5a): `EntityState.stale` is intentionally hardcoded to `false` by the projection.** Per Doc 03 §4.1 and the existing M1.9 record contract, `stale` is derived at read time by `StateQueryService` (M3.6 scope). The projection stores `staleAfter` (which can be null) but always sets `stale = false` on materialized records — the field exists on the record only because `EntityState` is a pure data carrier. Consumers must always recompute `stale` from `staleAfter` and the wall clock at query time.
+
+- **GOTCHA (M3.5a): `ViewCheckpointStore.writeCheckpoint(String, long, byte[])` does NOT take a `projectionVersion` parameter — the `InMemoryViewCheckpointStore` fixture hardcodes `projectionVersion = 1` when constructing the stored `CheckpointRecord`.** This means tests that need to exercise version-mismatch reconciliation can seed a checkpoint via `writeCheckpoint` and rely on the hardcoded `1`, then construct the projection with `projectionVersion = 2`. The M3.5b SqliteViewCheckpointStore will need a way to know which `projectionVersion` to write (likely passed at store construction time, since each projection has one stable version). The current M3.5a stub uses an empty `byte[0]` for the checkpoint data; M3.5b adds Jackson serialization of the materialized state.
+
+- **GOTCHA (M3.5a): `StateProjection.processBatch` does NOT advance the cursor on partial publish failure.** When a RuntimeException propagates out of the PUBLISH phase (after the advancer has already closed its read tx and the projection has applied state from some events), the cursor advance call is skipped — checkpoint position remains at its pre-batch value. SequenceConflictException is caught and logged but does NOT prevent cursor advance. This preserves INV-PROJ-04 (checkpoint monotonicity tied to ALL publishes succeeding for crash recovery). Note: state mutations applied INSIDE the read-tx callback are NOT rolled back — the InMemoryStateStore has no transactional rollback. M3.5b's SqliteStateStore will require transactional discipline here.
+
+- **S4-03 (Gradle/JPMS concordance):** `requires com.homesynapse.event` was non-transitive in the original Phase 2 spec, with Gradle scope `implementation`. M3.5a upgraded it to `requires transitive` because `EventEnvelope` and `EventPublisher` now appear in `StateProjection`'s public API. Gradle scope upgraded to `api`. `requires transitive com.homesynapse.event.bus` added (api scope) for the same reason: `Subscriber` and `SubscriberMode` are surfaced on `StateProjection`'s public API. `requires org.slf4j` added non-transitive (implementation scope) — SLF4J is used internally by `StateProjection` only, not exposed.
 - **S5-CF2 (Phase 3 watch):** When an integration fails and triggers device orphan lifecycle (AMD-17), the orphan transition MUST set `stale:true` and `availability:UNAVAILABLE` immediately. The 30-second staleness scan (AMD-11) must treat already-stale orphaned devices as no-ops — do not emit duplicate stale events.
 
 ## Test Fixtures and Contract Tests
@@ -203,14 +238,23 @@ These 5 tests serve as executable documentation of a contract that no other smar
 
 ## Phase 3 Cross-Module Context
 
-*Added 2026-05-17 (Post-M3.1 refresh). Phase 3 active — M3.1 `InProcessEventBus` landed 2026-05-17. Next milestone: M3.5a (StateProjection vertical slice). M3 governance: AMD-41/42/43 APPLIED. See `homesynapse-core-docs/design/HomeSynapse_Core_M3_Implementation_Plan_PLAN-M3-CONSOLIDATED-02.md` for the full M3 implementation plan.*
+*Added 2026-05-17 (Post-M3.1 refresh), revised 2026-05-18 (M3.5a complete). Phase 3 active — M3.5a vertical slice landed 2026-05-18. Next milestone: M3.5b (SqliteStateStore, SqliteViewCheckpointStore, persistent DLQ). M3 governance: AMD-41/42/43 APPLIED. See `homesynapse-core-docs/design/HomeSynapse_Core_M3_Implementation_Plan_PLAN-M3-CONSOLIDATED-02.md` for the full M3 implementation plan.*
+
+**M3.5a deliverables (2026-05-18):**
+- `StateProjection` (public final class implements `Subscriber`) — two-phase discipline, lazy initialization with reconciliation, self-filter, defence-in-depth, checkpoint cadence.
+- `SelfProducedFilter` (package-private final class) — 60s TTL, lazy eviction, REPLAY/TRANSITION bypass.
+- `StateStore`, `DerivationRule`, `DerivationContext`, `DerivedPublishGate`, `ProjectionId` (public types in the projection's collaborator graph).
+- testFixtures: `InMemoryStateStore`, `InMemoryProjectionAdvancer`, `SubscriberContractTest` (4 tests), `StateProjectionContractTest` (9 tests).
+- Tests: `InMemoryStateProjectionTest` (13 inherited contract tests), `InMemoryProjectionAdvancerTest` (11 inherited contract tests from Deliverable 0), `SelfProducedFilterTest` (6 unit tests), `StateProjectionVerticalIT` (1 end-to-end integration test with 5 assertions).
+- module-info.java: added `requires transitive com.homesynapse.event.bus`, upgraded `requires com.homesynapse.event` from non-transitive to transitive, added `requires org.slf4j`.
+- build.gradle.kts: added `api(project(":core:event-bus"))`, upgraded event-model from `implementation` to `api`, added `implementation(libs.slf4j.api)`, added test/testFixtures access to event-bus testFixtures.
 
 **Phase 3 cross-module decisions register:** `nexsys-hivemind/context/decisions/phase-3-cross-module-decisions.md` is the running list of decisions made during Phase 3 implementation that cross module boundaries. Read this file before starting Phase 3 work on this module — it closes questions the Phase 2 interface spec left open and establishes patterns that every Phase 3 implementation must follow.
 
 **Decisions directly relevant to this module:**
 
 - **D-01** — *DomainEvent non-sealed*: state projection dispatches on event types via `@EventType` registry lookup
-- **AMD-41** — *State Projection Execution Model*: defines how StateProjection processes events, checkpoints, and recovers
-- **M3.5a prerequisite** — *state-store module-info needs `requires com.homesynapse.event.bus`*: When `StateProjection` implements `Subscriber` (M3.5a), the state-store module must gain a `requires` directive for the event-bus module. Currently absent. See M3.1 cross-agent note.
+- **AMD-41** — *State Projection Execution Model*: defines how StateProjection processes events, checkpoints, and recovers (APPLIED in M3.5a)
+- **M3.5a complete (2026-05-18)** — `requires transitive com.homesynapse.event.bus` added to module-info, StateProjection implements Subscriber. Plan vs Reality reconciliation: `DerivedWriteRateLimit` is package-private (not public as the PLAN assumed); state-store introduced the `DerivedPublishGate` adapter interface as the workaround.
 
 **Read also:** `nexsys-hivemind/context/status/PROJECT_SNAPSHOT.md` for current milestone state; `nexsys-hivemind/context/lessons/coder-lessons.md` for Phase 3 pattern discoveries (including M3.1 entries on default interface methods, contract test capability hooks, and JPMS-enforced JDBC-free constraints).
