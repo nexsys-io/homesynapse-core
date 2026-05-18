@@ -161,3 +161,4 @@ jacoco/
 
 # Claude
 .claude/
+CLAUDE.md

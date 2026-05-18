@@ -6,6 +6,7 @@ package com.homesynapse.event.bus;
 
 import java.util.Objects;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -35,6 +36,7 @@ final class SubscriberRuntime {
     private final SubscriberDlq dlq;
     private final ReplayWindowQueue replayWindowQueue;
     private final LinkedBlockingQueue<Long> pendingPositions = new LinkedBlockingQueue<>();
+    private final AtomicLong lastReplayedPosition = new AtomicLong(0L);
     private volatile Thread virtualThread;
 
     /**
@@ -155,6 +157,33 @@ final class SubscriberRuntime {
      */
     LinkedBlockingQueue<Long> pendingPositions() {
         return pendingPositions;
+    }
+
+    /**
+     * Returns the highest global position successfully delivered (or attempted via the
+     * supervisor) to the subscriber during REPLAY and TRANSITION.
+     *
+     * <p>Used by {@link TransitionCoordinator} for gap detection when draining the
+     * {@link ReplayWindowQueue}: queue entries with {@code globalPosition <=
+     * lastReplayedPosition} have already been delivered via the REPLAY paging loop
+     * and are skipped to satisfy INV-BUS-01 (no duplicate delivery at the
+     * REPLAY→LIVE boundary).</p>
+     *
+     * @return the highest delivered global position, or 0 if none yet
+     */
+    long lastReplayedPosition() {
+        return lastReplayedPosition.get();
+    }
+
+    /**
+     * Sets the highest delivered global position. Called by {@link ReplayDriver}
+     * after each successful supervisor delivery during REPLAY and by
+     * {@link TransitionCoordinator} during drain.
+     *
+     * @param position the new high-water mark
+     */
+    void setLastReplayedPosition(long position) {
+        lastReplayedPosition.set(position);
     }
 
     /**

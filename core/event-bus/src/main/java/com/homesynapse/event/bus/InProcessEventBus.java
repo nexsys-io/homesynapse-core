@@ -18,25 +18,33 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 
 /**
- * Production {@link EventBus} implementation (AMD-42, PLAN-M3-CONSOLIDATED-02 §4).
+ * Production {@link EventBus} implementation (AMD-42, PLAN-M3-CONSOLIDATED-02 §4, §6).
  *
  * <p>Manages the subscriber registry, mode FSM, per-subscriber runtime lifecycle,
  * supervisor with DLQ, and circuit breaker. Supports both passive subscribers
  * (registered via {@link #subscribe(SubscriberInfo)}) and active runtime subscribers
  * (registered via {@link #subscribeRuntime(SubscriberInfo, Subscriber)}).</p>
  *
- * <p>Passive subscribers are notified via an optional callback bridge (for backward
- * compatibility with the Phase 2 contract test). Active subscribers receive events
- * through their dedicated virtual thread's pull loop.</p>
+ * <p>Active subscribers execute the three-phase
+ * {@link SubscriberMode#COLD COLD} → {@link SubscriberMode#REPLAY REPLAY}
+ * → {@link SubscriberMode#TRANSITION TRANSITION} → {@link SubscriberMode#LIVE LIVE}
+ * algorithm: {@link ReplayDriver} pages through the event log from the persisted
+ * checkpoint, {@link TransitionCoordinator} drains the
+ * {@link ReplayWindowQueue} with gap detection, and the LIVE pull loop
+ * processes notifications dispatched by {@link #notifyEvent(long)}.</p>
  *
  * <p><strong>Thread safety:</strong> The subscriber registry is guarded by a
  * {@link ReentrantReadWriteLock} per LTD-11 (no {@code synchronized}).
  * Notification fan-out acquires the read lock; registry mutations acquire the
- * write lock.</p>
+ * write lock. Per-subscriber state is guarded by per-runtime structures
+ * ({@link ReplayWindowQueue}'s internal lock, {@code AtomicReference<SubscriberMode>},
+ * and the supervisor's single-VT invariant).</p>
  *
  * @see EventBus
  * @see SubscriberRuntime
  * @see SubscriberSupervisor
+ * @see ReplayDriver
+ * @see TransitionCoordinator
  */
 final class InProcessEventBus implements EventBus {
 
@@ -133,7 +141,10 @@ final class InProcessEventBus implements EventBus {
                 }
             }
 
-            // Notify active subscribers — enqueue position and unpark their VT
+            // Notify active subscribers — route based on mode.
+            // The queue's lock is held across the mode read + routing decision
+            // so the TRANSITION → LIVE CAS in TransitionCoordinator cannot
+            // interleave between our observation and our enqueue/offer.
             for (SubscriberRuntime runtime : activeRegistry.values()) {
                 if (!runtime.info().filter().matches(envelope)) {
                     continue;
@@ -144,17 +155,30 @@ final class InProcessEventBus implements EventBus {
                     continue;
                 }
 
-                SubscriberMode currentMode = runtime.mode();
-                if (currentMode == SubscriberMode.SUSPENDED
-                        || currentMode == SubscriberMode.COLD) {
-                    continue;
-                }
-
-                // Enqueue position for the subscriber's VT to process
-                runtime.pendingPositions().offer(globalPosition);
-                Thread vt = runtime.virtualThread();
-                if (vt != null) {
-                    LockSupport.unpark(vt);
+                ReplayWindowQueue queue = runtime.replayWindowQueue();
+                queue.lock();
+                try {
+                    SubscriberMode mode = runtime.mode();
+                    if (mode == SubscriberMode.COLD
+                            || mode == SubscriberMode.SUSPENDED) {
+                        continue;
+                    }
+                    if (mode == SubscriberMode.REPLAY
+                            || mode == SubscriberMode.TRANSITION) {
+                        // Buffer until coordinator drains. Overflow is recoverable —
+                        // ReplayDriver observes the latched flag and restarts REPLAY
+                        // from the persisted checkpoint.
+                        queue.enqueue(globalPosition);
+                    } else {
+                        // LIVE — standard pull path.
+                        runtime.pendingPositions().offer(globalPosition);
+                        Thread vt = runtime.virtualThread();
+                        if (vt != null) {
+                            LockSupport.unpark(vt);
+                        }
+                    }
+                } finally {
+                    queue.unlock();
                 }
             }
         } finally {
@@ -198,7 +222,7 @@ final class InProcessEventBus implements EventBus {
             rwLock.writeLock().unlock();
         }
 
-        // Start the subscriber's virtual thread
+        // Start the subscriber's virtual thread (INV-SUB-ISO-01).
         Thread vt = Thread.ofVirtual()
                 .name("hs-sub-" + info.subscriberId())
                 .start(() -> subscriberLoop(subscriberRuntime));
@@ -250,39 +274,94 @@ final class InProcessEventBus implements EventBus {
     // ── Internal helpers ─────────────────────────────────────────────
 
     /**
-     * The subscriber's virtual thread loop. Transitions from COLD to REPLAY
-     * on first scheduling. Processes events from the pending positions queue.
-     * Full REPLAY→LIVE transition logic is M3.2 scope.
+     * The subscriber's virtual thread entry point. Drives the three-phase
+     * transition algorithm:
+     *
+     * <ol>
+     *   <li>{@link ReplayDriver#run()} — pages through the log from the persisted
+     *       checkpoint to the live tail; CASes mode REPLAY → TRANSITION on tail
+     *       reach.</li>
+     *   <li>{@link TransitionCoordinator#drainAndPromote()} — drains the
+     *       {@link ReplayWindowQueue} with gap detection; CASes mode TRANSITION
+     *       → LIVE; fires {@code onCaughtUp()} exactly once.</li>
+     *   <li>{@link #liveLoop} — steady-state LIVE delivery driven by
+     *       {@code notifyEvent} via the pending-positions queue and
+     *       {@code LockSupport.unpark()}.</li>
+     * </ol>
+     *
+     * <p>Any phase returning {@code false} (circuit-breaker trip, interrupt,
+     * infrastructure failure) terminates the VT — the subscriber is left in
+     * {@link SubscriberMode#SUSPENDED SUSPENDED} for operator action via
+     * {@link #resume(String)}.</p>
      *
      * @param runtime the subscriber runtime bundle
      */
     private void subscriberLoop(SubscriberRuntime runtime) {
-        // Transition COLD → REPLAY on first scheduling
-        runtime.compareAndTransition(SubscriberMode.COLD, SubscriberMode.REPLAY);
+        ReplayDriver driver = new ReplayDriver(runtime, eventStore, checkpointStore, clock);
+        if (!driver.run()) {
+            return;
+        }
 
-        // M3.1 event processing loop: pull positions from queue, load and deliver.
-        // M3.2 will implement the full replay-from-checkpoint, transition drain,
-        // and LIVE steady-state loop. For M3.1, this loop serves both REPLAY and
-        // LIVE delivery needs.
+        TransitionCoordinator coordinator = new TransitionCoordinator(
+                runtime, eventStore, clock);
+        if (!coordinator.drainAndPromote()) {
+            return;
+        }
+
+        liveLoop(runtime);
+    }
+
+    /**
+     * Steady-state LIVE delivery loop. Polls the subscriber's pending-positions
+     * queue (populated by {@link #notifyEvent(long)}), loads each event through
+     * the dedicated {@link SubscriberReadExecutor}, and delivers via the
+     * supervisor. Writes a per-event checkpoint after each successful delivery.
+     *
+     * <p>The loop exits cleanly on thread interrupt or {@code SUSPENDED} mode.</p>
+     *
+     * @param runtime the subscriber's runtime bundle
+     */
+    private void liveLoop(SubscriberRuntime runtime) {
+        String subscriberId = runtime.info().subscriberId();
+        SubscriptionFilter filter = runtime.info().filter();
+
         while (!Thread.currentThread().isInterrupted()) {
+            if (runtime.mode() == SubscriberMode.SUSPENDED) {
+                return;
+            }
+
             Long position = runtime.pendingPositions().poll();
             if (position == null) {
-                // No work — park until notifyEvent unparks us
                 LockSupport.park();
                 continue;
             }
 
-            // Skip if suspended (circuit breaker may have tripped during processing)
-            if (runtime.mode() == SubscriberMode.SUSPENDED) {
+            EventEnvelope envelope;
+            try {
+                final long pos = position;
+                EventPage page = runtime.readExecutor().executeRead(
+                        () -> eventStore.readFrom(pos - 1, 1));
+                if (page.events().isEmpty()) {
+                    continue;
+                }
+                envelope = page.events().get(0);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                // Transient read failure — skip this position; retain mode.
                 continue;
             }
 
-            // Load the event and deliver via supervisor
-            EventPage page = eventStore.readFrom(position - 1, 1);
-            if (!page.events().isEmpty()) {
-                EventEnvelope envelope = page.events().get(0);
-                runtime.supervisor().deliver(
-                        runtime.subscriber(), envelope, runtime);
+            if (!filter.matches(envelope)) {
+                continue;
+            }
+
+            SubscriberSupervisor.DeliveryResult result =
+                    runtime.supervisor().deliver(
+                            runtime.subscriber(), envelope, runtime);
+            if (result == SubscriberSupervisor.DeliveryResult.SUCCESS) {
+                checkpointStore.writeCheckpoint(subscriberId, envelope.globalPosition());
             }
         }
     }

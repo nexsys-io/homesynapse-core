@@ -6,6 +6,7 @@ package com.homesynapse.event.bus.test;
 
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
+import com.homesynapse.event.EventPage;
 import com.homesynapse.event.EventPriority;
 import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.EventStore;
@@ -204,6 +205,53 @@ public abstract class EventBusContractTest {
      */
     protected List<Long> notificationsFor(String subscriberId) {
         return notifications.getOrDefault(subscriberId, List.of());
+    }
+
+    /**
+     * Polls the bus's introspection API until the given subscriber reaches the
+     * specified mode, or fails with an {@link AssertionError} after the default
+     * 5-second budget elapses.
+     *
+     * <p>Polling cadence is fixed at 50&nbsp;ms increments — this method does
+     * not consult any direct time source (NO_DIRECT_TIME_ACCESS). Time
+     * granularity is therefore approximate to within one polling interval.</p>
+     *
+     * @param subscriberId the subscriber to observe
+     * @param targetMode   the desired mode
+     * @throws InterruptedException if the calling thread is interrupted while waiting
+     */
+    protected void awaitMode(String subscriberId, SubscriberMode targetMode)
+            throws InterruptedException {
+        awaitMode(subscriberId, targetMode, 5_000L);
+    }
+
+    /**
+     * Polls the bus's introspection API until the given subscriber reaches the
+     * specified mode, or fails with an {@link AssertionError} after the given
+     * millisecond budget elapses.
+     *
+     * @param subscriberId   the subscriber to observe
+     * @param targetMode     the desired mode
+     * @param maxWaitMillis  total wait budget in milliseconds (rounded down to the
+     *                       nearest 50&nbsp;ms polling interval)
+     * @throws InterruptedException if the calling thread is interrupted while waiting
+     */
+    protected void awaitMode(String subscriberId, SubscriberMode targetMode,
+                             long maxWaitMillis) throws InterruptedException {
+        long intervals = Math.max(1L, maxWaitMillis / 50L);
+        for (long i = 0; i < intervals; i++) {
+            try {
+                if (bus().subscriberInfo(subscriberId).mode() == targetMode) {
+                    return;
+                }
+            } catch (IllegalArgumentException ignored) {
+                // Subscriber not yet registered — keep polling.
+            }
+            Thread.sleep(50L);
+        }
+        throw new AssertionError("Subscriber '" + subscriberId
+                + "' did not reach mode " + targetMode + " within "
+                + maxWaitMillis + " ms");
     }
 
     /**
@@ -631,12 +679,15 @@ public abstract class EventBusContractTest {
 
             bus().subscribeRuntime(info, noOp);
 
-            // Immediately after registration, before VT runs, mode may be COLD
-            // or REPLAY (if VT already scheduled). Both are acceptable for this
-            // assertion — the key contract is that it starts in COLD.
+            // Immediately after registration the VT may not have run (COLD), or it
+            // may have raced through the full COLD→REPLAY→TRANSITION→LIVE
+            // sequence (M3.2 — empty store completes catch-up in microseconds).
+            // The contract is that registration does NOT leave the subscriber in
+            // SUSPENDED; any forward-progress mode is acceptable.
             SubscriberSnapshot snapshot = bus().subscriberInfo("mode-sub");
             assertThat(snapshot.mode())
-                    .isIn(SubscriberMode.COLD, SubscriberMode.REPLAY);
+                    .isIn(SubscriberMode.COLD, SubscriberMode.REPLAY,
+                            SubscriberMode.TRANSITION, SubscriberMode.LIVE);
         }
 
         @Test
@@ -652,8 +703,14 @@ public abstract class EventBusContractTest {
             // Allow the subscriber's VT to run
             Thread.sleep(100);
 
+            // The COLD → REPLAY transition has fired. With M3.2's full algorithm
+            // the subscriber may also have progressed through TRANSITION to LIVE
+            // (empty store ⇒ tail reached immediately). The contract this test
+            // guards is that COLD has been exited on first scheduling.
             SubscriberSnapshot snapshot = bus().subscriberInfo("replay-sub");
-            assertThat(snapshot.mode()).isEqualTo(SubscriberMode.REPLAY);
+            assertThat(snapshot.mode())
+                    .isIn(SubscriberMode.REPLAY, SubscriberMode.TRANSITION,
+                            SubscriberMode.LIVE);
         }
 
         @Test
@@ -1083,12 +1140,11 @@ public abstract class EventBusContractTest {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Tier 9: REPLAY→LIVE Transition (M3.2 — disabled placeholders)
+    // Tier 9: REPLAY→LIVE Transition (M3.2)
     // ──────────────────────────────────────────────────────────────────
 
     @Nested
     @DisplayName("Tier 9 — REPLAY→LIVE Transition (M3.2)")
-    @Disabled("M3.2")
     class ReplayToLiveTransition {
 
         /** Creates a new test instance. */
@@ -1096,40 +1152,290 @@ public abstract class EventBusContractTest {
             // Explicit constructor per -Xlint:all -Werror requirement.
         }
 
+        @BeforeEach
+        void assumeActiveRuntime() {
+            assumeTrue(supportsActiveRuntime(),
+                    "Skipped: implementation does not support active runtime");
+        }
+
         @Test
         @DisplayName("replay delivers from checkpoint forward")
-        void replayDeliversFromCheckpointForward() {
-            // M3.2 placeholder
+        void replayDeliversFromCheckpointForward()
+                throws InterruptedException, SequenceConflictException {
+            // Pre-populate the log with 5 events (positions 1..5).
+            EventEnvelope[] events = new EventEnvelope[5];
+            for (int i = 0; i < 5; i++) {
+                events[i] = publisher().publishRoot(TestEventFactory.draft());
+            }
+
+            // Persist a checkpoint at position 2 so subscribe should resume from 3.
+            checkpointStore().writeCheckpoint("rcf-sub", 2L);
+
+            List<Long> received = new CopyOnWriteArrayList<>();
+            Subscriber recorder = env -> received.add(env.globalPosition());
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("rcf-sub", SubscriptionFilter.all(), false),
+                    recorder);
+
+            // Wait for the subscriber to catch up to LIVE — at which point all
+            // post-checkpoint events should have been delivered.
+            awaitMode("rcf-sub", SubscriberMode.LIVE);
+
+            // Subscriber must have seen events 3, 4, 5 — and only those.
+            assertThat(received).containsExactly(
+                    events[2].globalPosition(),
+                    events[3].globalPosition(),
+                    events[4].globalPosition());
+            assertThat(received).doesNotContain(
+                    events[0].globalPosition(),
+                    events[1].globalPosition());
         }
 
         @Test
         @DisplayName("transition drains replay window queue")
-        void transitionDrainsReplayWindowQueue() {
-            // M3.2 placeholder
+        void transitionDrainsReplayWindowQueue()
+                throws InterruptedException, SequenceConflictException {
+            // Subscriber blocks on its first delivery to keep mode = REPLAY long
+            // enough for additional publishes to land in the replay window queue.
+            CountDownLatch firstDelivery = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            List<Long> received = new CopyOnWriteArrayList<>();
+            Subscriber blocking = env -> {
+                received.add(env.globalPosition());
+                if (received.size() == 1) {
+                    firstDelivery.countDown();
+                    try {
+                        release.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            };
+
+            // Pre-publish event 1 so the driver has something to deliver during REPLAY.
+            publishAndNotify(TestEventFactory.draft());
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("drain-sub", SubscriptionFilter.all(), false),
+                    blocking);
+
+            // Wait until the subscriber has begun (and is blocked on) its first delivery.
+            assertThat(firstDelivery.await(2, TimeUnit.SECONDS))
+                    .as("Subscriber should begin first delivery")
+                    .isTrue();
+
+            // While blocked in REPLAY, publish three more events. They will route
+            // into the replay window queue (mode = REPLAY).
+            publishAndNotify(TestEventFactory.draft());
+            publishAndNotify(TestEventFactory.draft());
+            publishAndNotify(TestEventFactory.draft());
+
+            // Unblock the subscriber. Driver continues paging, picks up events 2..4
+            // from the store, delivers them, then TRANSITION drains the queue and
+            // gap detection skips entries that were already delivered.
+            release.countDown();
+
+            awaitMode("drain-sub", SubscriberMode.LIVE);
+
+            // Each event must be delivered exactly once — no duplicates from the
+            // REPLAY/queue overlap (INV-BUS-01).
+            assertThat(received).containsExactly(1L, 2L, 3L, 4L);
         }
 
         @Test
         @DisplayName("LIVE transition fires onCaughtUp exactly once")
-        void liveTransitionFiresOnCaughtUpExactlyOnce() {
-            // M3.2 placeholder
+        void liveTransitionFiresOnCaughtUpExactlyOnce()
+                throws InterruptedException {
+            AtomicInteger caughtUpA = new AtomicInteger();
+            AtomicInteger caughtUpB = new AtomicInteger();
+
+            Subscriber subA = new Subscriber() {
+                @Override
+                public void onEvent(EventEnvelope event) {
+                }
+
+                @Override
+                public void onCaughtUp() {
+                    caughtUpA.incrementAndGet();
+                }
+            };
+            Subscriber subB = new Subscriber() {
+                @Override
+                public void onEvent(EventEnvelope event) {
+                }
+
+                @Override
+                public void onCaughtUp() {
+                    caughtUpB.incrementAndGet();
+                }
+            };
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("cu-A", SubscriptionFilter.all(), false), subA);
+            awaitMode("cu-A", SubscriberMode.LIVE);
+            assertThat(caughtUpA.get())
+                    .as("onCaughtUp fires exactly once for subscriber A")
+                    .isEqualTo(1);
+
+            // Register a second subscriber — its own onCaughtUp must fire exactly
+            // once, and A's must not fire again.
+            bus().subscribeRuntime(
+                    new SubscriberInfo("cu-B", SubscriptionFilter.all(), false), subB);
+            awaitMode("cu-B", SubscriberMode.LIVE);
+            assertThat(caughtUpB.get())
+                    .as("onCaughtUp fires exactly once for subscriber B")
+                    .isEqualTo(1);
+            assertThat(caughtUpA.get())
+                    .as("onCaughtUp on A must not fire a second time")
+                    .isEqualTo(1);
         }
 
         @Test
         @DisplayName("replay window overflow at 10000 is critical alert")
-        void replayWindowOverflowAt10000IsCriticalAlert() {
-            // M3.2 placeholder
+        void replayWindowOverflowAt10000IsCriticalAlert()
+                throws InterruptedException, SequenceConflictException {
+            // Block the subscriber on its first delivery so the driver stays in
+            // REPLAY while we flood the replay window queue past its 10,000-entry bound.
+            CountDownLatch firstDelivery = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            List<Long> received = new CopyOnWriteArrayList<>();
+            Subscriber blocking = env -> {
+                received.add(env.globalPosition());
+                if (received.size() == 1) {
+                    firstDelivery.countDown();
+                    try {
+                        release.await(30, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            };
+
+            // One event in the store so the subscriber lands in onEvent and blocks.
+            publishAndNotify(TestEventFactory.draft());
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("overflow-sub", SubscriptionFilter.all(), false),
+                    blocking);
+
+            assertThat(firstDelivery.await(5, TimeUnit.SECONDS))
+                    .as("Subscriber should begin first delivery")
+                    .isTrue();
+
+            // Publish 10,001 more events while the subscriber is blocked in REPLAY.
+            // Entries 10,000 will fit in the queue; the 10,001st will trigger overflow.
+            for (int i = 0; i < 10_001; i++) {
+                publishAndNotify(TestEventFactory.draft());
+            }
+
+            // Release the subscriber. The driver observes the overflow flag, resets
+            // its cursor to the persisted checkpoint, clears the queue, and re-pages
+            // through the entire log — eventually reaching LIVE.
+            release.countDown();
+
+            awaitMode("overflow-sub", SubscriberMode.LIVE, 30_000);
+
+            // Every published event was delivered at least once (no data loss).
+            long uniqueDelivered = received.stream().distinct().count();
+            assertThat(uniqueDelivered)
+                    .as("Every event must be delivered at least once (10002 unique positions)")
+                    .isEqualTo(10_002L);
+
+            // Re-pagination after overflow means at least one event was redelivered.
+            assertThat(received.size())
+                    .as("Overflow restart re-pages through the log, producing redeliveries")
+                    .isGreaterThan(10_002);
         }
 
         @Test
         @DisplayName("multiple subscribers in replay do not interfere")
-        void multipleSubscribersInReplayDoNotInterfere() {
-            // M3.2 placeholder
+        void multipleSubscribersInReplayDoNotInterfere()
+                throws InterruptedException, SequenceConflictException {
+            // Two filter-disjoint subscribers, each blocked on its first delivery
+            // so both stay in REPLAY while we publish more events of each type.
+            CountDownLatch firstA = new CountDownLatch(1);
+            CountDownLatch firstB = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            List<Long> receivedA = new CopyOnWriteArrayList<>();
+            List<Long> receivedB = new CopyOnWriteArrayList<>();
+
+            Subscriber blockingA = env -> {
+                receivedA.add(env.globalPosition());
+                if (receivedA.size() == 1) {
+                    firstA.countDown();
+                    try {
+                        release.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            };
+            Subscriber blockingB = env -> {
+                receivedB.add(env.globalPosition());
+                if (receivedB.size() == 1) {
+                    firstB.countDown();
+                    try {
+                        release.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            };
+
+            // Seed one event of each type so each subscriber lands in onEvent.
+            publishAndNotify(TestEventFactory.draftBuilder().eventType("alpha").build());
+            publishAndNotify(TestEventFactory.draftBuilder().eventType("beta").build());
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("iso-A",
+                            SubscriptionFilter.forTypes("alpha"), false),
+                    blockingA);
+            bus().subscribeRuntime(
+                    new SubscriberInfo("iso-B",
+                            SubscriptionFilter.forTypes("beta"), false),
+                    blockingB);
+
+            assertThat(firstA.await(2, TimeUnit.SECONDS)).isTrue();
+            assertThat(firstB.await(2, TimeUnit.SECONDS)).isTrue();
+
+            // Both subscribers are blocked in REPLAY. Publish more events that route
+            // into each subscriber's own replay window queue.
+            for (int i = 0; i < 3; i++) {
+                publishAndNotify(
+                        TestEventFactory.draftBuilder().eventType("alpha").build());
+                publishAndNotify(
+                        TestEventFactory.draftBuilder().eventType("beta").build());
+            }
+
+            release.countDown();
+
+            awaitMode("iso-A", SubscriberMode.LIVE);
+            awaitMode("iso-B", SubscriberMode.LIVE);
+
+            // INV-SUB-ISO-05: A's queue is isolated from B's — A never sees beta
+            // positions and B never sees alpha positions.
+            for (Long pos : receivedA) {
+                EventPage page = store().readFrom(pos - 1, 1);
+                assertThat(page.events().get(0).eventType()).isEqualTo("alpha");
+            }
+            for (Long pos : receivedB) {
+                EventPage page = store().readFrom(pos - 1, 1);
+                assertThat(page.events().get(0).eventType()).isEqualTo("beta");
+            }
+            assertThat(receivedA.stream().distinct().count())
+                    .as("subscriber A receives all 4 alpha events")
+                    .isEqualTo(4L);
+            assertThat(receivedB.stream().distinct().count())
+                    .as("subscriber B receives all 4 beta events")
+                    .isEqualTo(4L);
         }
 
         @Test
         @DisplayName("reconciliation on version mismatch")
+        @Disabled("M3.5a")
         void reconciliationOnVersionMismatch() {
-            // M3.2 placeholder
+            // Depends on ReconciliationPass and StateProjection (M3.5a scope).
         }
     }
 
