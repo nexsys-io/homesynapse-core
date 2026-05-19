@@ -75,15 +75,19 @@ final class SubscriberSupervisor {
     /**
      * Delivers an event to the subscriber with full exception handling.
      *
-     * <p>On {@link RuntimeException}, records a DLQ entry and a crash in the
-     * rolling window. Does NOT retry within this call — retries are driven by
-     * the subscriber's VT loop re-delivering from the pending queue. Each
-     * distinct delivery attempt through this method counts as one crash.</p>
+     * <p>On {@link RuntimeException}, parks a {@link DeadLetter} via
+     * {@link SubscriberDlq#park(DeadLetter)} (in-memory ring + persistent
+     * writer, AMD-36) and records a crash in the rolling 10-minute window.
+     * Five crashes trip the circuit breaker and the subscriber transitions to
+     * {@link SubscriberMode#SUSPENDED}. Does NOT retry within this call.</p>
      *
-     * <p>M3.2 will add scheduled retry with exponential backoff (MIN=3s, MAX=30s,
-     * jitter=0.2). For M3.1, each failed delivery immediately records the crash
-     * and returns, allowing the circuit breaker to trip after 5 crashes within
-     * the rolling 10-minute window.</p>
+     * <p>The retry loop ({@code computeBackoff}, {@code sleepForBackoff},
+     * {@code MAX_RETRIES}) is reserved for a future WU and is currently dead
+     * code. Each failed delivery parks immediately with {@code attemptCount=1}.</p>
+     *
+     * <p>{@link Error} and checked {@link Exception} bypass the DLQ and
+     * transition directly to {@link SubscriberMode#SUSPENDED} per the
+     * infrastructure-failure taxonomy.</p>
      *
      * @param subscriber the subscriber callback
      * @param envelope   the event to deliver
@@ -98,15 +102,24 @@ final class SubscriberSupervisor {
         } catch (RuntimeException e) {
             Instant now = clock.instant();
 
-            // Record in DLQ
-            dlq.park(new SubscriberDlq.DlqEntry(
+            // RuntimeException.getMessage() can return null (e.g. bare NPE) but
+            // DeadLetter and the V002 cause_message column reject null.
+            String causeMessage = e.getMessage() != null ? e.getMessage() : "";
+            // attemptCount = 1: no retry loop yet — see Supervisor dead-code gotcha.
+            DeadLetter deadLetter = new DeadLetter(
+                    DeadLetter.UNASSIGNED_DLQ_ID,
+                    subscriberId,
+                    envelope.subjectRef().toString(),
                     envelope.globalPosition(),
+                    envelope.eventId().value(),
                     e.getClass().getName(),
-                    e.getMessage(),
+                    causeMessage,
                     1,
                     now,
-                    now
-            ));
+                    now,
+                    null
+            );
+            dlq.park(deadLetter);
 
             // Record crash in window
             recordCrash(now);

@@ -253,7 +253,7 @@ final class InProcessEventBus implements EventBus {
         Objects.requireNonNull(runtime, "runtime must not be null");
 
         SubscriberReadExecutor readExecutor = readConnectionFactory.create(info.subscriberId());
-        SubscriberDlq dlq = new SubscriberDlq();
+        SubscriberDlq dlq = new SubscriberDlq(info.subscriberId(), PersistentDlqWriter.noop());
         SubscriberSupervisor supervisor = new SubscriberSupervisor(
                 info.subscriberId(), clock, dlq);
         ReplayWindowQueue replayWindowQueue = new ReplayWindowQueue();
