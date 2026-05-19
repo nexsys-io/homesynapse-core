@@ -48,4 +48,21 @@ dependencies {
     // not testFixturesImplementation, so they must be declared explicitly here.
     testFixturesImplementation(libs.junit.jupiter)
     testFixturesImplementation(libs.assertj.core)
+
+    // M3.4a: PersistenceTestHarness (testFixture) wraps SqlitePersistenceLifecycle
+    // and exposes its stores via public-interface return types from event-model
+    // (EventPublisher, EventStore, DomainEvent), event-bus (CheckpointStore), and
+    // state-store (ViewCheckpointStore). These three modules are `implementation`
+    // dependencies of the main source set — and the java-test-fixtures plugin does
+    // NOT propagate `implementation` deps to testFixtures (it propagates only the
+    // main source set's compiled classes). They must be declared explicitly for
+    // the testFixtures compile classpath. Using `testFixturesApi` (not just
+    // `testFixturesImplementation`) because the types appear in the fixture's
+    // public method signatures — downstream consumers of these testFixtures
+    // (e.g. testing:integration-tests) need them visible at compile time.
+    // platform-api is already `api`-scoped on the main source set, so HomeId
+    // is transitively visible without an explicit declaration here.
+    testFixturesApi(project(":core:event-model"))
+    testFixturesApi(project(":core:event-bus"))
+    testFixturesApi(project(":core:state-store"))
 }

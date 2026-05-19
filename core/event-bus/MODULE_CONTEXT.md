@@ -205,7 +205,7 @@ None. This module contains no sealed types.
 
 ## Test Fixtures and Contract Tests
 
-The `testFixtures` source set now provides six types:
+The `testFixtures` source set now provides seven types:
 
 | Type | Kind | Package | Purpose |
 |---|---|---|---|
@@ -215,6 +215,7 @@ The `testFixtures` source set now provides six types:
 | `InMemoryEventBus` | class | `com.homesynapse.event.bus.test` | Phase 2 contract-test fixture. 4-method interface only. |
 | `RecordingReadConnectionFactory` | class | `com.homesynapse.event.bus.test` | Recording stub for INV-SUB-ISO-02 assertions. |
 | `DeadLetterStoreContractTest` | abstract class (10 @Test methods) | `com.homesynapse.event.bus.test` | M3.5b — behavioral contract for any persistent dead-letter store implementation. Subclassed by the persistence module's `SqliteDeadLetterStoreContractTest`. |
+| `InProcessEventBusFactory` | utility class | `com.homesynapse.event.bus` (main package) | **M3.4a — public test factory** that constructs the package-private `InProcessEventBus` and returns it typed as the public `EventBus` interface. Lives in the main package (NOT `.test` sub-package) so it can reach the package-private constructor. Single static method `create(EventStore, CheckpointStore, Clock, SubscriberReadConnectionFactory) → EventBus` delegating to the bus's 4-arg convenience constructor (which wires `BusMetrics.noop()` and a constant zero queue-depth supplier). The composition-root lifecycle module (M3.6) will replace this seam with production wiring. |
 
 ### EventBusContractTest — 10 Nested Tiers
 
