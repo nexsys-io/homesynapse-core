@@ -1,4 +1,4 @@
-# event-bus — `com.homesynapse.event.bus` — 29 types — Pull-based event distribution, subscriber management, checkpoint persistence, active runtime lifecycle, backpressure metrics
+# event-bus — `com.homesynapse.event.bus` — 32 types — Pull-based event distribution, subscriber management, checkpoint persistence, active runtime lifecycle, backpressure metrics, persistent dead-letter seam
 
 ## Purpose
 
@@ -36,11 +36,14 @@ The non-transitive `requires jdk.jfr` (added M3.3) lets the bus emit JFR custom 
 
 ## Complete Type Inventory
 
-### Public Types (11)
+### Public Types (14)
 
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
 | `EventBus` | interface (8 methods) | Notification-driven subscription/delivery contract for event distribution | Methods: `subscribe(SubscriberInfo)`, `unsubscribe(String)`, `notifyEvent(long)`, `subscriberPosition(String)`, `subscribeRuntime(SubscriberInfo, Subscriber)`, `resume(String)`, `subscriberInfo(String)`, `subscribers()`. The 4 new methods have default implementations throwing UnsupportedOperationException for backward compatibility. Does NOT have a `publish()` method — the bus is notification-only. |
+| `DeadLetter` | record (11 fields) | M3.5b — public record mirroring the V002 `subscriber_dead_letters` row shape (AMD-36). | Fields: `dlqId` (long, `0` is `UNASSIGNED_DLQ_ID` sentinel pre-persist), `subscriberId`, `sequenceKey`, `eventPosition` (≥ 0), `eventId` (`Ulid`, BLOB(16) in SQLite), `causeClass`, `causeMessage`, `attemptCount` (≥ 1), `firstSeenAt` (`Instant`), `lastAttemptAt` (`Instant`), `diagnostics` (nullable). Compact constructor enforces non-null + non-negative invariants matching V002 `NOT NULL` columns. |
+| `SubscriberMaxRetries` | record (1 field) | M3.5b — typed wrapper for the supervisor's per-subscriber retry cap (AMD-36). | Field: `value` (int, ≥ 1). Constant: `DEFAULT = SubscriberMaxRetries(5)` per AMD-36 — five retries after the initial delivery, six total attempts before park. Validates `value >= 1` in compact constructor. |
+| `PersistentDlqWriter` | functional interface (1 method) | M3.5b — injection seam for persistent dead-letter overflow (AMD-36). | Single method: `park(DeadLetter)`. Static factory `noop()` returns a no-op writer for tests / in-memory-only deployments. Composition root supplies a lambda backed by `SqliteDeadLetterStore` so the bus has no compile-time dependency on persistence. |
 | `SubscriberInfo` | record (3 fields) | Immutable descriptor for subscriber registration with the EventBus | Fields: `subscriberId` (String), `filter` (SubscriptionFilter), `coalesceExempt` (boolean). |
 | `SubscriptionFilter` | record (3 fields) | Immutable filter determining which events a subscriber receives | Fields: `eventTypes` (Set\<String\>), `minimumPriority` (EventPriority), `subjectTypeFilter` (SubjectType nullable). |
 | `CheckpointStore` | interface (2 methods) | Durable storage for subscriber checkpoint positions | Methods: `readCheckpoint(String)` → long, `writeCheckpoint(String, long)`. |
@@ -58,7 +61,7 @@ The non-transitive `requires jdk.jfr` (added M3.3) lets the bus emit JFR custom 
 |---|---|---|---|
 | `InProcessEventBus` | class | Production EventBus implementation | Constructors: `(EventStore, CheckpointStore, Clock, SubscriberReadConnectionFactory)` (convenience — wires `BusMetrics.noop()` and `() -> 0`) and `(EventStore, CheckpointStore, Clock, SubscriberReadConnectionFactory, BusMetrics, IntSupplier)` (production, M3.3). `notifyEvent` samples the IntSupplier on entry, emits depth gauge + publisher-blocked counter (DEC-M3-14, AMD-43 §3.6.2), and records publish latency on exit. `liveLoop` records subscriber lag after each successful supervisor delivery. Routes by subscriber mode: REPLAY/TRANSITION → ReplayWindowQueue; LIVE → pendingPositions + unpark; COLD/SUSPENDED → skip. The queue's lock is held across the mode-read + routing decision. Constant: `PUBLISHER_BLOCKED_DEPTH_THRESHOLD = 5000` (AMD-43 §3.6.2). |
 | `SubscriberSupervisor` | class | Per-subscriber exception handling, backoff, circuit breaker | Exception taxonomy: Error/IOException/checked→SUSPENDED; RuntimeException→backoff. MIN=3s, MAX=30s, jitter=0.2. Rolling 10-min crash window, 5 crashes → SUSPENDED. |
-| `SubscriberDlq` | class | Per-subscriber in-memory DLQ ring (cap 1024) | Methods: `park(DlqEntry)`, `depth()`, `clear()`. Persistent overflow wiring deferred to M3.5b. Also receives `CAUGHT_UP_TRANSITION` synthetic entries on `onCaughtUp()` exceptions (AMD-42 §3.4.3). |
+| `SubscriberDlq` | class | Per-subscriber in-memory DLQ ring (cap 1024); M3.5b adds a `PersistentDlqWriter` injection seam. | Methods: `park(DlqEntry)` (legacy supervisor path — ring only), `park(DeadLetter)` (M3.5b — ring + persistent writer), `depth()`, `clear()`, `subscriberId()`. Two constructors: the no-arg M3.1 constructor preserved for the supervisor wiring (subscriberId="", writer=noop) and a new constructor `(String subscriberId, PersistentDlqWriter writer)` for production lifecycle wiring. The supervisor's `park(DlqEntry)` path is unchanged from M3.1; supervisor-side wiring to call `park(DeadLetter)` is a future enhancement. Also receives `CAUGHT_UP_TRANSITION` synthetic entries on `onCaughtUp()` exceptions (AMD-42 §3.4.3). |
 | `ReplayWindowQueue` | class | Bounded thread-safe queue for events arriving during REPLAY/TRANSITION | Bound `MAX_CAPACITY = 10_000`. Internal `ReentrantLock` (LTD-11). Methods: `enqueue(long)→boolean` (false on overflow, latches `overflowed` flag), `poll()→Long`, `size()`, `isEmpty()`, `clear()`, `overflowed()`, `lock()/unlock()` for compound atomic operations. The `ReplayDriver` polls `overflowed()` and restarts REPLAY from the persisted checkpoint on overflow. |
 | `SubscriberRuntime` | class | Internal bundle: VT, executor, supervisor, DLQ, mode ref, queue, lastReplayedPosition, optional rateLimit | Holds all per-subscriber resources. M3.3 added a nullable `DerivedWriteRateLimit` field. After Bus-Fix Piece A (2026-05-18) the `DerivedWriteRateLimit` type is now `public`, so the bus is no longer blocked on visibility — however the field still remains `null` for all subscribers because the composition root / lifecycle module has not yet been wired to instantiate the limiter and pass it in at `subscribeRuntime` time. That wiring lands with the future lifecycle-module work. `lastReplayedPosition` (AtomicLong) is the gap-detection high-water mark consumed by `TransitionCoordinator`. Closed on unsubscribe (closes rateLimit if present). |
 | `ReplayDriver` | class | Drives the REPLAY phase | Pages event log from persisted checkpoint to live tail, delivers matches via supervisor, writes checkpoints per AMD-38 cadence (200 events OR 2 s), handles `ReplayWindowQueue` overflow restart, CASes mode REPLAY→TRANSITION on tail. Constants: `MAX_REPLAY_PAGE = 500`, `CHECKPOINT_EVENT_THRESHOLD = 200`, `CHECKPOINT_MAX_INTERVAL_SECONDS = 2`. Reads route through `SubscriberReadExecutor` (AMD-26/27, INV-SUB-ISO-02). One instance per subscriber-VT activation. |
@@ -75,7 +78,7 @@ The non-transitive `requires jdk.jfr` (added M3.3) lets the bus emit JFR custom 
 | `HealthSignal` | record (4 fields) | M3.3 — payload of a health emission | Fields: `level` (HealthLevel), `channel` (String), `depth` (int), `timestamp` (Instant). |
 | `HealthLevel` | enum (3 values) | M3.3 — bus-internal severity level: INFO, WARN, CRITICAL | Distinct from the observability module's HealthStatus — that translation happens in the lifecycle/observability bridge layer. |
 
-**Total: 11 public types + 18 package-private types = 29 production types.**
+**Total: 14 public types + 18 package-private types = 32 production types.** M3.5b added three public types (`DeadLetter`, `SubscriberMaxRetries`, `PersistentDlqWriter`).
 
 ## Dependencies
 
@@ -158,7 +161,7 @@ None. This module contains no sealed types.
 
 **GOTCHA: `notifyEvent(long globalPosition)` does NOT pass the event itself.** The bus loads filter-relevant metadata from the event store.
 
-**GOTCHA: V002 schema (`subscriber_dead_letters` table) exists but is NOT wired.** The in-memory DLQ ring (cap 1024) is the M3.1 implementation. Persistent overflow is M3.5b.
+**GOTCHA: V002 schema (`subscriber_dead_letters` table) is wired as of M3.5b.** The persistent infrastructure (`SqliteDeadLetterStore` in `core/persistence`) is reachable through the bus's `PersistentDlqWriter` seam. However the supervisor's `park(DlqEntry)` path is unchanged from M3.1 — it writes only to the in-memory ring because `DlqEntry` lacks `sequenceKey` and `eventId`. Composition-root wiring (lifecycle module) instantiates `SubscriberDlq` with a real writer, but until the supervisor is taught to construct `DeadLetter` instances and call `park(DeadLetter)`, the persistent writer remains dormant. Tracked as a follow-up work unit; M3.5b lands the infrastructure.
 
 **GOTCHA: `InMemoryEventBus` is NOT modified in M3.1.** It remains the Phase 2 fixture for the original 4-method interface. The production bus is InProcessEventBus.
 
@@ -200,7 +203,7 @@ None. This module contains no sealed types.
 
 ## Test Fixtures and Contract Tests
 
-The `testFixtures` source set now provides five types:
+The `testFixtures` source set now provides six types:
 
 | Type | Kind | Package | Purpose |
 |---|---|---|---|
@@ -209,6 +212,7 @@ The `testFixtures` source set now provides five types:
 | `EventBusContractTest` | abstract class (44 @Test methods: 18 + 16 active + 10 disabled) | `com.homesynapse.event.bus.test` | Behavioral contract for EventBus. 4 @Nested tiers (Phase 2) + 4 new tiers (M3.1) + 2 disabled tiers (M3.2, M3.3). |
 | `InMemoryEventBus` | class | `com.homesynapse.event.bus.test` | Phase 2 contract-test fixture. 4-method interface only. |
 | `RecordingReadConnectionFactory` | class | `com.homesynapse.event.bus.test` | Recording stub for INV-SUB-ISO-02 assertions. |
+| `DeadLetterStoreContractTest` | abstract class (10 @Test methods) | `com.homesynapse.event.bus.test` | M3.5b — behavioral contract for any persistent dead-letter store implementation. Subclassed by the persistence module's `SqliteDeadLetterStoreContractTest`. |
 
 ### EventBusContractTest — 10 Nested Tiers
 
@@ -230,5 +234,10 @@ The `testFixtures` source set now provides five types:
 - **M3.3 complete (2026-05-17):** Backpressure metrics and observability landed (AMD-43). New types: `BusMetrics` (public interface + `noop()`/`jfr()` factories), `NoopBusMetrics`, `BusMetricsJfr`, six JFR custom event classes (`BusPublishLatencyEvent`, `BusPublisherBlockedEvent`, `BusWriterQueueDepthEvent`, `BusSubscriberLagEvent`, `BusWriteAcceptedEvent`, `BusWriteParkedEvent`), `QueueSaturationHealthCheck`, `HealthSignal` (record), `HealthLevel` (enum), `DerivedWriteRateLimit`. `InProcessEventBus` constructor extended with `(BusMetrics, IntSupplier)` parameters (DEC-M3-14 — no persistence module dependency); `notifyEvent` samples depth, emits depth gauge + publisher-blocked counter, and records bus-side publish latency; `liveLoop` records subscriber lag after each successful supervisor delivery. `SubscriberRuntime` gained a nullable `DerivedWriteRateLimit` field (still `null` for all subscribers after M3.5a — see below). Tier 10 contract suite: 5 active tests (busMetricsRecordPublishLatency, publisherBlockedCountIncrementsAbove5000, publisherBlockedCountNotIncrementedBelow5000, writerQueueDepthGaugeSampledOnNotify, subscriberLagPopulatedAfterDelivery) with a `BusMetricsRecorder` public static fixture nested in `EventBusContractTest`. New unit tests: `BusMetricsJfrTest`, `QueueSaturationHealthCheckTest`, `DerivedWriteRateLimitTest`. No new ArchUnit rules; no new `requires` directives in module-info.
 - **M3.5a complete (2026-05-18):** StateProjection vertical slice landed in `core/state-store`. State-store's `module-info.java` now declares `requires transitive com.homesynapse.event.bus`. `StateProjection` (public final class in state-store) implements `Subscriber` and observes `SubscriberMode` via a public `setMode(SubscriberMode)` method on the projection itself. State-store consumes the bus's rate limiter through a `DerivedPublishGate` interface (single `acquire() throws InterruptedException` method) — the adapter seam introduced because `DerivedWriteRateLimit` was package-private at M3.5a time. The Tier 9 `reconciliationOnVersionMismatch` test in `EventBusContractTest` remains `@Disabled("M3.5a")` — enabling it requires either a test-local subscriber that drives reconciliation or bus-code changes to support subscriber-initiated REPLAY restart. **Tracked as a dedicated bus-fix WU** (decision per M3.5a deliberation §6 — kept separate from M3.5b to avoid muddying its persistence scope). M3.5a proved the reconciliation pattern end-to-end in `StateProjectionContractTest#reconciliationOnVersionMismatch` on the state-store side.
 - **Bus-Fix Piece A complete (2026-05-18):** `DerivedWriteRateLimit` promoted from package-private to `public`. Class declaration, both constructors, and the `acquire()`/`refill()` methods are now public. The inspection accessors (`capacity()`, `available()`, `clock()`, `subscriberId()`) remain package-private — they are test-only. No new types, no `module-info.java` changes, no behavioral changes. Composition-root wiring can now adapt to state-store's `DerivedPublishGate` via a method reference (`DerivedPublishGate gate = rateLimit::acquire;`). `DerivedPublishGate` itself remains in state-store as an abstraction boundary. Type count change: 10 → 11 public, 19 → 18 package-private (total still 29).
-- **M3.5b pending:** Persistent DLQ wiring (DeadLetter record, SqliteDeadLetterStore, V004 DLQ indices). The in-memory DLQ ring is the current implementation. M3.2's synthetic `CAUGHT_UP_TRANSITION` marker (`eventPosition = -1L`) is recorded in the in-memory DLQ on `onCaughtUp()` exceptions per AMD-42 §3.4.3; persistent wiring is part of M3.5b.
+- **M3.5b complete (2026-05-18):** Persistent DLQ infrastructure landed.
+  - New public types: `DeadLetter` (11 fields mirroring V002), `SubscriberMaxRetries` (typed int wrapper, `DEFAULT = 5`), `PersistentDlqWriter` (`@FunctionalInterface` with `noop()` factory).
+  - `SubscriberDlq` gained a `(String subscriberId, PersistentDlqWriter writer)` constructor and a new `park(DeadLetter)` method that writes to both the in-memory ring AND the persistent writer. The M3.1 supervisor still calls `park(DlqEntry)` (ring only) — supervisor-side wiring to the persistent path is a tracked follow-up.
+  - testFixtures adds `DeadLetterStoreContractTest` — the behavioral contract every persistent DLQ store implementation must pass. Subclassed by the persistence module's `SqliteDeadLetterStoreContractTest` (10 tests covering INSERT semantics, idempotent upsert via `UNIQUE(subscriber_id, event_position)`, per-subscriber isolation, position lookup, counts, null diagnostics round-trip, and null-park rejection).
+  - M3.2's synthetic `CAUGHT_UP_TRANSITION` marker (`eventPosition = -1L`) is still recorded in the in-memory DLQ on `onCaughtUp()` exceptions per AMD-42 §3.4.3.
+- **M3.5b out-of-scope (deferred):** `DlqAdminEndpoint` / `ProjectionRebuildEndpoint` / `ProjectionStatusEndpoint` (operator REST tooling); supervisor wiring to call `park(DeadLetter)` with full identity context; lifecycle module composition root wiring.
 - **Performance targets:** Bus notification fan-out within 1ms for 20 subscribers. CheckpointStore.writeCheckpoint() within 1ms.

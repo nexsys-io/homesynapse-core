@@ -68,9 +68,20 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
     /** Classpath directory holding the events-database migration scripts. */
     private static final String EVENTS_MIGRATION_PATH = "db/migration/events";
 
-    /** Ordered list of migration files — the authoritative manifest (LTD-07). */
+    /**
+     * Ordered list of migration files — the authoritative manifest (LTD-07).
+     *
+     * <p>V002 (M3 bridge) added the {@code subscriber_dead_letters} table
+     * defined in AMD-36. V003 added the {@code snapshots} table for State
+     * Projection rebuild performance and dropped the redundant
+     * {@code idx_events_subject} index. V004 (M3.5b) adds operational
+     * indices on {@code subscriber_dead_letters} for admin query paths.</p>
+     */
     private static final List<String> EVENTS_MIGRATION_FILES = List.of(
-            "V001__initial_event_store_schema.sql");
+            "V001__initial_event_store_schema.sql",
+            "V002__subscriber_dead_letter_queue.sql",
+            "V003__add_snapshots_and_drop_redundant_index.sql",
+            "V004__dlq_operational_indices.sql");
 
     private final Path databasePath;
     private final int readThreadCount;
