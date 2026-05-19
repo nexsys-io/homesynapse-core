@@ -82,6 +82,7 @@ class StateProjectionVerticalIT {
                 new ProjectionId("state_projection"),
                 1,
                 viewCheckpointStore,
+                StateCheckpointSource.stub(),
                 stateStore,
                 rule,
                 eventStore,

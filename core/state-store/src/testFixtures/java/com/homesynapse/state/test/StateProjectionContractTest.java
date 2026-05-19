@@ -36,6 +36,7 @@ import com.homesynapse.state.InMemoryProjectionAdvancer;
 import com.homesynapse.state.InMemoryStateStore;
 import com.homesynapse.state.ProjectionAdvancer;
 import com.homesynapse.state.ProjectionId;
+import com.homesynapse.state.StateCheckpointSource;
 import com.homesynapse.state.StateProjection;
 import com.homesynapse.state.StateStore;
 import com.homesynapse.state.ViewCheckpointStore;
@@ -107,6 +108,14 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
     /** Unbounded gate (no rate limiting) for default tests. */
     protected DerivedPublishGate publishGate;
 
+    /**
+     * Default {@link StateCheckpointSource#stub() stub} source — preserves the
+     * M3.5a {@code byte[0]} write behavior and reports
+     * {@code loadedProjectionVersion() == 0}. Tests that need a real source
+     * construct their own and pass it to {@link #createProjection}.
+     */
+    protected StateCheckpointSource checkpointSource;
+
     /** Projection under test. */
     protected StateProjection projection;
 
@@ -131,6 +140,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
         spyPublisher = new SpyPublisher(eventStore);
         rule = new EchoStateRule();
         publishGate = DerivedPublishGate.unbounded();
+        checkpointSource = StateCheckpointSource.stub();
 
         testEntityId = new EntityId(UlidFactory.generate());
         testSubject = SubjectRef.entity(testEntityId);
@@ -139,6 +149,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
                 new ProjectionId("state_projection"),
                 1,
                 checkpointStore,
+                checkpointSource,
                 stateStore,
                 rule,
                 spyPublisher,
@@ -167,6 +178,8 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
      * @param projectionId      identifier for the projection view
      * @param projectionVersion running code's projection version
      * @param checkpointStore   durable checkpoint storage
+     * @param checkpointSource  source of serialized checkpoint data and the
+     *                          loaded projection version
      * @param stateStore        port for materialized state
      * @param rule              derivation strategy
      * @param publisher         event publisher for derived events
@@ -180,6 +193,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
             ProjectionId projectionId,
             int projectionVersion,
             ViewCheckpointStore checkpointStore,
+            StateCheckpointSource checkpointSource,
             StateStore stateStore,
             DerivationRule rule,
             EventPublisher publisher,
@@ -314,6 +328,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
                 new ProjectionId("defence-test"),
                 1,
                 checkpointStore,
+                checkpointSource,
                 stateStore,
                 new AlwaysProducingRule(),
                 spyPublisher,
@@ -365,6 +380,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
                 new ProjectionId("rate-test"),
                 1,
                 checkpointStore,
+                checkpointSource,
                 stateStore,
                 rule,
                 spyPublisher,
@@ -424,6 +440,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
                 new ProjectionId("crash-test"),
                 1,
                 checkpointStore,
+                checkpointSource,
                 new InMemoryStateStore(),
                 rule,
                 crashingPublisher,
@@ -454,9 +471,10 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
                 staleEntity, Map.of(), Availability.UNKNOWN,
                 7L, now, now, now, null, false));
 
-        // Seed a checkpoint with projectionVersion=1 (the in-memory store
-        // hardcodes 1; the seed value is independent of the projection's
-        // running version).
+        // Seed a checkpoint. The seeded byte payload is opaque to the
+        // contract test; reconciliation is driven by the StateCheckpointSource's
+        // loadedProjectionVersion() (default stub returns 0, mismatch with the
+        // projection's version 2 → reconciliation).
         String viewName = "recon-test";
         checkpointStore.writeCheckpoint(viewName, 100L, new byte[]{1, 2, 3});
 
@@ -465,6 +483,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
                 new ProjectionId(viewName),
                 2,
                 checkpointStore,
+                checkpointSource,
                 stateStore,
                 rule,
                 spyPublisher,
@@ -508,6 +527,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
                 new ProjectionId(viewName),
                 2,
                 checkpointStore,
+                checkpointSource,
                 stateStore,
                 rule,
                 spyPublisher,

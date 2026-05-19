@@ -93,7 +93,8 @@ import org.slf4j.LoggerFactory;
  *
  * <h2>Reconciliation (AMD-41 §3.2.4)</h2>
  *
- * <p>When the persisted checkpoint's {@code projectionVersion} does not match
+ * <p>When the {@link StateCheckpointSource#loadedProjectionVersion() persisted
+ * projection version} (recovered from the checkpoint data blob) does not match
  * the running code's {@code projectionVersion}:</p>
  * <ul>
  *   <li>If the system property
@@ -126,6 +127,7 @@ import org.slf4j.LoggerFactory;
  * @see DerivationRule
  * @see SelfProducedFilter
  * @see DerivedPublishGate
+ * @see StateCheckpointSource
  * @see CheckpointPolicy
  */
 public final class StateProjection implements Subscriber {
@@ -139,11 +141,22 @@ public final class StateProjection implements Subscriber {
     public static final String ALLOW_STALE_SNAPSHOTS_PROPERTY =
             "homesynapse.projection.allow_stale_snapshots";
 
+    /**
+     * Advisory size threshold (10 MB) for serialized checkpoint payloads. The
+     * projection emits a WARN once per checkpoint write when
+     * {@link StateCheckpointSource#serializeCheckpoint(int)} returns a payload
+     * larger than this. The write is not blocked — the guardrail is a hint to
+     * operators that entity count or attribute density is approaching the
+     * point where checkpoint cadence starts costing significant I/O.
+     */
+    static final int CHECKPOINT_SIZE_WARN_BYTES = 10 * 1024 * 1024;
+
     private static final Logger log = LoggerFactory.getLogger(StateProjection.class);
 
     private final ProjectionId projectionId;
     private final int projectionVersion;
     private final ViewCheckpointStore checkpointStore;
+    private final StateCheckpointSource checkpointSource;
     private final StateStore stateStore;
     private final DerivationRule rule;
     private final EventPublisher publisher;
@@ -175,6 +188,12 @@ public final class StateProjection implements Subscriber {
      * @param projectionId      stable identifier for this projection; never {@code null}
      * @param projectionVersion running code's projection version; must be ≥ 1
      * @param checkpointStore   durable checkpoint storage; never {@code null}
+     * @param checkpointSource  source of serialized checkpoint data and the
+     *                          authoritative loaded projection version (AMD-41
+     *                          §3.2.3–3.2.4); never {@code null}. Pass
+     *                          {@link StateCheckpointSource#stub()} when
+     *                          checkpoint persistence is not needed (tests,
+     *                          in-memory deployments).
      * @param stateStore        port for materialized state; never {@code null}
      * @param rule              derivation strategy; never {@code null}
      * @param publisher         event publisher for derived events; never {@code null}
@@ -190,6 +209,7 @@ public final class StateProjection implements Subscriber {
             ProjectionId projectionId,
             int projectionVersion,
             ViewCheckpointStore checkpointStore,
+            StateCheckpointSource checkpointSource,
             StateStore stateStore,
             DerivationRule rule,
             EventPublisher publisher,
@@ -199,8 +219,9 @@ public final class StateProjection implements Subscriber {
             DerivedPublishGate publishGate) {
         Objects.requireNonNull(clock, "clock must not be null");
         return new StateProjection(
-                projectionId, projectionVersion, checkpointStore, stateStore,
-                rule, publisher, advancer, checkpointPolicy, clock, publishGate,
+                projectionId, projectionVersion, checkpointStore, checkpointSource,
+                stateStore, rule, publisher, advancer, checkpointPolicy, clock,
+                publishGate,
                 new SelfProducedFilter(clock, SelfProducedFilter.DEFAULT_TTL));
     }
 
@@ -212,6 +233,7 @@ public final class StateProjection implements Subscriber {
             ProjectionId projectionId,
             int projectionVersion,
             ViewCheckpointStore checkpointStore,
+            StateCheckpointSource checkpointSource,
             StateStore stateStore,
             DerivationRule rule,
             EventPublisher publisher,
@@ -227,6 +249,7 @@ public final class StateProjection implements Subscriber {
         }
         this.projectionVersion = projectionVersion;
         this.checkpointStore = Objects.requireNonNull(checkpointStore, "checkpointStore");
+        this.checkpointSource = Objects.requireNonNull(checkpointSource, "checkpointSource");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.rule = Objects.requireNonNull(rule, "rule");
         this.publisher = Objects.requireNonNull(publisher, "publisher");
@@ -513,31 +536,33 @@ public final class StateProjection implements Subscriber {
                 checkpointStore.readLatestCheckpoint(projectionId.value());
         if (latest.isPresent()) {
             CheckpointRecord record = latest.get();
-            if (record.projectionVersion() != projectionVersion) {
+            // AMD-41 §3.2.4: the authoritative version lives in the checkpoint
+            // data blob (recovered via StateCheckpointSource), NOT in
+            // CheckpointRecord.projectionVersion() — that field is a sentinel
+            // hardcoded to 1 by both in-memory and SQLite ViewCheckpointStore
+            // implementations.
+            int persistedVersion = checkpointSource.loadedProjectionVersion();
+            if (persistedVersion != projectionVersion) {
                 boolean allowStale = Boolean.parseBoolean(
                         System.getProperty(ALLOW_STALE_SNAPSHOTS_PROPERTY, "false"));
                 if (allowStale) {
-                    log.warn("Stale snapshot accepted for {}: checkpoint version {} != "
+                    log.warn("Stale snapshot accepted for {}: persisted version {} != "
                                     + "projection version {} (escape hatch active)",
                             projectionId.value(),
-                            record.projectionVersion(),
+                            persistedVersion,
                             projectionVersion);
                     cursorPosition = record.position();
                 } else {
-                    log.info("Reconciliation triggered for {}: checkpoint version {} != "
+                    log.info("Reconciliation triggered for {}: persisted version {} != "
                                     + "projection version {}; clearing state, resetting cursor to 0",
                             projectionId.value(),
-                            record.projectionVersion(),
+                            persistedVersion,
                             projectionVersion);
                     stateStore.clear();
                     cursorPosition = 0L;
                 }
             } else {
                 cursorPosition = record.position();
-                // Phase 2 stub: byte[] data is opaque; deserialization is M3.5b
-                // scope. For M3.5a, the in-memory state store is shared across
-                // restart in tests via the fixture, so we don't re-hydrate from
-                // bytes.
             }
         } else {
             cursorPosition = 0L;
@@ -560,11 +585,12 @@ public final class StateProjection implements Subscriber {
     }
 
     private void writeCheckpoint(Instant now) {
-        // Phase 2 stub data: M3.5b will add Jackson serialization of the
-        // materialized state map. The opaque byte[] contract is preserved by
-        // ViewCheckpointStore, so the empty payload is harmless for M3.5a's
-        // in-memory tests.
-        byte[] data = new byte[0];
+        byte[] data = checkpointSource.serializeCheckpoint(projectionVersion);
+        if (data.length > CHECKPOINT_SIZE_WARN_BYTES) {
+            log.warn("Checkpoint data for {} is {} bytes — consider reducing "
+                            + "entity count or attribute density",
+                    projectionId.value(), data.length);
+        }
         checkpointStore.writeCheckpoint(projectionId.value(), cursorPosition, data);
         eventsSinceCheckpoint = 0L;
         lastCheckpointAt = now;
