@@ -61,6 +61,13 @@ dependencies {
     // Cross-cutting test infrastructure
     testImplementation(project(":testing:test-support"))
 
+    // M3.4b: Pi4SustainedLoadIT, Pi4D1SpikeIT, and CrashRecoveryIT emit
+    // periodic progress logs (mandatory operator signal for runs that take
+    // tens of minutes). The persistence module declares slf4j-api as
+    // `implementation`-scoped, which the java-library plugin does not
+    // propagate to consumers — declare it explicitly here.
+    testImplementation(libs.slf4j.api)
+
     // SQLite JDBC driver at test runtime — the real WAL mode needs the
     // actual driver, not a mock.
     testRuntimeOnly(libs.sqlite.jdbc)

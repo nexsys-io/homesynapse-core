@@ -29,6 +29,7 @@ import com.homesynapse.event.StoragePressureChangedEvent;
 import com.homesynapse.event.SystemStartedEvent;
 import com.homesynapse.event.SystemStoppedEvent;
 import com.homesynapse.event.TelemetrySummaryEvent;
+import com.homesynapse.event.bus.BusMetrics;
 import com.homesynapse.event.bus.CheckpointStore;
 import com.homesynapse.event.bus.EventBus;
 import com.homesynapse.event.bus.InProcessEventBusFactory;
@@ -42,6 +43,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.IntSupplier;
 
 /**
  * Shared test wiring that stands up the real production stack
@@ -166,26 +168,98 @@ final class IntegrationTestHarness implements AutoCloseable {
      * @return a started harness ready for publish / subscribe / query
      */
     static IntegrationTestHarness start(Path dbPath, Clock clock) {
+        return startInternal(dbPath, clock, /* throttled */ false,
+                BusMetrics.noop(), () -> 0);
+    }
+
+    /**
+     * Constructs and starts a harness with the Pi-4
+     * {@code ThrottledWriteCoordinator} (10 ms baseline, 200 ms spike at
+     * 0.5% probability) installed inside the persistence write thread, and
+     * with caller-supplied bus metrics + writer-queue-depth supplier.
+     *
+     * <p>This is the wiring used by M3.4b's {@code Pi4SustainedLoadIT} and
+     * {@code Pi4D1SpikeIT}. Tests that need to observe the seven canonical
+     * bus metrics (AMD-43 §3.6.2) — particularly {@code subscriber.lag.events}
+     * for the lag-bound assertions — pass a recording {@link BusMetrics}
+     * implementation here.</p>
+     *
+     * @param dbPath              the SQLite database file path
+     * @param clock               injected clock
+     * @param metrics             {@link BusMetrics} implementation; tests
+     *                            that assert on metrics pass a recorder,
+     *                            others pass {@link BusMetrics#noop()}
+     * @param writerQueueDepth    writer-queue-depth supplier; {@code () -> 0}
+     *                            is fine when the test does not assert on
+     *                            rate limiting
+     * @return a started harness with throttled writes and bus-metrics wired
+     */
+    static IntegrationTestHarness startThrottled(
+            Path dbPath,
+            Clock clock,
+            BusMetrics metrics,
+            IntSupplier writerQueueDepth) {
+        Objects.requireNonNull(metrics, "metrics");
+        Objects.requireNonNull(writerQueueDepth, "writerQueueDepth");
+        return startInternal(dbPath, clock, /* throttled */ true,
+                metrics, writerQueueDepth);
+    }
+
+    /**
+     * Constructs a harness whose persistence layer will NOT shut down
+     * gracefully via {@link #close()}. Used by {@code CrashRecoveryIT} to
+     * simulate an ungraceful process termination.
+     *
+     * <p>The harness behaves identically to {@link #start(Path, Clock)}
+     * until {@link #abandon()} is called: the WAL has not been flushed,
+     * the {@code DatabaseExecutor} has not been shut down, and the database
+     * file is in whatever state SQLite's WAL recovery sees on next open.</p>
+     *
+     * <p>To complete the crash simulation, a test calls {@link #abandon()}
+     * then constructs a fresh {@code IntegrationTestHarness.start(...)} on
+     * the same database path. The simulation works because the harness's
+     * {@code @TempDir} path persists across both lifetimes (use a
+     * class-level {@code static @TempDir} field or
+     * {@code @TempDir(cleanup = NEVER)}).</p>
+     *
+     * @param dbPath the SQLite database file path
+     * @param clock  injected clock
+     * @return a started harness ready for the crash-simulation flow
+     */
+    static IntegrationTestHarness startForCrashSimulation(Path dbPath, Clock clock) {
+        return startInternal(dbPath, clock, /* throttled */ false,
+                BusMetrics.noop(), () -> 0);
+    }
+
+    private static IntegrationTestHarness startInternal(
+            Path dbPath,
+            Clock clock,
+            boolean throttled,
+            BusMetrics metrics,
+            IntSupplier writerQueueDepth) {
         Objects.requireNonNull(dbPath, "dbPath");
         Objects.requireNonNull(clock, "clock");
 
         HomeId homeId = new HomeId(UlidFactory.generate(clock));
 
-        PersistenceTestHarness persistence = PersistenceTestHarness.start(
-                dbPath,
-                DEFAULT_READ_THREAD_COUNT,
-                clock,
-                homeId,
-                ALL_PRODUCTION_EVENT_CLASSES);
+        PersistenceTestHarness persistence = throttled
+                ? PersistenceTestHarness.startThrottled(
+                        dbPath, DEFAULT_READ_THREAD_COUNT, clock, homeId,
+                        ALL_PRODUCTION_EVENT_CLASSES)
+                : PersistenceTestHarness.start(
+                        dbPath, DEFAULT_READ_THREAD_COUNT, clock, homeId,
+                        ALL_PRODUCTION_EVENT_CLASSES);
 
         RecordingReadConnectionFactory readConnectionFactory =
                 new RecordingReadConnectionFactory();
 
-        EventBus eventBus = InProcessEventBusFactory.create(
+        EventBus eventBus = InProcessEventBusFactory.createWithMetrics(
                 persistence.eventStore(),
                 persistence.checkpointStore(),
                 clock,
-                readConnectionFactory);
+                readConnectionFactory,
+                metrics,
+                writerQueueDepth);
 
         return new IntegrationTestHarness(
                 clock, dbPath, homeId, persistence, readConnectionFactory, eventBus);
@@ -272,9 +346,28 @@ final class IntegrationTestHarness implements AutoCloseable {
      * are no active {@code subscribeRuntime} VTs that need draining.
      * Subscribers registered by tests should be tracked and unsubscribed
      * by those tests if they care about clean shutdown.</p>
+     *
+     * <p>If {@link #abandon()} was previously called, this is a no-op.</p>
      */
     @Override
     public void close() {
         persistence.close();
+    }
+
+    /**
+     * Marks the underlying persistence as abandoned, simulating an
+     * ungraceful process termination ({@code kill -9}). After this call,
+     * the next {@link #close()} will NOT flush the WAL and will NOT shut
+     * down the {@code DatabaseExecutor}. The database file is left as-is
+     * on disk; SQLite's WAL recovery handles the rest on the next harness
+     * open.
+     *
+     * <p>The {@code @TempDir} path used by the abandoned harness must be
+     * shared with the restart-phase harness — use a class-level
+     * {@code static @TempDir Path tempDir} field or
+     * {@code @TempDir(cleanup = NEVER)} to keep the file across instances.</p>
+     */
+    void abandon() {
+        persistence.abandonForCrashSimulation();
     }
 }
