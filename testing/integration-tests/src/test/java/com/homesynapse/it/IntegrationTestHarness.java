@@ -4,36 +4,16 @@
  */
 package com.homesynapse.it;
 
-import com.homesynapse.event.AutomationCompletedEvent;
-import com.homesynapse.event.AutomationTriggeredEvent;
-import com.homesynapse.event.AvailabilityChangedEvent;
-import com.homesynapse.event.CommandConfirmationTimedOutEvent;
-import com.homesynapse.event.CommandDispatchedEvent;
-import com.homesynapse.event.CommandIssuedEvent;
-import com.homesynapse.event.CommandResultEvent;
-import com.homesynapse.event.ConfigChangedEvent;
-import com.homesynapse.event.ConfigErrorEvent;
-import com.homesynapse.event.DeviceAdoptedEvent;
-import com.homesynapse.event.DeviceDiscoveredEvent;
-import com.homesynapse.event.DeviceRemovedEvent;
 import com.homesynapse.event.DomainEvent;
 import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.EventStore;
-import com.homesynapse.event.PresenceChangedEvent;
-import com.homesynapse.event.PresenceSignalEvent;
-import com.homesynapse.event.StateChangedEvent;
-import com.homesynapse.event.StateConfirmedEvent;
-import com.homesynapse.event.StateReportRejectedEvent;
-import com.homesynapse.event.StateReportedEvent;
-import com.homesynapse.event.StoragePressureChangedEvent;
-import com.homesynapse.event.SystemStartedEvent;
-import com.homesynapse.event.SystemStoppedEvent;
-import com.homesynapse.event.TelemetrySummaryEvent;
+import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.bus.BusMetrics;
 import com.homesynapse.event.bus.CheckpointStore;
 import com.homesynapse.event.bus.EventBus;
 import com.homesynapse.event.bus.InProcessEventBusFactory;
 import com.homesynapse.event.bus.test.RecordingReadConnectionFactory;
+import com.homesynapse.integration.IntegrationEvents;
 import com.homesynapse.persistence.PersistenceConfig;
 import com.homesynapse.persistence.PersistenceTestHarness;
 import com.homesynapse.platform.identity.HomeId;
@@ -45,6 +25,7 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.IntSupplier;
+import java.util.stream.Stream;
 
 /**
  * Shared test wiring that stands up the real production stack
@@ -95,38 +76,16 @@ final class IntegrationTestHarness implements AutoCloseable {
 
     /**
      * The full production event class list (22 core + 5 integration =
-     * 27 records). Kept in this file so the harness is self-contained;
-     * the canonical authoritative list lives in event-model and
-     * integration-api annotation tests.
+     * 27 records). Aggregated from the canonical per-module manifests
+     * shipped by {@code com.homesynapse.event} and
+     * {@code com.homesynapse.integration} (M3.6c). This is the same
+     * aggregation pattern the M3.6d composition root performs at startup.
      */
-    static final List<Class<? extends DomainEvent>> ALL_PRODUCTION_EVENT_CLASSES = List.of(
-            CommandIssuedEvent.class,
-            CommandDispatchedEvent.class,
-            CommandResultEvent.class,
-            CommandConfirmationTimedOutEvent.class,
-            StateReportedEvent.class,
-            StateReportRejectedEvent.class,
-            StateChangedEvent.class,
-            StateConfirmedEvent.class,
-            DeviceDiscoveredEvent.class,
-            DeviceAdoptedEvent.class,
-            DeviceRemovedEvent.class,
-            AvailabilityChangedEvent.class,
-            AutomationTriggeredEvent.class,
-            AutomationCompletedEvent.class,
-            PresenceSignalEvent.class,
-            PresenceChangedEvent.class,
-            SystemStartedEvent.class,
-            SystemStoppedEvent.class,
-            StoragePressureChangedEvent.class,
-            ConfigChangedEvent.class,
-            ConfigErrorEvent.class,
-            TelemetrySummaryEvent.class,
-            com.homesynapse.integration.IntegrationStarted.class,
-            com.homesynapse.integration.IntegrationStopped.class,
-            com.homesynapse.integration.IntegrationHealthChanged.class,
-            com.homesynapse.integration.IntegrationRestarted.class,
-            com.homesynapse.integration.IntegrationResourceExceeded.class);
+    static final List<Class<? extends DomainEvent>> ALL_PRODUCTION_EVENT_CLASSES =
+            Stream.concat(
+                            EventTypes.CORE_PRODUCTION_EVENT_CLASSES.stream(),
+                            IntegrationEvents.LIFECYCLE_EVENT_CLASSES.stream())
+                    .toList();
 
     /**
      * Production MVP default — {@link PersistenceConfig#HOME_DEFAULT}

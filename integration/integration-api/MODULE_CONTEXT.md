@@ -1,4 +1,4 @@
-# integration-api — `com.homesynapse.integration` — 21 types — Adapter-facing API boundary, re-exports all core modules, IntegrationFactory/Adapter/Context
+# integration-api — `com.homesynapse.integration` — 22 types — Adapter-facing API boundary, re-exports all core modules, IntegrationFactory/Adapter/Context
 
 ## Purpose
 
@@ -6,7 +6,7 @@ The Integration API module defines the adapter-facing contract boundary between 
 
 This is the single module that every integration adapter depends on. It re-exports all the core modules an adapter needs (event-model, device-model, state-store, persistence, configuration, platform-api, java.net.http) via `requires transitive`, so adapter modules only need to declare `requires com.homesynapse.integration`.
 
-The Phase 2 specification contains 21 public Java types: 4 enums (HealthState, IoType, RequiredService, DataPath), 9 records (4 non-lifecycle: IntegrationDescriptor, HealthParameters, IntegrationContext, CommandEnvelope; 5 lifecycle event subtypes: IntegrationStarted, IntegrationStopped, IntegrationHealthChanged, IntegrationRestarted, IntegrationResourceExceeded), 1 sealed interface (IntegrationLifecycleEvent), 4 service interfaces (IntegrationFactory, IntegrationAdapter, HealthReporter, CommandHandler), 2 optional service interfaces (SchedulerService, ManagedHttpClient), and 1 exception class (PermanentIntegrationException).
+The Phase 2 specification contains 22 public Java types: 4 enums (HealthState, IoType, RequiredService, DataPath), 9 records (4 non-lifecycle: IntegrationDescriptor, HealthParameters, IntegrationContext, CommandEnvelope; 5 lifecycle event subtypes: IntegrationStarted, IntegrationStopped, IntegrationHealthChanged, IntegrationRestarted, IntegrationResourceExceeded), 1 sealed interface (IntegrationLifecycleEvent), 4 service interfaces (IntegrationFactory, IntegrationAdapter, HealthReporter, CommandHandler), 2 optional service interfaces (SchedulerService, ManagedHttpClient), 1 exception class (PermanentIntegrationException), and 1 final utility class (IntegrationEvents — M3.6c per-module event-class manifest).
 
 ## Design Doc Reference
 
@@ -100,6 +100,12 @@ All `requires transitive` because adapter modules use types from all these modul
 | Type | Purpose |
 |---|---|
 | `PermanentIntegrationException` extends HomeSynapseException | Unrecoverable adapter failure — supervisor transitions to FAILED without retry. Error code: `integration.permanent_failure`. HTTP status: 503. |
+
+### Utility Classes (1)
+
+| Type | Purpose |
+|---|---|
+| `IntegrationEvents` (public final class, private constructor) | Per-module event-class manifest (M3.6c). Single static field `LIFECYCLE_EVENT_CLASSES` (`public static final List<Class<? extends DomainEvent>>`) listing the 5 `IntegrationLifecycleEvent` subtypes shipped by this module. The composition root aggregates this list with `EventTypes.CORE_PRODUCTION_EVENT_CLASSES` from `com.homesynapse.event` via `Stream.concat` to build the `EventTypeRegistry` at startup. Per DECIDE-04, this explicit aggregation is the only sanctioned discovery mechanism — classpath scanning and `ServiceLoader` are banned (enforced by ArchUnit Rule 3, `noServiceLoader`). Adding a new lifecycle event subtype requires editing this list (the forcing function). |
 
 ## Dependencies
 

@@ -4,51 +4,26 @@
  */
 package com.homesynapse.persistence;
 
-import com.homesynapse.event.AutomationCompletedEvent;
-import com.homesynapse.event.AutomationTriggeredEvent;
-import com.homesynapse.event.AvailabilityChangedEvent;
-import com.homesynapse.event.CommandConfirmationTimedOutEvent;
-import com.homesynapse.event.CommandDispatchedEvent;
-import com.homesynapse.event.CommandIssuedEvent;
-import com.homesynapse.event.CommandResultEvent;
-import com.homesynapse.event.ConfigChangedEvent;
-import com.homesynapse.event.ConfigErrorEvent;
-import com.homesynapse.event.DeviceAdoptedEvent;
-import com.homesynapse.event.DeviceDiscoveredEvent;
-import com.homesynapse.event.DeviceRemovedEvent;
 import com.homesynapse.event.DomainEvent;
-import com.homesynapse.event.PresenceChangedEvent;
-import com.homesynapse.event.PresenceSignalEvent;
-import com.homesynapse.event.StateChangedEvent;
-import com.homesynapse.event.StateConfirmedEvent;
-import com.homesynapse.event.StateReportRejectedEvent;
-import com.homesynapse.event.StateReportedEvent;
-import com.homesynapse.event.StoragePressureChangedEvent;
-import com.homesynapse.event.SystemStartedEvent;
-import com.homesynapse.event.SystemStoppedEvent;
-import com.homesynapse.event.TelemetrySummaryEvent;
-import com.homesynapse.integration.IntegrationHealthChanged;
-import com.homesynapse.integration.IntegrationResourceExceeded;
-import com.homesynapse.integration.IntegrationRestarted;
-import com.homesynapse.integration.IntegrationStarted;
-import com.homesynapse.integration.IntegrationStopped;
+import com.homesynapse.event.EventTypes;
+import com.homesynapse.integration.IntegrationEvents;
 
 import java.util.List;
+import java.util.stream.Stream;
 
 /**
- * Test-only mirror of the authoritative event class lists that the M2.4
- * persistence serialization tests register with the {@link EventTypeRegistry}.
+ * Test-only event class roster for the M2.4 persistence serialization tests that
+ * register classes with the {@link EventTypeRegistry}.
  *
- * <p>The 22 core event records mirror {@code EXPECTED_EVENT_RECORDS} in
- * {@code com.homesynapse.event.EventTypeAnnotationTest} (event-model test
- * source set). The 5 integration event records mirror
- * {@code EXPECTED_SUBTYPES} in
- * {@code com.homesynapse.integration.IntegrationEventTypeAnnotationTest}
- * (integration-api test source set). Both are private lists in their home
- * modules; this file is a deliberate copy so that the persistence tests have
- * a single local reference. If either upstream list changes, the
- * corresponding upstream annotation test fails; updating this file is a
- * follow-up step.</p>
+ * <p>As of M3.6c the lists are aliased to the canonical per-module manifests:
+ * {@link EventTypes#CORE_PRODUCTION_EVENT_CLASSES} contributes the 22 core records and
+ * {@link IntegrationEvents#LIFECYCLE_EVENT_CLASSES} contributes the 5 integration
+ * lifecycle records. Both manifests are public production API in their respective
+ * modules; this class exposes them under the shorter field names that the persistence
+ * test suite already references and combines them via {@link Stream#concat}.
+ *
+ * <p>The aggregation pattern here mirrors what the M3.6d composition root performs at
+ * startup to construct the production {@code EventTypeRegistry}.
  */
 final class AllEventClasses {
 
@@ -57,46 +32,17 @@ final class AllEventClasses {
     }
 
     /** 22 core domain event records from event-model, all carrying {@code @EventType}. */
-    static final List<Class<? extends DomainEvent>> CORE_EVENTS = List.of(
-            CommandIssuedEvent.class,
-            CommandDispatchedEvent.class,
-            CommandResultEvent.class,
-            CommandConfirmationTimedOutEvent.class,
-            StateReportedEvent.class,
-            StateReportRejectedEvent.class,
-            StateChangedEvent.class,
-            StateConfirmedEvent.class,
-            DeviceDiscoveredEvent.class,
-            DeviceAdoptedEvent.class,
-            DeviceRemovedEvent.class,
-            AvailabilityChangedEvent.class,
-            AutomationTriggeredEvent.class,
-            AutomationCompletedEvent.class,
-            PresenceSignalEvent.class,
-            PresenceChangedEvent.class,
-            SystemStartedEvent.class,
-            SystemStoppedEvent.class,
-            StoragePressureChangedEvent.class,
-            ConfigChangedEvent.class,
-            ConfigErrorEvent.class,
-            TelemetrySummaryEvent.class);
+    static final List<Class<? extends DomainEvent>> CORE_EVENTS =
+            EventTypes.CORE_PRODUCTION_EVENT_CLASSES;
 
     /** 5 integration lifecycle event records from integration-api. */
-    static final List<Class<? extends DomainEvent>> INTEGRATION_EVENTS = List.of(
-            IntegrationStarted.class,
-            IntegrationStopped.class,
-            IntegrationHealthChanged.class,
-            IntegrationRestarted.class,
-            IntegrationResourceExceeded.class);
+    static final List<Class<? extends DomainEvent>> INTEGRATION_EVENTS =
+            IntegrationEvents.LIFECYCLE_EVENT_CLASSES;
 
     /** All 27 registered event record classes — core + integration. */
-    static final List<Class<? extends DomainEvent>> ALL_EVENTS;
-
-    static {
-        var combined = new java.util.ArrayList<Class<? extends DomainEvent>>(
-                CORE_EVENTS.size() + INTEGRATION_EVENTS.size());
-        combined.addAll(CORE_EVENTS);
-        combined.addAll(INTEGRATION_EVENTS);
-        ALL_EVENTS = List.copyOf(combined);
-    }
+    static final List<Class<? extends DomainEvent>> ALL_EVENTS =
+            Stream.concat(
+                            EventTypes.CORE_PRODUCTION_EVENT_CLASSES.stream(),
+                            IntegrationEvents.LIFECYCLE_EVENT_CLASSES.stream())
+                    .toList();
 }

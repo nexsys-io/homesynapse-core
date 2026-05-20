@@ -4,12 +4,17 @@
  */
 package com.homesynapse.event;
 
+import java.util.List;
+
 /**
- * Canonical registry of event type strings used in the HomeSynapse event taxonomy.
+ * Canonical registry of event type strings AND the canonical roster of core
+ * {@link DomainEvent} payload classes used in the HomeSynapse event taxonomy.
  *
- * <p>This class defines all core event type constants referenced by {@link EventEnvelope#eventType()}.
- * Each constant uses UPPER_SNAKE_CASE names with lower_snake_case string values for consistency
- * with the taxonomy defined in Doc 01 §4.3.
+ * <p>This class defines all core event type string constants referenced by
+ * {@link EventEnvelope#eventType()} and the {@link EventType} annotation values on
+ * the 22 core payload records. Each constant uses UPPER_SNAKE_CASE names with
+ * lower_snake_case string values for consistency with the taxonomy defined in
+ * Doc 01 §4.3.
  *
  * <p><strong>Core vs. Integration Types:</strong>
  * Core event types are defined as constants in this class. Integration-defined types use a
@@ -21,7 +26,22 @@ package com.homesynapse.event;
  * following the namespace convention. This class captures only the core, built-in event types
  * shared across all HomeSynapse deployments.
  *
+ * <p><strong>Core production event class manifest (M3.6c):</strong>
+ * {@link #CORE_PRODUCTION_EVENT_CLASSES} is the canonical, ordered list of the 22 core
+ * {@link DomainEvent} payload record classes that ship with HomeSynapse Core. The composition
+ * root aggregates this list with the per-module manifests contributed by other modules
+ * (currently {@code IntegrationEvents.LIFECYCLE_EVENT_CLASSES} in
+ * {@code com.homesynapse.integration}) to build the
+ * {@code EventTypeRegistry} at startup. Adding, removing, or renaming a core event record
+ * <strong>requires editing this list</strong> — the same forcing function that
+ * {@code EventTypeRegistry} enforces at registration time. Per DECIDE-04, classpath scanning
+ * and {@code ServiceLoader} discovery are banned; aggregation is explicit.
+ *
+ * <p>Closes Q3 of the M3.6 gap-closure research: per-module event-class manifests are the
+ * DECIDE-04-compliant alternative to {@code ServiceLoader}.
+ *
  * @see EventEnvelope
+ * @see EventType
  * @see DomainEvent
  */
 public final class EventTypes {
@@ -191,4 +211,58 @@ public final class EventTypes {
 
 	/** Event issued when an integration adapter exceeds a resource quota. */
 	public static final String INTEGRATION_RESOURCE_EXCEEDED = "integration_resource_exceeded";
+
+	// ========== Core Production Event Class Manifest (M3.6c, DECIDE-04) ==========
+
+	/**
+	 * Canonical, ordered list of the 22 core {@link DomainEvent} payload record classes
+	 * that ship with HomeSynapse Core. Every entry carries an {@link EventType} annotation
+	 * whose value is one of the string constants above and which is registered with the
+	 * {@code EventTypeRegistry} at startup.
+	 *
+	 * <p>The composition root aggregates this list with the per-module manifests
+	 * contributed by other modules (currently
+	 * {@code IntegrationEvents.LIFECYCLE_EVENT_CLASSES} in
+	 * {@code com.homesynapse.integration}) using {@link java.util.stream.Stream#concat}.
+	 * Per DECIDE-04, this explicit aggregation is the only sanctioned discovery
+	 * mechanism — classpath scanning and {@code ServiceLoader} are banned and enforced
+	 * by ArchUnit Rule 3 ({@code noServiceLoader}).
+	 *
+	 * <p>{@link java.util.List#of(Object...)} returns an immutable list (JEP 269); the
+	 * field is intentionally exposed directly rather than through a defensive copy.
+	 *
+	 * <p><strong>Forcing function:</strong> adding a new core event record requires
+	 * editing this list. {@code EventTypeRegistry} construction will fail loudly at
+	 * startup if a class in the list lacks {@link EventType}, and the upstream
+	 * {@code EventTypeAnnotationTest.EXPECTED_EVENT_RECORDS} list must be updated in
+	 * the same change. {@code DegradedEvent} is deliberately excluded — it is the
+	 * fallback wrapper for failed upcasts and must never be registered.
+	 *
+	 * @see EventType
+	 * @see DomainEvent
+	 */
+	public static final List<Class<? extends DomainEvent>> CORE_PRODUCTION_EVENT_CLASSES =
+			List.of(
+					CommandIssuedEvent.class,
+					CommandDispatchedEvent.class,
+					CommandResultEvent.class,
+					CommandConfirmationTimedOutEvent.class,
+					StateReportedEvent.class,
+					StateReportRejectedEvent.class,
+					StateChangedEvent.class,
+					StateConfirmedEvent.class,
+					DeviceDiscoveredEvent.class,
+					DeviceAdoptedEvent.class,
+					DeviceRemovedEvent.class,
+					AvailabilityChangedEvent.class,
+					AutomationTriggeredEvent.class,
+					AutomationCompletedEvent.class,
+					PresenceSignalEvent.class,
+					PresenceChangedEvent.class,
+					SystemStartedEvent.class,
+					SystemStoppedEvent.class,
+					StoragePressureChangedEvent.class,
+					ConfigChangedEvent.class,
+					ConfigErrorEvent.class,
+					TelemetrySummaryEvent.class);
 }
