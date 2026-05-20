@@ -15,6 +15,7 @@ import com.homesynapse.event.SubjectType;
 import com.homesynapse.event.bus.BusMetrics;
 import com.homesynapse.event.bus.CheckpointStore;
 import com.homesynapse.event.bus.EventBus;
+import com.homesynapse.event.bus.EventBusConfig;
 import com.homesynapse.event.bus.Subscriber;
 import com.homesynapse.event.bus.SubscriberInfo;
 import com.homesynapse.event.bus.SubscriberMode;
@@ -1322,11 +1323,18 @@ public abstract class EventBusContractTest {
         }
 
         @Test
-        @DisplayName("replay window overflow at 10000 is critical alert")
-        void replayWindowOverflowAt10000IsCriticalAlert()
+        @DisplayName("replay window overflow at configured capacity is critical alert")
+        void replayWindowOverflowAtConfiguredCapacityIsCriticalAlert()
                 throws InterruptedException, SequenceConflictException {
+            // M3.6b: thresholds derive from EventBusConfig.HOME_DEFAULT (which
+            // the harness wires by default) so the assertion stays in lock-step
+            // with the bus's configured replay window capacity.
+            final int capacity = EventBusConfig.HOME_DEFAULT.replayQueueCapacity();
+            final int overflowPublishCount = capacity + 1;
+            final long totalExpectedUnique = (long) capacity + 2L;
+
             // Block the subscriber on its first delivery so the driver stays in
-            // REPLAY while we flood the replay window queue past its 10,000-entry bound.
+            // REPLAY while we flood the replay window queue past its capacity bound.
             CountDownLatch firstDelivery = new CountDownLatch(1);
             CountDownLatch release = new CountDownLatch(1);
             List<Long> received = new CopyOnWriteArrayList<>();
@@ -1353,9 +1361,10 @@ public abstract class EventBusContractTest {
                     .as("Subscriber should begin first delivery")
                     .isTrue();
 
-            // Publish 10,001 more events while the subscriber is blocked in REPLAY.
-            // Entries 10,000 will fit in the queue; the 10,001st will trigger overflow.
-            for (int i = 0; i < 10_001; i++) {
+            // Publish capacity+1 more events while the subscriber is blocked in
+            // REPLAY. The first `capacity` will fit in the queue; the
+            // capacity+1th will trigger overflow.
+            for (int i = 0; i < overflowPublishCount; i++) {
                 publishAndNotify(TestEventFactory.draft());
             }
 
@@ -1369,13 +1378,13 @@ public abstract class EventBusContractTest {
             // Every published event was delivered at least once (no data loss).
             long uniqueDelivered = received.stream().distinct().count();
             assertThat(uniqueDelivered)
-                    .as("Every event must be delivered at least once (10002 unique positions)")
-                    .isEqualTo(10_002L);
+                    .as("Every event must be delivered at least once (capacity+2 unique positions)")
+                    .isEqualTo(totalExpectedUnique);
 
             // Re-pagination after overflow means at least one event was redelivered.
             assertThat(received.size())
                     .as("Overflow restart re-pages through the log, producing redeliveries")
-                    .isGreaterThan(10_002);
+                    .isGreaterThan((int) totalExpectedUnique);
         }
 
         @Test

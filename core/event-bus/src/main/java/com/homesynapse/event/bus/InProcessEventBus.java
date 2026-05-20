@@ -49,10 +49,7 @@ import java.util.function.IntSupplier;
  * @see ReplayDriver
  * @see TransitionCoordinator
  */
-final class InProcessEventBus implements EventBus {
-
-    /** AMD-43 §3.6.2 threshold above which the publisher-blocked counter increments. */
-    static final int PUBLISHER_BLOCKED_DEPTH_THRESHOLD = 5000;
+public final class InProcessEventBus implements EventBus {
 
     private final EventStore eventStore;
     private final CheckpointStore checkpointStore;
@@ -60,6 +57,8 @@ final class InProcessEventBus implements EventBus {
     private final SubscriberReadConnectionFactory readConnectionFactory;
     private final BusMetrics metrics;
     private final IntSupplier queueDepthSupplier;
+    private final EventBusConfig config;
+    private final int publisherBlockedDepthThreshold;
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
 
     /**
@@ -75,8 +74,9 @@ final class InProcessEventBus implements EventBus {
             new ConcurrentHashMap<>();
 
     /**
-     * Creates a new in-process event bus with no-op metrics and a zero queue-depth
-     * supplier. Convenience constructor for tests that don't exercise M3.3 paths.
+     * Creates a new in-process event bus with no-op metrics, a zero queue-depth
+     * supplier, and {@link EventBusConfig#HOME_DEFAULT}. Convenience
+     * constructor for tests that don't exercise M3.3 paths.
      *
      * @param eventStore            the event store for loading event metadata
      * @param checkpointStore       the checkpoint store for position tracking
@@ -93,7 +93,7 @@ final class InProcessEventBus implements EventBus {
     }
 
     /**
-     * Creates a new in-process event bus.
+     * Creates a new in-process event bus with {@link EventBusConfig#HOME_DEFAULT}.
      *
      * @param eventStore            the event store for loading event metadata
      * @param checkpointStore       the checkpoint store for position tracking
@@ -110,6 +110,40 @@ final class InProcessEventBus implements EventBus {
                       SubscriberReadConnectionFactory readConnectionFactory,
                       BusMetrics metrics,
                       IntSupplier queueDepthSupplier) {
+        this(eventStore, checkpointStore, clock, readConnectionFactory,
+                metrics, queueDepthSupplier, EventBusConfig.HOME_DEFAULT);
+    }
+
+    /**
+     * Creates a new in-process event bus with a caller-supplied
+     * {@link EventBusConfig} (M3.6b, audit findings D1-07 and D4-09).
+     *
+     * <p>This is the canonical production constructor — the composition root
+     * (M3.6d) calls it directly. The 4-arg and 6-arg convenience constructors
+     * delegate here with {@link EventBusConfig#HOME_DEFAULT}, so callers that
+     * have not yet opted in to per-tier tuning observe no behavioural change.</p>
+     *
+     * @param eventStore                 the event store for loading event metadata
+     * @param checkpointStore            the checkpoint store for position tracking
+     * @param clock                      the clock for supervisor timing
+     *                                   (never {@code null})
+     * @param readConnectionFactory      factory for per-subscriber read executors
+     * @param metrics                    the bus metrics emitter (AMD-43 §3.6.2)
+     * @param writerQueueDepthSupplier   supplier of the writer queue depth
+     *                                   (DEC-M3-14 — the bus holds no reference
+     *                                   to persistence types)
+     * @param config                     bus configuration — replay-queue
+     *                                   capacity and publisher-blocked depth
+     *                                   threshold (M3.6b)
+     * @throws NullPointerException if any parameter is {@code null}
+     */
+    public InProcessEventBus(EventStore eventStore,
+                             CheckpointStore checkpointStore,
+                             Clock clock,
+                             SubscriberReadConnectionFactory readConnectionFactory,
+                             BusMetrics metrics,
+                             IntSupplier writerQueueDepthSupplier,
+                             EventBusConfig config) {
         this.eventStore = Objects.requireNonNull(eventStore, "eventStore must not be null");
         this.checkpointStore = Objects.requireNonNull(checkpointStore,
                 "checkpointStore must not be null");
@@ -117,8 +151,10 @@ final class InProcessEventBus implements EventBus {
         this.readConnectionFactory = Objects.requireNonNull(readConnectionFactory,
                 "readConnectionFactory must not be null");
         this.metrics = Objects.requireNonNull(metrics, "metrics must not be null");
-        this.queueDepthSupplier = Objects.requireNonNull(queueDepthSupplier,
-                "queueDepthSupplier must not be null");
+        this.queueDepthSupplier = Objects.requireNonNull(writerQueueDepthSupplier,
+                "writerQueueDepthSupplier must not be null");
+        this.config = Objects.requireNonNull(config, "config must not be null");
+        this.publisherBlockedDepthThreshold = config.publisherBlockedDepthThreshold();
     }
 
     // ── Existing Phase 2 contract (passive registration) ─────────────
@@ -159,7 +195,7 @@ final class InProcessEventBus implements EventBus {
         Instant notifyStart = clock.instant();
         int depth = queueDepthSupplier.getAsInt();
         metrics.recordWriterQueueDepth(depth);
-        if (depth > PUBLISHER_BLOCKED_DEPTH_THRESHOLD) {
+        if (depth > publisherBlockedDepthThreshold) {
             metrics.incrementPublisherBlocked();
         }
 
@@ -256,7 +292,8 @@ final class InProcessEventBus implements EventBus {
         SubscriberDlq dlq = new SubscriberDlq(info.subscriberId(), PersistentDlqWriter.noop());
         SubscriberSupervisor supervisor = new SubscriberSupervisor(
                 info.subscriberId(), clock, dlq);
-        ReplayWindowQueue replayWindowQueue = new ReplayWindowQueue();
+        ReplayWindowQueue replayWindowQueue =
+                new ReplayWindowQueue(config.replayQueueCapacity());
 
         SubscriberRuntime subscriberRuntime = new SubscriberRuntime(
                 info, runtime, readExecutor, supervisor, dlq, replayWindowQueue);

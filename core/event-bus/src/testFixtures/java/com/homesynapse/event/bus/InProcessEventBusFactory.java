@@ -11,17 +11,16 @@ import java.util.Objects;
 import java.util.function.IntSupplier;
 
 /**
- * Public test factory for the package-private {@link InProcessEventBus}.
+ * Public test factory for {@link InProcessEventBus}.
  *
- * <p>{@code InProcessEventBus} is package-private (and will remain so until
- * the composition-root lifecycle module M3.6 supplies the real wiring).
- * Integration tests in other modules cannot construct it directly. This
- * factory lives in the event-bus {@code testFixtures} source set's main
- * package so it can reach the package-private constructor and return the
- * production bus typed as the public {@link EventBus} interface.</p>
+ * <p>The bus class itself was promoted to {@code public} in M3.6b
+ * (DEC-M3-16). This factory remains in {@code testFixtures} so existing
+ * test sites continue to obtain the bus typed as the public
+ * {@link EventBus} interface — keeping cross-module test code from
+ * accidentally coupling to the concrete production type.</p>
  *
  * <p>This fixture is NOT a replacement for the future composition-root
- * lifecycle wiring (M3.6). It exists solely to make on-device integration
+ * lifecycle wiring (M3.6d). It exists to make on-device integration
  * testing possible before the composition root lands. Production code MUST
  * NOT depend on this class.</p>
  *
@@ -98,14 +97,51 @@ public final class InProcessEventBusFactory {
             SubscriberReadConnectionFactory readConnectionFactory,
             BusMetrics metrics,
             IntSupplier writerQueueDepth) {
+        return createWithConfig(eventStore, checkpointStore, clock,
+                readConnectionFactory, metrics, writerQueueDepth,
+                EventBusConfig.HOME_DEFAULT);
+    }
+
+    /**
+     * Constructs the production {@link InProcessEventBus} with caller-supplied
+     * metrics, writer-queue-depth supplier, AND
+     * {@link EventBusConfig} (M3.6b).
+     *
+     * <p>Tests that need to assert overflow behaviour at a smaller replay
+     * window capacity (or to exercise a non-default publisher-blocked
+     * threshold) pass an explicit config here. Tests that do not care
+     * should keep calling {@link #createWithMetrics(EventStore,
+     * CheckpointStore, Clock, SubscriberReadConnectionFactory, BusMetrics,
+     * IntSupplier)} or {@link #create(EventStore, CheckpointStore, Clock,
+     * SubscriberReadConnectionFactory)} — both delegate here with
+     * {@link EventBusConfig#HOME_DEFAULT} so behaviour is unchanged.</p>
+     *
+     * @param eventStore             the event store
+     * @param checkpointStore        the checkpoint store
+     * @param clock                  injected clock
+     * @param readConnectionFactory  per-subscriber read-executor factory
+     * @param metrics                the {@link BusMetrics} implementation
+     * @param writerQueueDepth       supplier of the current writer queue depth
+     * @param config                 bus configuration; never {@code null}
+     * @return the production bus typed as {@link EventBus}
+     */
+    public static EventBus createWithConfig(
+            EventStore eventStore,
+            CheckpointStore checkpointStore,
+            Clock clock,
+            SubscriberReadConnectionFactory readConnectionFactory,
+            BusMetrics metrics,
+            IntSupplier writerQueueDepth,
+            EventBusConfig config) {
         Objects.requireNonNull(eventStore, "eventStore");
         Objects.requireNonNull(checkpointStore, "checkpointStore");
         Objects.requireNonNull(clock, "clock");
         Objects.requireNonNull(readConnectionFactory, "readConnectionFactory");
         Objects.requireNonNull(metrics, "metrics");
         Objects.requireNonNull(writerQueueDepth, "writerQueueDepth");
+        Objects.requireNonNull(config, "config");
         return new InProcessEventBus(
                 eventStore, checkpointStore, clock, readConnectionFactory,
-                metrics, writerQueueDepth);
+                metrics, writerQueueDepth, config);
     }
 }

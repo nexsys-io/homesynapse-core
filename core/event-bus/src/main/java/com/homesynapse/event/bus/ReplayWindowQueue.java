@@ -21,11 +21,19 @@ import java.util.concurrent.locks.ReentrantLock;
  * {@link SubscriberRuntime#lastReplayedPosition()} so events already delivered
  * during REPLAY are not re-delivered.</p>
  *
- * <p>The queue is bounded at {@link #MAX_CAPACITY} entries. An enqueue that
- * would exceed the bound returns {@code false} and latches an overflow flag
- * (see {@link #overflowed()}). The {@link ReplayDriver} observes the flag and
- * restarts REPLAY from the subscriber's most recently written checkpoint
- * position — overflow is recoverable, not a data-loss event (INV-ES-05).</p>
+ * <p>The queue is bounded at the {@code maxCapacity} supplied to the
+ * constructor (default {@link #MAX_CAPACITY} via the no-arg form). An enqueue
+ * that would exceed the bound returns {@code false} and latches an overflow
+ * flag (see {@link #overflowed()}). The {@link ReplayDriver} observes the
+ * flag and restarts REPLAY from the subscriber's most recently written
+ * checkpoint position — overflow is recoverable, not a data-loss event
+ * (INV-ES-05).</p>
+ *
+ * <p><strong>Capacity parameterisation (M3.6b, audit D4-09):</strong> the
+ * capacity is now a constructor parameter so the composition root can tune
+ * the bound per deployment tier via {@link EventBusConfig}. The
+ * {@link #MAX_CAPACITY} constant is retained as the documentation reference
+ * for the default value used by the no-arg constructor.</p>
  *
  * <p><strong>Thread safety.</strong> All operations are guarded by a
  * {@link ReentrantLock} per LTD-11 (no {@code synchronized} — virtual threads
@@ -40,27 +48,51 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 final class ReplayWindowQueue {
 
-    /** Maximum capacity per AMD-42 §3.4.2 — overflow triggers REPLAY restart. */
-    static final int MAX_CAPACITY = 10_000;
+    /**
+     * Default maximum capacity per AMD-42 §3.4.2 — overflow triggers REPLAY
+     * restart. Retained as the documentation reference for the no-arg
+     * constructor's bound; the effective bound is the instance field
+     * {@code maxCapacity} set by the constructor (M3.6b).
+     */
+    public static final int MAX_CAPACITY = 10_000;
 
+    private final int maxCapacity;
     private final ReentrantLock mutex = new ReentrantLock();
     private final Deque<Long> queue = new ArrayDeque<>();
     private final AtomicBoolean overflowed = new AtomicBoolean(false);
 
     /**
-     * Creates a new empty replay window queue.
+     * Creates a new empty replay window queue bounded at {@link #MAX_CAPACITY}
+     * (the legacy M3.4b default). Retained for in-package callers that have
+     * not migrated to the parameterised form.
      */
     ReplayWindowQueue() {
-        // Package-private constructor.
+        this(MAX_CAPACITY);
+    }
+
+    /**
+     * Creates a new empty replay window queue with the given maximum capacity
+     * (M3.6b, audit D4-09).
+     *
+     * @param maxCapacity the maximum number of buffered positions before
+     *                    overflow latches; must be {@code >= 1}
+     * @throws IllegalArgumentException if {@code maxCapacity < 1}
+     */
+    ReplayWindowQueue(int maxCapacity) {
+        if (maxCapacity < 1) {
+            throw new IllegalArgumentException(
+                    "maxCapacity must be >= 1, got: " + maxCapacity);
+        }
+        this.maxCapacity = maxCapacity;
     }
 
     /**
      * Attempts to enqueue a global position for later drain during TRANSITION.
      *
-     * <p>If the queue is at {@link #MAX_CAPACITY}, the entry is rejected, the
-     * overflow flag is latched, and {@code false} is returned. Overflow is
-     * recoverable: the {@link ReplayDriver} observes the flag and restarts
-     * REPLAY from the most recently checkpointed position.</p>
+     * <p>If the queue is at the configured capacity, the entry is rejected,
+     * the overflow flag is latched, and {@code false} is returned. Overflow
+     * is recoverable: the {@link ReplayDriver} observes the flag and
+     * restarts REPLAY from the most recently checkpointed position.</p>
      *
      * @param globalPosition the event position to buffer
      * @return {@code true} if the entry was accepted; {@code false} on overflow
@@ -68,7 +100,7 @@ final class ReplayWindowQueue {
     boolean enqueue(long globalPosition) {
         mutex.lock();
         try {
-            if (queue.size() >= MAX_CAPACITY) {
+            if (queue.size() >= maxCapacity) {
                 overflowed.set(true);
                 return false;
             }
@@ -122,8 +154,8 @@ final class ReplayWindowQueue {
     }
 
     /**
-     * Returns {@code true} if any enqueue attempt has exceeded
-     * {@link #MAX_CAPACITY} since the last {@link #clear()}.
+     * Returns {@code true} if any enqueue attempt has exceeded the queue's
+     * configured capacity since the last {@link #clear()}.
      *
      * @return the latched overflow indicator
      */
