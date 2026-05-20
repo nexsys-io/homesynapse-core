@@ -12,28 +12,22 @@ import java.util.concurrent.CompletableFuture;
  * (Doc 04 §8.4).
  *
  * <p>{@code PersistenceLifecycle} controls the initialization, shutdown,
- * backup, and restore of the HomeSynapse database infrastructure. It is
+ * backup, and restore of the HomeSynapse storage infrastructure. It is
  * consumed by the Startup &amp; Lifecycle subsystem (Doc 12) which coordinates
  * ordered initialization of all HomeSynapse subsystems.</p>
  *
- * <p><strong>Virtual Thread Safety:</strong> All implementations MUST execute
- * SQLite operations on a platform thread executor, not virtual threads.
- * The sqlite-jdbc driver uses {@code synchronized native} JNI methods that
- * pin virtual thread carrier threads. See Virtual Thread Risk Audit finding B-4.</p>
+ * <p><strong>Virtual Thread Safety:</strong> All implementations MUST route
+ * storage operations through a platform thread executor, not virtual threads.
+ * See Virtual Thread Risk Audit finding B-4.</p>
  *
  * <h2>Startup Sequence</h2>
  *
- * <p>When {@link #start()} is called, the Persistence Layer performs the
- * following steps:</p>
+ * <p>When {@link #start()} is called, the Persistence Layer:</p>
  * <ol>
- *   <li>Opens SQLite database connections with required PRAGMA configuration
- *       (WAL mode, synchronous NORMAL, cache sizes per LTD-03)</li>
- *   <li>Runs schema migrations if the database version is behind the
- *       expected version</li>
- *   <li>Configures WAL mode and checkpoint thresholds</li>
+ *   <li>Opens databases, runs migrations, prepares connections</li>
  *   <li>Recovers any incomplete checkpoints from the previous session</li>
- *   <li>The returned {@link CompletableFuture} completes when all databases
- *       are initialized and ready for use</li>
+ *   <li>Completes the returned {@link CompletableFuture} when all storage is
+ *       initialized and ready for use</li>
  * </ol>
  *
  * <h2>Boot Order</h2>
@@ -46,10 +40,9 @@ import java.util.concurrent.CompletableFuture;
  *
  * <h2>Shutdown</h2>
  *
- * <p>When {@link #stop()} is called, the Persistence Layer flushes the WAL,
- * finalizes any in-progress checkpoints, and closes all database connections.
- * After {@code stop()} returns, no further database operations are
- * possible.</p>
+ * <p>When {@link #stop()} is called, the Persistence Layer closes connections,
+ * flushes pending writes, and releases resources. After {@code stop()}
+ * returns, no further storage operations are possible.</p>
  *
  * @see BackupOptions
  * @see BackupResult
@@ -59,28 +52,27 @@ import java.util.concurrent.CompletableFuture;
 public interface PersistenceLifecycle {
 
     /**
-     * Initializes all databases, runs schema migrations, and configures WAL
-     * mode.
+     * Opens databases, runs migrations, prepares connections.
      *
-     * <p>The returned future completes normally when all databases are ready
-     * for use. The future completes exceptionally if database initialization
+     * <p>The returned future completes normally when all storage is ready
+     * for use. The future completes exceptionally if storage initialization
      * or migration fails irrecoverably.</p>
      *
      * <p>This method is idempotent — calling it when the persistence layer
      * is already started has no effect and returns an already-completed
      * future.</p>
      *
-     * @return a future that completes when databases are ready for use,
-     *         never {@code null}
+     * @return a future that completes when storage is ready for use, never
+     *         {@code null}
      */
     CompletableFuture<Void> start();
 
     /**
-     * Flushes the WAL, finalizes checkpoints, and closes all database
-     * connections.
+     * Closes connections, flushes pending writes, and releases resources.
      *
-     * <p>After this method returns, no further database operations are
-     * possible. Any in-progress writes will have been flushed to disk.</p>
+     * <p>After this method returns, no further storage operations are
+     * possible. Any in-progress writes will have been flushed to durable
+     * storage.</p>
      *
      * <p>This method is idempotent — calling it when the persistence layer
      * is already stopped has no effect.</p>
@@ -88,13 +80,12 @@ public interface PersistenceLifecycle {
     void stop();
 
     /**
-     * Creates a timestamped backup of the HomeSynapse databases.
+     * Creates a timestamped backup of the HomeSynapse storage.
      *
-     * <p>The backup is created using SQLite's hot backup mechanism — the
-     * live database remains fully operational during the backup. After
-     * copying, {@code PRAGMA integrity_check} is run on the backup copy
-     * to verify consistency (the result is reported in
-     * {@link BackupResult#integrityVerified()}).</p>
+     * <p>The backup is created using a hot-backup mechanism — the live
+     * storage remains fully operational during the backup. After copying,
+     * an integrity check is run on the backup copy to verify consistency
+     * (the result is reported in {@link BackupResult#integrityVerified()}).</p>
      *
      * @param options backup configuration controlling telemetry inclusion
      *                and pre-upgrade tagging, never {@code null}
@@ -105,11 +96,11 @@ public interface PersistenceLifecycle {
     BackupResult createBackup(BackupOptions options);
 
     /**
-     * Restores databases from a previously created backup directory.
+     * Restores storage from a previously created backup directory.
      *
      * <p>The persistence layer must be stopped before calling this method.
      * After restore completes, {@link #start()} must be called to
-     * reinitialize the databases from the restored state.</p>
+     * reinitialize storage from the restored state.</p>
      *
      * @param backupDirectory the path to the backup directory created by
      *                        {@link #createBackup(BackupOptions)},

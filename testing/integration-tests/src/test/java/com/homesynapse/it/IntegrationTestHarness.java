@@ -34,6 +34,7 @@ import com.homesynapse.event.bus.CheckpointStore;
 import com.homesynapse.event.bus.EventBus;
 import com.homesynapse.event.bus.InProcessEventBusFactory;
 import com.homesynapse.event.bus.test.RecordingReadConnectionFactory;
+import com.homesynapse.persistence.PersistenceConfig;
 import com.homesynapse.persistence.PersistenceTestHarness;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.platform.identity.UlidFactory;
@@ -127,8 +128,12 @@ final class IntegrationTestHarness implements AutoCloseable {
             com.homesynapse.integration.IntegrationRestarted.class,
             com.homesynapse.integration.IntegrationResourceExceeded.class);
 
-    /** Production AMD-27 default. */
-    static final int DEFAULT_READ_THREAD_COUNT = 2;
+    /**
+     * Production MVP default — {@link PersistenceConfig#HOME_DEFAULT}
+     * (HOME profile + source-default retention policy).
+     */
+    static final PersistenceConfig DEFAULT_PERSISTENCE_CONFIG =
+            PersistenceConfig.HOME_DEFAULT;
 
     private final Clock clock;
     private final Path dbPath;
@@ -244,10 +249,10 @@ final class IntegrationTestHarness implements AutoCloseable {
 
         PersistenceTestHarness persistence = throttled
                 ? PersistenceTestHarness.startThrottled(
-                        dbPath, DEFAULT_READ_THREAD_COUNT, clock, homeId,
+                        dbPath, DEFAULT_PERSISTENCE_CONFIG, clock, homeId,
                         ALL_PRODUCTION_EVENT_CLASSES)
                 : PersistenceTestHarness.start(
-                        dbPath, DEFAULT_READ_THREAD_COUNT, clock, homeId,
+                        dbPath, DEFAULT_PERSISTENCE_CONFIG, clock, homeId,
                         ALL_PRODUCTION_EVENT_CLASSES);
 
         RecordingReadConnectionFactory readConnectionFactory =

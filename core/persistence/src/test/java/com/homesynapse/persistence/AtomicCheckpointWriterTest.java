@@ -45,8 +45,8 @@ final class AtomicCheckpointWriterTest {
     private static final List<String> EVENTS_MIGRATION_FILES = List.of(
             "V001__initial_event_store_schema.sql");
 
-    /** Number of read executor threads — two is enough to exercise round-robin. */
-    private static final int READ_THREAD_COUNT = 2;
+    /** Deployment profile (HOME — 2 read threads, enough to exercise round-robin). */
+    private static final DeploymentProfile PROFILE = DeploymentProfile.HOME;
 
     /**
      * Fixed clock for deterministic timestamps. Matches the convention used by
@@ -72,7 +72,7 @@ final class AtomicCheckpointWriterTest {
     void setUp() {
         Path dbPath = tempDir.resolve("events.db");
 
-        databaseExecutor = new DatabaseExecutor(READ_THREAD_COUNT, FIXED_CLOCK);
+        databaseExecutor = new DatabaseExecutor(PROFILE, FIXED_CLOCK);
         databaseExecutor.start(
                 dbPath,
                 EVENTS_MIGRATION_PATH,

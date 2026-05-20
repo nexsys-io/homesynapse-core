@@ -32,8 +32,11 @@ import org.slf4j.LoggerFactory;
  *   <li>On a new database, set creation-time PRAGMAs ({@code page_size},
  *       {@code auto_vacuum}) before any table exists. On an existing
  *       database, leave them untouched.</li>
- *   <li>Apply all 8 LTD-03 connection PRAGMAs on the write connection with
- *       {@code journal_mode = WAL} first.</li>
+ *   <li>Apply the LTD-03 connection PRAGMAs on the write connection with
+ *       {@code journal_mode = WAL} first. Values for {@code cache_size},
+ *       {@code mmap_size}, {@code busy_timeout}, {@code journal_size_limit},
+ *       and (when not {@link LockingMode#NORMAL}) {@code locking_mode} are
+ *       rendered from the supplied {@link DeploymentProfile}.</li>
  *   <li>Run {@link MigrationRunner} to bring the schema to the latest
  *       declared version.</li>
  *   <li>Open N read connections (one per read thread) and apply the same
@@ -65,17 +68,13 @@ final class DatabaseExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseExecutor.class);
 
-    /** Connection PRAGMAs from LTD-03, applied in this order on every connection. */
-    private static final List<String> CONNECTION_PRAGMAS = List.of(
-            "journal_mode = WAL",
-            "synchronous = NORMAL",
-            "cache_size = -128000",
-            "mmap_size = 1073741824",
-            "temp_store = MEMORY",
-            "busy_timeout = 5000",
-            "journal_size_limit = 6144000",
-            "cell_size_check = ON");
+    /**
+     * LTD-03 reader-budget ceiling. {@link DeploymentProfile#readThreadCount()}
+     * values must not exceed this; the constructor validates the bound.
+     */
+    private static final int MAX_READ_THREAD_COUNT = 8;
 
+    private final DeploymentProfile profile;
     private final int readThreadCount;
     private final Clock clock;
     private final Function<WriteCoordinator, WriteCoordinator> writeCoordinatorDecorator;
@@ -97,22 +96,27 @@ final class DatabaseExecutor {
     private PlatformThreadReadExecutor readExecutor;
 
     /**
-     * Creates a database executor that will open {@code readThreadCount}
-     * read threads (and matching read connections) when {@link #start} is
-     * invoked.
+     * Creates a database executor whose read-thread count, connection
+     * PRAGMAs, and locking-mode behaviour are derived from the given
+     * {@link DeploymentProfile}.
      *
-     * @param readThreadCount number of platform read threads; must be
-     *                        {@code >= 1}. AMD-27 default is 2.
-     * @param clock           clock forwarded to {@link MigrationRunner} for
-     *                        {@code hs_schema_version.applied_at} timestamp
-     *                        generation and diagnostic duration logging.
-     *                        Inject {@code Clock.systemUTC()} in production;
-     *                        use {@code Clock.fixed(...)} in tests.
-     * @throws IllegalArgumentException if {@code readThreadCount < 1}
-     * @throws NullPointerException     if {@code clock} is {@code null}
+     * @param profile deployment profile supplying read thread count and
+     *                connection PRAGMA values; never {@code null}. Its
+     *                {@code readThreadCount} must be in {@code [1, 8]} —
+     *                the LTD-03 reader-budget ceiling.
+     * @param clock   clock forwarded to {@link MigrationRunner} for
+     *                {@code hs_schema_version.applied_at} timestamp
+     *                generation and diagnostic duration logging. Inject
+     *                {@code Clock.systemUTC()} in production; use
+     *                {@code Clock.fixed(...)} in tests.
+     * @throws IllegalArgumentException if the profile's
+     *                                  {@code readThreadCount} is outside
+     *                                  {@code [1, 8]}
+     * @throws NullPointerException     if {@code profile} or {@code clock}
+     *                                  is {@code null}
      */
-    DatabaseExecutor(int readThreadCount, Clock clock) {
-        this(readThreadCount, clock, Function.identity());
+    DatabaseExecutor(DeploymentProfile profile, Clock clock) {
+        this(profile, clock, Function.identity());
     }
 
     /**
@@ -123,30 +127,34 @@ final class DatabaseExecutor {
      * production wiring path. Pass {@link Function#identity()} for the
      * production-equivalent behavior.
      *
-     * @param readThreadCount number of platform read threads; must be
-     *                        {@code >= 1}
-     * @param clock           clock for migrations and diagnostics; never
-     *                        {@code null}
+     * @param profile deployment profile supplying read thread count and
+     *                connection PRAGMA values; never {@code null}
+     * @param clock   clock for migrations and diagnostics; never {@code null}
      * @param writeCoordinatorDecorator decorator applied to the underlying
      *                        {@code PlatformThreadWriteCoordinator}; never
      *                        {@code null}. The result must implement the
      *                        full {@link WriteCoordinator} contract and
      *                        forward {@code shutdown()} to the underlying
      *                        coordinator.
-     * @throws IllegalArgumentException if {@code readThreadCount < 1}
-     * @throws NullPointerException     if {@code clock} or
-     *                                  {@code writeCoordinatorDecorator}
-     *                                  is {@code null}
+     * @throws IllegalArgumentException if the profile's
+     *                                  {@code readThreadCount} is outside
+     *                                  {@code [1, 8]}
+     * @throws NullPointerException     if {@code profile}, {@code clock}, or
+     *                                  {@code writeCoordinatorDecorator} is
+     *                                  {@code null}
      */
     DatabaseExecutor(
-            int readThreadCount,
+            DeploymentProfile profile,
             Clock clock,
             Function<WriteCoordinator, WriteCoordinator> writeCoordinatorDecorator) {
-        if (readThreadCount < 1) {
+        this.profile = Objects.requireNonNull(profile, "profile");
+        int rt = profile.readThreadCount();
+        if (rt < 1 || rt > MAX_READ_THREAD_COUNT) {
             throw new IllegalArgumentException(
-                    "readThreadCount must be >= 1, got " + readThreadCount);
+                    "profile.readThreadCount() must be in [1, " + MAX_READ_THREAD_COUNT
+                            + "], got " + rt);
         }
-        this.readThreadCount = readThreadCount;
+        this.readThreadCount = rt;
         this.clock = Objects.requireNonNull(clock, "clock");
         this.writeCoordinatorDecorator = Objects.requireNonNull(
                 writeCoordinatorDecorator, "writeCoordinatorDecorator");
@@ -215,10 +223,11 @@ final class DatabaseExecutor {
                     log.info("Existing database detected — skipping creation-time PRAGMAs");
                 }
 
-                // 3. Apply the 8 LTD-03 connection PRAGMAs on the write
-                //    connection. journal_mode = WAL must be first so the
-                //    rest of the connection lifecycle sees WAL state.
-                applyConnectionPragmas(writeConnection);
+                // 3. Apply the LTD-03 connection PRAGMAs on the write
+                //    connection, rendered from the deployment profile.
+                //    journal_mode = WAL must be first so the rest of the
+                //    connection lifecycle sees WAL state.
+                applyConnectionPragmas(writeConnection, profile);
 
                 // 4. Run migrations on the write connection.
                 new MigrationRunner(writeConnection, clock)
@@ -230,7 +239,7 @@ final class DatabaseExecutor {
                 //    cache_size, mmap_size, busy_timeout, and temp_store.
                 for (int i = 0; i < readThreadCount; i++) {
                     Connection readConnection = DriverManager.getConnection(jdbcUrl);
-                    applyConnectionPragmas(readConnection);
+                    applyConnectionPragmas(readConnection, profile);
                     readConnections.add(readConnection);
                 }
 
@@ -394,12 +403,53 @@ final class DatabaseExecutor {
         }
     }
 
-    private static void applyConnectionPragmas(Connection c) throws SQLException {
+    private static void applyConnectionPragmas(Connection c, DeploymentProfile profile)
+            throws SQLException {
         try (Statement stmt = c.createStatement()) {
-            for (String pragma : CONNECTION_PRAGMAS) {
+            for (String pragma : connectionPragmas(profile)) {
                 stmt.execute("PRAGMA " + pragma);
             }
         }
+    }
+
+    /**
+     * Renders the ordered list of {@code PRAGMA} statements for the given
+     * profile. {@code journal_mode = WAL} is always first because the other
+     * PRAGMAs rely on WAL being active to take effect on their intended
+     * semantics. The {@code locking_mode} PRAGMA is emitted only when the
+     * profile selects a non-default value ({@link LockingMode#EXCLUSIVE}) —
+     * SQLite's default is {@code NORMAL}, so emitting it explicitly would
+     * be a no-op.
+     *
+     * <p><strong>locking_mode is sticky.</strong> Once a connection enters
+     * {@code EXCLUSIVE}, the lock persists for the connection's lifetime and
+     * cannot be downgraded back to {@code NORMAL} without closing and
+     * reopening. This is fine for HomeSynapse: the PRAGMA is applied once
+     * per connection at startup and the connection lives until shutdown.
+     *
+     * <p>The {@code cache_size} value is rendered as the negative of
+     * {@link DeploymentProfile#cacheSizeKiB()} — SQLite interprets negative
+     * values as KiB.
+     *
+     * @param profile the deployment profile supplying tuning values
+     * @return the ordered list of PRAGMA bodies (without the {@code PRAGMA }
+     *         prefix); 8 elements for {@link LockingMode#NORMAL}, 9 for
+     *         {@link LockingMode#EXCLUSIVE}
+     */
+    private static List<String> connectionPragmas(DeploymentProfile profile) {
+        List<String> pragmas = new ArrayList<>(9);
+        pragmas.add("journal_mode = WAL");
+        pragmas.add("synchronous = NORMAL");
+        pragmas.add("cache_size = -" + profile.cacheSizeKiB());
+        pragmas.add("mmap_size = " + profile.mmapSizeBytes());
+        pragmas.add("temp_store = MEMORY");
+        pragmas.add("busy_timeout = " + profile.busyTimeoutMs());
+        pragmas.add("journal_size_limit = " + profile.journalSizeLimitBytes());
+        pragmas.add("cell_size_check = ON");
+        if (profile.lockingMode() != LockingMode.NORMAL) {
+            pragmas.add("locking_mode = " + profile.lockingMode().name());
+        }
+        return pragmas;
     }
 
     private void closeAllResourcesQuietly() {

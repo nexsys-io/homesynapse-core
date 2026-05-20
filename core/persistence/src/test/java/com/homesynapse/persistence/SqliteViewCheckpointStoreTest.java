@@ -73,8 +73,8 @@ final class SqliteViewCheckpointStoreTest extends ViewCheckpointStoreContractTes
     private static final List<String> EVENTS_MIGRATION_FILES = List.of(
             "V001__initial_event_store_schema.sql");
 
-    /** Number of read executor threads — two is enough to exercise round-robin. */
-    private static final int READ_THREAD_COUNT = 2;
+    /** Deployment profile (HOME — 2 read threads, enough to exercise round-robin). */
+    private static final DeploymentProfile PROFILE = DeploymentProfile.HOME;
 
     /**
      * Fixed instant for the test clock. Matches the convention used by
@@ -138,7 +138,7 @@ final class SqliteViewCheckpointStoreTest extends ViewCheckpointStoreContractTes
         // NO_DIRECT_TIME_ACCESS arch rule forbids System.nanoTime() here).
         Path dbPath = tempDir.resolve("events.db");
 
-        dbExecutor = new DatabaseExecutor(READ_THREAD_COUNT, FIXED_CLOCK);
+        dbExecutor = new DatabaseExecutor(PROFILE, FIXED_CLOCK);
         dbExecutor.start(
                 dbPath,
                 EVENTS_MIGRATION_PATH,
@@ -239,7 +239,7 @@ final class SqliteViewCheckpointStoreTest extends ViewCheckpointStoreContractTes
         Clock microClock = Clock.fixed(microInstant, ZoneOffset.UTC);
 
         // Fresh isolated dependencies — do not disturb the shared fixture.
-        DatabaseExecutor isolatedExecutor = new DatabaseExecutor(READ_THREAD_COUNT, microClock);
+        DatabaseExecutor isolatedExecutor = new DatabaseExecutor(PROFILE, microClock);
         try {
             isolatedExecutor.start(
                     tempDir.resolve("micro-precision.db"),

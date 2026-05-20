@@ -44,7 +44,7 @@ final class SqliteDeadLetterStoreContractTest extends DeadLetterStoreContractTes
             "V003__add_snapshots_and_drop_redundant_index.sql",
             "V004__dlq_operational_indices.sql");
 
-    private static final int READ_THREAD_COUNT = 2;
+    private static final DeploymentProfile PROFILE = DeploymentProfile.HOME;
 
     private static final Instant FIXED_INSTANT =
             Instant.parse("2026-01-01T00:00:00Z");
@@ -67,7 +67,7 @@ final class SqliteDeadLetterStoreContractTest extends DeadLetterStoreContractTes
         shutdownQuietly();
         Path dbPath = tempDir.resolve("events.db");
 
-        dbExecutor = new DatabaseExecutor(READ_THREAD_COUNT, FIXED_CLOCK);
+        dbExecutor = new DatabaseExecutor(PROFILE, FIXED_CLOCK);
         dbExecutor.start(
                 dbPath,
                 EVENTS_MIGRATION_PATH,

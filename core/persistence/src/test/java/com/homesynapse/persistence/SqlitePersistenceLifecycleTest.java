@@ -59,8 +59,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DisplayName("SqlitePersistenceLifecycle — persistence capstone lifecycle tests")
 final class SqlitePersistenceLifecycleTest {
 
-    /** Number of read executor threads. */
-    private static final int READ_THREAD_COUNT = 2;
+    /** Persistence configuration — HOME profile (2 read threads, AMD-27). */
+    private static final PersistenceConfig CONFIG = PersistenceConfig.HOME_DEFAULT;
 
     /**
      * Fixed clock — NO_DIRECT_TIME_ACCESS ArchUnit rule forbids
@@ -402,7 +402,7 @@ final class SqlitePersistenceLifecycleTest {
     private static SqlitePersistenceLifecycle createLifecycle(Path dir) {
         return new SqlitePersistenceLifecycle(
                 dir.resolve("events.db"),
-                READ_THREAD_COUNT,
+                CONFIG,
                 FIXED_CLOCK,
                 TEST_HOME_ID,
                 ALL_TEST_CLASSES);

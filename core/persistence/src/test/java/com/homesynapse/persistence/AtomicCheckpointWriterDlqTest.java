@@ -43,7 +43,7 @@ final class AtomicCheckpointWriterDlqTest {
             "V003__add_snapshots_and_drop_redundant_index.sql",
             "V004__dlq_operational_indices.sql");
 
-    private static final int READ_THREAD_COUNT = 2;
+    private static final DeploymentProfile PROFILE = DeploymentProfile.HOME;
 
     private static final Clock FIXED_CLOCK = Clock.fixed(
             Instant.parse("2026-01-15T12:00:00Z"), ZoneOffset.UTC);
@@ -69,7 +69,7 @@ final class AtomicCheckpointWriterDlqTest {
     void setUp() {
         Path dbPath = tempDir.resolve("events.db");
 
-        databaseExecutor = new DatabaseExecutor(READ_THREAD_COUNT, FIXED_CLOCK);
+        databaseExecutor = new DatabaseExecutor(PROFILE, FIXED_CLOCK);
         databaseExecutor.start(
                 dbPath,
                 EVENTS_MIGRATION_PATH,

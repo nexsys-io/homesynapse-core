@@ -73,7 +73,7 @@ final class DatabaseExecutorTest {
 
     @BeforeEach
     void setUp() {
-        executor = new DatabaseExecutor(2, TEST_CLOCK);
+        executor = new DatabaseExecutor(DeploymentProfile.HOME, TEST_CLOCK);
     }
 
     @AfterEach
@@ -144,37 +144,60 @@ final class DatabaseExecutorTest {
     // ──────────────────────────────────────────────────────────────────
 
     @Test
-    @DisplayName("start applies all 8 connection PRAGMAs on the write connection")
-    void start_setsConnectionPragmas() throws Exception {
+    @DisplayName("start applies the connection PRAGMAs derived from the HOME profile")
+    void start_setsConnectionPragmas_homeProfile() throws Exception {
         Path dbPath = tempDir.resolve("pragmas.db");
 
         executor.start(dbPath, EVENTS_MIGRATION_PATH, EVENTS_MIGRATION_FILES,
                 MigrationConfig.freshInstall());
 
-        Connection write = executor.writeConnection();
-        Map<String, String> pragmas = readPragmas(write,
-                "journal_mode",
-                "synchronous",
-                "cache_size",
-                "mmap_size",
-                "temp_store",
-                "busy_timeout",
-                "journal_size_limit",
-                "cell_size_check");
-
-        assertThat(pragmas.get("journal_mode")).isEqualToIgnoringCase("wal");
-        // synchronous: NORMAL = 1
-        assertThat(pragmas.get("synchronous")).isEqualTo("1");
-        // cache_size is signed: -128000 = 128 MB
-        assertThat(pragmas.get("cache_size")).isEqualTo("-128000");
-        assertThat(pragmas.get("mmap_size")).isEqualTo("1073741824");
-        // temp_store: MEMORY = 2
-        assertThat(pragmas.get("temp_store")).isEqualTo("2");
-        assertThat(pragmas.get("busy_timeout")).isEqualTo("5000");
-        assertThat(pragmas.get("journal_size_limit")).isEqualTo("6144000");
-        // cell_size_check: ON = 1
-        assertThat(pragmas.get("cell_size_check")).isEqualTo("1");
+        assertProfilePragmas(executor.writeConnection(), DeploymentProfile.HOME);
     }
+
+    @Test
+    @DisplayName("start renders STUDIO profile PRAGMAs")
+    void start_studioProfile_rendersProfilePragmas() throws Exception {
+        executor.shutdown();
+        executor = new DatabaseExecutor(DeploymentProfile.STUDIO, TEST_CLOCK);
+        Path dbPath = tempDir.resolve("studio.db");
+
+        executor.start(dbPath, EVENTS_MIGRATION_PATH, EVENTS_MIGRATION_FILES,
+                MigrationConfig.freshInstall());
+
+        assertProfilePragmas(executor.writeConnection(), DeploymentProfile.STUDIO);
+    }
+
+    @Test
+    @DisplayName("start renders PERFORMANCE profile PRAGMAs")
+    void start_performanceProfile_rendersProfilePragmas() throws Exception {
+        executor.shutdown();
+        executor = new DatabaseExecutor(DeploymentProfile.PERFORMANCE, TEST_CLOCK);
+        Path dbPath = tempDir.resolve("performance.db");
+
+        executor.start(dbPath, EVENTS_MIGRATION_PATH, EVENTS_MIGRATION_FILES,
+                MigrationConfig.freshInstall());
+
+        assertProfilePragmas(executor.writeConnection(), DeploymentProfile.PERFORMANCE);
+    }
+
+    @Test
+    @DisplayName("locking_mode PRAGMA is not emitted when the profile selects NORMAL")
+    void start_normalLockingMode_lockingModeRemainsDefault() throws Exception {
+        Path dbPath = tempDir.resolve("locking-normal.db");
+
+        executor.start(dbPath, EVENTS_MIGRATION_PATH, EVENTS_MIGRATION_FILES,
+                MigrationConfig.freshInstall());
+
+        // All current profiles use NORMAL — the executor does not issue
+        // `PRAGMA locking_mode = NORMAL`, and SQLite's default is NORMAL,
+        // so reading the PRAGMA back returns the default value.
+        try (Statement s = executor.writeConnection().createStatement();
+             ResultSet rs = s.executeQuery("PRAGMA locking_mode")) {
+            rs.next();
+            assertThat(rs.getString(1)).isEqualToIgnoringCase("normal");
+        }
+    }
+
 
     @Test
     @DisplayName("start activates WAL mode on a file-based database")
@@ -275,12 +298,12 @@ final class DatabaseExecutorTest {
     void start_withMultipleReadThreads() throws Exception {
         Path dbPath = tempDir.resolve("concurrent.db");
 
-        // Use a larger pool than the default of 2 to prove the size is
+        // Use the PERFORMANCE profile (4 read threads) to prove the size is
         // actually wired up through the constructor.
         if (executor != null) {
             executor.shutdown();
         }
-        executor = new DatabaseExecutor(3, TEST_CLOCK);
+        executor = new DatabaseExecutor(DeploymentProfile.PERFORMANCE, TEST_CLOCK);
         executor.start(dbPath, EVENTS_MIGRATION_PATH, EVENTS_MIGRATION_FILES,
                 MigrationConfig.freshInstall());
 
@@ -361,6 +384,43 @@ final class DatabaseExecutorTest {
     // ──────────────────────────────────────────────────────────────────
     // Test utilities
     // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Verifies that the eight always-emitted PRAGMAs on the given connection
+     * match the supplied profile's tuning values. {@code locking_mode} is not
+     * asserted here because all current profiles select
+     * {@link LockingMode#NORMAL}, which is also SQLite's default and is not
+     * emitted by the executor.
+     */
+    private static void assertProfilePragmas(Connection c, DeploymentProfile profile)
+            throws SQLException {
+        Map<String, String> pragmas = readPragmas(c,
+                "journal_mode",
+                "synchronous",
+                "cache_size",
+                "mmap_size",
+                "temp_store",
+                "busy_timeout",
+                "journal_size_limit",
+                "cell_size_check");
+
+        assertThat(pragmas.get("journal_mode")).isEqualToIgnoringCase("wal");
+        // synchronous: NORMAL = 1
+        assertThat(pragmas.get("synchronous")).isEqualTo("1");
+        // cache_size: SQLite reflects the signed negative magnitude
+        assertThat(pragmas.get("cache_size"))
+                .isEqualTo("-" + profile.cacheSizeKiB());
+        assertThat(pragmas.get("mmap_size"))
+                .isEqualTo(Long.toString(profile.mmapSizeBytes()));
+        // temp_store: MEMORY = 2
+        assertThat(pragmas.get("temp_store")).isEqualTo("2");
+        assertThat(pragmas.get("busy_timeout"))
+                .isEqualTo(Long.toString(profile.busyTimeoutMs()));
+        assertThat(pragmas.get("journal_size_limit"))
+                .isEqualTo(Long.toString(profile.journalSizeLimitBytes()));
+        // cell_size_check: ON = 1
+        assertThat(pragmas.get("cell_size_check")).isEqualTo("1");
+    }
 
     private static int readIntPragma(Connection c, String pragma) throws SQLException {
         try (Statement s = c.createStatement();

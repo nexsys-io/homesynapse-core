@@ -85,7 +85,7 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
             "V004__dlq_operational_indices.sql");
 
     private final Path databasePath;
-    private final int readThreadCount;
+    private final PersistenceConfig config;
     private final Clock clock;
     private final HomeId homeId;
     private final List<Class<? extends DomainEvent>> eventClasses;
@@ -102,30 +102,33 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
     /**
      * Creates a new lifecycle manager for the persistence layer.
      *
-     * @param databasePath   full path to the SQLite database file
-     *                       (e.g., {@code /var/lib/homesynapse/homesynapse-events.db}
-     *                       in production, {@code @TempDir} path in tests)
-     * @param readThreadCount number of read connections/threads (default 2,
-     *                        per AMD-27); must be {@code >= 1}
-     * @param clock          injected clock for all timestamp operations;
-     *                       use {@code Clock.systemUTC()} in production,
-     *                       {@code Clock.fixed(...)} in tests
-     * @param homeId         the home identity for this installation (AMD-34);
-     *                       passed to {@link SqliteEventStore} for the
-     *                       {@code home_id} column; never {@code null}
-     * @param eventClasses   the explicit list of {@link DomainEvent} record
-     *                       classes to register for polymorphic serialization;
-     *                       must not be empty (no classpath scanning per LTD-07)
-     * @throws NullPointerException     if any argument is {@code null}
-     * @throws IllegalArgumentException if {@code readThreadCount < 1}
+     * @param databasePath full path to the SQLite database file
+     *                     (e.g., {@code /var/lib/homesynapse/homesynapse-events.db}
+     *                     in production, {@code @TempDir} path in tests)
+     * @param config       persistence configuration bundling the
+     *                     {@link DeploymentProfile} (read thread count,
+     *                     PRAGMA values) and {@code RetentionPolicy}; never
+     *                     {@code null}. Use
+     *                     {@link PersistenceConfig#HOME_DEFAULT} for the MVP
+     *                     default.
+     * @param clock        injected clock for all timestamp operations; use
+     *                     {@code Clock.systemUTC()} in production,
+     *                     {@code Clock.fixed(...)} in tests
+     * @param homeId       the home identity for this installation (AMD-34);
+     *                     passed to {@link SqliteEventStore} for the
+     *                     {@code home_id} column; never {@code null}
+     * @param eventClasses the explicit list of {@link DomainEvent} record
+     *                     classes to register for polymorphic serialization;
+     *                     must not be empty (no classpath scanning per LTD-07)
+     * @throws NullPointerException if any argument is {@code null}
      */
     public SqlitePersistenceLifecycle(
             Path databasePath,
-            int readThreadCount,
+            PersistenceConfig config,
             Clock clock,
             HomeId homeId,
             List<Class<? extends DomainEvent>> eventClasses) {
-        this(databasePath, readThreadCount, clock, homeId, eventClasses,
+        this(databasePath, config, clock, homeId, eventClasses,
                 Function.identity());
     }
 
@@ -141,7 +144,7 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
      * Production composition (M3.6) MUST use the public 5-arg constructor.</p>
      *
      * @param databasePath              full path to the SQLite database file
-     * @param readThreadCount           number of read connections/threads
+     * @param config                    persistence configuration
      * @param clock                     injected clock
      * @param homeId                    home identity for this installation
      * @param eventClasses              domain-event record classes
@@ -151,17 +154,13 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
      */
     SqlitePersistenceLifecycle(
             Path databasePath,
-            int readThreadCount,
+            PersistenceConfig config,
             Clock clock,
             HomeId homeId,
             List<Class<? extends DomainEvent>> eventClasses,
             Function<WriteCoordinator, WriteCoordinator> writeCoordinatorDecorator) {
         this.databasePath = Objects.requireNonNull(databasePath, "databasePath");
-        if (readThreadCount < 1) {
-            throw new IllegalArgumentException(
-                    "readThreadCount must be >= 1, got " + readThreadCount);
-        }
-        this.readThreadCount = readThreadCount;
+        this.config = Objects.requireNonNull(config, "config");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.homeId = Objects.requireNonNull(homeId, "homeId");
         this.eventClasses = List.copyOf(
@@ -217,7 +216,7 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
             //    MigrationRunner execution, read connections, write coordinator,
             //    and read executor.
             databaseExecutor = new DatabaseExecutor(
-                    readThreadCount, clock, writeCoordinatorDecorator);
+                    config.profile(), clock, writeCoordinatorDecorator);
             databaseExecutor.start(
                     databasePath,
                     EVENTS_MIGRATION_PATH,
@@ -245,8 +244,8 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
                     databaseExecutor, clock);
 
             started = true;
-            LOG.info("Persistence layer started: database={}, readThreads={}",
-                    databasePath, readThreadCount);
+            LOG.info("Persistence layer started: database={}, profile={}, readThreads={}",
+                    databasePath, config.profile(), config.profile().readThreadCount());
 
             return CompletableFuture.completedFuture(null);
         } catch (Exception e) {

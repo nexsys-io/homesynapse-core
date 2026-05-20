@@ -8,19 +8,33 @@ package com.homesynapse.persistence;
  * Hardware deployment profile, detected at first boot and used to select
  * PRAGMA values, checkpoint policies, and retention defaults.
  *
- * <p>Auto-detection (M3 deliverable) inspects storage type, available RAM,
- * and CPU architecture to pick a profile. Until auto-detection is implemented,
- * {@link #HOME} is the default — operators may override via configuration.
+ * <p>Auto-detection (post-M3.6 deliverable) inspects storage type, available
+ * RAM, and CPU architecture to pick a profile. Until auto-detection is
+ * implemented, {@link #HOME} is the default — operators may override via
+ * configuration.
  *
- * <p>Each profile carries pre-validated PRAGMA values derived from the
- * M2→M3 storage efficiency research. The {@code cacheSizeKiB} and
- * {@code mmapSizeBytes} values are tuned per profile for RAM availability.
- * The {@code journalSizeLimitBytes} value is uniform across profiles at
+ * <p>Each profile carries pre-validated values for the six SQLite-PRAGMA-
+ * relevant tuning knobs:
+ * <ul>
+ *   <li>{@link #cacheSizeKiB()} — per-connection page cache magnitude in KiB
+ *       (PRAGMA syntax requires negation)</li>
+ *   <li>{@link #mmapSizeBytes()} — memory-mapped region size in bytes</li>
+ *   <li>{@link #journalSizeLimitBytes()} — soft cap on WAL/journal growth in
+ *       bytes</li>
+ *   <li>{@link #busyTimeoutMs()} — milliseconds a contended connection waits
+ *       before raising {@code SQLITE_BUSY}</li>
+ *   <li>{@link #lockingMode()} — locking_mode selection
+ *       ({@link LockingMode#NORMAL}/{@link LockingMode#EXCLUSIVE})</li>
+ *   <li>{@link #readThreadCount()} — number of platform-thread read workers
+ *       in {@code DatabaseExecutor}</li>
+ * </ul>
+ *
+ * <p>The {@code journalSizeLimitBytes} value is uniform across profiles at
  * 6,144,000 bytes (6 MB) per LTD-03, empirically validated by the D1 WAL
  * Pathology Validation Spike (2026-05-15): the bounded-window reader pattern
- * (AMD-38) keeps the WAL at ~4 MB peak under nominal load, so the 6 MB ceiling
- * remains correct. AMD-39 (proposed raise to 64 MB) was WITHDRAWN on the same
- * date as unnecessary.
+ * (AMD-38) keeps the WAL at ~4 MB peak under nominal load, so the 6 MB
+ * ceiling remains correct. AMD-39 (proposed raise to 64 MB) was WITHDRAWN
+ * on the same date as unnecessary.
  *
  * <p>The values are designed for the following hardware targets:
  * <ul>
@@ -37,9 +51,12 @@ public enum DeploymentProfile {
      *
      * <p>PRAGMA values: {@code cache_size=-2000} (2 MB),
      * {@code mmap_size=67108864} (64 MB),
-     * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike).
+     * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike),
+     * {@code busy_timeout=5000} (5 s),
+     * {@code locking_mode=NORMAL},
+     * 2 read threads (AMD-27 default for constrained I/O).
      */
-    STUDIO(2_000, 67_108_864L, 6_144_000L),
+    STUDIO(2_000, 67_108_864L, 6_144_000L, 5_000L, LockingMode.NORMAL, 2),
 
     /**
      * Pi 5 or equivalent with NVMe SSD, 4–8 GB RAM.
@@ -47,9 +64,12 @@ public enum DeploymentProfile {
      *
      * <p>PRAGMA values: {@code cache_size=-16000} (16 MB),
      * {@code mmap_size=268435456} (256 MB),
-     * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike).
+     * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike),
+     * {@code busy_timeout=5000} (5 s),
+     * {@code locking_mode=NORMAL},
+     * 2 read threads (AMD-27 default for constrained I/O).
      */
-    HOME(16_000, 268_435_456L, 6_144_000L),
+    HOME(16_000, 268_435_456L, 6_144_000L, 5_000L, LockingMode.NORMAL, 2),
 
     /**
      * x86 mini-PC or high-spec ARM, ≥16 GB RAM, NVMe/SATA SSD.
@@ -57,19 +77,33 @@ public enum DeploymentProfile {
      *
      * <p>PRAGMA values: {@code cache_size=-65536} (64 MB),
      * {@code mmap_size=1073741824} (1 GB),
-     * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike).
+     * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike),
+     * {@code busy_timeout=5000} (5 s),
+     * {@code locking_mode=NORMAL},
+     * 4 read threads (doubled vs. the constrained-I/O profiles).
      */
-    PERFORMANCE(65_536, 1_073_741_824L, 6_144_000L);
+    PERFORMANCE(65_536, 1_073_741_824L, 6_144_000L, 5_000L, LockingMode.NORMAL, 4);
 
     private final int cacheSizeKiB;
     private final long mmapSizeBytes;
     private final long journalSizeLimitBytes;
+    private final long busyTimeoutMs;
+    private final LockingMode lockingMode;
+    private final int readThreadCount;
 
-    DeploymentProfile(int cacheSizeKiB, long mmapSizeBytes,
-                      long journalSizeLimitBytes) {
+    DeploymentProfile(
+            int cacheSizeKiB,
+            long mmapSizeBytes,
+            long journalSizeLimitBytes,
+            long busyTimeoutMs,
+            LockingMode lockingMode,
+            int readThreadCount) {
         this.cacheSizeKiB = cacheSizeKiB;
         this.mmapSizeBytes = mmapSizeBytes;
         this.journalSizeLimitBytes = journalSizeLimitBytes;
+        this.busyTimeoutMs = busyTimeoutMs;
+        this.lockingMode = lockingMode;
+        this.readThreadCount = readThreadCount;
     }
 
     /**
@@ -105,5 +139,53 @@ public enum DeploymentProfile {
      */
     public long journalSizeLimitBytes() {
         return journalSizeLimitBytes;
+    }
+
+    /**
+     * Returns the value for {@code PRAGMA busy_timeout} in milliseconds — the
+     * time a connection blocks awaiting a database lock before raising
+     * {@code SQLITE_BUSY}.
+     *
+     * <p>Uniform across all profiles at 5,000 ms — the value previously
+     * hardcoded in {@code DatabaseExecutor}. Future profiles may tune this
+     * (e.g., higher for NFS-backed storage with longer round-trips).
+     *
+     * @return the busy timeout in milliseconds
+     */
+    public long busyTimeoutMs() {
+        return busyTimeoutMs;
+    }
+
+    /**
+     * Returns the {@link LockingMode} for connections opened against this
+     * profile.
+     *
+     * <p>Uniform across all current profiles at {@link LockingMode#NORMAL}.
+     * Docker Desktop / VirtioFS / NFS deployments will override to
+     * {@link LockingMode#EXCLUSIVE} via a post-M3.6 {@code PersistenceConfig}
+     * builder; the {@code EXCLUSIVE} value exists today so that custom
+     * profiles can already select it.
+     *
+     * @return the SQLite locking_mode for this profile
+     */
+    LockingMode lockingMode() {
+        return lockingMode;
+    }
+
+    /**
+     * Returns the number of platform-thread read workers
+     * {@link DatabaseExecutor} should open for this profile.
+     *
+     * <p>{@link #STUDIO} and {@link #HOME} (Pi-class hardware with constrained
+     * I/O) use 2 read threads, matching the AMD-27 default.
+     * {@link #PERFORMANCE} (NVMe x86 server) doubles to 4. Custom profiles
+     * may select any value in {@code [1, 8]}; the upper bound of 8 is the
+     * LTD-03 reader-budget ceiling and is enforced by
+     * {@link DatabaseExecutor}'s constructor.
+     *
+     * @return the read thread count
+     */
+    public int readThreadCount() {
+        return readThreadCount;
     }
 }

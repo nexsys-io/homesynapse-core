@@ -39,10 +39,10 @@ import java.util.function.Function;
  *
  * <h2>Lifecycle</h2>
  *
- * <p>{@link #start(Path, int, Clock, HomeId, List)} constructs the underlying
- * {@code SqlitePersistenceLifecycle}, calls its {@code start()} synchronously
- * (the future is already completed when {@code start()} returns), and returns
- * a ready-to-use harness instance.</p>
+ * <p>{@link #start(Path, PersistenceConfig, Clock, HomeId, List)} constructs
+ * the underlying {@code SqlitePersistenceLifecycle}, calls its {@code start()}
+ * synchronously (the future is already completed when {@code start()}
+ * returns), and returns a ready-to-use harness instance.</p>
  *
  * <p>{@link #close()} delegates to the lifecycle's {@code stop()} method,
  * flushing the WAL via {@code PRAGMA wal_checkpoint(TRUNCATE)} and closing
@@ -70,26 +70,29 @@ public final class PersistenceTestHarness implements AutoCloseable {
      * <p>Runs all migrations (V001–V004) on a fresh database. Subsequent
      * accessor calls return the constructed stores.</p>
      *
-     * @param databasePath    full path to the SQLite database file (typically
-     *                        a {@code @TempDir} path); never {@code null}
-     * @param readThreadCount number of read connections/threads (default 2);
-     *                        must be &gt;= 1
-     * @param clock           injected clock; never {@code null}
-     * @param homeId          home identity for this installation (AMD-34);
-     *                        never {@code null}
-     * @param eventClasses    domain-event record classes to register for
-     *                        polymorphic serialization; never {@code null} or
-     *                        empty
+     * @param databasePath  full path to the SQLite database file (typically
+     *                      a {@code @TempDir} path); never {@code null}
+     * @param config        persistence configuration supplying the deployment
+     *                      profile (read thread count, PRAGMA values) and
+     *                      retention policy; never {@code null}. Use
+     *                      {@link PersistenceConfig#HOME_DEFAULT} unless the
+     *                      test specifically exercises another profile.
+     * @param clock         injected clock; never {@code null}
+     * @param homeId        home identity for this installation (AMD-34);
+     *                      never {@code null}
+     * @param eventClasses  domain-event record classes to register for
+     *                      polymorphic serialization; never {@code null} or
+     *                      empty
      * @return a started harness with all stores constructed and ready
      */
     public static PersistenceTestHarness start(
             Path databasePath,
-            int readThreadCount,
+            PersistenceConfig config,
             Clock clock,
             HomeId homeId,
             List<Class<? extends DomainEvent>> eventClasses) {
         return startWithWriteCoordinator(
-                databasePath, readThreadCount, clock, homeId, eventClasses,
+                databasePath, config, clock, homeId, eventClasses,
                 Function.identity());
     }
 
@@ -106,10 +109,10 @@ public final class PersistenceTestHarness implements AutoCloseable {
      * equivalent baseline + spike latencies on the write thread.</p>
      *
      * <p>Pass {@link Function#identity()} to get the same behavior as
-     * {@link #start(Path, int, Clock, HomeId, List)}.</p>
+     * {@link #start(Path, PersistenceConfig, Clock, HomeId, List)}.</p>
      *
      * @param databasePath              full path to the SQLite database file
-     * @param readThreadCount           number of read connections/threads
+     * @param config                    persistence configuration
      * @param clock                     injected clock
      * @param homeId                    home identity for this installation
      * @param eventClasses              domain-event record classes
@@ -120,19 +123,20 @@ public final class PersistenceTestHarness implements AutoCloseable {
      */
     public static PersistenceTestHarness startWithWriteCoordinator(
             Path databasePath,
-            int readThreadCount,
+            PersistenceConfig config,
             Clock clock,
             HomeId homeId,
             List<Class<? extends DomainEvent>> eventClasses,
             Function<WriteCoordinator, WriteCoordinator> coordinatorDecorator) {
         Objects.requireNonNull(databasePath, "databasePath");
+        Objects.requireNonNull(config, "config");
         Objects.requireNonNull(clock, "clock");
         Objects.requireNonNull(homeId, "homeId");
         Objects.requireNonNull(eventClasses, "eventClasses");
         Objects.requireNonNull(coordinatorDecorator, "coordinatorDecorator");
 
         SqlitePersistenceLifecycle lifecycle = new SqlitePersistenceLifecycle(
-                databasePath, readThreadCount, clock, homeId, eventClasses,
+                databasePath, config, clock, homeId, eventClasses,
                 coordinatorDecorator);
         lifecycle.start().join();
         return new PersistenceTestHarness(lifecycle);
@@ -150,21 +154,21 @@ public final class PersistenceTestHarness implements AutoCloseable {
      * directly. This factory encapsulates the decorator wiring and exposes
      * the throttled behavior under a stable named entry point.</p>
      *
-     * @param databasePath    full path to the SQLite database file
-     * @param readThreadCount number of read connections/threads
-     * @param clock           injected clock
-     * @param homeId          home identity for this installation
-     * @param eventClasses    domain-event record classes
+     * @param databasePath full path to the SQLite database file
+     * @param config       persistence configuration
+     * @param clock        injected clock
+     * @param homeId       home identity for this installation
+     * @param eventClasses domain-event record classes
      * @return a started harness whose writes incur Pi-4-equivalent latency
      */
     public static PersistenceTestHarness startThrottled(
             Path databasePath,
-            int readThreadCount,
+            PersistenceConfig config,
             Clock clock,
             HomeId homeId,
             List<Class<? extends DomainEvent>> eventClasses) {
         return startWithWriteCoordinator(
-                databasePath, readThreadCount, clock, homeId, eventClasses,
+                databasePath, config, clock, homeId, eventClasses,
                 ThrottledWriteCoordinator::withDefaults);
     }
 
