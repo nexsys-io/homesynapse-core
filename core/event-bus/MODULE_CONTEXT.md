@@ -205,7 +205,7 @@ None. This module contains no sealed types.
 
 ## Test Fixtures and Contract Tests
 
-The `testFixtures` source set now provides seven types:
+The `testFixtures` source set now provides seven types (one extended for M3.4b):
 
 | Type | Kind | Package | Purpose |
 |---|---|---|---|
@@ -215,7 +215,7 @@ The `testFixtures` source set now provides seven types:
 | `InMemoryEventBus` | class | `com.homesynapse.event.bus.test` | Phase 2 contract-test fixture. 4-method interface only. |
 | `RecordingReadConnectionFactory` | class | `com.homesynapse.event.bus.test` | Recording stub for INV-SUB-ISO-02 assertions. |
 | `DeadLetterStoreContractTest` | abstract class (10 @Test methods) | `com.homesynapse.event.bus.test` | M3.5b — behavioral contract for any persistent dead-letter store implementation. Subclassed by the persistence module's `SqliteDeadLetterStoreContractTest`. |
-| `InProcessEventBusFactory` | utility class | `com.homesynapse.event.bus` (main package) | **M3.4a — public test factory** that constructs the package-private `InProcessEventBus` and returns it typed as the public `EventBus` interface. Lives in the main package (NOT `.test` sub-package) so it can reach the package-private constructor. Single static method `create(EventStore, CheckpointStore, Clock, SubscriberReadConnectionFactory) → EventBus` delegating to the bus's 4-arg convenience constructor (which wires `BusMetrics.noop()` and a constant zero queue-depth supplier). The composition-root lifecycle module (M3.6) will replace this seam with production wiring. |
+| `InProcessEventBusFactory` | utility class | `com.homesynapse.event.bus` (main package) | **M3.4a / M3.4b — public test factory** that constructs the package-private `InProcessEventBus` and returns it typed as the public `EventBus` interface. Lives in the main package (NOT `.test` sub-package) so it can reach the package-private constructor. Two static methods: `create(EventStore, CheckpointStore, Clock, SubscriberReadConnectionFactory) → EventBus` (M3.4a — delegates to `createWithMetrics(..., BusMetrics.noop(), () -> 0)`); `createWithMetrics(EventStore, CheckpointStore, Clock, SubscriberReadConnectionFactory, BusMetrics, IntSupplier) → EventBus` (M3.4b — routes through the production 6-arg `InProcessEventBus` constructor with a caller-supplied recorder and writer-queue-depth supplier). The composition-root lifecycle module (M3.6) will replace this seam with production wiring. |
 
 ### EventBusContractTest — 10 Nested Tiers
 

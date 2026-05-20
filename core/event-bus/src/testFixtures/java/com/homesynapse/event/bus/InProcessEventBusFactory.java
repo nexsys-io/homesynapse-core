@@ -8,6 +8,7 @@ import com.homesynapse.event.EventStore;
 
 import java.time.Clock;
 import java.util.Objects;
+import java.util.function.IntSupplier;
 
 /**
  * Public test factory for the package-private {@link InProcessEventBus}.
@@ -34,14 +35,14 @@ public final class InProcessEventBusFactory {
     }
 
     /**
-     * Constructs the production {@link InProcessEventBus} via its convenience
-     * constructor.
+     * Constructs the production {@link InProcessEventBus} with no-op metrics
+     * and a constant zero writer-queue-depth supplier.
      *
-     * <p>Wires {@code BusMetrics.noop()} and a constant {@code () -> 0}
-     * writer-queue-depth supplier — appropriate for integration tests that
-     * do not assert on JFR metrics or saturation behavior. Tests needing
-     * those signals should call the production 6-arg constructor directly
-     * (which requires same-package access).</p>
+     * <p>Appropriate for integration tests that do not assert on bus metrics
+     * or saturation behavior. Tests that DO need to observe the seven
+     * canonical bus metrics (AMD-43 §3.6.2) should call
+     * {@link #createWithMetrics(EventStore, CheckpointStore, Clock,
+     * SubscriberReadConnectionFactory, BusMetrics, IntSupplier)} instead.</p>
      *
      * @param eventStore             the SQLite-backed (or in-memory) event
      *                               store the subscribers will pull from;
@@ -61,11 +62,50 @@ public final class InProcessEventBusFactory {
             CheckpointStore checkpointStore,
             Clock clock,
             SubscriberReadConnectionFactory readConnectionFactory) {
+        return createWithMetrics(
+                eventStore, checkpointStore, clock, readConnectionFactory,
+                BusMetrics.noop(), () -> 0);
+    }
+
+    /**
+     * Constructs the production {@link InProcessEventBus} with caller-supplied
+     * metrics and writer-queue-depth supplier.
+     *
+     * <p>Routes through the production 6-arg constructor of
+     * {@link InProcessEventBus}. The {@code metrics} parameter accepts any
+     * {@link BusMetrics} implementation — tests typically pass an in-process
+     * recording fixture (e.g. {@code EventBusContractTest.BusMetricsRecorder})
+     * to assert on the emitted seven-metric set (AMD-43 §3.6.2). The
+     * {@code writerQueueDepth} supplier feeds the writer-queue-depth gauge;
+     * tests that do not exercise rate limiting can pass {@code () -> 0}.</p>
+     *
+     * @param eventStore             the event store
+     * @param checkpointStore        the checkpoint store
+     * @param clock                  injected clock
+     * @param readConnectionFactory  per-subscriber read-executor factory
+     * @param metrics                the {@link BusMetrics} implementation;
+     *                               never {@code null}
+     * @param writerQueueDepth       supplier of the current writer queue
+     *                               depth (DEC-M3-14 — the bus holds no
+     *                               reference to persistence types);
+     *                               never {@code null}
+     * @return the production bus typed as {@link EventBus}
+     */
+    public static EventBus createWithMetrics(
+            EventStore eventStore,
+            CheckpointStore checkpointStore,
+            Clock clock,
+            SubscriberReadConnectionFactory readConnectionFactory,
+            BusMetrics metrics,
+            IntSupplier writerQueueDepth) {
         Objects.requireNonNull(eventStore, "eventStore");
         Objects.requireNonNull(checkpointStore, "checkpointStore");
         Objects.requireNonNull(clock, "clock");
         Objects.requireNonNull(readConnectionFactory, "readConnectionFactory");
+        Objects.requireNonNull(metrics, "metrics");
+        Objects.requireNonNull(writerQueueDepth, "writerQueueDepth");
         return new InProcessEventBus(
-                eventStore, checkpointStore, clock, readConnectionFactory);
+                eventStore, checkpointStore, clock, readConnectionFactory,
+                metrics, writerQueueDepth);
     }
 }

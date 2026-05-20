@@ -16,6 +16,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -77,6 +78,7 @@ final class DatabaseExecutor {
 
     private final int readThreadCount;
     private final Clock clock;
+    private final Function<WriteCoordinator, WriteCoordinator> writeCoordinatorDecorator;
     private final ReentrantLock lifecycleLock = new ReentrantLock();
 
     private volatile boolean started;
@@ -84,7 +86,14 @@ final class DatabaseExecutor {
 
     private Connection writeConnection;
     private final List<Connection> readConnections = new ArrayList<>();
-    private PlatformThreadWriteCoordinator writeCoordinator;
+    /**
+     * The exposed {@link WriteCoordinator}. In production this is the bare
+     * {@link PlatformThreadWriteCoordinator}; tests may install a decorator
+     * (e.g. {@code ThrottledWriteCoordinator}) via the package-private
+     * constructor overload. The decorator's {@link WriteCoordinator#shutdown()}
+     * forwards to the underlying coordinator's shutdown.
+     */
+    private WriteCoordinator writeCoordinator;
     private PlatformThreadReadExecutor readExecutor;
 
     /**
@@ -103,12 +112,44 @@ final class DatabaseExecutor {
      * @throws NullPointerException     if {@code clock} is {@code null}
      */
     DatabaseExecutor(int readThreadCount, Clock clock) {
+        this(readThreadCount, clock, Function.identity());
+    }
+
+    /**
+     * Test-only constructor accepting a decorator function applied to the
+     * {@link PlatformThreadWriteCoordinator} during {@link #start}. The
+     * decorator allows the {@code testFixtures} source set to install a
+     * {@code ThrottledWriteCoordinator} (M3.4b) without changing the
+     * production wiring path. Pass {@link Function#identity()} for the
+     * production-equivalent behavior.
+     *
+     * @param readThreadCount number of platform read threads; must be
+     *                        {@code >= 1}
+     * @param clock           clock for migrations and diagnostics; never
+     *                        {@code null}
+     * @param writeCoordinatorDecorator decorator applied to the underlying
+     *                        {@code PlatformThreadWriteCoordinator}; never
+     *                        {@code null}. The result must implement the
+     *                        full {@link WriteCoordinator} contract and
+     *                        forward {@code shutdown()} to the underlying
+     *                        coordinator.
+     * @throws IllegalArgumentException if {@code readThreadCount < 1}
+     * @throws NullPointerException     if {@code clock} or
+     *                                  {@code writeCoordinatorDecorator}
+     *                                  is {@code null}
+     */
+    DatabaseExecutor(
+            int readThreadCount,
+            Clock clock,
+            Function<WriteCoordinator, WriteCoordinator> writeCoordinatorDecorator) {
         if (readThreadCount < 1) {
             throw new IllegalArgumentException(
                     "readThreadCount must be >= 1, got " + readThreadCount);
         }
         this.readThreadCount = readThreadCount;
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.writeCoordinatorDecorator = Objects.requireNonNull(
+                writeCoordinatorDecorator, "writeCoordinatorDecorator");
     }
 
     /**
@@ -194,7 +235,14 @@ final class DatabaseExecutor {
                 }
 
                 // 6. Start the write coordinator and read executor.
-                writeCoordinator = new PlatformThreadWriteCoordinator();
+                //    The decorator hook (default Function.identity()) lets the
+                //    testFixtures source set install a ThrottledWriteCoordinator
+                //    (M3.4b) without changing the production code path.
+                PlatformThreadWriteCoordinator underlying =
+                        new PlatformThreadWriteCoordinator();
+                writeCoordinator = Objects.requireNonNull(
+                        writeCoordinatorDecorator.apply(underlying),
+                        "writeCoordinatorDecorator returned null");
                 readExecutor = new PlatformThreadReadExecutor(readThreadCount);
 
                 started = true;

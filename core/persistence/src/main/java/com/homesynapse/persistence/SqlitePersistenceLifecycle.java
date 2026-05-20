@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -88,6 +89,7 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
     private final Clock clock;
     private final HomeId homeId;
     private final List<Class<? extends DomainEvent>> eventClasses;
+    private final Function<WriteCoordinator, WriteCoordinator> writeCoordinatorDecorator;
 
     // Constructed during start()
     private DatabaseExecutor databaseExecutor;
@@ -123,6 +125,37 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
             Clock clock,
             HomeId homeId,
             List<Class<? extends DomainEvent>> eventClasses) {
+        this(databasePath, readThreadCount, clock, homeId, eventClasses,
+                Function.identity());
+    }
+
+    /**
+     * Test-only constructor accepting a {@link WriteCoordinator} decorator
+     * applied to the {@link DatabaseExecutor}'s underlying
+     * {@code PlatformThreadWriteCoordinator}. Lives in the same package as
+     * {@link PersistenceTestHarness}, which calls this overload from
+     * {@code startWithWriteCoordinator(...)} to install a
+     * {@code ThrottledWriteCoordinator} (M3.4b).
+     *
+     * <p>Pass {@link Function#identity()} for production-equivalent behavior.
+     * Production composition (M3.6) MUST use the public 5-arg constructor.</p>
+     *
+     * @param databasePath              full path to the SQLite database file
+     * @param readThreadCount           number of read connections/threads
+     * @param clock                     injected clock
+     * @param homeId                    home identity for this installation
+     * @param eventClasses              domain-event record classes
+     * @param writeCoordinatorDecorator decorator applied to the
+     *                                  {@code WriteCoordinator}; never
+     *                                  {@code null}
+     */
+    SqlitePersistenceLifecycle(
+            Path databasePath,
+            int readThreadCount,
+            Clock clock,
+            HomeId homeId,
+            List<Class<? extends DomainEvent>> eventClasses,
+            Function<WriteCoordinator, WriteCoordinator> writeCoordinatorDecorator) {
         this.databasePath = Objects.requireNonNull(databasePath, "databasePath");
         if (readThreadCount < 1) {
             throw new IllegalArgumentException(
@@ -133,6 +166,8 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
         this.homeId = Objects.requireNonNull(homeId, "homeId");
         this.eventClasses = List.copyOf(
                 Objects.requireNonNull(eventClasses, "eventClasses"));
+        this.writeCoordinatorDecorator = Objects.requireNonNull(
+                writeCoordinatorDecorator, "writeCoordinatorDecorator");
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -181,7 +216,8 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
             //    connection PRAGMAs with journal_mode=WAL first,
             //    MigrationRunner execution, read connections, write coordinator,
             //    and read executor.
-            databaseExecutor = new DatabaseExecutor(readThreadCount, clock);
+            databaseExecutor = new DatabaseExecutor(
+                    readThreadCount, clock, writeCoordinatorDecorator);
             databaseExecutor.start(
                     databasePath,
                     EVENTS_MIGRATION_PATH,
