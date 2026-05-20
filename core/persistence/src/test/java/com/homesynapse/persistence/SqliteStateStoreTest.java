@@ -206,7 +206,7 @@ final class SqliteStateStoreTest {
                 Map.of("temperature_c", new StringValue("21.5")), Availability.UNAVAILABLE,
                 2L, T0, T1, T2, null, false));
 
-        byte[] bytes = store.serialize(3);
+        byte[] bytes = store.serializeCheckpoint(3);
         CheckpointData parsed = serializer.deserialize(bytes);
 
         assertThat(parsed.stateMap()).hasSize(2).containsKeys(ENT_A, ENT_B);
@@ -226,7 +226,7 @@ final class SqliteStateStoreTest {
         live.put(ENT_C, entityWithAttrs(ENT_C,
                 Map.of("brightness", new StringValue("128")), Availability.AVAILABLE,
                 7L, T0, T1, T2, null, false));
-        byte[] checkpoint = live.serialize(1);
+        byte[] checkpoint = live.serializeCheckpoint(1);
         checkpointStore.writeCheckpoint(VIEW_NAME, 250L, checkpoint);
 
         // Phase 2: simulate crash — discard the live store; a fresh store
@@ -250,7 +250,7 @@ final class SqliteStateStoreTest {
         live.put(ENT_A, entityWithAttrs(ENT_A, attrs, Availability.AVAILABLE,
                 1L, T0, T0, T0, null, false));
 
-        byte[] checkpoint = live.serialize(1);
+        byte[] checkpoint = live.serializeCheckpoint(1);
         checkpointStore.writeCheckpoint(VIEW_NAME, 1L, checkpoint);
 
         SqliteStateStore recovered = new SqliteStateStore(checkpointStore, serializer, VIEW_NAME);

@@ -7,6 +7,7 @@ package com.homesynapse.persistence;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.state.CheckpointRecord;
 import com.homesynapse.state.EntityState;
+import com.homesynapse.state.StateCheckpointSource;
 import com.homesynapse.state.StateStore;
 import com.homesynapse.state.ViewCheckpointStore;
 
@@ -29,8 +30,9 @@ import org.slf4j.LoggerFactory;
  * directly with no SQLite I/O on the hot path. Durability is provided by
  * the {@link com.homesynapse.state.StateProjection}'s checkpoint cadence
  * — at every {@code FixedCheckpointPolicy} firing, the projection captures
- * the full state map via {@link #serialize()} and writes it through the
- * {@link ViewCheckpointStore}. On startup, the store rehydrates its map
+ * the full state map via {@link #serializeCheckpoint(int)} and writes it
+ * through the {@link ViewCheckpointStore}. On startup, the store rehydrates
+ * its map
  * from the latest checkpoint (Jackson-deserialized via
  * {@link CheckpointSerializer}).</p>
  *
@@ -65,17 +67,19 @@ import org.slf4j.LoggerFactory;
  * <p>Backed by {@link ConcurrentHashMap}: reads are lock-free,
  * virtual-thread-safe, and never block. Writes are atomic per-key. The
  * projection's subscriber virtual thread is the only writer in production.
- * {@link #serialize()} captures a snapshot via {@link #getAll()} which
- * itself returns a defensive unmodifiable copy.</p>
+ * {@link #serializeCheckpoint(int)} captures a snapshot via {@link #getAll()}
+ * which itself returns a defensive unmodifiable copy.</p>
  *
  * <p>Package-private — composition wiring constructs the store and exposes
- * it through the public {@link StateStore} interface only.</p>
+ * it through the public {@link StateStore} and {@link StateCheckpointSource}
+ * interfaces (the latter added in M3.6d to satisfy the
+ * {@link com.homesynapse.state.StateProjection} checkpoint contract).</p>
  *
  * @see CheckpointSerializer
  * @see ViewCheckpointStore
  * @see com.homesynapse.state.StateProjection
  */
-final class SqliteStateStore implements StateStore {
+final class SqliteStateStore implements StateStore, StateCheckpointSource {
 
     private static final Logger LOG = LoggerFactory.getLogger(SqliteStateStore.class);
 
@@ -162,16 +166,24 @@ final class SqliteStateStore implements StateStore {
      *
      * <p>The {@link com.homesynapse.state.StateProjection} owns the
      * checkpoint cadence (AMD-38). On each checkpoint firing, the
-     * projection calls {@code stateStore.serialize()} to capture a
-     * snapshot, then writes the resulting bytes via the checkpoint store
-     * at the current cursor position.</p>
+     * projection calls {@code source.serializeCheckpoint(projectionVersion)}
+     * via the {@link StateCheckpointSource} seam to capture a snapshot,
+     * then writes the resulting bytes via the checkpoint store at the
+     * current cursor position.</p>
+     *
+     * <p>Method renamed from {@code serialize(int)} to
+     * {@code serializeCheckpoint(int)} in M3.6d to match the
+     * {@link StateCheckpointSource#serializeCheckpoint(int)} interface
+     * contract, which was deliberately named to avoid a JPMS visibility
+     * clash with the original package-private name.</p>
      *
      * @param projectionVersion the running projection's code version,
      *                          embedded in the checkpoint payload for the
      *                          AMD-41 §3.2.4 reconciliation check
      * @return the serialized bytes; never {@code null}
      */
-    byte[] serialize(int projectionVersion) {
+    @Override
+    public byte[] serializeCheckpoint(int projectionVersion) {
         Map<EntityId, EntityState> snapshot = new LinkedHashMap<>(backing);
         return serializer.serialize(snapshot, projectionVersion, null, null, null);
     }
@@ -186,9 +198,15 @@ final class SqliteStateStore implements StateStore {
      * {@link CheckpointRecord#projectionVersion()} to {@code 1}; the
      * authoritative value lives inside the data blob.</p>
      *
+     * <p>Promoted to {@code public} in M3.6d to satisfy the
+     * {@link StateCheckpointSource} interface contract — composition-root
+     * wiring exposes this store as a {@code StateCheckpointSource} to
+     * {@link com.homesynapse.state.StateProjection}.</p>
+     *
      * @return the loaded projection version
      */
-    int loadedProjectionVersion() {
+    @Override
+    public int loadedProjectionVersion() {
         return loadedProjectionVersion;
     }
 

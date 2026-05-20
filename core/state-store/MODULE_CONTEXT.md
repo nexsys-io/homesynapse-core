@@ -1,4 +1,4 @@
-# state-store — `com.homesynapse.state` — 19 public + 1 package-private types — Materialized view over event stream, EntityState projection, availability tracking, checkpoint policy (sealed), bounded-window projection advancer, M3.5a vertical-slice StateProjection subscriber, M3.5b-wiring checkpoint-source injection seam
+# state-store — `com.homesynapse.state` — 20 public + 1 package-private types — Materialized view over event stream, EntityState projection, availability tracking, checkpoint policy (sealed), bounded-window projection advancer, M3.5a vertical-slice StateProjection subscriber, M3.5b-wiring checkpoint-source injection seam, M3.6d-a readiness-source seam
 
 ## Purpose
 
@@ -84,9 +84,15 @@ All four `requires transitive` declarations mean any module that reads `com.home
 
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
-| `StateCheckpointSource` | public interface (2 methods + static factory) | Injection seam decoupling `StateProjection` from the persistence module's `SqliteStateStore`. AMD-41 §3.2.3–3.2.4. | Methods: `serializeCheckpoint(int projectionVersion) → byte[]` (called at checkpoint cadence to obtain the opaque data payload for `ViewCheckpointStore.writeCheckpoint`) and `loadedProjectionVersion() → int` (returns the version recovered from the checkpoint data blob — the AUTHORITATIVE source per AMD-41 §3.2.4, since `CheckpointRecord.projectionVersion()` is a sentinel hardcoded to 1 by both store implementations). Static factory `stub()` returns a no-op source that serializes to `new byte[0]` and reports `loadedProjectionVersion() == 0`. Method name `serializeCheckpoint` (not `serialize`) was deliberately chosen to avoid a JPMS visibility-clash when `SqliteStateStore` later promotes its existing package-private `serialize(int)` to public and declares `implements StateCheckpointSource`. |
+| `StateCheckpointSource` | public interface (2 methods + static factory) | Injection seam decoupling `StateProjection` from the persistence module's `SqliteStateStore`. AMD-41 §3.2.3–3.2.4. | Methods: `serializeCheckpoint(int projectionVersion) → byte[]` (called at checkpoint cadence to obtain the opaque data payload for `ViewCheckpointStore.writeCheckpoint`) and `loadedProjectionVersion() → int` (returns the version recovered from the checkpoint data blob — the AUTHORITATIVE source per AMD-41 §3.2.4, since `CheckpointRecord.projectionVersion()` is a sentinel hardcoded to 1 by both store implementations). Static factory `stub()` returns a no-op source that serializes to `new byte[0]` and reports `loadedProjectionVersion() == 0`. Method name `serializeCheckpoint` (not `serialize`) was deliberately chosen to avoid a JPMS visibility-clash when `SqliteStateStore` later promotes its existing package-private `serialize(int)` to public and declares `implements StateCheckpointSource`. **M3.6d-a completed the promotion: `SqliteStateStore` now declares `implements StateCheckpointSource` and `serialize(int)` has been renamed to `serializeCheckpoint(int)` with public visibility.** |
 
-**Total: 19 public types + 1 package-private type (`SelfProducedFilter`) + 1 module-info.java = 21 production Java files** (M3.5b-wiring added 1 public type to the M3.5a baseline of 18+1).
+### M3.6d-a — Readiness-source seam (2026-05-20)
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `ReadinessSource` | public interface (1 method) | Reports the State Projection's lifecycle mode to query-side adapters (M3.6e's `MaterializedStateQueryService`) so REST and WebSocket layers can gate traffic until the projection reaches LIVE. | Method: `mode() → SubscriberMode` (never null). Zero new module dependencies — `SubscriberMode` is already transitively available through state-store's `requires transitive com.homesynapse.event.bus`. The lifecycle module's composition root implements this interface by delegating to `StateProjection.currentMode()`. Distinct from `StateQueryService.isReady()` (which returns boolean) — `ReadinessSource.mode()` exposes the full mode so consumers can distinguish "warming up" (COLD/REPLAY/TRANSITION) from "halted" (SUSPENDED) for nuanced 503 messaging. |
+
+**Total: 20 public types + 1 package-private type (`SelfProducedFilter`) + 1 module-info.java = 22 production Java files** (M3.6d-a added 1 public type — `ReadinessSource` — to the M3.5b-wiring baseline of 19+1).
 
 **testFixtures additions (M3.5a):**
 - `InMemoryStateStore` (`com.homesynapse.state` package — **not** the `.test` sub-package per the brief's convention for fixture implementations)
@@ -253,6 +259,11 @@ These 5 tests serve as executable documentation of a contract that no other smar
 ## Phase 3 Cross-Module Context
 
 *Added 2026-05-17 (Post-M3.1 refresh), revised 2026-05-18 (M3.5a + M3.5b complete; M3.5b-wiring complete same day). Phase 3 active — M3.5b State Projection Production Persistence landed 2026-05-18; M3.5b-wiring (projection-checkpoint injection seam) landed 2026-05-18. Next milestone: M3.6 (StateQueryService implementation, ReadinessSource, lifecycle composition root) — including the SqliteStateStore-implements-StateCheckpointSource promotion and composition-root wiring. M3 governance: AMD-41/42/43 APPLIED. See `homesynapse-core-docs/design/HomeSynapse_Core_M3_Implementation_Plan_PLAN-M3-CONSOLIDATED-02.md` for the full M3 implementation plan.*
+
+**M3.6d-a deliverables (2026-05-20) — readiness seam + reconciliation tests:**
+- New `ReadinessSource` public interface in `com.homesynapse.state` (1 method: `mode() → SubscriberMode`). Composition root implements this via delegation to `StateProjection.currentMode()`. M3.6e's `MaterializedStateQueryService` consumes it to gate REST/WebSocket traffic.
+- New `ReconciliationTest` concrete test class in `src/test/java/com/homesynapse/state/` covering 4 of the brief's 5 reconciliation scenarios: upgrade mismatch discards checkpoint, `allow_stale_snapshots=true` preserves checkpoint, reconciliation is idempotent across repeated mismatched-version init, downgrade mismatch also discards (symmetric to upgrade). The 5th brief test (`reconciliationRecordsMetadataInDataSlot`) is a documented feature gap: `StateProjection.writeCheckpoint` currently passes `null` for the three reconciliation-metadata parameters to `StateCheckpointSource.serializeCheckpoint(int)` — no plumbing exists to thread the metadata through. Recording reconciliation metadata is tracked as a separate enhancement.
+- The state-store side of M3.6d-b's wiring is now ready: `StateCheckpointSource` is implemented by `SqliteStateStore` (M3.6d-a persistence-side promotion); `ReadinessSource` is implemented by the composition root (M3.6d-b).
 
 **M3.5b-wiring deliverables (2026-05-18) — projection-side completion of M3.5b:**
 - New `StateCheckpointSource` public interface in `com.homesynapse.state` (2 methods + `stub()` factory). Decouples `StateProjection` from the persistence module's `SqliteStateStore`.

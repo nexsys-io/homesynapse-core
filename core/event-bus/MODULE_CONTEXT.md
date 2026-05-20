@@ -36,7 +36,7 @@ The non-transitive `requires jdk.jfr` (added M3.3) lets the bus emit JFR custom 
 
 ## Complete Type Inventory
 
-### Public Types (16)
+### Public Types (19)
 
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
@@ -56,8 +56,11 @@ The non-transitive `requires jdk.jfr` (added M3.3) lets the bus emit JFR custom 
 | `SubscriberReadExecutor` | interface extends AutoCloseable | Dedicated platform-thread read executor per subscriber | Method: `<T> executeRead(Callable<T>)`. Encapsulates platform thread + SQLite connection. |
 | `BusMetrics` | interface (6 methods + 2 factories) | M3.3 — typed facade for the seven canonical bus metric emissions (AMD-43 §3.6.2) | Methods: `recordPublishLatency`, `incrementPublisherBlocked`, `recordWriterQueueDepth`, `recordSubscriberLag`, `recordDerivedWriteAccepted`, `recordDerivedWriteParked`. Static factories: `noop()` and `jfr()`. All emissions are fire-and-forget; thread-safe. |
 | `DerivedWriteRateLimit` | class implements AutoCloseable | M3.3 — per-subscriber token bucket for derived-write throttling (AMD-43 §3.6.4). Visibility promoted to `public` in Bus-Fix Piece A (2026-05-18) so cross-module consumers (composition root, state-store via `DerivedPublishGate` method reference) can reach the type directly. | Public constructors: `(int capacity, Clock, BusMetrics, String)` and `(Clock, BusMetrics, String)` using default capacity 200. Public methods: `acquire()` (throws `InterruptedException`), `refill()`, `close()` (from `AutoCloseable`). Bucket capacity 200, refill 10 tokens/50 ms (200 tokens/sec effective). `acquire()` blocks on a `Semaphore` when empty (VT-safe — no carrier pinning). `refill()` adds tokens and releases parked threads. `close()` releases parked threads and marks closed. Inspection accessors (`capacity()`, `available()`, `clock()`, `subscriberId()`) remain package-private — they exist for in-package tests only. |
+| `QueueSaturationHealthCheck` | final class (public — promoted from package-private in M3.6d-a, DEC-M3-16 part 3) | M3.3 — hysteresis health check on writer queue depth (AMD-43 §3.6.3). Composition root constructs one instance and `SharedScheduler` calls `tick()` every second. | Public constructor: `(IntSupplier queueDepthSupplier, Clock, int warnDepth, int criticalDepth, int saturationTicks, Consumer<HealthSignal> emitter)`. Defaults: warn=5000, critical=10000, saturationTicks=5. Public method: `tick()` advances the state machine by one tick. Public constants: `CHANNEL_SATURATING`, `CHANNEL_RECOVERED`. Re-emit cadence: CRITICAL 10 s, WARN 30 s. Recovery requires 5 consecutive below-threshold ticks. Promoting this type required promoting `HealthSignal` and `HealthLevel` too — both appear in the constructor's `Consumer<HealthSignal>` parameter type, and `-Xlint:exports` would have failed on a public class leaking package-private types. |
+| `HealthSignal` | record (4 fields, public — promoted in M3.6d-a) | M3.3 — payload of a health emission from `QueueSaturationHealthCheck`. | Fields: `level` (HealthLevel), `channel` (String), `depth` (int), `timestamp` (Instant). Promoted to satisfy `-Xlint:exports` once `QueueSaturationHealthCheck` became public — without this promotion, the public constructor would leak a package-private type. |
+| `HealthLevel` | enum (3 values, public — promoted in M3.6d-a) | M3.3 — bus-internal severity level: INFO, WARN, CRITICAL. | Distinct from the observability module's HealthStatus — that translation happens in the lifecycle/observability bridge layer. Promoted alongside `HealthSignal` in the same `-Xlint:exports` chain. |
 
-### Package-Private Types (17)
+### Package-Private Types (14)
 
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
@@ -75,11 +78,9 @@ The non-transitive `requires jdk.jfr` (added M3.3) lets the bus emit JFR custom 
 | `BusSubscriberLagEvent` | class extends jdk.jfr.Event | M3.3 — combined event for `homesynapse.bus.subscriber.lag.events` and `homesynapse.bus.subscriber.lag.millis` | Fields: `String subscriberId, long lagEvents, long lagMillis`. Two logical metric names share a single JFR event class because they share an observation point. |
 | `BusWriteAcceptedEvent` | class extends jdk.jfr.Event | M3.3 — `homesynapse.bus.subscriber.derived_writes.accepted` counter | Field: `String subscriberId`. Emitted by `DerivedWriteRateLimit.acquire()` on token availability. |
 | `BusWriteParkedEvent` | class extends jdk.jfr.Event | M3.3 — `homesynapse.bus.subscriber.derived_writes.parked` counter | Field: `String subscriberId`. Emitted by `DerivedWriteRateLimit.acquire()` when a thread must park. |
-| `QueueSaturationHealthCheck` | class | M3.3 — hysteresis health check on writer queue depth (AMD-43 §3.6.3) | Constructor: `(IntSupplier, Clock, int warnDepth, int criticalDepth, int saturationTicks, Consumer<HealthSignal>)`. Defaults: warn=5000, critical=10000, saturationTicks=5. `tick()` advances the state machine by one tick — call from a 1-second scheduler in production. Re-emit cadence: CRITICAL 10 s, WARN 30 s. Recovery requires 5 consecutive below-threshold ticks. |
-| `HealthSignal` | record (4 fields) | M3.3 — payload of a health emission | Fields: `level` (HealthLevel), `channel` (String), `depth` (int), `timestamp` (Instant). |
-| `HealthLevel` | enum (3 values) | M3.3 — bus-internal severity level: INFO, WARN, CRITICAL | Distinct from the observability module's HealthStatus — that translation happens in the lifecycle/observability bridge layer. |
+| (`QueueSaturationHealthCheck`, `HealthSignal`, `HealthLevel` now live in the Public Types table — promoted in M3.6d-a, DEC-M3-16 part 3.) | | | |
 
-**Total: 16 public types + 17 package-private types = 33 production types.** M3.5b added three public types (`DeadLetter`, `SubscriberMaxRetries`, `PersistentDlqWriter`). M3.6b added one new public type (`EventBusConfig`) and promoted one type from package-private to public (`InProcessEventBus`, DEC-M3-16).
+**Total: 19 public types + 14 package-private types = 33 production types.** M3.5b added three public types (`DeadLetter`, `SubscriberMaxRetries`, `PersistentDlqWriter`). M3.6b added one new public type (`EventBusConfig`) and promoted one type from package-private to public (`InProcessEventBus`, DEC-M3-16). M3.6d-a promoted three types from package-private to public (`QueueSaturationHealthCheck` per DEC-M3-16 part 3, plus `HealthSignal` and `HealthLevel` to satisfy `-Xlint:exports` on `QueueSaturationHealthCheck`'s constructor signature).
 
 ## Dependencies
 
@@ -188,6 +189,10 @@ None. This module contains no sealed types.
 
 **GOTCHA: `BusMetricsJfr` is package-private.** Construct via `BusMetrics.jfr()` from the lifecycle module's composition root. The same applies to `NoopBusMetrics` (use `BusMetrics.noop()`). Tests can construct their own `BusMetrics` implementation directly (e.g. `BusMetricsRecorder` in `EventBusContractTest`).
 
+**GOTCHA: `QueueSaturationHealthCheck` was promoted to public in M3.6d-a — but its `tick()` method is also now public.** Before M3.6d-a both were package-private; tests inside the bus's package called `tick()` directly. The composition root needs cross-package access to drive the 1-second cadence through `SharedScheduler`, which is in `com.homesynapse.lifecycle`. The promotion is per DEC-M3-16 part 3.
+
+**GOTCHA: `HealthSignal` and `HealthLevel` are now public (M3.6d-a).** They were originally package-private — the brief that asked for `QueueSaturationHealthCheck` promotion incorrectly described it as a "clean" promotion. The constructor's `Consumer<HealthSignal>` parameter would have leaked the package-private `HealthSignal` type and failed `-Xlint:exports`. Both types had to be promoted in the same change to keep the module compile clean.
+
 **GOTCHA: Writer queue depth is observed via `IntSupplier` injection (DEC-M3-14), NOT through `core/observability`.** The lifecycle module passes `() -> writeCoordinator.queueSize()` to `InProcessEventBus` at construction time. The bus holds no reference to persistence types. This overrides PLAN-M3-CONSOLIDATED-02 §7.2 and §7.9 which prescribed routing through observability. The justification is the single-value, zero-observability-module-impact tradeoff documented in the M3.3 deliberation.
 
 **GOTCHA: `DerivedWriteRateLimit` is standalone-independent (DEC-M3-15).** The class has no compile-time dependency on StateProjection — it depends only on `Clock`, `BusMetrics`, and `Semaphore`. The M3.5a STOP gate prescribed by PLAN-M3 §7.9 does NOT apply to this milestone because the component is independently testable with mock collaborators. The pattern formalised here: M3.5a STOP gates are removed whenever the gated component is independently testable without StateProjection.
@@ -228,7 +233,7 @@ The `testFixtures` source set now provides seven types (one extended for M3.4b):
 - **Tier 6 — Per-Subscriber Isolation (6 active tests)** — M3.1
 - **Tier 7 — Supervisor (5 active tests)** — M3.1
 - **Tier 8 — Lifecycle (1 active test)** — M3.1
-- **Tier 9 — REPLAY→LIVE Transition (5 active tests + 1 disabled @Disabled("M3.5a") for `reconciliationOnVersionMismatch`)** — M3.2
+- **Tier 9 — REPLAY→LIVE Transition (6 active tests as of M3.6d-a — `reconciliationOnVersionMismatch` un-disabled and implemented)** — M3.2 + M3.6d-a
 - **Tier 10 — Backpressure and Metrics (6 active tests, M3.3)** — `publishDoesNotBlockAt5000` (INV-BUS-02), `busMetricsRecordPublishLatency`, `publisherBlockedCountIncrementsAbove5000`, `publisherBlockedCountNotIncrementedBelow5000`, `writerQueueDepthGaugeSampledOnNotify`, `subscriberLagPopulatedAfterDelivery`. All gated on active runtime AND access to `BusMetricsRecorder` + `AtomicInteger queueDepth()` harness hooks. `BusMetricsRecorder` is a public static nested class on `EventBusContractTest` that records all 7 canonical metric emissions for assertion.
 
 ## Phase 3 Notes

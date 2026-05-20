@@ -25,7 +25,6 @@ import com.homesynapse.event.bus.SubscriptionFilter;
 import com.homesynapse.event.test.TestEventFactory;
 
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -1471,10 +1470,104 @@ public abstract class EventBusContractTest {
         }
 
         @Test
-        @DisplayName("reconciliation on version mismatch")
-        @Disabled("M3.5a")
-        void reconciliationOnVersionMismatch() {
-            // Depends on ReconciliationPass and StateProjection (M3.5a scope).
+        @DisplayName("reconciliation on version mismatch — externally reset checkpoint re-replays")
+        void reconciliationOnVersionMismatch()
+                throws InterruptedException, SequenceConflictException {
+            // M3.6d-a: This test exercises the BUS-side observable consequence
+            // of reconciliation — namely that a subscriber's checkpoint, if
+            // externally reset back to position 0, re-pages through the full
+            // event log on its next subscription. The reconciliation pass
+            // itself (version-mismatch detection in StateProjection.initialize)
+            // is tested in core/state-store's ReconciliationTest; here we
+            // verify the bus honours the reset by re-replaying every event.
+            //
+            // Sequence:
+            //   1. Publish N=10 events while no subscribers exist.
+            //   2. Subscribe sub1; wait for LIVE; verify all 10 received.
+            //   3. Unsubscribe sub1 (closes its VT).
+            //   4. Externally reset checkpoint to 0 (the post-reconciliation
+            //      state in production — StateProjection's cursor reset is
+            //      flushed to the bus's CheckpointStore on the next checkpoint
+            //      cadence; here we simulate that flush directly).
+            //   5. Re-subscribe with the same subscriberId. The new VT reads
+            //      the (now-zero) checkpoint via ReplayDriver and re-pages
+            //      through all 10 events from the beginning.
+            //   6. Assert sub2 received all 10 events.
+            //
+            // This is NOT testing bus.resume() (which has the known M4
+            // VT re-spawn limitation per coder-handoff.md). The subscriber
+            // is fully torn down and re-created, exercising the standard
+            // subscribeRuntime → COLD → REPLAY → LIVE path.
+
+            final int eventCount = 10;
+            final String subscriberId = "reconcile-sub";
+
+            // Step 1: publish all events before any subscription exists so
+            // they're already in the store and the subscriber paginates them
+            // during REPLAY.
+            for (int i = 0; i < eventCount; i++) {
+                publishAndNotify(TestEventFactory.draft());
+            }
+
+            // Step 2: first subscription receives all 10 events during REPLAY.
+            List<Long> firstRun = new CopyOnWriteArrayList<>();
+            CountDownLatch firstRunSeen = new CountDownLatch(eventCount);
+            Subscriber sub1 = env -> {
+                firstRun.add(env.globalPosition());
+                firstRunSeen.countDown();
+            };
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo(subscriberId, SubscriptionFilter.all(), false),
+                    sub1);
+            awaitMode(subscriberId, SubscriberMode.LIVE);
+            assertThat(firstRunSeen.await(5, TimeUnit.SECONDS))
+                    .as("first subscription should observe all %d events".formatted(eventCount))
+                    .isTrue();
+            assertThat(firstRun.stream().distinct().count())
+                    .as("first subscription processed every unique position")
+                    .isEqualTo((long) eventCount);
+
+            // Step 3: tear down the first subscriber's VT.
+            bus().unsubscribe(subscriberId);
+
+            // Step 4: simulate the post-reconciliation checkpoint flush by
+            // resetting the bus's persisted position for this subscriber to
+            // zero. In production, StateProjection's reconciliation pass
+            // resets its internal cursor to 0 and the next checkpoint cadence
+            // writes that 0 through to the bus's CheckpointStore.
+            checkpointStore().writeCheckpoint(subscriberId, 0L);
+            assertThat(checkpointStore().readCheckpoint(subscriberId))
+                    .as("checkpoint was externally reset to 0")
+                    .isZero();
+
+            // Step 5: re-subscribe with the same subscriberId. The new VT
+            // reads the now-zero checkpoint and re-pages through every event.
+            List<Long> secondRun = new CopyOnWriteArrayList<>();
+            CountDownLatch secondRunSeen = new CountDownLatch(eventCount);
+            Subscriber sub2 = env -> {
+                secondRun.add(env.globalPosition());
+                secondRunSeen.countDown();
+            };
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo(subscriberId, SubscriptionFilter.all(), false),
+                    sub2);
+            awaitMode(subscriberId, SubscriberMode.LIVE);
+            assertThat(secondRunSeen.await(5, TimeUnit.SECONDS))
+                    .as("re-subscription should re-replay all %d events from position 0"
+                            .formatted(eventCount))
+                    .isTrue();
+
+            // Step 6: both runs cover the same set of positions — every
+            // event was redelivered. This is the at-least-once delivery
+            // guarantee (INV-ES-05) operating in the reconciliation scenario.
+            assertThat(secondRun.stream().distinct().count())
+                    .as("re-subscription re-processed every unique position")
+                    .isEqualTo((long) eventCount);
+            assertThat(secondRun.stream().distinct().sorted().toList())
+                    .as("re-subscription covers exactly the same positions as the first run")
+                    .containsExactlyElementsOf(firstRun.stream().distinct().sorted().toList());
         }
     }
 

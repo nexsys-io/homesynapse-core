@@ -1,4 +1,4 @@
-# lifecycle — `com.homesynapse.lifecycle` — Scaffold — 10-phase sequential startup, 30-second shutdown budget, fatal vs non-fatal classification
+# lifecycle — `com.homesynapse.lifecycle` — 7 public + 2 package-private types (M3.6d-a) — Process-level startup/shutdown orchestration AND M3.6 composition-root primitives (HomeSynapseConfig, SharedScheduler, ThrowingStateQueryService)
 
 ## Purpose
 
@@ -21,6 +21,14 @@ module com.homesynapse.lifecycle {
     requires transitive com.homesynapse.event;
     requires transitive com.homesynapse.platform;
 
+    // M3.6d-a — composition-root prerequisites
+    requires transitive com.homesynapse.persistence;
+    requires transitive com.homesynapse.event.bus;
+    requires transitive com.homesynapse.state;
+
+    // M3.6d-a build-fix — SLF4J for internal logging (SharedScheduler)
+    requires org.slf4j;
+
     exports com.homesynapse.lifecycle;
 }
 ```
@@ -28,6 +36,10 @@ module com.homesynapse.lifecycle {
 - `requires transitive com.homesynapse.observability` — HealthStatus (from observability) appears in SubsystemState and SystemHealthSnapshot exported API. Must be transitive so consumers see the HealthStatus type.
 - `requires transitive com.homesynapse.event` — LD#10 default rule. No event-model types in current exported API, but the default is transitive unless confirmed safe to downgrade.
 - `requires transitive com.homesynapse.platform` — LD#10 default rule. PlatformPaths and HealthReporter (from platform-api) are referenced in Javadoc @see tags on SystemLifecycleManager. Platform identity types (Ulid, EntityId) are available transitively through event-model→platform-api chain.
+- `requires transitive com.homesynapse.persistence` (M3.6d-a) — `HomeSynapseConfig.persistence()` returns `PersistenceConfig`, an exported field accessor. LD#10 default.
+- `requires transitive com.homesynapse.event.bus` (M3.6d-a) — `HomeSynapseConfig.eventBus()` returns `EventBusConfig`; `SharedScheduler` consumes `DerivedWriteRateLimit` and `QueueSaturationHealthCheck`. LD#10 default.
+- `requires transitive com.homesynapse.state` (M3.6d-a) — `ThrowingStateQueryService` implements `StateQueryService`. LD#10 default.
+- `requires org.slf4j` (M3.6d-a build-fix) — **non-transitive** (LTD-15 / DECIDE-01). `SharedScheduler` uses SLF4J internally for ERROR logging from `safelyInvoke()`; the matching Gradle declaration is `implementation(libs.slf4j.api)`. No SLF4J types appear in the lifecycle module's exported API, so consumers do not need SLF4J on their compile classpath through this module. Mirrors the canonical pattern in `core/persistence/module-info.java` (M2.2) and `core/state-store/module-info.java` (M3.5a). Failing to add this directive produces the build error "package org.slf4j does not exist" at compile time — the persistence module's transitive deps did NOT pull SLF4J into the lifecycle module's classpath because persistence declares SLF4J at `implementation` scope, which the java-library plugin does not propagate to consumers.
 
 ## Gradle Dependencies
 
@@ -37,11 +49,24 @@ dependencies {
     api(project(":core:event-model"))
     api(project(":platform:platform-api"))
     implementation(project(":config:configuration"))
+
+    // M3.6d-a — composition-root prerequisites
+    api(project(":core:persistence"))
+    api(project(":core:event-bus"))
+    api(project(":core:state-store"))
+
+    // M3.6d-a build-fix — SLF4J for SharedScheduler.safelyInvoke()
+    implementation(libs.slf4j.api)
+
+    testImplementation(project(":testing:test-support"))
 }
 ```
 
 - `api` for observability, event-model, platform-api — matches `requires transitive` in module-info.
 - `implementation` for configuration — Phase 3 internal dependency only (SystemLifecycleManager impl reads config for timeouts, grace periods). Not in exported API.
+- `api` for persistence, event-bus, state-store (M3.6d-a) — matches `requires transitive` in module-info. The new lifecycle types depend on `PersistenceConfig`, `EventBusConfig`, `DerivedWriteRateLimit`, `QueueSaturationHealthCheck`, and `StateQueryService` from these modules, surfaced through either exported records (`HomeSynapseConfig`) or package-private collaborators (`SharedScheduler`, `ThrowingStateQueryService`).
+- `implementation(libs.slf4j.api)` (M3.6d-a build-fix) — matches the non-transitive `requires org.slf4j` in module-info. `implementation` scope keeps SLF4J off consumers' compile classpath, which is correct because no SLF4J types appear in the lifecycle module's exported API. Canonical pattern from `core/persistence/build.gradle.kts:14` and `core/state-store/build.gradle.kts:12`.
+- `testImplementation` for test-support — `SharedSchedulerTest` does not currently use it but the dependency is declared for future composition-root tests that need TestClock or NoRealIoExtension.
 
 ## Package Structure
 
@@ -74,6 +99,14 @@ dependencies {
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
 | `SystemLifecycleManager` | interface (5 methods) | Top-level process lifecycle orchestration | Methods: `start()`, `shutdown(String reason)`, `currentPhase()`, `healthSnapshot()`, `subsystemStates()`. Thread-safety: query methods callable from any thread, shutdown synchronized internally. @see HealthReporter, PlatformPaths (both in com.homesynapse.platform). |
+
+### M3.6 Composition-Root Primitives (M3.6d-a)
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `HomeSynapseConfig` | public record (2 fields) | Consolidated configuration carrier for `HomeSynapseCore` (M3.6d-b). | Fields: `persistence` (`PersistenceConfig`, non-null), `eventBus` (`EventBusConfig`, non-null). Compact constructor enforces non-null. Constant: `HOME_DEFAULT = new HomeSynapseConfig(PersistenceConfig.HOME_DEFAULT, EventBusConfig.HOME_DEFAULT)`. YAML loading is deferred to a later WU per Doc 06 §14 — M3.6d uses programmatic construction. Extensible: future subsystem configs are added as new record components alongside the existing `*_DEFAULT` constants. |
+| `SharedScheduler` | package-private final class | Single-threaded scheduler driving the two periodic maintenance tasks shared by `HomeSynapseCore`: token-bucket refill (50 ms cadence) and queue-saturation tick (1 s cadence). | Production constructor: `SharedScheduler(DerivedWriteRateLimit, QueueSaturationHealthCheck)` — wraps `rateLimit::refill` and `healthCheck::tick` as the two scheduled tasks and delegates to the test-friendly form. Test-friendly constructor: `SharedScheduler(Runnable refillTask, Runnable tickTask)` — used by `SharedSchedulerTest` because the two collaborators are `final` and cannot be mocked. Method `shutdown()` calls `executor.shutdownNow()` and `awaitTermination(2000ms)`; idempotent. Uses `Executors.newSingleThreadScheduledExecutor` with a daemon thread named `"hs-sched-0"` (daemon status is defence against composition-root bugs that forget to call `shutdown()`). Tasks are wrapped in `safelyInvoke` so a thrown `RuntimeException` is logged but does NOT cancel the executor's task — `ScheduledExecutorService` cancels future executions of a throwing task by default; the wrapper preserves cadence across transient faults. Constants: `REFILL_PERIOD_MILLIS = 50`, `TICK_PERIOD_MILLIS = 1000`. |
+| `ThrowingStateQueryService` | package-private final class implementing `StateQueryService` | Placeholder for `HomeSynapseCore.stateQueryService()` (M3.6d-b) — throws `IllegalStateException` on every method call. Replaced by `MaterializedStateQueryService` in M3.6e. | All 5 `StateQueryService` methods throw with message `NOT_WIRED_MESSAGE = "StateQueryService not yet wired — available after M3.6e"`. The constant is package-visible so `HomeSynapseCoreTest` (landing M3.6d-b) can assert the error path. Avoids `null` returns at the composition-root accessor so accidental pre-M3.6e callsites surface a clear failure instead of a downstream NPE. |
 
 ## Dependencies
 
@@ -125,6 +158,14 @@ dependencies {
 - Health loop implementation polls HealthContributors every 30 seconds
 - Watchdog feeds systemd via HealthReporter.reportWatchdog()
 - Configuration dependency provides timeout values, grace periods, watchdog intervals
+
+### M3.6d-a deliverables (2026-05-20)
+
+- **`HomeSynapseConfig`** — public record bundling `PersistenceConfig` and `EventBusConfig`. `HOME_DEFAULT` reproduces the prior implicit defaults exactly. Consumed by `HomeSynapseCore` (M3.6d-b).
+- **`SharedScheduler`** — package-private single-threaded scheduler. Drives `DerivedWriteRateLimit.refill()` every 50 ms and `QueueSaturationHealthCheck.tick()` every 1 s on a daemon platform thread named `"hs-sched-0"`. 5 unit tests in `SharedSchedulerTest` (cadence × 2, shutdown × 2, throwing-task survival × 1).
+- **`ThrowingStateQueryService`** — package-private placeholder. `HomeSynapseCore.stateQueryService()` (M3.6d-b) will return one; M3.6e replaces it with `MaterializedStateQueryService`.
+- **Module dependencies added:** `requires transitive com.homesynapse.persistence`, `requires transitive com.homesynapse.event.bus`, `requires transitive com.homesynapse.state`. The transitive directives match LD#10 (default for inter-module requires) and surface the public types these three modules export (`PersistenceConfig`, `EventBusConfig`, `DerivedWriteRateLimit`, `QueueSaturationHealthCheck`, `StateQueryService`).
+- **M3.6d-b deferred to the next WU.** `PersistenceFactory` (in `core/persistence`) and `HomeSynapseCore` (in this module) require additional infrastructure not yet present: `SqlitePersistenceLifecycle` must construct `SqliteStateStore` + `SqliteDeadLetterStore` + an `Include.ALWAYS`-configured `ObjectMapper` + `CheckpointSerializer`; `WriteCoordinator` needs a `queueSize()` method for the writer-queue-depth `IntSupplier`; and the composition root needs a production `SubscriberReadConnectionFactory` (the test harness's `RecordingReadConnectionFactory` is a fixture, not production). See coder-handoff.md M3.6d-a entry for the full deferral list.
 
 
 ---

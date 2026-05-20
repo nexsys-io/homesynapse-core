@@ -23,14 +23,20 @@ import java.util.Objects;
  * @param depth     the observed queue depth at signal time
  * @param timestamp when the signal was emitted (from the injected {@code Clock})
  */
-record HealthSignal(
+public record HealthSignal(
         HealthLevel level,
         String channel,
         int depth,
         Instant timestamp
 ) {
 
-    HealthSignal {
+    /**
+     * Compact constructor validating non-null components.
+     *
+     * @throws NullPointerException if {@code level}, {@code channel}, or
+     *                              {@code timestamp} is {@code null}
+     */
+    public HealthSignal {
         Objects.requireNonNull(level, "level");
         Objects.requireNonNull(channel, "channel");
         Objects.requireNonNull(timestamp, "timestamp");

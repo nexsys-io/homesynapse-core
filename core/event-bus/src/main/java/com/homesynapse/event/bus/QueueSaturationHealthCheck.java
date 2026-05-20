@@ -45,13 +45,13 @@ import java.util.function.IntSupplier;
  * <p>This class is NOT thread-safe — it must be ticked from a single
  * scheduler thread.</p>
  */
-final class QueueSaturationHealthCheck {
+public final class QueueSaturationHealthCheck {
 
     /** Channel name for saturation events. */
-    static final String CHANNEL_SATURATING = "writer.queue.saturating";
+    public static final String CHANNEL_SATURATING = "writer.queue.saturating";
 
     /** Channel name for recovery events. */
-    static final String CHANNEL_RECOVERED = "writer.queue.recovered";
+    public static final String CHANNEL_RECOVERED = "writer.queue.recovered";
 
     /** Re-emit cooldown for sustained CRITICAL. */
     private static final Duration CRITICAL_REEMIT_INTERVAL = Duration.ofSeconds(10);
@@ -87,12 +87,12 @@ final class QueueSaturationHealthCheck {
      * @param saturationTicks    consecutive ticks before transition (default 5)
      * @param emitter            callback invoked on signal emission
      */
-    QueueSaturationHealthCheck(IntSupplier queueDepthSupplier,
-                               Clock clock,
-                               int warnDepth,
-                               int criticalDepth,
-                               int saturationTicks,
-                               Consumer<HealthSignal> emitter) {
+    public QueueSaturationHealthCheck(IntSupplier queueDepthSupplier,
+                                      Clock clock,
+                                      int warnDepth,
+                                      int criticalDepth,
+                                      int saturationTicks,
+                                      Consumer<HealthSignal> emitter) {
         this.queueDepthSupplier = Objects.requireNonNull(queueDepthSupplier,
                 "queueDepthSupplier");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -119,7 +119,7 @@ final class QueueSaturationHealthCheck {
      * (typically a 1-second cadence). All time access uses the injected clock
      * (DEC-M3-09 / NO_DIRECT_TIME_ACCESS).</p>
      */
-    void tick() {
+    public void tick() {
         int depth = queueDepthSupplier.getAsInt();
 
         if (depth > criticalDepth) {

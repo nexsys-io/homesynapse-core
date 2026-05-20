@@ -13,7 +13,7 @@ package com.homesynapse.event.bus;
  * a future bridge in the lifecycle or observability layer translates
  * them to {@code HealthStatus} reports via {@code HealthContributor}.</p>
  */
-enum HealthLevel {
+public enum HealthLevel {
 
     /** Informational signal — used for recovery notifications. */
     INFO,
