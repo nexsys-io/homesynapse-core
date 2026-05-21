@@ -431,12 +431,17 @@ final class DatabaseExecutor {
      * {@link DeploymentProfile#cacheSizeKiB()} — SQLite interprets negative
      * values as KiB.
      *
+     * <p>Package-private (M3.6d-b) so
+     * {@link SqliteSubscriberReadConnectionFactory} can apply the same PRAGMA
+     * list to per-subscriber read connections without duplicating the
+     * rendering logic (INV-SUB-ISO-02).
+     *
      * @param profile the deployment profile supplying tuning values
      * @return the ordered list of PRAGMA bodies (without the {@code PRAGMA }
      *         prefix); 8 elements for {@link LockingMode#NORMAL}, 9 for
      *         {@link LockingMode#EXCLUSIVE}
      */
-    private static List<String> connectionPragmas(DeploymentProfile profile) {
+    static List<String> connectionPragmas(DeploymentProfile profile) {
         List<String> pragmas = new ArrayList<>(9);
         pragmas.add("journal_mode = WAL");
         pragmas.add("synchronous = NORMAL");
