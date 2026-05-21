@@ -35,6 +35,12 @@ module com.homesynapse.lifecycle {
     requires transitive com.homesynapse.event.bus;
     requires transitive com.homesynapse.state;
 
+    // M3.6d-b: HomeSynapseCore aggregates IntegrationEvents.LIFECYCLE_EVENT_CLASSES
+    // with EventTypes.CORE_PRODUCTION_EVENT_CLASSES at startup to feed the event
+    // type registry. Non-transitive — IntegrationEvents is referenced only inside
+    // the composition root, not exposed on the lifecycle module's public API.
+    requires com.homesynapse.integration;
+
     // M3.6d-a build-fix: SharedScheduler uses SLF4J internally for ERROR
     // logging from safelyInvoke(). Non-transitive (LTD-15 / DECIDE-01) —
     // SLF4J is an implementation concern; no SLF4J types appear in the

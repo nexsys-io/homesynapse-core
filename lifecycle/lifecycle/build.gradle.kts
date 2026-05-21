@@ -19,6 +19,12 @@ dependencies {
     api(project(":core:event-bus"))
     api(project(":core:state-store"))
 
+    // M3.6d-b: HomeSynapseCore aggregates IntegrationEvents.LIFECYCLE_EVENT_CLASSES
+    // into the event-type registry. `implementation` scope — IntegrationEvents is
+    // referenced only inside the composition root, not exposed on the lifecycle
+    // module's public API (matches the non-transitive `requires` directive).
+    implementation(project(":integration:integration-api"))
+
     // M3.6d-a build-fix: SharedScheduler uses SLF4J internally for ERROR
     // logging from safelyInvoke(). Implementation scope per LTD-15 /
     // DECIDE-01 — SLF4J types do not appear in the lifecycle module's

@@ -1,4 +1,4 @@
-# lifecycle — `com.homesynapse.lifecycle` — 7 public + 2 package-private types (M3.6d-a) — Process-level startup/shutdown orchestration AND M3.6 composition-root primitives (HomeSynapseConfig, SharedScheduler, ThrowingStateQueryService)
+# lifecycle — `com.homesynapse.lifecycle` — 8 public + 2 package-private types (M3.6d-b) — Process-level startup/shutdown orchestration AND M3.6 composition-root primitives (HomeSynapseConfig, SharedScheduler, ThrowingStateQueryService, HomeSynapseCore)
 
 ## Purpose
 
@@ -26,7 +26,12 @@ module com.homesynapse.lifecycle {
     requires transitive com.homesynapse.event.bus;
     requires transitive com.homesynapse.state;
 
-    // M3.6d-a build-fix — SLF4J for internal logging (SharedScheduler)
+    // M3.6d-b — HomeSynapseCore aggregates IntegrationEvents.LIFECYCLE_EVENT_CLASSES
+    // for the event-type registry. Non-transitive; IntegrationEvents is internal
+    // to the composition root, not exposed on the public API.
+    requires com.homesynapse.integration;
+
+    // M3.6d-a build-fix — SLF4J for internal logging (SharedScheduler, HomeSynapseCore)
     requires org.slf4j;
 
     exports com.homesynapse.lifecycle;
@@ -108,6 +113,12 @@ dependencies {
 | `SharedScheduler` | package-private final class | Single-threaded scheduler driving the two periodic maintenance tasks shared by `HomeSynapseCore`: token-bucket refill (50 ms cadence) and queue-saturation tick (1 s cadence). | Production constructor: `SharedScheduler(DerivedWriteRateLimit, QueueSaturationHealthCheck)` — wraps `rateLimit::refill` and `healthCheck::tick` as the two scheduled tasks and delegates to the test-friendly form. Test-friendly constructor: `SharedScheduler(Runnable refillTask, Runnable tickTask)` — used by `SharedSchedulerTest` because the two collaborators are `final` and cannot be mocked. Method `shutdown()` calls `executor.shutdownNow()` and `awaitTermination(2000ms)`; idempotent. Uses `Executors.newSingleThreadScheduledExecutor` with a daemon thread named `"hs-sched-0"` (daemon status is defence against composition-root bugs that forget to call `shutdown()`). Tasks are wrapped in `safelyInvoke` so a thrown `RuntimeException` is logged but does NOT cancel the executor's task — `ScheduledExecutorService` cancels future executions of a throwing task by default; the wrapper preserves cadence across transient faults. Constants: `REFILL_PERIOD_MILLIS = 50`, `TICK_PERIOD_MILLIS = 1000`. |
 | `ThrowingStateQueryService` | package-private final class implementing `StateQueryService` | Placeholder for `HomeSynapseCore.stateQueryService()` (M3.6d-b) — throws `IllegalStateException` on every method call. Replaced by `MaterializedStateQueryService` in M3.6e. | All 5 `StateQueryService` methods throw with message `NOT_WIRED_MESSAGE = "StateQueryService not yet wired — available after M3.6e"`. The constant is package-visible so `HomeSynapseCoreTest` (landing M3.6d-b) can assert the error path. Avoids `null` returns at the composition-root accessor so accidental pre-M3.6e callsites surface a clear failure instead of a downstream NPE. |
 
+### M3.6d-b Composition Root (2026-05-20)
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `HomeSynapseCore` | public final class implementing `ReadinessSource` | Composition root for the HomeSynapse Core runtime. Owns the full lifecycle of every long-lived subsystem and wires them together in a fixed order. | Constructor: `HomeSynapseCore(Path dbPath, HomeSynapseConfig config, Clock clock, HomeId homeId)`. Public methods: `start() → CompletableFuture<Void>` (12-step bootstrap; MUST be invoked from a platform thread per LTD-19 / DECIDE-M2-05 for JacksonWarmup), `stop()` (reverse-order teardown; idempotent), `eventPublisher() → EventPublisher`, `eventStore() → EventStore`, `eventBus() → EventBus`, `stateQueryService() → StateQueryService` (returns a fresh `ThrowingStateQueryService` until M3.6e wires `MaterializedStateQueryService`), `mode() → SubscriberMode` (returns `COLD` before `start()`, delegates to `StateProjection.currentMode()` afterwards). Bootstrap order: persistence → bus metrics → event bus → state store + checkpoint source → rate limit → state projection → subscribe → health signal handler → queue saturation health check → shared scheduler → mark started. Shutdown order: scheduler.shutdown() → eventBus.unsubscribe("state_projection") → rateLimit.close() → persistenceFactory.close(). Two M3.6d-b open-rocks tracked inline: **OR-M3-15** (`NO_OP_DERIVATION` placeholder — no production `DerivationRule` impl exists in state-store main yet; core materialization still works because `StateProjection.applyToState` handles state_reported/state_changed/availability_changed directly) and **OR-M3-16** (`NO_OP_ADVANCER` placeholder — no production `ProjectionAdvancer` impl exists; advancer is only used by `processBatch()` which is NOT called by the bus's LIVE delivery path; MUST be resolved before M3.7 because end-to-end REPLAY tests will exercise it). Both placeholders are private static final fields on `HomeSynapseCore` and will be replaced when the production strategies land. |
+
 ## Dependencies
 
 | Module | Relationship | Why |
@@ -157,6 +168,7 @@ dependencies {
 - Shutdown coordinator implements reverse-order shutdown with per-subsystem grace periods
 - Health loop implementation polls HealthContributors every 30 seconds
 - Watchdog feeds systemd via HealthReporter.reportWatchdog()
+- **M3.6d-b complete** — `HomeSynapseCore` composition-root facade, 12-step bootstrap, reverse shutdown. `SystemLifecycleManager` merger with `HomeSynapseCore` is post-M3.6 cleanup. Two open-rocks (OR-M3-15 `DerivationRule` placeholder, OR-M3-16 `ProjectionAdvancer` placeholder) will be resolved before M3.7.
 - Configuration dependency provides timeout values, grace periods, watchdog intervals
 
 ### M3.6d-a deliverables (2026-05-20)
