@@ -26,13 +26,20 @@
  */
 module com.homesynapse.persistence {
     requires transitive com.homesynapse.platform;
-    requires com.homesynapse.state;
-    requires com.homesynapse.event;
+
+    // M3.6d-b: PersistenceFactory.eventPublisher()/eventStore() return
+    // com.homesynapse.event types, .stateStore()/.stateCheckpointSource() return
+    // com.homesynapse.state types, .checkpointStore()/.subscriberReadConnectionFactory()/
+    // .deadLetterWriter() return com.homesynapse.event.bus types — all three modules
+    // appear on the persistence module's public API, so promote to `requires transitive`
+    // (LD#10) so PersistenceFactory consumers automatically resolve those types.
+    requires transitive com.homesynapse.state;
+    requires transitive com.homesynapse.event;
     // M2.6: SqliteCheckpointStore implements
     // com.homesynapse.event.bus.CheckpointStore — the subscriber checkpoint
     // contract owned by the event-bus module (distinct from
     // com.homesynapse.state.ViewCheckpointStore which covers view state).
-    requires com.homesynapse.event.bus;
+    requires transitive com.homesynapse.event.bus;
 
     requires java.sql;
     requires org.slf4j;

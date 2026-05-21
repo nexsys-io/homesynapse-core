@@ -4,8 +4,10 @@
  */
 package com.homesynapse.persistence;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.homesynapse.event.DomainEvent;
+import com.homesynapse.event.bus.SubscriberReadConnectionFactory;
 import com.homesynapse.platform.identity.HomeId;
 
 import java.io.IOException;
@@ -97,6 +99,9 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
     private SqliteCheckpointStore checkpointStore;
     private SqliteViewCheckpointStore viewCheckpointStore;
     private AtomicCheckpointWriter atomicCheckpointWriter;
+    private SqliteStateStore stateStore;
+    private SqliteDeadLetterStore deadLetterStore;
+    private SqliteSubscriberReadConnectionFactory subscriberReadConnectionFactory;
     private volatile boolean started = false;
 
     /**
@@ -242,6 +247,31 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
                     databaseExecutor, clock);
             atomicCheckpointWriter = new AtomicCheckpointWriter(
                     databaseExecutor, clock);
+
+            // 5. Checkpoint-specific ObjectMapper (M3.6d-b Gap 1).
+            //    CheckpointSerializer requires Include.ALWAYS so null
+            //    staleAfter and null attribute values survive round-trip
+            //    (see persistence MODULE_CONTEXT gotcha). We .copy() the
+            //    events mapper so the PersistenceJacksonModule, ULID serdes,
+            //    and recycler pool stay registered — only the serialization
+            //    inclusion changes.
+            ObjectMapper checkpointMapper = mapper.copy()
+                    .setSerializationInclusion(JsonInclude.Include.ALWAYS);
+            CheckpointSerializer checkpointSerializer =
+                    new CheckpointSerializer(checkpointMapper);
+
+            // 6. State store (in-memory map + checkpoint durability via the
+            //    view checkpoint store).
+            stateStore = new SqliteStateStore(
+                    viewCheckpointStore, checkpointSerializer, "entity_state");
+
+            // 7. Dead-letter store (V002 subscriber_dead_letters table).
+            deadLetterStore = new SqliteDeadLetterStore(databaseExecutor);
+
+            // 8. Per-subscriber read connection factory (INV-SUB-ISO-02).
+            subscriberReadConnectionFactory =
+                    new SqliteSubscriberReadConnectionFactory(
+                            databasePath, config.profile());
 
             started = true;
             LOG.info("Persistence layer started: database={}, profile={}, readThreads={}",
@@ -391,6 +421,63 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
     public AtomicCheckpointWriter atomicCheckpointWriter() {
         requireStarted();
         return atomicCheckpointWriter;
+    }
+
+    /**
+     * Returns the materialized state store (M3.6d-b). The same instance
+     * implements both {@link com.homesynapse.state.StateStore} and
+     * {@link com.homesynapse.state.StateCheckpointSource}; the composition
+     * root exposes each role through its respective interface.
+     *
+     * @return the initialized state store, never {@code null}
+     * @throws IllegalStateException if the persistence layer has not been
+     *                               started via {@link #start()}
+     */
+    SqliteStateStore stateStore() {
+        requireStarted();
+        return stateStore;
+    }
+
+    /**
+     * Returns the durable dead-letter store (M3.6d-b). Backs the bus's
+     * in-memory subscriber DLQ ring via the
+     * {@link com.homesynapse.event.bus.PersistentDlqWriter} seam.
+     *
+     * @return the initialized dead-letter store, never {@code null}
+     * @throws IllegalStateException if the persistence layer has not been
+     *                               started via {@link #start()}
+     */
+    SqliteDeadLetterStore deadLetterStore() {
+        requireStarted();
+        return deadLetterStore;
+    }
+
+    /**
+     * Returns the per-subscriber read connection factory (M3.6d-b,
+     * INV-SUB-ISO-02). Each call to {@code create(subscriberId)} opens a
+     * new dedicated platform-thread + SQLite read connection.
+     *
+     * @return the initialized factory, never {@code null}
+     * @throws IllegalStateException if the persistence layer has not been
+     *                               started via {@link #start()}
+     */
+    SubscriberReadConnectionFactory subscriberReadConnectionFactory() {
+        requireStarted();
+        return subscriberReadConnectionFactory;
+    }
+
+    /**
+     * Returns the database executor — package-private access for
+     * {@link PersistenceFactory} to reach the {@code WriteCoordinator} for
+     * the {@code IntSupplier} surfaced to the event bus (DEC-M3-14).
+     *
+     * @return the initialized database executor, never {@code null}
+     * @throws IllegalStateException if the persistence layer has not been
+     *                               started via {@link #start()}
+     */
+    DatabaseExecutor databaseExecutor() {
+        requireStarted();
+        return databaseExecutor;
     }
 
     // ──────────────────────────────────────────────────────────────────

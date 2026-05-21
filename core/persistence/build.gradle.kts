@@ -6,9 +6,15 @@ description = "Persistence: SQLite event store, telemetry, checkpoints, migratio
 
 dependencies {
     api(project(":platform:platform-api"))
-    implementation(project(":core:event-model"))
-    implementation(project(":core:event-bus"))
-    implementation(project(":core:state-store"))
+
+    // M3.6d-b: promoted from `implementation` to `api` because PersistenceFactory's
+    // public API surfaces event-model (EventPublisher, EventStore, DomainEvent),
+    // event-bus (CheckpointStore, SubscriberReadConnectionFactory, PersistentDlqWriter,
+    // DeadLetter), and state-store (StateStore, StateCheckpointSource, ViewCheckpointStore).
+    // The `api` scope matches the `requires transitive` directives in module-info.java.
+    api(project(":core:event-model"))
+    api(project(":core:event-bus"))
+    api(project(":core:state-store"))
 
     implementation(libs.sqlite.jdbc)
     implementation(libs.slf4j.api)
