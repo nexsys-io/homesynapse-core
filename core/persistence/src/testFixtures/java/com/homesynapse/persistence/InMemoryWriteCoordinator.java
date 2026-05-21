@@ -73,6 +73,11 @@ final class InMemoryWriteCoordinator implements WriteCoordinator {
         }
     }
 
+    @Override
+    public int queueSize() {
+        return 0;
+    }
+
     /**
      * Resets this coordinator to its initial active state.
      *

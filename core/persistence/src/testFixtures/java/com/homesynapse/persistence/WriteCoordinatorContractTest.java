@@ -252,6 +252,15 @@ public abstract class WriteCoordinatorContractTest {
         }
 
         @Test
+        @DisplayName("queueSize returns zero when coordinator is idle")
+        void queueSize_idle_returnsZero() {
+            // M3.6d-b (DEC-M3-14): queueSize() reports the current write-path
+            // depth for QueueSaturationHealthCheck. With no submitted work in
+            // flight, the queue is empty.
+            assertThat(coordinator().queueSize()).isEqualTo(0);
+        }
+
+        @Test
         @DisplayName("concurrent submit from 4 threads completes all 100 operations")
         void concurrentSubmit_allOperationsComplete() throws InterruptedException {
             int threadCount = 4;

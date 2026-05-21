@@ -129,6 +129,11 @@ final class ThrottledWriteCoordinator implements WriteCoordinator {
         delegate.shutdown();
     }
 
+    @Override
+    public int queueSize() {
+        return delegate.queueSize();
+    }
+
     private static void sleep(Duration d) {
         if (d.isZero()) {
             return;

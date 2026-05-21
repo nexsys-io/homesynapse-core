@@ -98,6 +98,11 @@ final class PlatformThreadWriteCoordinator implements WriteCoordinator {
     }
 
     @Override
+    public int queueSize() {
+        return queue.size();
+    }
+
+    @Override
     public void shutdown() {
         lifecycleLock.lock();
         try {

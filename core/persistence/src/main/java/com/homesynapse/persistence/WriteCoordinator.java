@@ -66,4 +66,19 @@ interface WriteCoordinator {
      * multiple times has no additional effect.</p>
      */
     void shutdown();
+
+    /**
+     * Returns the current number of pending work items in the coordinator's queue.
+     *
+     * <p>Used by {@code QueueSaturationHealthCheck} for write-path observability
+     * (AMD-43 §3.6.3, DEC-M3-14). The composition root surfaces this as an
+     * {@code IntSupplier} so the event-bus module never references persistence
+     * types directly.</p>
+     *
+     * <p>Returns 0 when the coordinator is idle or has been
+     * {@linkplain #shutdown() shut down}.</p>
+     *
+     * @return the current queue depth, always {@code >= 0}
+     */
+    int queueSize();
 }
