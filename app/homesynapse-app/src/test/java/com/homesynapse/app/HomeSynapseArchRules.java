@@ -227,6 +227,59 @@ final class HomeSynapseArchRules {
                     .as("Event logical names: no @JsonTypeInfo in event package"
                             + " — use EventSerializer with logical type names");
 
+    // ──────────────────────────────────────────────────────────────────
+    // Rule 8: REST API must not access persistence directly (M3.6e.2)
+    //
+    // Defense-in-depth complement to JPMS: the rest-api module-info
+    // already lacks `requires com.homesynapse.persistence`, so a direct
+    // import would fail at compile time on the module path. This rule
+    // catches accidental classpath leaks (e.g., a future test source set
+    // that pulls persistence transitively) and documents the
+    // composition-root intent — REST queries MUST flow through
+    // StateQueryService, never through a SQLite store.
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * M3.6e.2: REST endpoint handlers must read state through
+     * {@code StateQueryService}, never by accessing persistence types
+     * directly. Defense in depth on top of JPMS module visibility.
+     */
+    static final ArchRule QUERY_SERVICE_READ_ONLY =
+            noClasses()
+                    .that().resideInAPackage("com.homesynapse.api.rest..")
+                    .should().accessClassesThat().resideInAPackage(
+                            "com.homesynapse.persistence..")
+                    .as("M3.6e.2: REST endpoints must not access persistence"
+                            + " directly — use StateQueryService");
+
+    // ──────────────────────────────────────────────────────────────────
+    // Rule 9: REST query endpoints must not publish events (M3.6e.2)
+    //
+    // The REST surface introduced in M3.6e.2 is read-only (entity
+    // queries + operational/admin status). Write operations have their
+    // own surface (command issuance, M5+) and route through the proper
+    // command-validator pipeline — they MUST NOT bypass it by calling
+    // EventPublisher directly from a query handler.
+    //
+    // The brief sketched a `callMethodWhere(target(name("publish"))...)`
+    // form. The simpler `accessClassesThat().belongToAnyOf(...)` form
+    // catches the same violation (EventPublisher has no read-only
+    // methods — any access to the type implies an intent to publish)
+    // and follows the established style of NO_SERVICE_LOADER above.
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * M3.6e.2: REST query/admin endpoints must not depend on
+     * {@code EventPublisher}. Read-only surface.
+     */
+    static final ArchRule REST_ENDPOINTS_NO_EVENT_PUBLISHING =
+            noClasses()
+                    .that().resideInAPackage("com.homesynapse.api.rest..")
+                    .should().accessClassesThat().belongToAnyOf(
+                            com.homesynapse.event.EventPublisher.class)
+                    .as("M3.6e.2: REST query endpoints must not publish events"
+                            + " — read-only surface");
+
     /**
      * Validates all rules against the given classes.
      *
@@ -243,5 +296,7 @@ final class HomeSynapseArchRules {
         NO_DIRECT_FILESYSTEM_IN_CORE.check(classes);
         NO_INTERNAL_PACKAGE_ACCESS.check(classes);
         NO_JSON_TYPE_INFO_IN_EVENTS.check(classes);
+        QUERY_SERVICE_READ_ONLY.check(classes);
+        REST_ENDPOINTS_NO_EVENT_PUBLISHING.check(classes);
     }
 }

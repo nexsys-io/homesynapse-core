@@ -83,6 +83,18 @@ import org.slf4j.LoggerFactory;
  *       gate installed via
  *       {@link RestFilters#installReadinessGate(Object, com.homesynapse.state.ReadinessSource)}
  *       and bound on port {@value #HTTP_PORT}.</li>
+ *   <li>Entity query endpoints (M3.6e.2) — {@code GET /api/v1/entities},
+ *       {@code GET /api/v1/entities/{entityId}}, and
+ *       {@code GET /api/v1/entities/{entityId}/state} registered via
+ *       {@link RestFilters#installEntityQueryEndpoints(Object,
+ *       StateQueryService, java.util.function.LongSupplier, Clock)}.
+ *       All three are gated by the readiness filter.</li>
+ *   <li>Admin endpoints (M3.6e.2) — {@code GET /internal/dlq} and
+ *       {@code GET /internal/projection} registered via
+ *       {@link RestFilters#installAdminEndpoints(Object, Object,
+ *       com.homesynapse.state.ReadinessSource, StateQueryService,
+ *       java.util.function.LongSupplier)}. Intentionally outside the
+ *       readiness gate per SD-5 — operators need them during REPLAY.</li>
  *   <li>Set {@code started = true}.</li>
  *   <li>Return a completed {@link CompletableFuture}.</li>
  * </ol>
@@ -315,15 +327,36 @@ public final class HomeSynapseCore implements ReadinessSource {
             cfg.showJavalinBanner = false;           // @JvmField var on JavalinConfig
         });
         RestFilters.installReadinessGate(app, this);
+
+        // Step 13 — Entity query endpoints (M3.6e.2). All three live under
+        // /api/* and are therefore gated by the readiness filter installed
+        // at step 12. View position is the projection's cursor; the clock
+        // supplies response timestamps (DEC-M3-09).
+        RestFilters.installEntityQueryEndpoints(
+                app,
+                stateQueryService,
+                stateProjection::cursorPosition,
+                clock);
+
+        // Step 14 — Admin/operational endpoints (M3.6e.2). /internal/* is
+        // intentionally outside the readiness filter — operators need DLQ
+        // and projection visibility during REPLAY/COLD/TRANSITION (SD-5).
+        RestFilters.installAdminEndpoints(
+                app,
+                eventBus,
+                this,
+                stateQueryService,
+                stateProjection::cursorPosition);
+
         app.start(HTTP_PORT);
         this.httpServer = app;
 
-        // Step 13 — Mark started.
+        // Step 15 — Mark started.
         this.started = true;
         LOG.info("HomeSynapseCore started: db={}, homeId={}, http=:{}",
                 dbPath, homeId.value(), HTTP_PORT);
 
-        // Step 14 — Return a completed future.
+        // Step 16 — Return a completed future.
         return CompletableFuture.completedFuture(null);
     }
 

@@ -51,4 +51,14 @@ class HomeSynapseArchRulesTest {
     @ArchTest
     static final ArchRule noJsonTypeInfoInEvents =
             HomeSynapseArchRules.NO_JSON_TYPE_INFO_IN_EVENTS;
+
+    // M3.6e.2 — REST query surface guard rails.
+
+    @ArchTest
+    static final ArchRule queryServiceReadOnly_preventsRestFromAccessingPersistence =
+            HomeSynapseArchRules.QUERY_SERVICE_READ_ONLY;
+
+    @ArchTest
+    static final ArchRule restEndpointsNoEventPublishing_preventsPublishCalls =
+            HomeSynapseArchRules.REST_ENDPOINTS_NO_EVENT_PUBLISHING;
 }
