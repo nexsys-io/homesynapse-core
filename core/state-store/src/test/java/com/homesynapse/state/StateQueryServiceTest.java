@@ -39,9 +39,9 @@ class StateQueryServiceTest {
     }
 
     @Test
-    @DisplayName("exactly 5 declared methods")
-    void exactlyFiveMethods() {
-        assertThat(StateQueryService.class.getDeclaredMethods()).hasSize(5);
+    @DisplayName("exactly 6 declared methods")
+    void exactlySixMethods() {
+        assertThat(StateQueryService.class.getDeclaredMethods()).hasSize(6);
     }
 
     @Test

@@ -145,17 +145,21 @@ final class HomeSynapseCoreTest {
     }
 
     @Test
-    @DisplayName("stateQueryService returns ThrowingStateQueryService until M3.6e")
-    void stateQueryServiceThrowsUntilM3_6e(@TempDir Path tempDir) {
+    @DisplayName("stateQueryService returns the MaterializedStateQueryService after M3.6e.1")
+    void stateQueryServiceReturnsMaterializedAfterM3_6e_1(@TempDir Path tempDir) {
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"),
                 HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
         core.start().join();
 
-        assertThatThrownBy(() ->
-                core.stateQueryService().getState(
-                        new EntityId(Ulid.parse("01JCCCCCCCCCCCCCCCCCCCCCCC"))))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("M3.6e");
+        // The real query service no longer throws; an unknown entity returns
+        // Optional.empty(), and isReady() reflects the projection's lifecycle
+        // mode rather than throwing.
+        assertThat(core.stateQueryService()).isNotNull();
+        assertThat(core.stateQueryService().getState(
+                new EntityId(Ulid.parse("01JCCCCCCCCCCCCCCCCCCCCCCC"))))
+                .isEmpty();
+        // The same instance is returned on every call.
+        assertThat(core.stateQueryService()).isSameAs(core.stateQueryService());
     }
 }

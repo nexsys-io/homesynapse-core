@@ -4,6 +4,7 @@
  */
 package com.homesynapse.lifecycle;
 
+import com.homesynapse.api.rest.RestFilters;
 import com.homesynapse.event.DomainEvent;
 import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.EventStore;
@@ -18,6 +19,7 @@ import com.homesynapse.event.bus.SubscriberInfo;
 import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.event.bus.SubscriptionFilter;
 import com.homesynapse.integration.IntegrationEvents;
+import com.homesynapse.persistence.DeploymentProfile;
 import com.homesynapse.persistence.PersistenceFactory;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.state.AdvanceResult;
@@ -30,6 +32,8 @@ import com.homesynapse.state.ReadinessSource;
 import com.homesynapse.state.StateProjection;
 import com.homesynapse.state.StateQueryService;
 
+import io.javalin.Javalin;
+
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
@@ -38,6 +42,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
+import org.eclipse.jetty.util.thread.QueuedThreadPool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,9 +51,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p>{@code HomeSynapseCore} is the single owner of every long-lived
  * subsystem: persistence, event bus, state projection, scheduler, rate
- * limit, and health check. It constructs these in a fixed twelve-step
- * sequence on {@link #start()} and tears them down in reverse order on
- * {@link #stop()}.</p>
+ * limit, health check, query service, and the embedded HTTP server. It
+ * constructs these in a fixed sequence on {@link #start()} and tears them
+ * down in reverse order on {@link #stop()}.</p>
  *
  * <h2>Bootstrap sequence</h2>
  * <ol>
@@ -69,13 +74,23 @@ import org.slf4j.LoggerFactory;
  *       the writer-queue depth.</li>
  *   <li>{@link SharedScheduler} — drives the rate-limit refill cadence
  *       (50 ms) and the saturation tick cadence (1 s).</li>
+ *   <li>{@code MaterializedStateQueryService} (M3.6e.1) — production
+ *       {@link StateQueryService} backed by the projection's
+ *       {@code StateStore} and this instance as {@link ReadinessSource}.</li>
+ *   <li>{@link Javalin} HTTP server (M3.6e.1) — embedded Jetty pool sized
+ *       by {@link DeploymentProfile#javalinMinThreads} /
+ *       {@link DeploymentProfile#javalinMaxThreads}, with the readiness
+ *       gate installed via
+ *       {@link RestFilters#installReadinessGate(Object, com.homesynapse.state.ReadinessSource)}
+ *       and bound on port {@value #HTTP_PORT}.</li>
  *   <li>Set {@code started = true}.</li>
  *   <li>Return a completed {@link CompletableFuture}.</li>
  * </ol>
  *
- * <p>Shutdown ({@link #stop()}) reverses that order: stop the scheduler,
- * unsubscribe the projection (which closes its dedicated read connection),
- * then close the persistence layer (flushing WAL).</p>
+ * <p>Shutdown ({@link #stop()}) reverses that order: stop the HTTP server
+ * first (refuse new queries before tearing down the state they would
+ * query), then stop the scheduler, unsubscribe the projection (which closes
+ * its dedicated read connection), then close persistence (flushing WAL).</p>
  *
  * <h2>Threading</h2>
  *
@@ -102,6 +117,13 @@ public final class HomeSynapseCore implements ReadinessSource {
 
     /** Subscriber identifier used for the materialized state projection. */
     private static final String PROJECTION_SUBSCRIBER_ID = "state_projection";
+
+    /**
+     * Default HTTP port for the embedded Javalin server (M3.6e.1). Hardcoded
+     * per PLAN-M3 §10 for the MVP; future work makes this configurable
+     * through {@link HomeSynapseConfig}.
+     */
+    private static final int HTTP_PORT = 7070;
 
     /**
      * Default derivation rule for M3.6d-b composition wiring (OR-M3-15).
@@ -149,6 +171,8 @@ public final class HomeSynapseCore implements ReadinessSource {
     private SharedScheduler scheduler;
     private DerivedWriteRateLimit rateLimit;
     private QueueSaturationHealthCheck healthCheck;
+    private StateQueryService stateQueryService;
+    private Javalin httpServer;
     private volatile boolean started = false;
 
     /**
@@ -264,19 +288,52 @@ public final class HomeSynapseCore implements ReadinessSource {
         // Step 10 — Shared scheduler (50ms refill + 1s tick cadence).
         this.scheduler = new SharedScheduler(rateLimit, healthCheck);
 
-        // Step 11 — Mark started.
-        this.started = true;
-        LOG.info("HomeSynapseCore started: db={}, homeId={}", dbPath, homeId.value());
+        // Step 11 — Materialized state query service (M3.6e.1, DEC-M3-16).
+        // Wired via the StateStore + this ReadinessSource + the projection's
+        // cursor for view position + the injected clock for staleness
+        // recomputation at read time (Doc 03 §3.8, AMD-11). The
+        // implementation lives package-private in com.homesynapse.state and
+        // is reached via the static factory on StateQueryService.
+        this.stateQueryService = StateQueryService.materialized(
+                persistenceFactory.stateStore(),
+                this,
+                stateProjection::cursorPosition,
+                clock);
 
-        // Step 12 — Return a completed future.
+        // Step 12 — Embedded Javalin HTTP server (M3.6e.1). Jetty pool sized
+        // by the deployment profile so Pi-class hardware doesn't spend half
+        // its carrier budget on HTTP. ReadinessFilter gates /api/* until the
+        // projection reaches LIVE. Banner suppressed (we are a headless
+        // embedded system, not a web app).
+        DeploymentProfile profile = config.persistence().profile();
+        QueuedThreadPool threadPool = new QueuedThreadPool(
+                profile.javalinMaxThreads(),
+                profile.javalinMinThreads());
+        threadPool.setName("hs-http");
+        Javalin app = Javalin.create(cfg -> {
+            cfg.jetty.threadPool = threadPool;       // @JvmField var on JettyConfig
+            cfg.showJavalinBanner = false;           // @JvmField var on JavalinConfig
+        });
+        RestFilters.installReadinessGate(app, this);
+        app.start(HTTP_PORT);
+        this.httpServer = app;
+
+        // Step 13 — Mark started.
+        this.started = true;
+        LOG.info("HomeSynapseCore started: db={}, homeId={}, http=:{}",
+                dbPath, homeId.value(), HTTP_PORT);
+
+        // Step 14 — Return a completed future.
         return CompletableFuture.completedFuture(null);
     }
 
     /**
-     * Tears down the runtime in reverse order: scheduler first (stops the
-     * periodic tasks so they cannot touch resources being torn down), then
-     * unsubscribe the projection (closes its dedicated read connection),
-     * then close persistence (flushes WAL, closes all connections).
+     * Tears down the runtime in reverse order: HTTP server first (refuse new
+     * queries before tearing down the state they would query), then
+     * scheduler (stops the periodic tasks so they cannot touch resources
+     * being torn down), then unsubscribe the projection (closes its
+     * dedicated read connection), then close persistence (flushes WAL,
+     * closes all connections).
      *
      * <p>Idempotent — repeated calls after the first are no-ops.</p>
      */
@@ -286,6 +343,9 @@ public final class HomeSynapseCore implements ReadinessSource {
         }
         started = false;
 
+        if (httpServer != null) {
+            httpServer.stop();
+        }
         if (scheduler != null) {
             scheduler.shutdown();
         }
@@ -335,17 +395,19 @@ public final class HomeSynapseCore implements ReadinessSource {
     }
 
     /**
-     * Returns a {@link StateQueryService} placeholder. M3.6d-b returns a
-     * {@link ThrowingStateQueryService} that fails every call with
-     * {@link IllegalStateException} until M3.6e lands the real
-     * {@code MaterializedStateQueryService}.
+     * Returns the production {@link StateQueryService} (M3.6e.1) — a
+     * {@code MaterializedStateQueryService} backed by the State Projection's
+     * live {@code StateStore} with read-time staleness recomputation. Reads
+     * are lock-free; consumers may call this from any thread including
+     * virtual threads. Returns the same instance on every call after
+     * {@link #start()}.
      *
-     * @return the placeholder query service
+     * @return the materialized query service
      * @throws IllegalStateException if {@link #start()} has not been called
      */
     public StateQueryService stateQueryService() {
         requireStarted();
-        return new ThrowingStateQueryService();
+        return stateQueryService;
     }
 
     @Override

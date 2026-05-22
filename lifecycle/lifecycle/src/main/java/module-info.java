@@ -41,6 +41,18 @@ module com.homesynapse.lifecycle {
     // the composition root, not exposed on the lifecycle module's public API.
     requires com.homesynapse.integration;
 
+    // M3.6e.1: HomeSynapseCore registers ReadinessFilter (from rest-api) as a
+    // Javalin before("/api/*") gate. Non-transitive — the type is referenced
+    // only inside the composition root.
+    requires com.homesynapse.api.rest;
+
+    // M3.6e.1: HomeSynapseCore constructs and owns the embedded Javalin
+    // server, tuning the underlying Jetty thread pool. Non-transitive —
+    // Javalin and Jetty types do not appear in the lifecycle module's
+    // exported API.
+    requires io.javalin;
+    requires org.eclipse.jetty.util;
+
     // M3.6d-a build-fix: SharedScheduler uses SLF4J internally for ERROR
     // logging from safelyInvoke(). Non-transitive (LTD-15 / DECIDE-01) —
     // SLF4J is an implementation concern; no SLF4J types appear in the

@@ -13,8 +13,7 @@ package com.homesynapse.persistence;
  * implemented, {@link #HOME} is the default — operators may override via
  * configuration.
  *
- * <p>Each profile carries pre-validated values for the six SQLite-PRAGMA-
- * relevant tuning knobs:
+ * <p>Each profile carries pre-validated values for the eight tuning knobs:
  * <ul>
  *   <li>{@link #cacheSizeKiB()} — per-connection page cache magnitude in KiB
  *       (PRAGMA syntax requires negation)</li>
@@ -27,6 +26,10 @@ package com.homesynapse.persistence;
  *       ({@link LockingMode#NORMAL}/{@link LockingMode#EXCLUSIVE})</li>
  *   <li>{@link #readThreadCount()} — number of platform-thread read workers
  *       in {@code DatabaseExecutor}</li>
+ *   <li>{@link #javalinMinThreads()} — minimum embedded Jetty thread pool size
+ *       for the Javalin HTTP server (M3.6e.1)</li>
+ *   <li>{@link #javalinMaxThreads()} — maximum embedded Jetty thread pool size
+ *       for the Javalin HTTP server (M3.6e.1)</li>
  * </ul>
  *
  * <p>The {@code journalSizeLimitBytes} value is uniform across profiles at
@@ -54,9 +57,10 @@ public enum DeploymentProfile {
      * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike),
      * {@code busy_timeout=5000} (5 s),
      * {@code locking_mode=NORMAL},
-     * 2 read threads (AMD-27 default for constrained I/O).
+     * 2 read threads (AMD-27 default for constrained I/O),
+     * Javalin pool 1/4 (minimal admin/probe traffic on resource-constrained hardware).
      */
-    STUDIO(2_000, 67_108_864L, 6_144_000L, 5_000L, LockingMode.NORMAL, 2),
+    STUDIO(2_000, 67_108_864L, 6_144_000L, 5_000L, LockingMode.NORMAL, 2, 1, 4),
 
     /**
      * Pi 5 or equivalent with NVMe SSD, 4–8 GB RAM.
@@ -67,9 +71,10 @@ public enum DeploymentProfile {
      * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike),
      * {@code busy_timeout=5000} (5 s),
      * {@code locking_mode=NORMAL},
-     * 2 read threads (AMD-27 default for constrained I/O).
+     * 2 read threads (AMD-27 default for constrained I/O),
+     * Javalin pool 2/8 (typical household dashboard + automation REST load).
      */
-    HOME(16_000, 268_435_456L, 6_144_000L, 5_000L, LockingMode.NORMAL, 2),
+    HOME(16_000, 268_435_456L, 6_144_000L, 5_000L, LockingMode.NORMAL, 2, 2, 8),
 
     /**
      * x86 mini-PC or high-spec ARM, ≥16 GB RAM, NVMe/SATA SSD.
@@ -80,9 +85,10 @@ public enum DeploymentProfile {
      * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike),
      * {@code busy_timeout=5000} (5 s),
      * {@code locking_mode=NORMAL},
-     * 4 read threads (doubled vs. the constrained-I/O profiles).
+     * 4 read threads (doubled vs. the constrained-I/O profiles),
+     * Javalin pool 4/16 (doubled vs. HOME for bulk analytics + multi-client deployments).
      */
-    PERFORMANCE(65_536, 1_073_741_824L, 6_144_000L, 5_000L, LockingMode.NORMAL, 4);
+    PERFORMANCE(65_536, 1_073_741_824L, 6_144_000L, 5_000L, LockingMode.NORMAL, 4, 4, 16);
 
     private final int cacheSizeKiB;
     private final long mmapSizeBytes;
@@ -90,6 +96,8 @@ public enum DeploymentProfile {
     private final long busyTimeoutMs;
     private final LockingMode lockingMode;
     private final int readThreadCount;
+    private final int javalinMinThreads;
+    private final int javalinMaxThreads;
 
     DeploymentProfile(
             int cacheSizeKiB,
@@ -97,13 +105,17 @@ public enum DeploymentProfile {
             long journalSizeLimitBytes,
             long busyTimeoutMs,
             LockingMode lockingMode,
-            int readThreadCount) {
+            int readThreadCount,
+            int javalinMinThreads,
+            int javalinMaxThreads) {
         this.cacheSizeKiB = cacheSizeKiB;
         this.mmapSizeBytes = mmapSizeBytes;
         this.journalSizeLimitBytes = journalSizeLimitBytes;
         this.busyTimeoutMs = busyTimeoutMs;
         this.lockingMode = lockingMode;
         this.readThreadCount = readThreadCount;
+        this.javalinMinThreads = javalinMinThreads;
+        this.javalinMaxThreads = javalinMaxThreads;
     }
 
     /**
@@ -187,5 +199,34 @@ public enum DeploymentProfile {
      */
     public int readThreadCount() {
         return readThreadCount;
+    }
+
+    /**
+     * Returns the minimum embedded Jetty thread pool size for the Javalin
+     * HTTP server (M3.6e.1).
+     *
+     * <p>Per-profile values: STUDIO 1, HOME 2, PERFORMANCE 4. The pool grows
+     * up to {@link #javalinMaxThreads()} under load and shrinks back to this
+     * floor when idle.
+     *
+     * @return the minimum Javalin thread count for this profile
+     */
+    public int javalinMinThreads() {
+        return javalinMinThreads;
+    }
+
+    /**
+     * Returns the maximum embedded Jetty thread pool size for the Javalin
+     * HTTP server (M3.6e.1).
+     *
+     * <p>Per-profile values: STUDIO 4, HOME 8, PERFORMANCE 16. Sized to
+     * absorb typical request bursts without exhausting the host's carrier
+     * thread budget; Pi-class profiles deliberately stay small to leave
+     * headroom for SQLite write and read executors.
+     *
+     * @return the maximum Javalin thread count for this profile
+     */
+    public int javalinMaxThreads() {
+        return javalinMaxThreads;
     }
 }

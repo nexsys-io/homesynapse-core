@@ -6,9 +6,11 @@ package com.homesynapse.state;
 
 import com.homesynapse.platform.identity.EntityId;
 
+import java.time.Clock;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.LongSupplier;
 
 /**
  * Read-only query interface for the materialized entity state view.
@@ -129,4 +131,44 @@ public interface StateQueryService {
      *         is in progress
      */
     boolean isReady();
+
+    /**
+     * Factory for the production {@code MaterializedStateQueryService}
+     * implementation (M3.6e.1, DEC-M3-16).
+     *
+     * <p>The concrete implementation is package-private; consumers reach it
+     * only through this static factory. The composition root passes:</p>
+     * <ul>
+     *   <li>the {@link StateStore} owned by the State Projection,</li>
+     *   <li>the {@link ReadinessSource} (typically the composition root
+     *       itself, which delegates to {@code StateProjection.currentMode()}),</li>
+     *   <li>a {@link LongSupplier} for the projection's cursor position
+     *       (typically {@code StateProjection::cursorPosition}), and</li>
+     *   <li>the injected {@link Clock} used for read-time staleness
+     *       recomputation (DEC-M3-09 / {@code NO_DIRECT_TIME_ACCESS}).</li>
+     * </ul>
+     *
+     * <p>The {@link LongSupplier} parameter is the reason a factory exists at
+     * all: {@link StateStore} is a pure key-value port and does not carry the
+     * projection cursor, so the query service must source the view position
+     * separately. Routing this through a {@link LongSupplier} keeps the query
+     * service decoupled from the concrete {@link StateProjection} type.</p>
+     *
+     * @param stateStore     the materialized state store; never {@code null}
+     * @param readinessSource the source of subscriber lifecycle mode; never {@code null}
+     * @param viewPosition   supplier of the projection's current cursor
+     *                       position; never {@code null}
+     * @param clock          injected clock for staleness recomputation;
+     *                       never {@code null}
+     * @return a new {@link StateQueryService} backed by the given collaborators
+     * @since 1.0
+     */
+    static StateQueryService materialized(
+            StateStore stateStore,
+            ReadinessSource readinessSource,
+            LongSupplier viewPosition,
+            Clock clock) {
+        return new MaterializedStateQueryService(
+                stateStore, readinessSource, viewPosition, clock);
+    }
 }

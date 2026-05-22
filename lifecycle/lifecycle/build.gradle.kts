@@ -25,6 +25,19 @@ dependencies {
     // module's public API (matches the non-transitive `requires` directive).
     implementation(project(":integration:integration-api"))
 
+    // M3.6e.1: HomeSynapseCore registers a ReadinessFilter from rest-api as
+    // the Javalin before("/api/*") gate. `implementation` scope — only the
+    // composition root references it. The matching JPMS `requires
+    // com.homesynapse.api.rest;` is also non-transitive.
+    implementation(project(":api:rest-api"))
+
+    // M3.6e.1: HomeSynapseCore starts a Javalin server during step 12 of
+    // the bootstrap and tunes its embedded Jetty thread pool via
+    // QueuedThreadPool (from Jetty, transitively available through Javalin).
+    // `implementation` scope — Javalin/Jetty types do not appear in the
+    // lifecycle module's exported API.
+    implementation(libs.javalin)
+
     // M3.6d-a build-fix: SharedScheduler uses SLF4J internally for ERROR
     // logging from safelyInvoke(). Implementation scope per LTD-15 /
     // DECIDE-01 — SLF4J types do not appear in the lifecycle module's

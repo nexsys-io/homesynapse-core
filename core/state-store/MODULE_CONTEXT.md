@@ -1,4 +1,4 @@
-# state-store — `com.homesynapse.state` — 20 public + 1 package-private types — Materialized view over event stream, EntityState projection, availability tracking, checkpoint policy (sealed), bounded-window projection advancer, M3.5a vertical-slice StateProjection subscriber, M3.5b-wiring checkpoint-source injection seam, M3.6d-a readiness-source seam
+# state-store — `com.homesynapse.state` — 20 public + 2 package-private types — Materialized view over event stream, EntityState projection, availability tracking, checkpoint policy (sealed), bounded-window projection advancer, M3.5a vertical-slice StateProjection subscriber, M3.5b-wiring checkpoint-source injection seam, M3.6d-a readiness-source seam, M3.6e.1 MaterializedStateQueryService
 
 ## Purpose
 
@@ -92,7 +92,14 @@ All four `requires transitive` declarations mean any module that reads `com.home
 |---|---|---|---|
 | `ReadinessSource` | public interface (1 method) | Reports the State Projection's lifecycle mode to query-side adapters (M3.6e's `MaterializedStateQueryService`) so REST and WebSocket layers can gate traffic until the projection reaches LIVE. | Method: `mode() → SubscriberMode` (never null). Zero new module dependencies — `SubscriberMode` is already transitively available through state-store's `requires transitive com.homesynapse.event.bus`. The lifecycle module's composition root implements this interface by delegating to `StateProjection.currentMode()`. Distinct from `StateQueryService.isReady()` (which returns boolean) — `ReadinessSource.mode()` exposes the full mode so consumers can distinguish "warming up" (COLD/REPLAY/TRANSITION) from "halted" (SUSPENDED) for nuanced 503 messaging. |
 
-**Total: 20 public types + 1 package-private type (`SelfProducedFilter`) + 1 module-info.java = 22 production Java files** (M3.6d-a added 1 public type — `ReadinessSource` — to the M3.5b-wiring baseline of 19+1).
+### M3.6e.1 — Materialized state query service (2026-05-22)
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `MaterializedStateQueryService` | **package-private** final class implements `StateQueryService` | Production `StateQueryService` backed by the State Projection's live `StateStore`. Replaces the lifecycle module's `ThrowingStateQueryService` placeholder as `HomeSynapseCore.stateQueryService()`'s return. | Constructor: `(StateStore stateStore, ReadinessSource readinessSource, LongSupplier viewPosition, Clock clock)`. All four params required. Reads are lock-free (delegate straight to `StateStore`). `getState`/`getStates`/`getSnapshot` each recompute `EntityState.stale` at read time from `staleAfter` + `clock.instant()` — Doc 03 §3.8 / AMD-11, the projection writes `stale=false` unconditionally. `getStates` omits unknown ids silently and returns `Collections.unmodifiableMap(LinkedHashMap)` (NOT `Map.copyOf` — gotcha: `EntityState.attributes()` may carry null values which `Map.copyOf` rejects). `getSnapshot` sources viewPosition from the supplier, derives `replaying = (mode != LIVE)`, and uses `Set.of()` for `disabledEntities` (Entity Registry consultation is M3.7+ scope). `isReady()` returns `readinessSource.mode() == LIVE`. Read-only — INV-QS-01: no write methods on `StateStore` are touched. Package-private per DEC-M3-16; consumers reach it through `StateQueryService.materialized(...)` static factory. |
+| `StateQueryService.materialized(...)` | **public** static factory on the public interface | Bridge from the lifecycle composition root into the package-private `MaterializedStateQueryService`. | Signature: `static StateQueryService materialized(StateStore, ReadinessSource, LongSupplier viewPosition, Clock)`. The `LongSupplier` parameter exists because `StateStore` is a pure key-value port with no cursor — the composition root wires `stateProjection::cursorPosition` here. Pattern mirrors `StateCheckpointSource.stub()`'s same-package static factory. |
+
+**Total: 20 public types + 2 package-private types (`SelfProducedFilter`, `MaterializedStateQueryService`) + 1 module-info.java = 23 production Java files** (M3.6e.1 added 1 package-private type — `MaterializedStateQueryService` — and 1 public static factory method on `StateQueryService`).
 
 **testFixtures additions (M3.5a):**
 - `InMemoryStateStore` (`com.homesynapse.state` package — **not** the `.test` sub-package per the brief's convention for fixture implementations)
@@ -259,6 +266,12 @@ These 5 tests serve as executable documentation of a contract that no other smar
 ## Phase 3 Cross-Module Context
 
 *Added 2026-05-17 (Post-M3.1 refresh), revised 2026-05-18 (M3.5a + M3.5b complete; M3.5b-wiring complete same day). Phase 3 active — M3.5b State Projection Production Persistence landed 2026-05-18; M3.5b-wiring (projection-checkpoint injection seam) landed 2026-05-18. Next milestone: M3.6 (StateQueryService implementation, ReadinessSource, lifecycle composition root) — including the SqliteStateStore-implements-StateCheckpointSource promotion and composition-root wiring. M3 governance: AMD-41/42/43 APPLIED. See `homesynapse-core-docs/design/HomeSynapse_Core_M3_Implementation_Plan_PLAN-M3-CONSOLIDATED-02.md` for the full M3 implementation plan.*
+
+**M3.6e.1 deliverables (2026-05-22) — MaterializedStateQueryService + REST readiness gate:**
+- New `MaterializedStateQueryService` package-private final class in `com.homesynapse.state` implementing `StateQueryService`. Constructor takes `StateStore`, `ReadinessSource`, `LongSupplier viewPosition`, `Clock`. Recomputes `EntityState.stale` at read time from `staleAfter` + `clock.instant()` for every returned record (Doc 03 §3.8 / AMD-11).
+- New public static factory `StateQueryService.materialized(StateStore, ReadinessSource, LongSupplier, Clock)` to construct the package-private impl from outside the package per DEC-M3-16. Mirrors `StateCheckpointSource.stub()`'s static-factory pattern.
+- 10 unit tests in `MaterializedStateQueryServiceTest` (7 required from brief + 3 additional staleness-recomputation tests + 1 batch-staleness test + 1 snapshot replaying-flag test + 1 disabled-entities test + 1 mode-read freshness test). Covers happy path, unknown-entity omission, unmodifiable result map, view-position passthrough, isReady mode delegation across all 5 SubscriberMode values, and read-time stale recomputation for staleAfter present/absent and clock past/before threshold.
+- `MaterializedStateQueryService` is THE Phase 3 implementation that replaces the lifecycle module's `ThrowingStateQueryService` placeholder as `HomeSynapseCore.stateQueryService()`'s return.
 
 **M3.6d-a deliverables (2026-05-20) — readiness seam + reconciliation tests:**
 - New `ReadinessSource` public interface in `com.homesynapse.state` (1 method: `mode() → SubscriberMode`). Composition root implements this via delegation to `StateProjection.currentMode()`. M3.6e's `MaterializedStateQueryService` consumes it to gate REST/WebSocket traffic.
