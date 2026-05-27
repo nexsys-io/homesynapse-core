@@ -35,4 +35,26 @@ public interface Subscriber {
      * override this method.</p>
      */
     default void onCaughtUp() { /* no-op */ }
+
+    /**
+     * Lifecycle callback invoked by the bus after every successful mode
+     * transition for this subscriber. Subscribers that track their own mode
+     * (e.g., {@code StateProjection}) override this to keep their internal
+     * state in sync with the bus's authoritative FSM.
+     *
+     * <p>Called on the subscriber's dedicated virtual thread, IMMEDIATELY
+     * after a successful CAS on the bus's runtime.mode. Failed CAS attempts
+     * do NOT trigger this callback.</p>
+     *
+     * <p>Implementations MUST be fast and non-blocking — some bus-side call
+     * sites hold internal locks.</p>
+     *
+     * @param mode the new mode the subscriber has transitioned into
+     * @since M3.7 fix round 4 — closes the H5 cross-module gap (the
+     *        Subscriber interface was missing this lifecycle hook in
+     *        Phase 2; surfaced at M3.7 integration testing)
+     */
+    default void setMode(SubscriberMode mode) {
+        // No-op by default. Mode-aware subscribers override.
+    }
 }

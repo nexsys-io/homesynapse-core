@@ -68,6 +68,17 @@ dependencies {
     // propagate to consumers — declare it explicitly here.
     testImplementation(libs.slf4j.api)
 
+    // M3.7 — capstone E2E harness depends on lifecycle's HomeSynapseCore,
+    // the production composition root, plus the rest-api module for the
+    // ProblemType enum surfaced in error responses.
+    testImplementation(project(":lifecycle:lifecycle"))
+    testImplementation(project(":api:rest-api"))
+
+    // M3.7 — Awaitility for LIVE-mode polling (REC-14).
+    // json-unit-assertj for shape-tolerant JSON assertions (REC-17).
+    testImplementation(libs.awaitility)
+    testImplementation(libs.json.unit.assertj)
+
     // SQLite JDBC driver at test runtime — the real WAL mode needs the
     // actual driver, not a mock.
     testRuntimeOnly(libs.sqlite.jdbc)

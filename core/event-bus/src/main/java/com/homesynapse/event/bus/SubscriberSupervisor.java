@@ -127,6 +127,8 @@ final class SubscriberSupervisor {
             // Check circuit breaker
             if (crashCount() >= CIRCUIT_BREAKER_THRESHOLD) {
                 runtime.transitionTo(SubscriberMode.SUSPENDED);
+                // M3.7 fix round 4: inform the subscriber of its new mode.
+                subscriber.setMode(SubscriberMode.SUSPENDED);
                 return DeliveryResult.CIRCUIT_BREAKER_TRIPPED;
             }
 
@@ -134,12 +136,16 @@ final class SubscriberSupervisor {
         } catch (Error e) {
             // Infrastructure: immediate SUSPENDED, bypass DLQ
             runtime.transitionTo(SubscriberMode.SUSPENDED);
+            // M3.7 fix round 4: inform the subscriber of its new mode.
+            subscriber.setMode(SubscriberMode.SUSPENDED);
             return DeliveryResult.INFRASTRUCTURE_FAILURE;
         } catch (Exception e) {
             // Checked exception (not RuntimeException) — infrastructure path
             // This catches IOException and implicitly catches SQLException
             // (which cannot be imported due to JPMS) as checked exceptions.
             runtime.transitionTo(SubscriberMode.SUSPENDED);
+            // M3.7 fix round 4: inform the subscriber of its new mode.
+            subscriber.setMode(SubscriberMode.SUSPENDED);
             return DeliveryResult.INFRASTRUCTURE_FAILURE;
         }
     }

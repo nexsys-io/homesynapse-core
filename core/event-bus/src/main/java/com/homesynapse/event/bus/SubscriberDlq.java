@@ -4,10 +4,12 @@
  */
 package com.homesynapse.event.bus;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Per-subscriber in-memory dead-letter queue ring (AMD-42 §3.4.5).
@@ -19,6 +21,11 @@ import java.util.Objects;
  * module's {@code SqliteDeadLetterStore} (AMD-36). The in-memory ring remains
  * the primary path for the M3.1 supervisor, which constructs {@link DlqEntry}
  * records without the full identity context required by {@link DeadLetter}.</p>
+ *
+ * <p>M3.7 — every parked entry carries a {@link DlqEntry#parkedAt() parkedAt}
+ * timestamp stamped by the injected {@link Clock} at park time. The
+ * {@link #oldestParkedAt()} accessor surfaces this to the operational
+ * {@code GET /internal/dlq} endpoint (closing the M3.6e.2 D-2 deviation).</p>
  *
  * <p>This class is NOT thread-safe — it is only accessed from the subscriber's
  * dedicated virtual thread and the bus's internal coordination, both of which
@@ -32,56 +39,55 @@ final class SubscriberDlq {
     private final Deque<DlqEntry> ring = new ArrayDeque<>(CAPACITY);
     private final String subscriberId;
     private final PersistentDlqWriter persistentWriter;
+    private final Clock clock;
 
     /**
-     * Creates a new in-memory-only DLQ ring. The persistent writer is wired
-     * to a no-op — failed deliveries are held only in the bounded ring.
-     *
-     * <p>This is the M3.1 constructor; preserved unchanged so that existing
-     * call sites in {@code InProcessEventBus} continue to compile until the
-     * lifecycle module is taught how to supply a real
-     * {@link PersistentDlqWriter}.</p>
-     */
-    SubscriberDlq() {
-        this("", PersistentDlqWriter.noop());
-    }
-
-    /**
-     * Creates a new DLQ ring with persistent overflow support.
+     * Creates a new DLQ ring with persistent overflow support (M3.7 —
+     * {@link Clock} now mandatory for {@code parkedAt} stamping).
      *
      * <p>When a {@link DeadLetter} is parked via {@link #park(DeadLetter)},
-     * the entry is recorded in the in-memory ring AND flushed to the
-     * supplied {@link PersistentDlqWriter}. The legacy
-     * {@link #park(DlqEntry)} path (used by the M3.1 supervisor) is
-     * unaffected — its callers do not yet have the full identity context
-     * required to construct a {@link DeadLetter}.</p>
+     * the entry is recorded in the in-memory ring (with a freshly stamped
+     * {@code parkedAt}) AND flushed to the supplied
+     * {@link PersistentDlqWriter}. The legacy {@link #park(DlqEntry)} path
+     * (used by {@link TransitionCoordinator} for synthetic onCaughtUp DLQ
+     * markers) accepts a caller-built entry — that entry's {@code parkedAt}
+     * value is honoured (the caller, which has its own injected clock, has
+     * already stamped it).</p>
      *
      * @param subscriberId     stable identifier of the subscriber owning this
      *                         DLQ; never {@code null}
      * @param persistentWriter durable storage seam; never {@code null}
      *                         (use {@link PersistentDlqWriter#noop()} when
      *                         persistent overflow is not configured)
+     * @param clock            injected clock used to stamp {@code parkedAt}
+     *                         on the {@link #park(DeadLetter)} path; never
+     *                         {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
-    SubscriberDlq(String subscriberId, PersistentDlqWriter persistentWriter) {
+    SubscriberDlq(String subscriberId, PersistentDlqWriter persistentWriter, Clock clock) {
         this.subscriberId = Objects.requireNonNull(subscriberId, "subscriberId");
         this.persistentWriter = Objects.requireNonNull(persistentWriter, "persistentWriter");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     /**
-     * Parks a failed event delivery in the in-memory DLQ ring (M3.1 supervisor
-     * path).
+     * Parks a caller-built DLQ entry in the in-memory ring (used by
+     * {@link TransitionCoordinator} for synthetic onCaughtUp markers).
      *
-     * <p>If the ring is at capacity, the oldest entry is evicted to make room.
-     * This overload does NOT flush to the persistent writer — the
+     * <p>If the ring is at capacity, the oldest entry is evicted to make
+     * room. This overload does NOT flush to the persistent writer — the
      * {@link DlqEntry} carries only a subset of the identity context required
      * by the persistent schema (no {@code sequence_key}, no {@code event_id}).
      * Supervisor wiring to the {@link #park(DeadLetter)} path is tracked as a
      * future enhancement; see the module's persistent-DLQ Phase 3 notes.</p>
      *
-     * @param entry the DLQ entry to park; never {@code null}
+     * @param entry the DLQ entry to park; never {@code null}. The entry's
+     *              {@code parkedAt} field is preserved as-is — the caller
+     *              owns the stamp (its own injected {@link Clock} is the
+     *              source of truth for synthetic markers).
      */
     void park(DlqEntry entry) {
+        Objects.requireNonNull(entry, "entry");
         if (ring.size() >= CAPACITY) {
             ring.pollFirst();
         }
@@ -92,10 +98,13 @@ final class SubscriberDlq {
      * Parks a fully-identified dead-letter in the in-memory ring AND flushes
      * it to the persistent writer.
      *
-     * <p>Both writes always run: the ring keeps a recent, fast-access trace
-     * for diagnostics, while the persistent writer carries the durable audit
-     * trail. Persistent-writer failures propagate to the caller — the bus's
-     * supervisor (when wired) decides whether to escalate.</p>
+     * <p>The in-memory ring entry's {@code parkedAt} is stamped from the
+     * injected {@link Clock} — NOT from {@link DeadLetter#firstSeenAt()},
+     * which is the supervisor's first-crash timestamp (a different
+     * semantic). Both writes always run: the ring keeps a recent,
+     * fast-access trace for diagnostics, while the persistent writer
+     * carries the durable audit trail. Persistent-writer failures propagate
+     * to the caller — the bus's supervisor decides whether to escalate.</p>
      *
      * @param deadLetter the dead-letter; never {@code null}
      */
@@ -107,7 +116,8 @@ final class SubscriberDlq {
                 deadLetter.causeMessage(),
                 deadLetter.attemptCount(),
                 deadLetter.firstSeenAt(),
-                deadLetter.lastAttemptAt());
+                deadLetter.lastAttemptAt(),
+                clock.instant());
         if (ring.size() >= CAPACITY) {
             ring.pollFirst();
         }
@@ -125,13 +135,31 @@ final class SubscriberDlq {
     }
 
     /**
-     * Returns the subscriber identifier this DLQ belongs to. Empty string when
-     * constructed via the legacy no-arg constructor.
+     * Returns the subscriber identifier this DLQ belongs to.
      *
      * @return the subscriber identifier; never {@code null}
      */
     String subscriberId() {
         return subscriberId;
+    }
+
+    /**
+     * Returns the {@code parkedAt} stamp of the oldest entry in the ring, or
+     * {@link Optional#empty()} if the ring is empty (M3.7).
+     *
+     * <p>The ring is ordered by insertion (oldest at head, newest at tail),
+     * so the head IS the oldest. Capacity-driven eviction removes the
+     * current head ({@link Deque#pollFirst}); the next entry becomes the
+     * new oldest. This means the value reported is the oldest entry
+     * <em>still in the ring</em>, NOT the all-time-oldest park timestamp
+     * for this subscriber — older entries may have been evicted.</p>
+     *
+     * @return the oldest parked entry's stamp, empty when the ring is empty
+     */
+    Optional<Instant> oldestParkedAt() {
+        return ring.isEmpty()
+                ? Optional.empty()
+                : Optional.of(ring.peekFirst().parkedAt());
     }
 
     /**
@@ -146,7 +174,8 @@ final class SubscriberDlq {
     }
 
     /**
-     * Internal DLQ entry representing a single failed delivery (M3.1 in-memory only).
+     * Internal DLQ entry representing a single failed delivery (M3.1
+     * in-memory only; M3.7 added {@code parkedAt} as the 7th field).
      *
      * @param eventPosition the global position of the failed event
      * @param causeClass    the exception class name
@@ -154,6 +183,9 @@ final class SubscriberDlq {
      * @param attemptCount  the number of delivery attempts so far
      * @param firstSeenAt   when the first failure occurred
      * @param lastAttemptAt when the last delivery attempt was made
+     * @param parkedAt      when the entry was parked into this ring
+     *                      (M3.7 — stamped from the injected {@link Clock}
+     *                      at park time, never {@code null})
      */
     record DlqEntry(
             long eventPosition,
@@ -161,6 +193,17 @@ final class SubscriberDlq {
             String causeMessage,
             int attemptCount,
             Instant firstSeenAt,
-            Instant lastAttemptAt
-    ) {}
+            Instant lastAttemptAt,
+            Instant parkedAt
+    ) {
+        /**
+         * Validates non-null on {@code parkedAt} — other fields preserve
+         * their pre-M3.7 nullability (cause message may be null, etc.).
+         *
+         * @throws NullPointerException if {@code parkedAt} is {@code null}
+         */
+        public DlqEntry {
+            Objects.requireNonNull(parkedAt, "parkedAt");
+        }
+    }
 }

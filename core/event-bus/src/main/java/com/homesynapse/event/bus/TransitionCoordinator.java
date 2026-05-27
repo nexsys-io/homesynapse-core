@@ -106,6 +106,8 @@ final class TransitionCoordinator {
                     return false;
                 } catch (Exception e) {
                     runtime.transitionTo(SubscriberMode.SUSPENDED);
+                    // M3.7 fix round 4: inform the subscriber of its new mode.
+                    runtime.subscriber().setMode(SubscriberMode.SUSPENDED);
                     return false;
                 }
 
@@ -133,6 +135,10 @@ final class TransitionCoordinator {
                             SubscriberMode.TRANSITION, SubscriberMode.LIVE)) {
                         return false; // mode raced out from under us (e.g., SUSPENDED)
                     }
+                    // M3.7 fix round 4: inform the subscriber of its new mode.
+                    // Called under queue.lock(); StateProjection.setMode is a
+                    // non-blocking AtomicReference.set per the contract.
+                    runtime.subscriber().setMode(SubscriberMode.LIVE);
                     break; // committed to LIVE, exit drain loop
                 }
                 // Else: notifyEvent enqueued under the lock between our last poll
@@ -158,7 +164,8 @@ final class TransitionCoordinator {
                     "onCaughtUp: " + message,
                     1,
                     now,
-                    now));
+                    now,
+                    now)); // M3.7 — parkedAt stamped by the coordinator's clock
         }
 
         return true;

@@ -4,6 +4,8 @@
  */
 package com.homesynapse.event.bus;
 
+import java.time.Instant;
+
 /**
  * Point-in-time introspection snapshot of a subscriber's state (PLAN §4.3).
  *
@@ -12,22 +14,38 @@ package com.homesynapse.event.bus;
  * subscriber's runtime state, separate from the registration descriptor
  * {@link SubscriberInfo}.</p>
  *
- * @param subscriberId the subscriber's stable identifier
- * @param mode         the current lifecycle mode
- * @param checkpoint   the last delivered global position; 0 if never delivered
- * @param dlqDepth     current DLQ size (in-memory entries)
- * @param crashCount   crashes within the current rolling 10-minute window
+ * <p>M3.7 extended the record from 5 to 6 fields by adding
+ * {@link #oldestParkedAt()} — the {@code parkedAt} timestamp of the oldest
+ * entry currently in the subscriber's in-memory DLQ ring. The value is
+ * {@code null} when the DLQ is empty (the field is intentionally nullable
+ * to keep the record-component contract simple — operators that prefer
+ * {@link java.util.Optional Optional} handling can wrap with
+ * {@code Optional.ofNullable(snapshot.oldestParkedAt())}).</p>
+ *
+ * @param subscriberId    the subscriber's stable identifier
+ * @param mode            the current lifecycle mode
+ * @param checkpoint      the last delivered global position; 0 if never delivered
+ * @param dlqDepth        current DLQ size (in-memory entries)
+ * @param crashCount      crashes within the current rolling 10-minute window
+ * @param oldestParkedAt  the {@code parkedAt} timestamp of the oldest DLQ
+ *                        entry, or {@code null} when the DLQ is empty (M3.7).
+ *                        The ring is insertion-ordered (oldest = head), so
+ *                        this is the head entry's stamp; eviction does NOT
+ *                        preserve the all-time-oldest value.
  */
 public record SubscriberSnapshot(
     String subscriberId,
     SubscriberMode mode,
     long checkpoint,
     int dlqDepth,
-    int crashCount
+    int crashCount,
+    Instant oldestParkedAt
 ) {
 
     /**
-     * Validates all snapshot fields.
+     * Validates {@code subscriberId} and {@code mode}. The
+     * {@code oldestParkedAt} field is intentionally NOT validated for
+     * non-null — {@code null} is the documented "DLQ empty" sentinel.
      *
      * @throws NullPointerException if {@code subscriberId} or {@code mode} is {@code null}
      */

@@ -110,7 +110,10 @@ final class ReplayDriver {
         runtime.setLastReplayedPosition(currentPosition);
 
         // (2) Move out of COLD if we haven't already.
-        runtime.compareAndTransition(SubscriberMode.COLD, SubscriberMode.REPLAY);
+        if (runtime.compareAndTransition(SubscriberMode.COLD, SubscriberMode.REPLAY)) {
+            // M3.7 fix round 4: inform the subscriber of its new mode.
+            runtime.subscriber().setMode(SubscriberMode.REPLAY);
+        }
         if (runtime.mode() != SubscriberMode.REPLAY) {
             // Mode was changed externally (e.g., SUSPENDED) before we started.
             return false;
@@ -142,6 +145,8 @@ final class ReplayDriver {
             } catch (Exception e) {
                 // Infrastructure read failure — suspend the subscriber.
                 runtime.transitionTo(SubscriberMode.SUSPENDED);
+                // M3.7 fix round 4: inform the subscriber of its new mode.
+                runtime.subscriber().setMode(SubscriberMode.SUSPENDED);
                 return false;
             }
 
@@ -151,8 +156,13 @@ final class ReplayDriver {
                 if (currentPosition > 0L) {
                     checkpointStore.writeCheckpoint(subscriberId, currentPosition);
                 }
-                return runtime.compareAndTransition(
+                boolean swapped = runtime.compareAndTransition(
                         SubscriberMode.REPLAY, SubscriberMode.TRANSITION);
+                if (swapped) {
+                    // M3.7 fix round 4: inform the subscriber of its new mode.
+                    runtime.subscriber().setMode(SubscriberMode.TRANSITION);
+                }
+                return swapped;
             }
 
             // (6) Deliver matching events; always advance currentPosition past paged rows.

@@ -30,6 +30,8 @@ json-schema-validator = "1.5.6"
 junit              = "5.14.3"
 assertj            = "3.27.7"
 archunit           = "1.4.0"
+awaitility         = "4.3.0"
+json-unit-assertj  = "3.5.0"
 
 # Build Plugins
 spotless           = "7.0.2"
@@ -66,6 +68,8 @@ junit-jupiter             = { module = "org.junit.jupiter:junit-jupiter", versio
 junit-platform-launcher   = { module = "org.junit.platform:junit-platform-launcher" }
 assertj-core              = { module = "org.assertj:assertj-core", version.ref = "assertj" }
 archunit-junit5           = { module = "com.tngtech.archunit:archunit-junit5", version.ref = "archunit" }
+awaitility                = { module = "org.awaitility:awaitility", version.ref = "awaitility" }
+json-unit-assertj         = { module = "net.javacrumbs.json-unit:json-unit-assertj", version.ref = "json-unit-assertj" }
 
 [plugins]
 spotless                  = { id = "com.diffplug.spotless", version.ref = "spotless" }

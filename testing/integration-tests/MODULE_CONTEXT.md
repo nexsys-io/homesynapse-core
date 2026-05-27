@@ -64,6 +64,26 @@ All types are test-scope. None are public API — this module has no consumers.
 | `Pi4D1SpikeIT` | test class | 50 ev/s for 30 minutes with D1 spike simulation | Validates stability under realistic SD-card latency spikes (200ms at 0.5% probability). Paced against absolute schedule to prevent drift. Uses `startThrottled()`. |
 | `CrashRecoveryIT` | test class | 5,000 events, simulated crash at ≥3,000, restart, verify recovery | Creates harness → publishes 5,000 events → calls `abandon()` at ≥3,000 → creates fresh harness on same dbPath → verifies all persisted events survive and projection rebuilds correctly. Uses `@TempDir(cleanup = CleanupMode.NEVER)` because abandoned harness holds file handles. |
 
+### M3.7 — E2E HTTP Coverage
+
+New types (parallel to M3.4a/M3.4b infrastructure — the M3.4 `IntegrationTestHarness` STAYS for performance/load/heap-budget tests that do not exercise HTTP; M3.7's `HomeSynapseE2eHarness` is the HTTP-aware sibling).
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `HomeSynapseE2eHarness` | test class (REC-16) | Wires the full production composition root (`HomeSynapseCore`) against a `@TempDir` SQLite file and an ephemeral HTTP port for HTTP-aware E2E. Implements `AutoCloseable`. | Static factory: `start(Path, Clock, HomeId)` constructs `HomeSynapseConfig.testing()` (port 0) and calls `core.start().join()` on the calling thread (MUST be a platform thread — JacksonWarmup constraint, LTD-19 / DECIDE-M2-05). Accessors delegate to the underlying core: `boundHttpPort()`, `baseUri()`, `eventPublisher()`, `eventStore()`, `eventBus()`, `stateQueryService()`, `mode()`. `stop()` / `close()` are idempotent. Each harness binds to a single dbPath and a single ephemeral port — no shared state across tests. |
+| `LiveModeAwaiter` | test utility (REC-13, reinterpreted) | Awaitility-based helper for waiting on `SubscriberMode.LIVE`. | Two static methods: `awaitLive(harness, Duration)` and the default-5s overload `awaitLive(harness)`. REC-13 said "use `bus.isLive()`" — there is no such method on `EventBus` (per-subscriber concept). This helper polls `harness.mode()` instead, which delegates to `HomeSynapseCore.mode()` → `StateProjection.currentMode()`. No `isLive()` method was added to `EventBus`. |
+| `TestEvents` | test utility (REC-18) | Static-factory helpers for the most common `EventDraft` shapes. | Methods: `stateReported(EntityId, String attributeKey, String value)`, `availabilityChanged(EntityId, String previousStatus, String newStatus)`. Defaults: priority NORMAL or DIAGNOSTIC, origin DEVICE_AUTONOMOUS, `eventTime = null`, `actorRef = null`, `idempotencyKey = null`. |
+| `EndpointE2eIT` | test class | E2E tests against the M3.6e.2 endpoints with real Jetty + real `HttpClient` + `json-unit-assertj` (REC-17). | Five `@Test` methods covering: empty listing, populated listing, single-entity 200, unknown-entity 404 with RFC 9457 problem detail, `/internal/dlq` response shape including the new `oldestParkedAt` field (asserts empty-DLQ → null). Uses `Clock.fixed(...)` per DEC-M3-09. |
+| `CrashRecoveryHttpIT` | test class (REC-19) | Crash-recovery scenario at the HTTP layer. | Mirrors M3.4b's `CrashRecoveryIT` but verifies via `GET /api/v1/entities` after restart. Uses `@TempDir(cleanup = CleanupMode.NEVER)` per the M3.4b Windows file-handle lesson. |
+| `InFlightRequestShutdownIT` | test class (REC-21) | In-flight request behaviour during shutdown. | Fires a slow request on a separate platform thread, then calls `harness.stop()`. Asserts the request resolves deterministically (response or IO failure) within a loose 30-second bound (the exact `RestApiLifecycle.stop(int drainSeconds)` contract is Phase 3 future scope). |
+
+### M3.7 Dependencies Added
+
+- `testImplementation(project(":lifecycle:lifecycle"))` — for `HomeSynapseCore`, `HomeSynapseConfig`
+- `testImplementation(project(":api:rest-api"))` — for the M3.6e.2 endpoint contract types referenced in assertions
+- `testImplementation(libs.awaitility)` — Awaitility 4.3.0 (REC-14)
+- `testImplementation(libs.json.unit.assertj)` — json-unit-assertj 3.5.0 (REC-17)
+
 ---
 
 ## Resources

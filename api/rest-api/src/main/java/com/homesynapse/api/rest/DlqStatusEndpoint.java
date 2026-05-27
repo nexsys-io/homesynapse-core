@@ -21,12 +21,12 @@ import java.util.Objects;
  * (operational tooling, NOT a public API).
  *
  * <p>Returns a snapshot of every active subscriber's in-memory DLQ ring
- * depth plus its mode and rolling crash-window counter. The data is
- * sourced directly from {@link EventBus#subscribers()}; the bus itself
- * already aggregates the per-subscriber state into a {@link SubscriberSnapshot}
- * record.</p>
+ * depth plus its mode, rolling crash-window counter, and the oldest parked
+ * entry's timestamp (M3.7). The data is sourced directly from
+ * {@link EventBus#subscribers()}; the bus itself already aggregates the
+ * per-subscriber state into a {@link SubscriberSnapshot} record.</p>
  *
- * <h2>Response shape</h2>
+ * <h2>Response shape (M3.7)</h2>
  * <pre>{@code
  * {
  *   "subscribers": [
@@ -34,33 +34,41 @@ import java.util.Objects;
  *       "subscriberId": "state_projection",
  *       "mode": "LIVE",
  *       "dlqDepth": 0,
- *       "crashCount": 0
+ *       "crashCount": 0,
+ *       "oldestParkedAt": null
+ *     },
+ *     {
+ *       "subscriberId": "automation",
+ *       "mode": "LIVE",
+ *       "dlqDepth": 3,
+ *       "crashCount": 1,
+ *       "oldestParkedAt": "2026-01-01T00:00:05Z"
  *     }
  *   ]
  * }
  * }</pre>
  *
- * <h2>Deviation from the brief's example shape</h2>
+ * <p>{@code oldestParkedAt} is serialized as an ISO-8601 instant via Jackson's
+ * {@code JavaTimeModule}, or {@code null} when the subscriber's in-memory
+ * DLQ ring is empty.</p>
  *
- * <p>The PLAN-M3 sketch in the M3.6e.2 brief shows {@code parkedCount} and
- * {@code oldestParkedAt} fields. The actual production event-bus snapshot
- * record carries {@code dlqDepth} (in-memory ring) and {@code crashCount}
- * (rolling 10-minute window) and does not expose a "oldest parked at"
- * timestamp — see {@link SubscriberSnapshot} (5 fields:
- * {@code subscriberId}, {@code mode}, {@code checkpoint}, {@code dlqDepth},
- * {@code crashCount}). The brief explicitly invites the coder to adjust
- * the response shape to "what's actually available on
- * {@code SubscriberSnapshot} or {@code EventBus}". This endpoint exposes
- * exactly those fields. Adding {@code oldestParkedAt} would require
- * tracking parked-at timestamps in {@code SubscriberDlq} — a follow-up
- * enhancement, not M3.6e.2 scope.</p>
+ * <h2>M3.7 closure of the M3.6e.2 D-2 deviation</h2>
+ *
+ * <p>The original PLAN-M3 sketch called for an {@code oldestParkedAt} field
+ * but the M3.6e.2 {@link SubscriberSnapshot} record only carried 5 fields
+ * with no timestamp data — the M3.6e.2 endpoint omitted the field and
+ * documented the gap as deviation D-2. M3.7 extends
+ * {@link SubscriberSnapshot} with a 6th nullable {@code oldestParkedAt}
+ * component (sourced from {@code SubscriberDlq.oldestParkedAt()}, ring head),
+ * closing the deviation and aligning the response shape with the original
+ * design intent.</p>
  *
  * <h2>NOT gated by readiness</h2>
  *
  * <p>{@code /internal/*} is intentionally outside the
  * {@code ReadinessFilter}'s {@code before("/api/*")} path — operators need
  * DLQ visibility during REPLAY (when the projection is precisely the thing
- * they're waiting on). This is settled decision SD-5 from the brief.</p>
+ * they're waiting on). This is settled decision SD-5.</p>
  *
  * <h2>Thread safety</h2>
  *
@@ -99,11 +107,12 @@ final class DlqStatusEndpoint implements Handler {
         List<SubscriberSnapshot> snapshots = bus.subscribers();
         List<Map<String, Object>> entries = new ArrayList<>(snapshots.size());
         for (SubscriberSnapshot snapshot : snapshots) {
-            Map<String, Object> entry = new LinkedHashMap<>(4);
+            Map<String, Object> entry = new LinkedHashMap<>(5);
             entry.put("subscriberId", snapshot.subscriberId());
             entry.put("mode", snapshot.mode().name());
             entry.put("dlqDepth", snapshot.dlqDepth());
             entry.put("crashCount", snapshot.crashCount());
+            entry.put("oldestParkedAt", snapshot.oldestParkedAt());
             entries.add(entry);
         }
 

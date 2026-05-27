@@ -1569,6 +1569,37 @@ public abstract class EventBusContractTest {
                     .as("re-subscription covers exactly the same positions as the first run")
                     .containsExactlyElementsOf(firstRun.stream().distinct().sorted().toList());
         }
+
+        @Test
+        @DisplayName("bus invokes Subscriber.setMode at each successful runtime.mode CAS")
+        void busInvokesSetModeAfterEachSuccessfulCas() throws InterruptedException {
+            // M3.7 fix round 4: the bus is responsible for keeping a subscriber's
+            // self-tracked mode in sync with the runtime's authoritative FSM.
+            // Empty store → COLD → REPLAY → TRANSITION → LIVE completes without
+            // any onEvent firing; this test asserts that setMode was nevertheless
+            // called with at least one non-COLD mode (i.e., the bus made it past
+            // the COLD→REPLAY CAS into the actual lifecycle).
+            List<SubscriberMode> observed = new CopyOnWriteArrayList<>();
+            Subscriber recorder = new Subscriber() {
+                @Override
+                public void onEvent(EventEnvelope event) {
+                }
+
+                @Override
+                public void setMode(SubscriberMode mode) {
+                    observed.add(mode);
+                }
+            };
+
+            bus().subscribeRuntime(
+                    new SubscriberInfo("setmode-sub", SubscriptionFilter.all(), false),
+                    recorder);
+            awaitMode("setmode-sub", SubscriberMode.LIVE);
+
+            assertThat(observed)
+                    .as("bus must invoke setMode on at least one non-COLD transition")
+                    .anyMatch(m -> m != SubscriberMode.COLD);
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────

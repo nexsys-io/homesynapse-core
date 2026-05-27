@@ -22,11 +22,9 @@ import com.homesynapse.integration.IntegrationEvents;
 import com.homesynapse.persistence.DeploymentProfile;
 import com.homesynapse.persistence.PersistenceFactory;
 import com.homesynapse.platform.identity.HomeId;
-import com.homesynapse.state.AdvanceResult;
 import com.homesynapse.state.DerivationRule;
 import com.homesynapse.state.DerivedPublishGate;
 import com.homesynapse.state.FixedCheckpointPolicy;
-import com.homesynapse.state.ProjectionAdvancer;
 import com.homesynapse.state.ProjectionId;
 import com.homesynapse.state.ReadinessSource;
 import com.homesynapse.state.StateProjection;
@@ -82,7 +80,8 @@ import org.slf4j.LoggerFactory;
  *       {@link DeploymentProfile#javalinMaxThreads}, with the readiness
  *       gate installed via
  *       {@link RestFilters#installReadinessGate(Object, com.homesynapse.state.ReadinessSource)}
- *       and bound on port {@value #HTTP_PORT}.</li>
+ *       and bound on {@link HomeSynapseConfig#httpPort()} (M3.7 — {@code 0}
+ *       requests an ephemeral port for parallel test execution).</li>
  *   <li>Entity query endpoints (M3.6e.2) — {@code GET /api/v1/entities},
  *       {@code GET /api/v1/entities/{entityId}}, and
  *       {@code GET /api/v1/entities/{entityId}/state} registered via
@@ -115,8 +114,9 @@ import org.slf4j.LoggerFactory;
  * <h2>Readiness</h2>
  *
  * <p>Implements {@link ReadinessSource}. Before {@link #start()},
- * {@link #mode()} returns {@link SubscriberMode#COLD}; once started, the
- * call delegates to {@link StateProjection#currentMode()}.</p>
+ * {@link #mode()} returns {@link SubscriberMode#COLD}; once started, it
+ * reads the projection subscriber's mode from {@link EventBus#subscribers()}
+ * (M3.7 fix round 1).</p>
  *
  * @see PersistenceFactory
  * @see InProcessEventBus
@@ -131,45 +131,19 @@ public final class HomeSynapseCore implements ReadinessSource {
     private static final String PROJECTION_SUBSCRIBER_ID = "state_projection";
 
     /**
-     * Default HTTP port for the embedded Javalin server (M3.6e.1). Hardcoded
-     * per PLAN-M3 §10 for the MVP; future work makes this configurable
-     * through {@link HomeSynapseConfig}.
-     */
-    private static final int HTTP_PORT = 7070;
-
-    /**
-     * Default derivation rule for M3.6d-b composition wiring (OR-M3-15).
+     * M3.7-scoped derivation rule (closes OR-M3-17 from M3.6d-b).
      *
-     * <p>No production {@link DerivationRule} implementation exists in the
-     * state-store module's main source set yet. A no-op rule is correct for
-     * M3.6d-b because the projection's {@code applyToState} already handles
-     * the core materialization path (state_reported → state map update);
-     * {@code DerivationRule} is the hook for emitting additional
+     * <p>The empty-derivation path IS the M3.7 closure of the placeholder.
+     * {@code StateProjection.applyToState} already handles the core
+     * materialization path (state_reported → state map update);
+     * {@link DerivationRule} is the hook for emitting additional
      * {@code state_changed} events whose primary consumer (the automation
-     * engine) is M5 scope. To be replaced when the production derivation
-     * rule lands.</p>
+     * engine) is M5 scope. The full M4.0 replacement
+     * ({@code DispatchingProjectionAdvancer} per Research 8 REC-28) will
+     * dispatch derivation through the {@code @EventType} registry.</p>
      */
-    private static final DerivationRule NO_OP_DERIVATION =
-            context -> List.of(); // OR-M3-15
-
-    /**
-     * Default projection advancer for M3.6d-b composition wiring (OR-M3-16).
-     *
-     * <p>No production {@link ProjectionAdvancer} implementation exists in
-     * the state-store module's main source set yet (only the test fixture
-     * {@code InMemoryProjectionAdvancer}). The advancer is only invoked by
-     * {@link StateProjection#processBatch(int)}, which is not called in the
-     * production LIVE delivery path — the bus's per-subscriber VT delivers
-     * envelopes through {@link StateProjection#onEvent} directly. Returning
-     * a {@link AdvanceResult} with no events processed and
-     * {@code hasMore=false} is correct for the no-batch wiring.</p>
-     *
-     * <p>MUST be resolved before M3.7 — end-to-end REPLAY tests exercise the
-     * advancer.</p>
-     */
-    private static final ProjectionAdvancer NO_OP_ADVANCER =
-            (fromPosition, maxRows, processor) ->
-                    new AdvanceResult(fromPosition, 0, false); // OR-M3-16
+    private static final DerivationRule MINIMAL_DERIVATION_RULE =
+            context -> List.of();
 
     private final Path dbPath;
     private final HomeSynapseConfig config;
@@ -185,6 +159,10 @@ public final class HomeSynapseCore implements ReadinessSource {
     private QueueSaturationHealthCheck healthCheck;
     private StateQueryService stateQueryService;
     private Javalin httpServer;
+    /** M3.7 — {@link MinimalProjectionAdvancer} bound to the live event store. */
+    private MinimalProjectionAdvancer projectionAdvancer;
+    /** M3.7 — decorator that bridges persist → bus notify (Finding 2). */
+    private EventPublisher eventPublisher;
     private volatile boolean started = false;
 
     /**
@@ -249,9 +227,22 @@ public final class HomeSynapseCore implements ReadinessSource {
         // Step 4 — State store + checkpoint source (same instance, two roles).
         // Both flow through the persistence factory's public-interface accessors.
 
-        // Step 5 — Derived write rate limit.
+        // Step 5 — Derived write rate limit + projection advancer.
+        // The MinimalProjectionAdvancer (M3.7, closes OR-M3-18) wraps the
+        // live event store and is what StateProjection.processBatch() invokes
+        // during REPLAY/TRANSITION; the M3.7 MINIMAL_DERIVATION_RULE
+        // (closes OR-M3-17) ships derivation as a no-op until M4.0's
+        // DispatchingProjectionAdvancer (Research 8 REC-28) lands.
         this.rateLimit = new DerivedWriteRateLimit(
                 clock, jfrMetrics, PROJECTION_SUBSCRIBER_ID);
+        this.projectionAdvancer = new MinimalProjectionAdvancer(
+                persistenceFactory.eventStore());
+
+        // Step 5b — NotifyingEventPublisher decorator (M3.7 Finding 2).
+        // Bridges the publish/notify gap: every successful persist is
+        // immediately visible to bus subscribers.
+        this.eventPublisher = new NotifyingEventPublisher(
+                persistenceFactory.eventPublisher(), eventBus);
 
         // Step 6 — State projection.
         DerivedPublishGate publishGate = rateLimit::acquire;
@@ -261,9 +252,9 @@ public final class HomeSynapseCore implements ReadinessSource {
                 persistenceFactory.viewCheckpointStore(),
                 persistenceFactory.stateCheckpointSource(),
                 persistenceFactory.stateStore(),
-                NO_OP_DERIVATION,                          // OR-M3-15
-                persistenceFactory.eventPublisher(),
-                NO_OP_ADVANCER,                            // OR-M3-16
+                MINIMAL_DERIVATION_RULE,                   // M3.7 (closes OR-M3-17)
+                eventPublisher,                            // M3.7 (decorated — Finding 2)
+                projectionAdvancer,                        // M3.7 (closes OR-M3-18)
                 FixedCheckpointPolicy.HOME_DEFAULT,        // AMD-38
                 clock,
                 publishGate);
@@ -348,16 +339,36 @@ public final class HomeSynapseCore implements ReadinessSource {
                 stateQueryService,
                 stateProjection::cursorPosition);
 
-        app.start(HTTP_PORT);
+        app.start(config.httpPort());
         this.httpServer = app;
 
         // Step 15 — Mark started.
         this.started = true;
         LOG.info("HomeSynapseCore started: db={}, homeId={}, http=:{}",
-                dbPath, homeId.value(), HTTP_PORT);
+                dbPath, homeId.value(), app.port());
 
         // Step 16 — Return a completed future.
         return CompletableFuture.completedFuture(null);
+    }
+
+    /**
+     * Returns the actual HTTP port the embedded Javalin server is bound to.
+     *
+     * <p>For {@link HomeSynapseConfig#HOME_DEFAULT} this matches the configured
+     * {@code 7070}. For {@link HomeSynapseConfig#testing()} (which requests
+     * port {@code 0}), Jetty selects a free ephemeral port at
+     * {@code app.start(0)}; this accessor returns that bound port so tests
+     * can construct request URIs without conflicting on a fixed port.</p>
+     *
+     * @return the live bound HTTP port, always {@code > 0}
+     * @throws IllegalStateException if {@link #start()} has not been called or
+     *                               the HTTP server was not constructed
+     */
+    public int boundHttpPort() {
+        if (!started || httpServer == null) {
+            throw new IllegalStateException("HomeSynapseCore not started");
+        }
+        return httpServer.port();
     }
 
     /**
@@ -402,7 +413,7 @@ public final class HomeSynapseCore implements ReadinessSource {
      */
     public EventPublisher eventPublisher() {
         requireStarted();
-        return persistenceFactory.eventPublisher();
+        return eventPublisher;
     }
 
     /**
@@ -448,7 +459,25 @@ public final class HomeSynapseCore implements ReadinessSource {
         if (!started) {
             return SubscriberMode.COLD;
         }
-        return stateProjection.currentMode();
+        // M3.7 fix round 1 — readiness is a property of the bus's per-subscriber
+        // delivery FSM (driven by ReplayDriver + TransitionCoordinator), NOT the
+        // projection's internal mode field. Pre-fix, this delegated to
+        // stateProjection.currentMode() which only advances when the bus calls
+        // subscriber.setMode(). On an empty event log (M3.7 E2E tests) the
+        // projection's currentMode stayed at construction-time COLD even after
+        // the bus FSM reached LIVE, failing the readiness contract.
+        //
+        // Fix round 4 wired setMode() callbacks at all CAS sites in
+        // ReplayDriver, TransitionCoordinator, and SubscriberSupervisor —
+        // so StateProjection.currentMode() now tracks correctly. This method
+        // still reads from bus.subscribers() as the canonical source:
+        // HomeSynapseCore implements ReadinessSource, and the bus snapshot's
+        // mode IS the authoritative delivery FSM state.
+        return eventBus.subscribers().stream()
+                .filter(s -> PROJECTION_SUBSCRIBER_ID.equals(s.subscriberId()))
+                .findFirst()
+                .map(com.homesynapse.event.bus.SubscriberSnapshot::mode)
+                .orElse(SubscriberMode.COLD);
     }
 
     private void requireStarted() {

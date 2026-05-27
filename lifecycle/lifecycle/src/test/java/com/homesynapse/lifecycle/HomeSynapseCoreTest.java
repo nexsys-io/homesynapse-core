@@ -18,6 +18,7 @@ import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.platform.identity.Ulid;
 
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -25,6 +26,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -41,7 +43,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p>Uses {@link Clock#systemUTC()} because these are lifecycle tests that
  * need real time for the bus's per-subscriber VTs to park and unpark.</p>
  */
-@DisplayName("HomeSynapseCore — composition root")
+@DisplayName("HomeSynapseCore -- composition root")
 final class HomeSynapseCoreTest {
 
     private static final HomeId TEST_HOME_ID =
@@ -161,5 +163,59 @@ final class HomeSynapseCoreTest {
                 .isEmpty();
         // The same instance is returned on every call.
         assertThat(core.stateQueryService()).isSameAs(core.stateQueryService());
+    }
+
+    // ── M3.7 — boundHttpPort + ephemeral binding ────────────────────────
+
+    @Test
+    @DisplayName("boundHttpPort returns a positive non-zero port after start "
+            + "with HOME_DEFAULT (port 7070)")
+    void boundHttpPort_returnsPositiveNonZeroAfterStart(@TempDir Path tempDir) {
+        core = new HomeSynapseCore(
+                tempDir.resolve("homesynapse-events.db"),
+                HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+        core.start().join();
+
+        assertThat(core.boundHttpPort()).isPositive();
+        // HOME_DEFAULT uses port 7070 — the bound port matches exactly.
+        assertThat(core.boundHttpPort()).isEqualTo(7070);
+    }
+
+    @Test
+    @DisplayName("boundHttpPort throws IllegalStateException before start")
+    void boundHttpPort_throwsBeforeStart(@TempDir Path tempDir) {
+        core = new HomeSynapseCore(
+                tempDir.resolve("homesynapse-events.db"),
+                HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+
+        assertThatThrownBy(core::boundHttpPort)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not started");
+    }
+
+    @Test
+    @DisplayName("mode returns LIVE once the projection completes replay")
+    void mode_returnsLiveAfterProjectionCompletesReplay(@TempDir Path tempDir) {
+        core = new HomeSynapseCore(
+                tempDir.resolve("homesynapse-events.db"),
+                HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+        core.start().join();
+
+        // The bus drives the projection subscriber through
+        // COLD → REPLAY → TRANSITION → LIVE on a dedicated virtual thread; on
+        // a fresh database the trip completes in microseconds. Awaitility's
+        // polling pattern is the established M3.7 idiom (Research 3 REC-13)
+        // and respects D-04 / NO_DIRECT_TIME_ACCESS — it does not call
+        // System.nanoTime() / Instant.now() from the test source.
+        //
+        // core.mode() reads the bus's authoritative per-subscriber FSM via
+        // EventBus.subscribers() (see HomeSynapseCore.mode() — M3.7 fix
+        // round 1). The projection's own currentMode field is not the source
+        // of truth here.
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .pollInterval(Duration.ofMillis(50))
+                .until(() -> core.mode() == SubscriberMode.LIVE);
+        assertThat(core.mode()).isEqualTo(SubscriberMode.LIVE);
     }
 }

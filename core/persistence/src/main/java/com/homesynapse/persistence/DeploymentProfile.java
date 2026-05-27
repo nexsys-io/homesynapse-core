@@ -44,6 +44,7 @@ package com.homesynapse.persistence;
  *   <li>{@link #STUDIO} — Pi 4 / SD card / 4 GB RAM</li>
  *   <li>{@link #HOME} — Pi 5 / NVMe / 4–8 GB RAM (MVP default)</li>
  *   <li>{@link #PERFORMANCE} — x86 mini-PC / NVMe-SATA SSD / ≥16 GB RAM</li>
+ *   <li>{@link #TESTING} — M3.7 E2E test profile (1 read thread, Javalin 1/2)</li>
  * </ul>
  */
 public enum DeploymentProfile {
@@ -88,7 +89,28 @@ public enum DeploymentProfile {
      * 4 read threads (doubled vs. the constrained-I/O profiles),
      * Javalin pool 4/16 (doubled vs. HOME for bulk analytics + multi-client deployments).
      */
-    PERFORMANCE(65_536, 1_073_741_824L, 6_144_000L, 5_000L, LockingMode.NORMAL, 4, 4, 16);
+    PERFORMANCE(65_536, 1_073_741_824L, 6_144_000L, 5_000L, LockingMode.NORMAL, 4, 4, 16),
+
+    /**
+     * M3.7 E2E test profile — tight SQLite bounds for fast end-to-end test
+     * startup with a HOME-equivalent Javalin pool. Not intended for hardware
+     * deployment.
+     *
+     * <p>PRAGMA values: {@code cache_size=-2000} (2 MB),
+     * {@code mmap_size=33554432} (32 MB),
+     * {@code journal_size_limit=6144000} (6 MB, LTD-03 validated by D1 spike),
+     * {@code busy_timeout=5000} (5 s),
+     * {@code locking_mode=NORMAL},
+     * 1 read thread (single-test workload — one writer + one reader suffices),
+     * Javalin pool 2/8 (matches {@link #HOME} — Jetty's
+     * {@code QueuedThreadPool.doStart()} requires
+     * {@code minThreads >= acceptors + selectors + 1}; the original M3.7
+     * 1/2 sizing was below Jetty's floor on multi-core dev hosts and
+     * threw {@code IllegalStateException} at server bind).
+     *
+     * <p>Selected by {@code HomeSynapseConfig.testing()} (Research 3 REC-15).
+     */
+    TESTING(2_000, 33_554_432L, 6_144_000L, 5_000L, LockingMode.NORMAL, 1, 2, 8);
 
     private final int cacheSizeKiB;
     private final long mmapSizeBytes;

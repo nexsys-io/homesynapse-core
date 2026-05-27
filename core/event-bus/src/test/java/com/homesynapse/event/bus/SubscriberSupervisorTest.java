@@ -72,7 +72,7 @@ class SubscriberSupervisorTest {
 
     @BeforeEach
     void setUp() {
-        dlq = new SubscriberDlq(SUBSCRIBER_ID, PersistentDlqWriter.noop());
+        dlq = new SubscriberDlq(SUBSCRIBER_ID, PersistentDlqWriter.noop(), FIXED_CLOCK);
         supervisor = new SubscriberSupervisor(SUBSCRIBER_ID, FIXED_CLOCK, dlq);
         runtime = newRuntime(dlq, supervisor);
     }
@@ -111,7 +111,7 @@ class SubscriberSupervisorTest {
     @DisplayName("parked DeadLetter fields mirror envelope and exception identity")
     void deliver_runtimeException_deadLetterFieldsMatchEnvelope() {
         RecordingPersistentWriter writer = new RecordingPersistentWriter();
-        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer);
+        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer, FIXED_CLOCK);
         SubscriberSupervisor sup =
                 new SubscriberSupervisor(SUBSCRIBER_ID, FIXED_CLOCK, capturingDlq);
 
@@ -135,7 +135,7 @@ class SubscriberSupervisorTest {
     @DisplayName("sequenceKey is envelope.subjectRef().toString() — type-prefixed format")
     void deliver_runtimeException_sequenceKeyUsesSubjectRefToString() {
         RecordingPersistentWriter writer = new RecordingPersistentWriter();
-        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer);
+        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer, FIXED_CLOCK);
         SubscriberSupervisor sup =
                 new SubscriberSupervisor(SUBSCRIBER_ID, FIXED_CLOCK, capturingDlq);
 
@@ -153,7 +153,7 @@ class SubscriberSupervisorTest {
     @DisplayName("attemptCount is 1 — no retry loop activated yet")
     void deliver_runtimeException_attemptCountIsOne() {
         RecordingPersistentWriter writer = new RecordingPersistentWriter();
-        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer);
+        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer, FIXED_CLOCK);
         SubscriberSupervisor sup =
                 new SubscriberSupervisor(SUBSCRIBER_ID, FIXED_CLOCK, capturingDlq);
 
@@ -167,7 +167,7 @@ class SubscriberSupervisorTest {
     @DisplayName("null exception message is replaced by empty string for V002 NOT NULL column")
     void deliver_runtimeException_nullMessage_usesEmptyString() {
         RecordingPersistentWriter writer = new RecordingPersistentWriter();
-        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer);
+        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer, FIXED_CLOCK);
         SubscriberSupervisor sup =
                 new SubscriberSupervisor(SUBSCRIBER_ID, FIXED_CLOCK, capturingDlq);
 
@@ -186,7 +186,7 @@ class SubscriberSupervisorTest {
     @DisplayName("diagnostics is null — stack trace serialization is a future enhancement")
     void deliver_runtimeException_diagnosticsIsNull() {
         RecordingPersistentWriter writer = new RecordingPersistentWriter();
-        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer);
+        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer, FIXED_CLOCK);
         SubscriberSupervisor sup =
                 new SubscriberSupervisor(SUBSCRIBER_ID, FIXED_CLOCK, capturingDlq);
 
@@ -200,7 +200,7 @@ class SubscriberSupervisorTest {
     @DisplayName("dlqId is UNASSIGNED_DLQ_ID (0) — SQLite assigns the real id on persist")
     void deliver_runtimeException_dlqIdIsUnassigned() {
         RecordingPersistentWriter writer = new RecordingPersistentWriter();
-        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer);
+        SubscriberDlq capturingDlq = new SubscriberDlq(SUBSCRIBER_ID, writer, FIXED_CLOCK);
         SubscriberSupervisor sup =
                 new SubscriberSupervisor(SUBSCRIBER_ID, FIXED_CLOCK, capturingDlq);
 

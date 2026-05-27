@@ -38,9 +38,9 @@ final class DlqStatusEndpointTest {
     void returns200WithSubscriberDlqStatus() {
         StubBus bus = new StubBus(List.of(
                 new SubscriberSnapshot(
-                        "state_projection", SubscriberMode.LIVE, 100L, 0, 0),
+                        "state_projection", SubscriberMode.LIVE, 100L, 0, 0, null),
                 new SubscriberSnapshot(
-                        "automation", SubscriberMode.LIVE, 99L, 3, 1)));
+                        "automation", SubscriberMode.LIVE, 99L, 3, 1, null)));
         DlqStatusEndpoint endpoint = new DlqStatusEndpoint(bus);
         RecordingEndpointContext ctx = new RecordingEndpointContext();
 
@@ -69,7 +69,7 @@ final class DlqStatusEndpointTest {
     void respondsDuringReplay() {
         StubBus bus = new StubBus(List.of(
                 new SubscriberSnapshot(
-                        "state_projection", SubscriberMode.REPLAY, 50L, 0, 0)));
+                        "state_projection", SubscriberMode.REPLAY, 50L, 0, 0, null)));
         DlqStatusEndpoint endpoint = new DlqStatusEndpoint(bus);
         RecordingEndpointContext ctx = new RecordingEndpointContext();
 

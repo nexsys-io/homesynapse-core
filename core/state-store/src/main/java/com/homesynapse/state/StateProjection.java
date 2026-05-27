@@ -261,11 +261,15 @@ public final class StateProjection implements Subscriber {
     }
 
     /**
-     * Sets the subscriber's lifecycle mode. The bus's lifecycle code calls this
-     * during {@code COLD → REPLAY → TRANSITION → LIVE → SUSPENDED} transitions.
+     * Sets the subscriber's lifecycle mode. The bus invokes this immediately
+     * after each successful CAS on the runtime's authoritative mode reference
+     * (M3.7 fix round 4) — at {@code COLD → REPLAY}, {@code REPLAY → TRANSITION},
+     * {@code TRANSITION → LIVE}, and any transition to {@code SUSPENDED}. The
+     * resume path is intentionally NOT wired (pending bus VT-respawn fix).
      *
      * @param mode the new mode; never {@code null}
      */
+    @Override
     public void setMode(SubscriberMode mode) {
         Objects.requireNonNull(mode, "mode must not be null");
         currentMode.set(mode);

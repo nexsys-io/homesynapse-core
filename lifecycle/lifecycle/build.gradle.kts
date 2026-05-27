@@ -51,4 +51,10 @@ dependencies {
     // periodic task invocations within deterministic bounds. test-support
     // provides Awaitility-compatible helpers and the NoRealIoExtension.
     testImplementation(project(":testing:test-support"))
+
+    // M3.7 fix round 1: HomeSynapseCoreTest's
+    // mode_returnsLiveAfterProjectionCompletesReplay needs Awaitility polling
+    // to await the bus's COLD → REPLAY → TRANSITION → LIVE FSM without using
+    // System.nanoTime() (forbidden by D-04 / NO_DIRECT_TIME_ACCESS).
+    testImplementation(libs.awaitility)
 }
