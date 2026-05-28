@@ -46,7 +46,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DisplayName("SqliteStateStore")
 final class SqliteStateStoreTest {
 
-    private static final String VIEW_NAME = "entity_state";
+    private static final String VIEW_NAME = "state_projection";
 
     private static final Instant T0 = Instant.parse("2026-01-01T00:00:00Z");
     private static final Instant T1 = Instant.parse("2026-01-01T00:01:00Z");

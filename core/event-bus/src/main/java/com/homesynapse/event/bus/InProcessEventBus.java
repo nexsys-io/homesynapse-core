@@ -60,6 +60,7 @@ public final class InProcessEventBus implements EventBus {
     private final EventBusConfig config;
     private final int publisherBlockedDepthThreshold;
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+    private volatile boolean abandoned = false;
 
     /**
      * Passive subscriber registrations (subscribe() path — filter + optional callback).
@@ -181,6 +182,50 @@ public final class InProcessEventBus implements EventBus {
             if (runtime != null) {
                 runtime.close();
             }
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Abandons the event bus, releasing all OS-level resources held by
+     * subscriber runtimes (virtual threads, dedicated read connections,
+     * platform-thread read executors).
+     *
+     * <p>Each active subscriber's virtual thread is interrupted, its
+     * dedicated read connection is closed, and its DLQ and replay window
+     * queues are cleared. Both the active and passive registries are
+     * emptied.</p>
+     *
+     * <p>Use for crash simulation in tests and emergency shutdown in
+     * production (e.g., imminent power loss, OOM). Normal shutdown MUST use
+     * {@link #unsubscribe(String)} per subscriber.</p>
+     *
+     * <p>Do NOT use for normal shutdown — {@link #unsubscribe(String)}
+     * performs per-subscriber cleanup with proper lifecycle transitions.</p>
+     *
+     * <p>Idempotent. Safe to call after individual
+     * {@link #unsubscribe(String)} calls or after a previous
+     * {@code abandon()}.</p>
+     *
+     * @implNote No in-flight event delivery is drained. If the delivery
+     *           thread is mid-delivery (calling {@code subscriber.onEvent}),
+     *           the interrupt lands and the thread exits. The event was
+     *           already persisted (INV-ES-04), so it will be replayed on
+     *           restart. No checkpoint is updated.
+     */
+    public void abandon() {
+        if (abandoned) {
+            return;
+        }
+        rwLock.writeLock().lock();
+        try {
+            abandoned = true;
+            for (SubscriberRuntime runtime : activeRegistry.values()) {
+                runtime.close();
+            }
+            activeRegistry.clear();
+            passiveRegistry.clear();
         } finally {
             rwLock.writeLock().unlock();
         }

@@ -154,6 +154,17 @@ final class HomeSynapseE2eHarness implements AutoCloseable {
         core.stop();
     }
 
+    /**
+     * Abandons the underlying {@link HomeSynapseCore}, releasing OS-level
+     * resources without performing durability operations. Simulates
+     * {@code kill -9}.
+     *
+     * @see HomeSynapseCore#abandon()
+     */
+    void abandon() {
+        core.abandon();
+    }
+
     @Override
     public void close() {
         stop();

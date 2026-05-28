@@ -57,4 +57,10 @@ dependencies {
     // to await the bus's COLD → REPLAY → TRANSITION → LIVE FSM without using
     // System.nanoTime() (forbidden by D-04 / NO_DIRECT_TIME_ACCESS).
     testImplementation(libs.awaitility)
+
+    // M3.7 closeout: NotifyingEventPublisherTest extends MinimalEventBusStub
+    // (from event-bus testFixtures) instead of declaring its own inner-class
+    // EventBus stub. The base provides no-op subscribe/unsubscribe/notify;
+    // the test subclass adds notify recording.
+    testImplementation(testFixtures(project(":core:event-bus")))
 }

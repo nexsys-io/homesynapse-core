@@ -90,9 +90,10 @@ final class CrashRecoveryHttpIT {
                     .pollInterval(Duration.ofMillis(50))
                     .until(() -> preCrash.stateQueryService().getViewPosition() >= 2L);
         } finally {
-            // We intentionally do NOT call stop()/close() — the goal is to
-            // simulate kill -9: WAL not flushed, executors not shut down.
+            // Simulate kill -9: release OS handles (JDBC, HTTP socket, bus
+            // threads) but skip WAL checkpoint and projection checkpoint flush.
             // SQLite's WAL recovery on the next open is what we are asserting.
+            preCrash.abandon();
         }
 
         // Phase 2 — restart on the same dbPath.
@@ -101,12 +102,14 @@ final class CrashRecoveryHttpIT {
         try {
             LiveModeAwaiter.awaitLive(postCrash);
 
-            // The projection rebuilds from the persisted events. Wait until
-            // both entities are visible.
-            Awaitility.await()
-                    .atMost(Duration.ofSeconds(5))
-                    .pollInterval(Duration.ofMillis(50))
-                    .until(() -> postCrash.stateQueryService().getViewPosition() >= 2L);
+            // With FixedCheckpointPolicy.TESTING (N=1), every onEvent() in
+            // Phase 1 triggers a view checkpoint write. On restart, the
+            // fresh SqliteStateStore.loadFromCheckpoint() finds the
+            // checkpoint blob under "state_projection" and rehydrates the
+            // in-memory ConcurrentHashMap. The bus subscriber checkpoint
+            // (position 2) causes the bus to skip replay — no onEvent()
+            // calls reach the fresh StateProjection — but that's fine:
+            // state was recovered from the checkpoint blob, not from replay.
 
             HttpResponse<String> response = executeGet(
                     postCrash.baseUri().resolve("/api/v1/entities"));

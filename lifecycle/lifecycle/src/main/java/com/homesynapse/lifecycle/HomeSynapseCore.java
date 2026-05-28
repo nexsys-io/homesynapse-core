@@ -24,7 +24,6 @@ import com.homesynapse.persistence.PersistenceFactory;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.state.DerivationRule;
 import com.homesynapse.state.DerivedPublishGate;
-import com.homesynapse.state.FixedCheckpointPolicy;
 import com.homesynapse.state.ProjectionId;
 import com.homesynapse.state.ReadinessSource;
 import com.homesynapse.state.StateProjection;
@@ -164,6 +163,7 @@ public final class HomeSynapseCore implements ReadinessSource {
     /** M3.7 — decorator that bridges persist → bus notify (Finding 2). */
     private EventPublisher eventPublisher;
     private volatile boolean started = false;
+    private volatile boolean abandoned = false;
 
     /**
      * Constructs a new composition root.
@@ -255,7 +255,7 @@ public final class HomeSynapseCore implements ReadinessSource {
                 MINIMAL_DERIVATION_RULE,                   // M3.7 (closes OR-M3-17)
                 eventPublisher,                            // M3.7 (decorated — Finding 2)
                 projectionAdvancer,                        // M3.7 (closes OR-M3-18)
-                FixedCheckpointPolicy.HOME_DEFAULT,        // AMD-38
+                config.checkpointPolicy(),                 // AMD-38 (HOME_DEFAULT or TESTING)
                 clock,
                 publishGate);
 
@@ -382,7 +382,7 @@ public final class HomeSynapseCore implements ReadinessSource {
      * <p>Idempotent — repeated calls after the first are no-ops.</p>
      */
     public void stop() {
-        if (!started) {
+        if (!started || abandoned) {
             return;
         }
         started = false;
@@ -403,6 +403,65 @@ public final class HomeSynapseCore implements ReadinessSource {
             persistenceFactory.close();
         }
         LOG.info("HomeSynapseCore stopped: db={}", dbPath);
+    }
+
+    /**
+     * Abandons the runtime, releasing OS-level resources (JDBC connections,
+     * HTTP server socket, bus delivery threads, scheduler threads) without
+     * performing any durability operations.
+     *
+     * <p>Teardown order:</p>
+     * <ol>
+     *   <li>{@link Javalin#stop()} — releases the HTTP server socket.</li>
+     *   <li>{@link SharedScheduler#shutdown()} — interrupts timer tasks
+     *       (rate-limit refill, saturation tick) via the underlying
+     *       {@code ScheduledExecutorService.shutdownNow()} rather than
+     *       letting them complete.</li>
+     *   <li>{@link InProcessEventBus#abandon()} — interrupts all subscriber
+     *       delivery threads, closes per-subscriber read connections, clears
+     *       registries.</li>
+     *   <li>{@link PersistenceFactory#abandon()} — closes JDBC connections,
+     *       shuts down the database executor. WAL is NOT checkpointed.</li>
+     * </ol>
+     *
+     * <p>Use for crash simulation in tests and emergency shutdown in
+     * production (e.g., imminent power loss, OOM). Normal shutdown MUST use
+     * {@link #stop()}.</p>
+     *
+     * <p>Do NOT use for normal shutdown — {@link #stop()} performs WAL
+     * checkpoint, graceful subscriber unsubscription, and orderly executor
+     * shutdown.</p>
+     *
+     * <p>Idempotent. Calling this after {@link #stop()} is a no-op. Calling
+     * {@link #stop()} after this is a no-op.</p>
+     *
+     * @implNote Mutual exclusion with {@link #stop()} is enforced via the
+     *           {@code abandoned} flag. Both methods check it before acting.
+     *           INV-ES-04 is preserved: events already persisted survive
+     *           abandon; the replay mechanism re-processes the gap between
+     *           the last projection checkpoint and the event store head on
+     *           restart.
+     */
+    public void abandon() {
+        if (!started || abandoned) {
+            return;
+        }
+        abandoned = true;
+        started = false;
+
+        if (httpServer != null) {
+            httpServer.stop();
+        }
+        if (scheduler != null) {
+            scheduler.shutdown();
+        }
+        if (eventBus != null) {
+            eventBus.abandon();
+        }
+        if (persistenceFactory != null) {
+            persistenceFactory.abandon();
+        }
+        LOG.warn("HomeSynapseCore abandoned (ungraceful shutdown): db={}", dbPath);
     }
 
     /**

@@ -8,6 +8,8 @@ import com.homesynapse.event.bus.EventBusConfig;
 import com.homesynapse.persistence.DeploymentProfile;
 import com.homesynapse.persistence.PersistenceConfig;
 import com.homesynapse.persistence.RetentionPolicy;
+import com.homesynapse.state.CheckpointPolicy;
+import com.homesynapse.state.FixedCheckpointPolicy;
 
 import java.util.Objects;
 
@@ -31,22 +33,30 @@ import java.util.Objects;
  * {@code AutomationConfig}, {@code IntegrationRuntimeConfig}) will be added
  * as new record components. Adding a component is a source-incompatible
  * change to direct constructor callers but stays binary-compatible for
- * callers that go through {@link #HOME_DEFAULT}.</p>
+ * callers that go through {@link #HOME_DEFAULT}. As of M3.7 the record has
+ * four components: {@code persistence}, {@code eventBus}, {@code httpPort},
+ * and {@code checkpointPolicy}.</p>
  *
- * @param persistence persistence-layer configuration (deployment profile,
- *                    retention policy); never {@code null}
- * @param eventBus    event-bus configuration (replay queue capacity,
- *                    publisher-blocked depth threshold); never {@code null}
- * @param httpPort    embedded Javalin HTTP server port; {@code 0} requests an
- *                    ephemeral port (used by M3.7 E2E tests for parallel
- *                    execution); must be {@code >= 0}
+ * @param persistence      persistence-layer configuration (deployment profile,
+ *                         retention policy); never {@code null}
+ * @param eventBus         event-bus configuration (replay queue capacity,
+ *                         publisher-blocked depth threshold); never {@code null}
+ * @param httpPort         embedded Javalin HTTP server port; {@code 0} requests
+ *                         an ephemeral port (used by M3.7 E2E tests for
+ *                         parallel execution); must be {@code >= 0}
+ * @param checkpointPolicy checkpoint policy for the state projection;
+ *                         never {@code null}. Use
+ *                         {@link FixedCheckpointPolicy#HOME_DEFAULT} for
+ *                         production and {@link FixedCheckpointPolicy#TESTING}
+ *                         for tests.
  * @see PersistenceConfig
  * @see EventBusConfig
  */
 public record HomeSynapseConfig(
         PersistenceConfig persistence,
         EventBusConfig eventBus,
-        int httpPort) {
+        int httpPort,
+        CheckpointPolicy checkpointPolicy) {
 
     /**
      * Default configuration for the HOME deployment profile — pairs
@@ -57,19 +67,22 @@ public record HomeSynapseConfig(
     public static final HomeSynapseConfig HOME_DEFAULT = new HomeSynapseConfig(
             PersistenceConfig.HOME_DEFAULT,
             EventBusConfig.HOME_DEFAULT,
-            7070);
+            7070,
+            FixedCheckpointPolicy.HOME_DEFAULT);
 
     /**
      * Compact constructor validating non-null components and non-negative
      * {@code httpPort}.
      *
-     * @throws NullPointerException     if {@code persistence} or {@code eventBus}
-     *                                  is {@code null}
+     * @throws NullPointerException     if {@code persistence}, {@code eventBus},
+     *                                  or {@code checkpointPolicy} is
+     *                                  {@code null}
      * @throws IllegalArgumentException if {@code httpPort} is negative
      */
     public HomeSynapseConfig {
         Objects.requireNonNull(persistence, "persistence config must not be null");
         Objects.requireNonNull(eventBus, "eventBus config must not be null");
+        Objects.requireNonNull(checkpointPolicy, "checkpointPolicy must not be null");
         if (httpPort < 0) {
             throw new IllegalArgumentException(
                     "httpPort must be >= 0 (0 = ephemeral), got " + httpPort);
@@ -94,6 +107,7 @@ public record HomeSynapseConfig(
                         DeploymentProfile.TESTING,
                         RetentionPolicy.SOURCE_DEFAULT),
                 EventBusConfig.HOME_DEFAULT,
-                0);
+                0,
+                FixedCheckpointPolicy.TESTING);
     }
 }

@@ -6,14 +6,12 @@ package com.homesynapse.api.rest;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.homesynapse.event.bus.EventBus;
-import com.homesynapse.event.bus.SubscriberInfo;
 import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.event.bus.SubscriberSnapshot;
+import com.homesynapse.event.bus.test.MinimalEventBusStub;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -21,11 +19,11 @@ import org.junit.jupiter.api.Test;
 /**
  * Unit tests for {@link DlqStatusEndpoint}.
  *
- * <p>Uses a stub {@link EventBus} implementation that overrides only
- * {@link EventBus#subscribers()} (the single method the endpoint
- * consumes). The other interface methods inherit their default
- * {@code UnsupportedOperationException} bodies — the endpoint must not
- * touch them, and the test confirms this implicitly.</p>
+ * <p>Uses {@link MinimalEventBusStub} from {@code event-bus} testFixtures —
+ * the stub overrides {@link com.homesynapse.event.bus.EventBus#subscribers()
+ * subscribers()} via its snapshot-list constructor; the other interface
+ * methods inherit the stub's no-op defaults, and the endpoint must not
+ * touch them.</p>
  */
 @DisplayName("DlqStatusEndpoint")
 final class DlqStatusEndpointTest {
@@ -36,7 +34,7 @@ final class DlqStatusEndpointTest {
     @Test
     @DisplayName("returns 200 with one entry per registered subscriber")
     void returns200WithSubscriberDlqStatus() {
-        StubBus bus = new StubBus(List.of(
+        MinimalEventBusStub bus = new MinimalEventBusStub(List.of(
                 new SubscriberSnapshot(
                         "state_projection", SubscriberMode.LIVE, 100L, 0, 0, null),
                 new SubscriberSnapshot(
@@ -67,7 +65,7 @@ final class DlqStatusEndpointTest {
     @Test
     @DisplayName("responds 200 during REPLAY (not 503 — operational endpoint)")
     void respondsDuringReplay() {
-        StubBus bus = new StubBus(List.of(
+        MinimalEventBusStub bus = new MinimalEventBusStub(List.of(
                 new SubscriberSnapshot(
                         "state_projection", SubscriberMode.REPLAY, 50L, 0, 0, null)));
         DlqStatusEndpoint endpoint = new DlqStatusEndpoint(bus);
@@ -88,7 +86,7 @@ final class DlqStatusEndpointTest {
     @Test
     @DisplayName("returns empty subscribers array when no subscribers registered")
     void emptySubscribersArrayWhenNoneRegistered() {
-        StubBus bus = new StubBus(List.of());
+        MinimalEventBusStub bus = new MinimalEventBusStub(List.of());
         DlqStatusEndpoint endpoint = new DlqStatusEndpoint(bus);
         RecordingEndpointContext ctx = new RecordingEndpointContext();
 
@@ -100,43 +98,5 @@ final class DlqStatusEndpointTest {
         @SuppressWarnings("unchecked")
         List<Object> entries = (List<Object>) body.get("subscribers");
         assertThat(entries).isEmpty();
-    }
-
-    /**
-     * Minimal {@link EventBus} test double — overrides only the methods the
-     * endpoint actually calls. Other defaults stay at
-     * {@code UnsupportedOperationException}.
-     */
-    private static final class StubBus implements EventBus {
-        private final List<SubscriberSnapshot> snapshots;
-
-        StubBus(List<SubscriberSnapshot> snapshots) {
-            this.snapshots = Objects.requireNonNull(snapshots, "snapshots");
-        }
-
-        @Override
-        public List<SubscriberSnapshot> subscribers() {
-            return List.copyOf(snapshots);
-        }
-
-        @Override
-        public void subscribe(SubscriberInfo subscriber) {
-            throw new UnsupportedOperationException("subscribe");
-        }
-
-        @Override
-        public void unsubscribe(String subscriberId) {
-            throw new UnsupportedOperationException("unsubscribe");
-        }
-
-        @Override
-        public void notifyEvent(long globalPosition) {
-            throw new UnsupportedOperationException("notifyEvent");
-        }
-
-        @Override
-        public long subscriberPosition(String subscriberId) {
-            throw new UnsupportedOperationException("subscriberPosition");
-        }
     }
 }

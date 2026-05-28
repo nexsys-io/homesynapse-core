@@ -26,4 +26,9 @@ dependencies {
     // (LTD-15). Non-transitive — no SLF4J types appear in the rest-api
     // module's exported API.
     implementation(libs.slf4j.api)
+
+    // M3.7 closeout: DlqStatusEndpointTest uses MinimalEventBusStub from
+    // event-bus testFixtures instead of an inner-class StubBus, so a single
+    // canonical lightweight EventBus stub is shared across unit tests.
+    testImplementation(testFixtures(project(":core:event-bus")))
 }

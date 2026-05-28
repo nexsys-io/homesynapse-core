@@ -49,6 +49,22 @@ public record FixedCheckpointPolicy(
             new FixedCheckpointPolicy(200, Duration.ofSeconds(2));
 
     /**
+     * Aggressive checkpoint policy for the TESTING deployment profile.
+     *
+     * <p>Every event triggers a checkpoint ({@code eventThreshold = 1}).
+     * The time interval is set to 100 ms but is effectively irrelevant —
+     * the event threshold fires first in all practical test scenarios.
+     *
+     * <p>This policy ensures that view checkpoints are written
+     * deterministically after each event, regardless of clock behavior
+     * (including {@code Clock.fixed()}). Without it, tests using fewer
+     * than 200 events with a fixed clock never trigger a checkpoint,
+     * making crash-recovery and rehydration untestable.
+     */
+    public static final FixedCheckpointPolicy TESTING =
+            new FixedCheckpointPolicy(1, Duration.ofMillis(100));
+
+    /**
      * Validates the record components.
      *
      * @throws IllegalArgumentException if {@code eventThreshold <= 0} or

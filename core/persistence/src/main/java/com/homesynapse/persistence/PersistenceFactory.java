@@ -54,6 +54,7 @@ import java.util.function.IntSupplier;
 public final class PersistenceFactory implements AutoCloseable {
 
     private final SqlitePersistenceLifecycle lifecycle;
+    private volatile boolean abandoned = false;
 
     private PersistenceFactory(SqlitePersistenceLifecycle lifecycle) {
         this.lifecycle = lifecycle;
@@ -219,6 +220,40 @@ public final class PersistenceFactory implements AutoCloseable {
      */
     @Override
     public void close() {
+        if (abandoned) {
+            return;
+        }
         lifecycle.stop();
+    }
+
+    /**
+     * Abandons the persistence layer without performing a WAL checkpoint,
+     * releasing all OS-level resources (JDBC connections, executor threads).
+     *
+     * <p>The WAL and {@code -shm} files remain on disk; SQLite's automatic
+     * WAL recovery handles them on next open. All pending writes in the
+     * executor queue are discarded.</p>
+     *
+     * <p>Use for crash simulation in tests and emergency shutdown in
+     * production (e.g., imminent power loss, OOM). Normal shutdown MUST use
+     * {@link #close()}.</p>
+     *
+     * <p>Do NOT use for normal shutdown — {@link #close()} flushes the WAL
+     * via {@code PRAGMA wal_checkpoint(TRUNCATE)} before closing.</p>
+     *
+     * <p>Idempotent. Calling this after {@link #close()} is a no-op. Calling
+     * {@link #close()} after this is a no-op.</p>
+     *
+     * @implNote Mutual exclusion with {@link #close()} is enforced via the
+     *           {@code abandoned} flag. Both methods check it before acting.
+     *           INV-ES-04 is preserved: events already persisted survive
+     *           abandon and are replayed from the store on restart.
+     */
+    public void abandon() {
+        if (abandoned) {
+            return;
+        }
+        abandoned = true;
+        lifecycle.abandonWithoutCheckpoint();
     }
 }

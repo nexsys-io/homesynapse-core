@@ -16,8 +16,7 @@ import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.SubjectType;
-import com.homesynapse.event.bus.EventBus;
-import com.homesynapse.event.bus.SubscriberInfo;
+import com.homesynapse.event.bus.test.MinimalEventBusStub;
 import com.homesynapse.platform.identity.Ulid;
 
 import org.junit.jupiter.api.Test;
@@ -84,31 +83,22 @@ class NotifyingEventPublisherTest {
     }
 
     /**
-     * Recording bus that captures {@code notifyEvent} calls. All other
-     * {@link EventBus} methods throw {@link UnsupportedOperationException}.
+     * Recording bus that captures {@code notifyEvent} calls. Extends
+     * {@link MinimalEventBusStub} so subscribe/unsubscribe/subscriberPosition
+     * inherit the canonical no-op defaults; this class only adds the
+     * notify-recording behaviour the test asserts on.
      */
-    private static final class RecordingBus implements EventBus {
+    private static final class RecordingBus extends MinimalEventBusStub {
 
-        private final List<Long> notifiedPositions = new ArrayList<>();
+        final List<Long> notifiedPositions = new ArrayList<>();
+
+        RecordingBus() {
+            super();
+        }
 
         @Override
         public void notifyEvent(long globalPosition) {
             notifiedPositions.add(globalPosition);
-        }
-
-        @Override
-        public void subscribe(SubscriberInfo subscriber) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public void unsubscribe(String subscriberId) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public long subscriberPosition(String subscriberId) {
-            throw new UnsupportedOperationException();
         }
     }
 

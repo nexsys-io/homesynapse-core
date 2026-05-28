@@ -103,6 +103,7 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
     private SqliteDeadLetterStore deadLetterStore;
     private SqliteSubscriberReadConnectionFactory subscriberReadConnectionFactory;
     private volatile boolean started = false;
+    private volatile boolean abandoned = false;
 
     /**
      * Creates a new lifecycle manager for the persistence layer.
@@ -261,9 +262,13 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
                     new CheckpointSerializer(checkpointMapper);
 
             // 6. State store (in-memory map + checkpoint durability via the
-            //    view checkpoint store).
+            //    view checkpoint store). The viewName MUST match the
+            //    ProjectionId used by StateProjection when writing checkpoints
+            //    (HomeSynapseCore.PROJECTION_SUBSCRIBER_ID = "state_projection")
+            //    — otherwise rehydrate-from-checkpoint silently reads null and
+            //    crash recovery cannot restore state.
             stateStore = new SqliteStateStore(
-                    viewCheckpointStore, checkpointSerializer, "entity_state");
+                    viewCheckpointStore, checkpointSerializer, "state_projection");
 
             // 7. Dead-letter store (V002 subscriber_dead_letters table).
             deadLetterStore = new SqliteDeadLetterStore(databaseExecutor);
@@ -307,7 +312,7 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
      */
     @Override
     public void stop() {
-        if (!started) {
+        if (!started || abandoned) {
             return;
         }
 
@@ -336,6 +341,43 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
 
         started = false;
         LOG.info("Persistence layer stopped: database={}", databasePath);
+    }
+
+    /**
+     * Shuts down the persistence layer without performing a WAL checkpoint.
+     *
+     * <p>Releases OS-level resources: shuts down the {@link DatabaseExecutor}
+     * (which closes the write coordinator, read executor, and all JDBC
+     * connections). The WAL and {@code -shm} files remain on disk in
+     * whatever state they are; SQLite's automatic WAL recovery handles them
+     * on next open.</p>
+     *
+     * <p>Use for crash simulation in tests and emergency shutdown in
+     * production (e.g., imminent power loss). Normal shutdown MUST use
+     * {@link #stop()}.</p>
+     *
+     * <p>Do NOT use for normal shutdown — {@link #stop()} performs WAL
+     * checkpoint before closing, ensuring all data is in the main database
+     * file.</p>
+     *
+     * <p>Idempotent. Calling this after {@link #stop()} is a no-op. Calling
+     * {@link #stop()} after this is a no-op.</p>
+     *
+     * @implNote Mutual exclusion with {@link #stop()} is enforced via the
+     *           {@code abandoned} flag. Both methods check it before acting.
+     *           INV-ES-04 is preserved: events already persisted survive
+     *           abandon; the replay mechanism re-processes the gap between
+     *           the last projection checkpoint and the event store head.
+     */
+    void abandonWithoutCheckpoint() {
+        if (!started || abandoned) {
+            return;
+        }
+        abandoned = true;
+        started = false;
+        databaseExecutor.shutdown();
+        LOG.warn("Persistence layer abandoned (no WAL checkpoint): database={}",
+                databasePath);
     }
 
     /**
