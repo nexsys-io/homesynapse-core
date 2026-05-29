@@ -214,6 +214,41 @@ final class SqliteStateStoreTest {
     }
 
     @Test
+    @DisplayName("M4.0a: serializeCheckpoint(version, reconciledAt, from, to) embeds reconciliation metadata")
+    void serializeCheckpointEmbedsReconciliationMetadata() {
+        SqliteStateStore store = new SqliteStateStore(checkpointStore, serializer, VIEW_NAME);
+        store.put(ENT_A, entityWithAttrs(ENT_A,
+                Map.of("on", new StringValue("true")), Availability.AVAILABLE,
+                1L, T0, T0, T0, null, false));
+
+        // OR-M3-13: the reconciliation-aware overload threads the 1 -> 2
+        // transition metadata into the data slot instead of writing null,null,null.
+        byte[] bytes = store.serializeCheckpoint(2, T1, 1, 2);
+        CheckpointData parsed = serializer.deserialize(bytes);
+
+        assertThat(parsed.projectionVersion()).isEqualTo(2);
+        assertThat(parsed.reconciledToVersion())
+                .as("reconciledToVersion is recorded (M4.0b's backfill gate binds to this)")
+                .isEqualTo(2);
+        assertThat(parsed.reconciledFromVersion()).isEqualTo(1);
+        assertThat(parsed.reconciledAt()).isEqualTo(T1);
+    }
+
+    @Test
+    @DisplayName("M4.0a: 1-arg serializeCheckpoint still writes null reconciliation metadata")
+    void serializeCheckpointOneArgWritesNullMetadata() {
+        SqliteStateStore store = new SqliteStateStore(checkpointStore, serializer, VIEW_NAME);
+        store.put(ENT_A, entityWithAttrs(ENT_A, Map.of(), Availability.AVAILABLE,
+                1L, T0, T0, T0, null, false));
+
+        CheckpointData parsed = serializer.deserialize(store.serializeCheckpoint(2));
+
+        assertThat(parsed.reconciledAt()).isNull();
+        assertThat(parsed.reconciledFromVersion()).isNull();
+        assertThat(parsed.reconciledToVersion()).isNull();
+    }
+
+    @Test
     @DisplayName("crash recovery: serialize -> write checkpoint -> reload restores state")
     void crashRecoveryEndToEnd() {
         // Phase 1: live store, three entities, checkpoint flushed.
@@ -302,6 +337,9 @@ final class SqliteStateStoreTest {
                     viewName, position, copy, T0, 1));
         }
 
+        // Record-mechanics round-trip of the deprecated sentinel accessor
+        // (REC-82) — not a reconciliation read, so suppress the deprecation.
+        @SuppressWarnings("deprecation")
         @Override
         public Optional<CheckpointRecord> readLatestCheckpoint(String viewName) {
             CheckpointRecord r = records.get(viewName);

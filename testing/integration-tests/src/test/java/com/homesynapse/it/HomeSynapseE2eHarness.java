@@ -78,12 +78,38 @@ final class HomeSynapseE2eHarness implements AutoCloseable {
      * @return a started harness ready for HTTP queries and event publication
      */
     static HomeSynapseE2eHarness start(Path dbPath, Clock clock, HomeId homeId) {
+        return start(dbPath, clock, homeId, HomeSynapseConfig.testing());
+    }
+
+    /**
+     * Constructs and starts a fresh E2E test stack with an explicit
+     * {@link HomeSynapseConfig}.
+     *
+     * <p>Used by tests that need a non-default checkpoint policy — e.g.
+     * {@code CrashRecoveryHttpIT}'s AMD-45 §3 scenario pairs the
+     * {@code DeploymentProfile.TESTING} (fast startup, ephemeral port 0) with
+     * {@code FixedCheckpointPolicy.HOME_DEFAULT} (200 events / 2 s) so that,
+     * with a sub-2 s fixed clock and fewer than 200 events, NO checkpoint fires
+     * before the crash — reproducing the no-checkpoint replay-from-zero case the
+     * coupled-checkpoint fix targets.</p>
+     *
+     * <p>The same platform-thread requirement applies (LTD-19 / DECIDE-M2-05).</p>
+     *
+     * @param dbPath the SQLite database file path; never {@code null}
+     * @param clock  injected clock; never {@code null}
+     * @param homeId home identity for this installation (AMD-34); never {@code null}
+     * @param config the full runtime configuration; never {@code null}. The HTTP
+     *               port should be {@code 0} (ephemeral) for parallel-safe tests.
+     * @return a started harness ready for HTTP queries and event publication
+     */
+    static HomeSynapseE2eHarness start(Path dbPath, Clock clock, HomeId homeId,
+                                       HomeSynapseConfig config) {
         Objects.requireNonNull(dbPath, "dbPath");
         Objects.requireNonNull(clock, "clock");
         Objects.requireNonNull(homeId, "homeId");
+        Objects.requireNonNull(config, "config");
 
-        HomeSynapseCore core = new HomeSynapseCore(
-                dbPath, HomeSynapseConfig.testing(), clock, homeId);
+        HomeSynapseCore core = new HomeSynapseCore(dbPath, config, clock, homeId);
         core.start().join();
         return new HomeSynapseE2eHarness(core);
     }

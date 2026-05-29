@@ -27,13 +27,17 @@ import java.time.Instant;
  * same checkpoint infrastructure. The State Store uses {@code "entity_state"} as its
  * view name. Future projections (e.g., energy analytics) use different view names.</p>
  *
- * <h2>Projection Version</h2>
+ * <h2>Projection Version — sentinel, NOT authoritative (REC-82)</h2>
  *
- * <p>The {@code projectionVersion} field enables version-aware checkpoint invalidation.
- * When the projection logic changes in a way that alters the materialized state
- * structure, the projection version is incremented. On startup, if the stored
- * checkpoint's projection version does not match the running code's version, the
- * checkpoint is discarded and a full replay is performed.</p>
+ * <p><b>Do not use {@link #projectionVersion()} for reconciliation decisions.</b>
+ * Both {@code ViewCheckpointStore} implementations
+ * ({@code InMemoryViewCheckpointStore} and {@code SqliteViewCheckpointStore})
+ * hardcode this field to the sentinel value {@code 1}. The authoritative
+ * projection version lives inside the opaque {@code data} blob and is recovered
+ * via {@link StateCheckpointSource#loadedProjectionVersion()} (AMD-41 §3.2.4).
+ * {@code StateProjection.initialize()} reconciles against that loaded value, not
+ * this field. The accessor is {@code @Deprecated} so a future caller cannot
+ * silently bind to the sentinel.</p>
  *
  * <p>Defined in Doc 03 §8.3.</p>
  *
@@ -43,8 +47,11 @@ import java.time.Instant;
  * @param data the opaque serialized checkpoint content, never {@code null}
  * @param writtenAt the wall-clock time when this checkpoint was written, never {@code null}
  * @param projectionVersion the version of the projection logic that produced this
- *        checkpoint, used for version-aware invalidation
+ *        checkpoint. <b>Sentinel only</b> — hardcoded to {@code 1} by all store
+ *        implementations; the real version is in {@code data}. See
+ *        {@link #projectionVersion()}.
  * @see ViewCheckpointStore
+ * @see StateCheckpointSource#loadedProjectionVersion()
  * @see StateStoreLifecycle
  * @since 1.0
  */
@@ -54,4 +61,25 @@ public record CheckpointRecord(
         byte[] data,
         Instant writtenAt,
         int projectionVersion
-) { }
+) {
+
+    /**
+     * Returns the stored projection-version field.
+     *
+     * @deprecated This is a sentinel hardcoded to {@code 1} by every
+     *             {@link ViewCheckpointStore} implementation — it is NOT the
+     *             authoritative projection version and MUST NOT be used for the
+     *             reconciliation version-mismatch check (REC-82, AMD-41 §3.2.4).
+     *             The real version lives in the checkpoint {@code data} blob; use
+     *             {@link StateCheckpointSource#loadedProjectionVersion()} instead.
+     *             This accessor remains only for record-mechanics callers (the
+     *             contract test that asserts the sentinel invariant and the store
+     *             implementations that round-trip the record).
+     * @return the stored sentinel projection version (always {@code 1} in
+     *         practice)
+     */
+    @Deprecated
+    public int projectionVersion() {
+        return projectionVersion;
+    }
+}

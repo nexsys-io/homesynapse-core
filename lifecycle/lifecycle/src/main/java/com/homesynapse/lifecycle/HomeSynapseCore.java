@@ -134,10 +134,14 @@ public final class HomeSynapseCore implements ReadinessSource {
      *
      * <p>The empty-derivation path IS the M3.7 closure of the placeholder.
      * {@code StateProjection.applyToState} already handles the core
-     * materialization path (state_reported → state map update);
-     * {@link DerivationRule} is the hook for emitting additional
+     * materialization path: on {@code state_reported} the {@code EntityState}
+     * record is replaced (its version and timestamps advance) but the
+     * {@code attributes} map is NOT touched — only {@code state_changed}
+     * updates {@code attributes}.
+     * {@link DerivationRule} is the hook for emitting those additional
      * {@code state_changed} events whose primary consumer (the automation
-     * engine) is M5 scope. The full M4.0 replacement
+     * engine) is M7/M8 scope (M5 is the Platform API). The full M4.0
+     * replacement
      * ({@code DispatchingProjectionAdvancer} per Research 8 REC-28) will
      * dispatch derivation through the {@code @EventType} registry.</p>
      */
@@ -251,6 +255,7 @@ public final class HomeSynapseCore implements ReadinessSource {
                 1,
                 persistenceFactory.viewCheckpointStore(),
                 persistenceFactory.stateCheckpointSource(),
+                persistenceFactory.atomicCheckpointSink(), // AMD-45 §2.1 (coupled checkpoint)
                 persistenceFactory.stateStore(),
                 MINIMAL_DERIVATION_RULE,                   // M3.7 (closes OR-M3-17)
                 eventPublisher,                            // M3.7 (decorated — Finding 2)
@@ -259,11 +264,16 @@ public final class HomeSynapseCore implements ReadinessSource {
                 clock,
                 publishGate);
 
-        // Step 7 — Subscribe the projection (coalesceExempt — Doc 01 §3.6).
+        // Step 7 — Subscribe the projection. coalesceExempt=true (Doc 01 §3.6 —
+        // skipping intermediate events would lose state transitions);
+        // atomicCheckpoint=true (AMD-45 §2.2 Option A — the bus must NOT write
+        // the per-delivery subscriber checkpoint, because the projection writes
+        // the coupled subscriber+view checkpoint atomically on policy cadence).
         SubscriberInfo projectionInfo = new SubscriberInfo(
                 PROJECTION_SUBSCRIBER_ID,
                 SubscriptionFilter.all(),
-                true);
+                true,   // coalesceExempt
+                true);  // atomicCheckpoint (AMD-45)
         eventBus.subscribeRuntime(projectionInfo, stateProjection);
 
         // Step 8 — Health signal handler. SLF4J bridge for now; the real

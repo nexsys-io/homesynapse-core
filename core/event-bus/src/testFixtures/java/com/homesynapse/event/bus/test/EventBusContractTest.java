@@ -1223,6 +1223,57 @@ public abstract class EventBusContractTest {
         }
 
         @Test
+        @DisplayName("AMD-45-INV-01: REPLAY does NOT advance the bus subscriber checkpoint for atomicCheckpoint subscribers")
+        void replayDoesNotAdvanceBusCheckpointForAtomicCheckpointSubscriber()
+                throws InterruptedException, SequenceConflictException {
+            // Seed > CHECKPOINT_EVENT_THRESHOLD (200) events so REPLAY crosses BOTH
+            // the periodic AMD-38-cadence write AND the final tail write in
+            // ReplayDriver. 201 events => positions 1..201.
+            int count = 201;
+            EventEnvelope last = null;
+            for (int i = 0; i < count; i++) {
+                last = publisher().publishRoot(TestEventFactory.draft());
+            }
+            long tailPosition = last.globalPosition();
+
+            Subscriber noOp = env -> { };
+
+            // Control — a NON-atomic subscriber. The bus MUST advance its checkpoint
+            // during REPLAY. This proves the 201-event REPLAY actually crosses the
+            // threshold, so the atomic-subscriber assertion below is not vacuous.
+            bus().subscribeRuntime(
+                    new SubscriberInfo("plain-replay-sub", SubscriptionFilter.all(),
+                            false, false),
+                    noOp);
+            awaitMode("plain-replay-sub", SubscriberMode.LIVE);
+
+            // Subject under test — an atomicCheckpoint subscriber (AMD-45 §2.2). The
+            // bus MUST NOT write its subscriber checkpoint during REPLAY: the
+            // projection writes the coupled subscriber+view checkpoint via
+            // AtomicCheckpointSink, so a bus-side uncoupled write would advance the
+            // subscriber position ahead of the view snapshot and reopen the
+            // mid-REPLAY crash window AMD-45-INV-01 forbids. Without the ReplayDriver
+            // gate (lines 157 + 186), the bus would advance this row to the
+            // threshold/tail position and THIS TEST WOULD FAIL.
+            bus().subscribeRuntime(
+                    new SubscriberInfo("atomic-replay-sub", SubscriptionFilter.all(),
+                            false, true),
+                    noOp);
+            awaitMode("atomic-replay-sub", SubscriberMode.LIVE);
+
+            assertThat(checkpointStore().readCheckpoint("plain-replay-sub"))
+                    .as("control: the bus advances a NON-atomic subscriber's checkpoint "
+                            + "past the AMD-38 threshold during REPLAY")
+                    .isEqualTo(tailPosition);
+            assertThat(checkpointStore().readCheckpoint("atomic-replay-sub"))
+                    .as("AMD-45-INV-01: the bus must NOT write the subscriber checkpoint "
+                            + "during REPLAY for an atomicCheckpoint subscriber — the "
+                            + "coupled AtomicCheckpointSink is the sole writer "
+                            + "(this assertion fails without the ReplayDriver gate)")
+                    .isEqualTo(0L);
+        }
+
+        @Test
         @DisplayName("transition drains replay window queue")
         void transitionDrainsReplayWindowQueue()
                 throws InterruptedException, SequenceConflictException {

@@ -42,9 +42,9 @@ class SubscriberInfoTest {
         }
 
         @Test
-        @DisplayName("exactly 3 record components")
-        void exactlyThreeFields() {
-            assertThat(SubscriberInfo.class.getRecordComponents()).hasSize(3);
+        @DisplayName("exactly 4 record components (atomicCheckpoint added — AMD-45 §2.2)")
+        void exactlyFourFields() {
+            assertThat(SubscriberInfo.class.getRecordComponents()).hasSize(4);
         }
 
         @Test
@@ -57,6 +57,36 @@ class SubscriberInfoTest {
 
             assertThat(coalesceComponent).isPresent();
             assertThat(coalesceComponent.get().getType()).isEqualTo(boolean.class);
+        }
+
+        @Test
+        @DisplayName("atomicCheckpoint field exists and is boolean (AMD-45 §2.2)")
+        void atomicCheckpointIsBoolean() {
+            var components = SubscriberInfo.class.getRecordComponents();
+            var atomicComponent = java.util.Arrays.stream(components)
+                    .filter(c -> "atomicCheckpoint".equals(c.getName()))
+                    .findFirst();
+
+            assertThat(atomicComponent).isPresent();
+            assertThat(atomicComponent.get().getType()).isEqualTo(boolean.class);
+        }
+
+        @Test
+        @DisplayName("4-arg constructor sets atomicCheckpoint")
+        void atomicCheckpointAccessible() {
+            var info = new SubscriberInfo("state_projection", ALL_FILTER, true, true);
+
+            assertThat(info.atomicCheckpoint()).isTrue();
+        }
+
+        @Test
+        @DisplayName("3-arg convenience constructor defaults atomicCheckpoint to false")
+        void threeArgConstructorDefaultsAtomicCheckpointFalse() {
+            var info = new SubscriberInfo("websocket_streamer", ALL_FILTER, false);
+
+            assertThat(info.atomicCheckpoint())
+                    .as("existing subscribers retain pre-AMD-45 per-delivery checkpointing")
+                    .isFalse();
         }
 
         @Test
@@ -164,6 +194,15 @@ class SubscriberInfoTest {
         void differentCoalesceExempt() {
             var a = new SubscriberInfo("test", ALL_FILTER, true);
             var b = new SubscriberInfo("test", ALL_FILTER, false);
+
+            assertThat(a).isNotEqualTo(b);
+        }
+
+        @Test
+        @DisplayName("infos differing in atomicCheckpoint are not equal (AMD-45 §2.2)")
+        void differentAtomicCheckpoint() {
+            var a = new SubscriberInfo("test", ALL_FILTER, true, true);
+            var b = new SubscriberInfo("test", ALL_FILTER, true, false);
 
             assertThat(a).isNotEqualTo(b);
         }

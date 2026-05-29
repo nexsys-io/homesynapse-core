@@ -30,6 +30,16 @@ import java.util.Objects;
  *                       because skipping intermediate events would cause missed state
  *                       transitions or missed confirmation matches. Most subscribers
  *                       should use {@code false}.
+ * @param atomicCheckpoint {@code true} if this subscriber's checkpoint is written
+ *                       atomically with its materialized view (AMD-45 §2.2 Option A).
+ *                       When {@code true}, the bus SKIPS the per-delivery
+ *                       {@code subscriber_checkpoints} write — the subscriber (e.g. the
+ *                       State Projection) writes the coupled subscriber+view checkpoint
+ *                       on its own policy cadence via {@code AtomicCheckpointSink},
+ *                       closing the crash window AMD-45 §1 describes. Most subscribers
+ *                       use {@code false} and rely on the bus's per-delivery checkpoint.
+ *                       Mirrors the established per-subscriber-flag pattern of
+ *                       {@code coalesceExempt}.
  * @see EventBus#subscribe(SubscriberInfo)
  * @see SubscriptionFilter
  * @see CheckpointStore
@@ -39,7 +49,8 @@ import java.util.Objects;
 public record SubscriberInfo(
         String subscriberId,
         SubscriptionFilter filter,
-        boolean coalesceExempt
+        boolean coalesceExempt,
+        boolean atomicCheckpoint
 ) {
 
     /**
@@ -55,5 +66,20 @@ public record SubscriberInfo(
         if (subscriberId.isBlank()) {
             throw new IllegalArgumentException("subscriberId must not be blank");
         }
+    }
+
+    /**
+     * Backward-compatible convenience constructor for subscribers that use the
+     * bus's per-delivery checkpoint (the common case). Delegates to the
+     * canonical constructor with {@code atomicCheckpoint = false} (AMD-45 §2.2
+     * — existing subscribers retain pre-AMD-45 behavior).
+     *
+     * @param subscriberId   stable subscriber identifier; never {@code null} or blank
+     * @param filter         the subscription filter; never {@code null}
+     * @param coalesceExempt whether this subscriber is exempt from coalescing
+     */
+    public SubscriberInfo(String subscriberId, SubscriptionFilter filter,
+                          boolean coalesceExempt) {
+        this(subscriberId, filter, coalesceExempt, false);
     }
 }

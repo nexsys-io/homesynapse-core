@@ -58,11 +58,15 @@ class InMemoryStateProjectionTest extends StateProjectionContractTest {
             Clock clock,
             DerivedPublishGate publishGate) {
         // Construct a SelfProducedFilter with the production default TTL.
+        // The in-memory deployment has no coupled subscriber checkpoint, so the
+        // atomic sink writes through the same ViewCheckpointStore (AMD-45 —
+        // view-only path; the coupling invariant is trivially satisfied).
         return new StateProjection(
                 projectionId,
                 projectionVersion,
                 checkpointStore,
                 checkpointSource,
+                AtomicCheckpointSink.viewOnly(checkpointStore),
                 stateStore,
                 rule,
                 publisher,

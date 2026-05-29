@@ -83,6 +83,7 @@ class StateProjectionVerticalIT {
                 1,
                 viewCheckpointStore,
                 StateCheckpointSource.stub(),
+                AtomicCheckpointSink.viewOnly(viewCheckpointStore),
                 stateStore,
                 rule,
                 eventStore,

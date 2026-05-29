@@ -157,6 +157,7 @@ public final class StateProjection implements Subscriber {
     private final int projectionVersion;
     private final ViewCheckpointStore checkpointStore;
     private final StateCheckpointSource checkpointSource;
+    private final AtomicCheckpointSink checkpointSink;
     private final StateStore stateStore;
     private final DerivationRule rule;
     private final EventPublisher publisher;
@@ -177,6 +178,23 @@ public final class StateProjection implements Subscriber {
     private long eventsSinceCheckpoint;
     private Instant lastCheckpointAt;
 
+    // Reconciliation metadata (AMD-41 §3.2.4, OR-M3-13). Set during
+    // initialize() when a version-mismatch reconciliation fires; threaded into
+    // every subsequent checkpoint write so the transition is recorded in the
+    // checkpoint data slot. reconciledToVersion is a downstream dependency:
+    // M4.0b's backfill gate binds to it. Null until a reconciliation occurs.
+    private Instant reconciledAt;
+    private Integer reconciledFromVersion;
+    private Integer reconciledToVersion;
+
+    // REC-80 replay-duration metric. replayStartedAt is stamped at the first
+    // initialize(); eventsReplayed counts processed events; both are read at
+    // onCaughtUp() (the REPLAY -> LIVE signal, AMD-42 §3.4.3) to emit the
+    // projection.replay.duration_ms / events_replayed measurement that later
+    // feeds the AMD-41 §3.2.3 5 s full-replay decision.
+    private Instant replayStartedAt;
+    private long eventsReplayed;
+
     /**
      * Public factory for production wiring. Creates a {@link SelfProducedFilter}
      * with the default 60-second TTL internally.
@@ -194,6 +212,13 @@ public final class StateProjection implements Subscriber {
      *                          {@link StateCheckpointSource#stub()} when
      *                          checkpoint persistence is not needed (tests,
      *                          in-memory deployments).
+     * @param checkpointSink    atomic subscriber+view checkpoint sink (AMD-45);
+     *                          checkpoint writes route through this so the bus
+     *                          subscriber position and the view snapshot advance
+     *                          in a single transaction. Never {@code null}. Pass
+     *                          {@link AtomicCheckpointSink#viewOnly(ViewCheckpointStore)}
+     *                          for in-memory deployments with no coupled
+     *                          subscriber checkpoint.
      * @param stateStore        port for materialized state; never {@code null}
      * @param rule              derivation strategy; never {@code null}
      * @param publisher         event publisher for derived events; never {@code null}
@@ -210,6 +235,7 @@ public final class StateProjection implements Subscriber {
             int projectionVersion,
             ViewCheckpointStore checkpointStore,
             StateCheckpointSource checkpointSource,
+            AtomicCheckpointSink checkpointSink,
             StateStore stateStore,
             DerivationRule rule,
             EventPublisher publisher,
@@ -220,8 +246,8 @@ public final class StateProjection implements Subscriber {
         Objects.requireNonNull(clock, "clock must not be null");
         return new StateProjection(
                 projectionId, projectionVersion, checkpointStore, checkpointSource,
-                stateStore, rule, publisher, advancer, checkpointPolicy, clock,
-                publishGate,
+                checkpointSink, stateStore, rule, publisher, advancer,
+                checkpointPolicy, clock, publishGate,
                 new SelfProducedFilter(clock, SelfProducedFilter.DEFAULT_TTL));
     }
 
@@ -234,6 +260,7 @@ public final class StateProjection implements Subscriber {
             int projectionVersion,
             ViewCheckpointStore checkpointStore,
             StateCheckpointSource checkpointSource,
+            AtomicCheckpointSink checkpointSink,
             StateStore stateStore,
             DerivationRule rule,
             EventPublisher publisher,
@@ -250,6 +277,7 @@ public final class StateProjection implements Subscriber {
         this.projectionVersion = projectionVersion;
         this.checkpointStore = Objects.requireNonNull(checkpointStore, "checkpointStore");
         this.checkpointSource = Objects.requireNonNull(checkpointSource, "checkpointSource");
+        this.checkpointSink = Objects.requireNonNull(checkpointSink, "checkpointSink");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.rule = Objects.requireNonNull(rule, "rule");
         this.publisher = Objects.requireNonNull(publisher, "publisher");
@@ -424,8 +452,18 @@ public final class StateProjection implements Subscriber {
     @Override
     public void onCaughtUp() {
         if (caughtUpFired.compareAndSet(false, true)) {
-            log.info("StateProjection {} caught up at position {}",
-                    projectionId.value(), cursorPosition);
+            // REC-80: emit the replay-duration metric at the REPLAY -> LIVE
+            // signal. State-store has no metrics facade (the bus uses JFR via a
+            // dependency state-store does not carry), so the canonical metric
+            // names are emitted as structured SLF4J fields per LTD-15 — this is
+            // the measurement hook that later feeds the AMD-41 §3.2.3 5 s
+            // full-replay-on-Pi decision (no SqliteSnapshotStore work here).
+            long durationMs = (replayStartedAt != null)
+                    ? Math.max(0L, Duration.between(replayStartedAt, clock.instant()).toMillis())
+                    : 0L;
+            log.info("StateProjection {} caught up at position {}; "
+                            + "projection.replay.duration_ms={} events_replayed={}",
+                    projectionId.value(), cursorPosition, durationMs, eventsReplayed);
         }
     }
 
@@ -564,6 +602,12 @@ public final class StateProjection implements Subscriber {
                             projectionVersion);
                     stateStore.clear();
                     cursorPosition = 0L;
+                    // OR-M3-13 / AMD-41 §3.2.4: record the version transition so
+                    // the next checkpoint write persists it in the data slot.
+                    // reconciledToVersion is what M4.0b's backfill gate binds to.
+                    reconciledFromVersion = persistedVersion;
+                    reconciledToVersion = projectionVersion;
+                    reconciledAt = clock.instant();
                 }
             } else {
                 cursorPosition = record.position();
@@ -573,12 +617,16 @@ public final class StateProjection implements Subscriber {
         }
         lastCheckpointAt = clock.instant();
         eventsSinceCheckpoint = 0L;
+        // REC-80: stamp the replay-window start. eventsReplayed accumulates as
+        // events are processed; both are read at onCaughtUp().
+        replayStartedAt = clock.instant();
         initialized = true;
     }
 
     private void advanceCheckpointCadence(long globalPosition) {
         cursorPosition = Math.max(cursorPosition, globalPosition);
         eventsSinceCheckpoint++;
+        eventsReplayed++; // REC-80: total events processed (snapshotted at onCaughtUp)
         Instant now = clock.instant();
         Duration since = (lastCheckpointAt != null)
                 ? Duration.between(lastCheckpointAt, now)
@@ -589,13 +637,22 @@ public final class StateProjection implements Subscriber {
     }
 
     private void writeCheckpoint(Instant now) {
-        byte[] data = checkpointSource.serializeCheckpoint(projectionVersion);
+        // AMD-41 §3.2.4 / OR-M3-13: thread the reconciliation metadata into the
+        // serialized payload. The fields are null until a version-mismatch
+        // reconciliation fires (see initialize()); once set, every subsequent
+        // checkpoint records the transition.
+        byte[] data = checkpointSource.serializeCheckpoint(
+                projectionVersion, reconciledAt, reconciledFromVersion, reconciledToVersion);
         if (data.length > CHECKPOINT_SIZE_WARN_BYTES) {
             log.warn("Checkpoint data for {} is {} bytes — consider reducing "
                             + "entity count or attribute density",
                     projectionId.value(), data.length);
         }
-        checkpointStore.writeCheckpoint(projectionId.value(), cursorPosition, data);
+        // AMD-45 §2.1: write the subscriber checkpoint and the view checkpoint
+        // atomically (one SQLite transaction). The bus's per-delivery subscriber
+        // checkpoint write is suppressed for this subscriber (atomicCheckpoint),
+        // so the projection is the sole writer of the coupled position.
+        checkpointSink.writeAtomicCheckpoint(projectionId.value(), cursorPosition, data);
         eventsSinceCheckpoint = 0L;
         lastCheckpointAt = now;
     }

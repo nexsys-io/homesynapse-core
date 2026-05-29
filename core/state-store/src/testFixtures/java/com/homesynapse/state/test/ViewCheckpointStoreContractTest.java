@@ -117,6 +117,10 @@ public abstract class ViewCheckpointStoreContractTest {
      * Verifies basic write-then-read round trip: writing a checkpoint and reading
      * it back returns a {@link CheckpointRecord} with all 5 fields matching.
      */
+    // Asserts the sentinel invariant on the deprecated projectionVersion()
+    // accessor (REC-82) — a legitimate record-mechanics assertion, not a
+    // reconciliation read, so the deprecation is suppressed here.
+    @SuppressWarnings("deprecation")
     @Test
     @DisplayName("writeCheckpoint then readLatestCheckpoint returns matching record")
     void writeCheckpoint_thenRead_returnsMatchingRecord() {

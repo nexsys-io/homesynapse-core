@@ -4,6 +4,8 @@
  */
 package com.homesynapse.state;
 
+import java.time.Instant;
+
 /**
  * Injection seam for projection checkpoint data serialization and projection
  * version recovery (AMD-41 §3.2.3–3.2.4).
@@ -77,6 +79,44 @@ public interface StateCheckpointSource {
      * @return serialized checkpoint data; never {@code null}
      */
     byte[] serializeCheckpoint(int projectionVersion);
+
+    /**
+     * Reconciliation-aware serialization overload (M4.0a, AMD-41 §3.2.4).
+     *
+     * <p>Called by {@link StateProjection} at checkpoint cadence. When the
+     * projection has run a reconciliation pass (a {@code persistedVersion !=
+     * projectionVersion} transition — e.g. the 1&rarr;2 transition M4.0b's
+     * backfill triggers), it threads the transition metadata through this
+     * overload so production implementations can embed it in the serialized
+     * payload. The recorded {@code reconciledToVersion} is a downstream
+     * dependency: M4.0b's backfill gate binds to it (folds OR-M3-13).</p>
+     *
+     * <p>The default delegates to {@link #serializeCheckpoint(int)},
+     * discarding the metadata. This preserves backward compatibility with
+     * in-memory fixtures and stubs that have nothing to persist — only the
+     * persistence-backed implementation overrides it to populate the
+     * {@code reconciledAt}/{@code reconciledFromVersion}/{@code reconciledToVersion}
+     * fields that {@code CheckpointData} and {@code CheckpointSerializer}
+     * already carry (and previously always wrote {@code null}).</p>
+     *
+     * @param projectionVersion     the projection's compile-time version constant
+     * @param reconciledAt          when the reconciliation pass ran, from the
+     *                              injected {@code Clock}; {@code null} when no
+     *                              reconciliation has occurred
+     * @param reconciledFromVersion the persisted version that triggered
+     *                              reconciliation; {@code null} when
+     *                              {@code reconciledAt == null}
+     * @param reconciledToVersion   the projection version reconciled to (the
+     *                              transition's target); {@code null} when
+     *                              {@code reconciledAt == null}
+     * @return serialized checkpoint data; never {@code null}
+     */
+    default byte[] serializeCheckpoint(int projectionVersion,
+                                       Instant reconciledAt,
+                                       Integer reconciledFromVersion,
+                                       Integer reconciledToVersion) {
+        return serializeCheckpoint(projectionVersion);
+    }
 
     /**
      * Returns the projection version recovered from the most recently loaded

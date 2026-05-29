@@ -71,6 +71,11 @@ public class InMemoryViewCheckpointStore implements ViewCheckpointStore {
         checkpoints.put(viewName, record);
     }
 
+    // Record-mechanics use of the deprecated sentinel accessor (REC-82): this
+    // round-trips the stored record's own projectionVersion on a defensive
+    // copy — it is NOT a reconciliation decision, so the deprecation is
+    // suppressed here rather than rerouted through loadedProjectionVersion().
+    @SuppressWarnings("deprecation")
     @Override
     public Optional<CheckpointRecord> readLatestCheckpoint(String viewName) {
         Objects.requireNonNull(viewName, "viewName must not be null");

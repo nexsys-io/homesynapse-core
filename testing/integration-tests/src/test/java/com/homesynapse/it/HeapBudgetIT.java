@@ -19,6 +19,7 @@ import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.event.bus.SubscriptionFilter;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.UlidFactory;
+import com.homesynapse.state.AtomicCheckpointSink;
 import com.homesynapse.state.DerivationRule;
 import com.homesynapse.state.DerivedPublishGate;
 import com.homesynapse.state.FixedCheckpointPolicy;
@@ -112,6 +113,7 @@ class HeapBudgetIT {
                 1,
                 harness.viewCheckpointStore(),
                 StateCheckpointSource.stub(),
+                AtomicCheckpointSink.viewOnly(harness.viewCheckpointStore()),
                 stateStore,
                 noDerivation,
                 harness.eventPublisher(),

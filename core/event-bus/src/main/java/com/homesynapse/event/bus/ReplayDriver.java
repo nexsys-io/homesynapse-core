@@ -153,7 +153,17 @@ final class ReplayDriver {
             List<EventEnvelope> events = page.events();
             if (events.isEmpty()) {
                 // (5) Tail reached. Write the final REPLAY checkpoint and hand off.
-                if (currentPosition > 0L) {
+                // AMD-45 §2.2 / AMD-45-INV-01: skip the bus subscriber-checkpoint
+                // write for atomic-checkpoint subscribers on the REPLAY path too —
+                // the projection writes the coupled subscriber+view checkpoint via
+                // AtomicCheckpointSink, so a bus-side uncoupled write here would
+                // advance the subscriber position ahead of the view snapshot and
+                // reopen the crash window AMD-45-INV-01 forbids (the invariant is
+                // unconditional — it does not carve out REPLAY). Re-replay on
+                // restart is idempotent (AMD-45 §2.3), so suppressing this write is
+                // safe; the initial-checkpoint read at run() and the overflow read
+                // above naturally resume from the projection's coupled checkpoint.
+                if (currentPosition > 0L && !runtime.info().atomicCheckpoint()) {
                     checkpointStore.writeCheckpoint(subscriberId, currentPosition);
                 }
                 boolean swapped = runtime.compareAndTransition(
@@ -183,7 +193,14 @@ final class ReplayDriver {
 
             // (7) Checkpoint cadence per AMD-38: 200 events OR 2 seconds.
             if (shouldCheckpoint(eventsSinceCheckpoint, lastCheckpointAt)) {
-                checkpointStore.writeCheckpoint(subscriberId, currentPosition);
+                // AMD-45 §2.2 / AMD-45-INV-01: gate the bus subscriber-checkpoint
+                // write for atomic-checkpoint subscribers (same reasoning as the
+                // tail write above and the LIVE write in InProcessEventBus). The
+                // cadence counters still reset so the loop's timing is unchanged;
+                // only the uncoupled write is suppressed.
+                if (!runtime.info().atomicCheckpoint()) {
+                    checkpointStore.writeCheckpoint(subscriberId, currentPosition);
+                }
                 eventsSinceCheckpoint = 0;
                 lastCheckpointAt = clock.instant();
             }

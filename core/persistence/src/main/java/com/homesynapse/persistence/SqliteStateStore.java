@@ -11,6 +11,7 @@ import com.homesynapse.state.StateCheckpointSource;
 import com.homesynapse.state.StateStore;
 import com.homesynapse.state.ViewCheckpointStore;
 
+import java.time.Instant;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -184,8 +185,37 @@ final class SqliteStateStore implements StateStore, StateCheckpointSource {
      */
     @Override
     public byte[] serializeCheckpoint(int projectionVersion) {
+        return serializeCheckpoint(projectionVersion, null, null, null);
+    }
+
+    /**
+     * Serializes the current in-memory state plus reconciliation metadata
+     * (M4.0a, AMD-41 §3.2.4 / OR-M3-13).
+     *
+     * <p>When the {@link com.homesynapse.state.StateProjection} has run a
+     * version-mismatch reconciliation, it threads the transition metadata
+     * through this overload; the bytes embed {@code reconciledAt},
+     * {@code reconciledFromVersion}, and {@code reconciledToVersion} via
+     * {@link CheckpointSerializer} (which already carries these fields — they
+     * were previously always written {@code null}). The recorded
+     * {@code reconciledToVersion} is what M4.0b's backfill gate binds to.</p>
+     *
+     * @param projectionVersion     the running projection's code version
+     * @param reconciledAt          when reconciliation ran; may be {@code null}
+     * @param reconciledFromVersion the persisted version that triggered
+     *                              reconciliation; may be {@code null}
+     * @param reconciledToVersion   the reconciled-to (target) version; may be
+     *                              {@code null}
+     * @return the serialized bytes; never {@code null}
+     */
+    @Override
+    public byte[] serializeCheckpoint(int projectionVersion,
+                                      Instant reconciledAt,
+                                      Integer reconciledFromVersion,
+                                      Integer reconciledToVersion) {
         Map<EntityId, EntityState> snapshot = new LinkedHashMap<>(backing);
-        return serializer.serialize(snapshot, projectionVersion, null, null, null);
+        return serializer.serialize(snapshot, projectionVersion, reconciledAt,
+                reconciledFromVersion, reconciledToVersion);
     }
 
     /**

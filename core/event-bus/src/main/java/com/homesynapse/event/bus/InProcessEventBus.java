@@ -497,7 +497,16 @@ public final class InProcessEventBus implements EventBus {
                     runtime.supervisor().deliver(
                             runtime.subscriber(), envelope, runtime);
             if (result == SubscriberSupervisor.DeliveryResult.SUCCESS) {
-                checkpointStore.writeCheckpoint(subscriberId, envelope.globalPosition());
+                // AMD-45 §2.2 (Option A): skip the per-delivery subscriber
+                // checkpoint write for subscribers that couple their subscriber
+                // and view checkpoints atomically (e.g. the State Projection).
+                // For those, the subscriber checkpoint is written by the
+                // projection on its policy cadence via AtomicCheckpointSink, so
+                // a bus-side per-delivery write here would race ahead of the
+                // view checkpoint and reopen the crash window AMD-45 §1 closes.
+                if (!runtime.info().atomicCheckpoint()) {
+                    checkpointStore.writeCheckpoint(subscriberId, envelope.globalPosition());
+                }
                 // M3.3 (AMD-43 §3.6.2): record subscriber lag after delivery.
                 // lagEvents — the count of further enqueued positions ahead of
                 // this delivery in the subscriber's pending queue (approximates

@@ -11,6 +11,7 @@ import com.homesynapse.event.bus.CheckpointStore;
 import com.homesynapse.event.bus.PersistentDlqWriter;
 import com.homesynapse.event.bus.SubscriberReadConnectionFactory;
 import com.homesynapse.platform.identity.HomeId;
+import com.homesynapse.state.AtomicCheckpointSink;
 import com.homesynapse.state.StateCheckpointSource;
 import com.homesynapse.state.StateStore;
 import com.homesynapse.state.ViewCheckpointStore;
@@ -172,6 +173,31 @@ public final class PersistenceFactory implements AutoCloseable {
      */
     public StateCheckpointSource stateCheckpointSource() {
         return lifecycle.stateStore();
+    }
+
+    /**
+     * Returns the atomic subscriber+view checkpoint sink (AMD-45 §2.1).
+     *
+     * <p>Backs the {@link AtomicCheckpointSink} state-store interface with the
+     * package-private {@code AtomicCheckpointWriter}, which writes the
+     * {@code subscriber_checkpoints} position and the {@code view_checkpoints}
+     * snapshot in a single SQLite transaction (AMD-45-INV-01). The projection's
+     * stable {@code checkpointKey} is used as both the subscriber id and the
+     * view name — for the materialized state projection these are the same
+     * identifier ({@code "state_projection"}).</p>
+     *
+     * <p>The returned object is typed as the exported-module
+     * {@link AtomicCheckpointSink} interface; the {@code AtomicCheckpointWriter}
+     * it captures stays package-private (no persistence type leaks onto the
+     * state-store-facing API surface — the inward dependency direction is
+     * preserved).</p>
+     *
+     * @return the production {@link AtomicCheckpointSink}
+     */
+    public AtomicCheckpointSink atomicCheckpointSink() {
+        AtomicCheckpointWriter writer = lifecycle.atomicCheckpointWriter();
+        return (checkpointKey, position, viewData) ->
+                writer.writeAtomicCheckpoint(checkpointKey, position, checkpointKey, viewData);
     }
 
     // ─── Infrastructure accessors ───

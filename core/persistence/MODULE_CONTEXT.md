@@ -134,6 +134,13 @@ In addition to the 11 public types above, the persistence module declares 2 pack
 
 **Total including internal types: 39 types** (12 public + 27 package-private). M3.6d-b adds 3 types (`PersistenceFactory` public, `SqliteSubscriberReadConnectionFactory` and `SqliteSubscriberReadExecutor` package-private).
 
+### M4.0a — Atomic checkpoint coupling wiring + reconciliation metadata (2026-05-29)
+
+No new types. Contract changes:
+- **`PersistenceFactory.atomicCheckpointSink() → com.homesynapse.state.AtomicCheckpointSink`** (new public accessor, AMD-45 §2.1). Returns a lambda over the package-private `AtomicCheckpointWriter`: `(key, position, data) -> writer.writeAtomicCheckpoint(key, position, key, data)` — the projection's `checkpointKey` is used as both subscriber id and view name. The returned type is the exported state-store interface; `AtomicCheckpointWriter` stays package-private (no persistence type leaks onto the state-store-facing surface — inward dependency direction preserved). Backed by `SqlitePersistenceLifecycle.atomicCheckpointWriter()`.
+- **`SqliteStateStore` now overrides the 4-arg `StateCheckpointSource.serializeCheckpoint(int, Instant, Integer, Integer)`** (OR-M3-13). It passes the reconciliation metadata to `CheckpointSerializer.serialize(...)` (which already carried these fields — they were previously always `null,null,null`). The 1-arg `serializeCheckpoint(int)` now delegates to the 4-arg with nulls.
+- **`AtomicCheckpointWriter` H2 dedup**: the autoCommit-save / try-commit / catch-rollback / finally-restore boilerplate is extracted into a private `executeInTransaction(String context, TransactionalWork work)` helper (LTD-11; runs on the write-coordinator platform thread). Both `writeAtomicCheckpoint` and `writeAtomicCheckpointWithDlqPark` route through it. Behavior is unchanged (same SQL, same rollback semantics); only the rollback-failure log message wording changed (context now embedded — not asserted by any test). Scoped to the atomic-write path only.
+
 The 9 new internal types added in M2.4 form the serialization infrastructure that will bridge `DomainEvent` records to SQLite BLOB payload storage in a future milestone. Their public surface is `EventPayloadCodec.encode()` and `EventPayloadCodec.decode()` — everything else is implementation detail. No Jackson types appear in any public API signature; Jackson is fully isolated behind the codec.
 
 ## Dependencies
