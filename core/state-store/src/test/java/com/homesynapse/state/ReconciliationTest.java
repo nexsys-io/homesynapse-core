@@ -10,10 +10,12 @@ import com.homesynapse.device.AttributeValue;
 import com.homesynapse.device.StringValue;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
+import com.homesynapse.event.EventId;
 import com.homesynapse.event.EventOrigin;
 import com.homesynapse.event.EventPriority;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.SequenceConflictException;
+import com.homesynapse.event.StateChangedEvent;
 import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.bus.SubscriberMode;
@@ -27,6 +29,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -76,6 +79,15 @@ class ReconciliationTest {
 
     private static final String VIEW_NAME = "reconcile-test";
     private static final byte[] SEEDED_PAYLOAD = new byte[]{1, 2, 3};
+
+    /**
+     * A log-fixed event time deliberately DISTINCT from the projection clock
+     * (TestClock default {@code 2026-01-01T00:00:00Z}) so the AMD-50 backfill tests
+     * can prove {@code lastChanged} is sourced from the causing event's eventTime,
+     * not the projection wall-clock (Contract 3). Literal parse is whitelisted by
+     * NO_DIRECT_TIME_ACCESS.
+     */
+    private static final Instant EVENT_TIME = Instant.parse("2025-09-15T08:30:00Z");
 
     private TestClock clock;
     private InMemoryStateStore stateStore;
@@ -306,6 +318,225 @@ class ReconciliationTest {
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // AMD-50 reconciliation backfill (§2.1–§2.5, §5 tests 2–5 + generality)
+    // ──────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("AMD-50 §2.1: a 1->2 reconciliation reconstructs historical attributes from the state_reported log (event-time lastChanged)")
+    void reconciliation1to2ReconstructsHistoricalAttributesWithEventTimeLastChanged()
+            throws SequenceConflictException {
+        // The pre-2 log holds only state_reported (the M4.0b-1 rule logged no
+        // state_changed historically). A plain replay-from-zero would leave
+        // attributes empty (AMD-50 §1.1); the backfill reconstructs them. This is
+        // Success Criterion 3: query a populated historical attribute after a 1->2
+        // reconciliation.
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        EventEnvelope r1 = reportedAt(subject, "temperature_c", "20.0", EVENT_TIME);
+        EventEnvelope r2 = reportedAt(subject, "temperature_c", "21.5", EVENT_TIME.plusSeconds(30));
+
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = projectionFor("recon-1to2", 1, 2,
+                DerivationRule.production(), store, 0L);
+        p.setMode(SubscriberMode.REPLAY);
+        p.onEvent(r1);
+        p.onEvent(r2);
+
+        EntityState state = store.get(entityId).orElseThrow();
+        assertThat(state.attributes().get("temperature_c"))
+                .as("historical attribute reconstructed by the backfill (was dark before AMD-50)")
+                .isEqualTo(new StringValue("21.5"));
+        assertThat(state.stateVersion())
+                .as("two state_reported -> stateVersion 2; backfill drafts carry no increment (INV-01)")
+                .isEqualTo(2L);
+        assertThat(state.lastChanged())
+                .as("lastChanged is the causing event's log-fixed eventTime, NOT the projection clock")
+                .isEqualTo(EVENT_TIME.plusSeconds(30));
+        assertThat(state.lastChanged())
+                .as("...and is therefore distinct from clock.instant() — the masking this WU forbids")
+                .isNotEqualTo(clock.instant());
+    }
+
+    @Test
+    @DisplayName("AMD-50 §5.2: backfill attribute values equal a native LIVE log's; stateVersion = state_reported count (no double-increment)")
+    void backfillAttributeValuesEqualNativeButStateVersionIsReportCount()
+            throws SequenceConflictException {
+        // Native: a fresh LIVE projection (matching version, no reconciliation)
+        // folds state_reported -> publishes + applies state_changed -> final attr
+        // value AND a doubled stateVersion (report +1 and derived +1 each).
+        SubjectRef nativeSubject = freshSubject();
+        EntityId nativeId = new EntityId(nativeSubject.id());
+        InMemoryStateStore nativeStore = new InMemoryStateStore();
+        StateProjection live = projectionFor("native-live", 1, 1,
+                DerivationRule.production(), nativeStore, 0L);
+        live.setMode(SubscriberMode.LIVE);
+        live.onEvent(reportedAt(nativeSubject, "level", "10", EVENT_TIME));
+        live.onEvent(reportedAt(nativeSubject, "level", "20", EVENT_TIME.plusSeconds(5)));
+        live.onEvent(reportedAt(nativeSubject, "level", "30", EVENT_TIME.plusSeconds(10)));
+        EntityState nativeState = nativeStore.get(nativeId).orElseThrow();
+
+        // Backfill: a fresh 1->2 reconciliation over an equivalent
+        // state_reported-only log reconstructs the SAME final attribute value, but
+        // stateVersion equals the state_reported count (3) — backfill drafts carry
+        // no increment (INV-01).
+        SubjectRef backfillSubject = freshSubject();
+        EntityId backfillId = new EntityId(backfillSubject.id());
+        InMemoryStateStore backfillStore = new InMemoryStateStore();
+        StateProjection recon = projectionFor("native-backfill", 1, 2,
+                DerivationRule.production(), backfillStore, 0L);
+        recon.setMode(SubscriberMode.REPLAY);
+        recon.onEvent(reportedAt(backfillSubject, "level", "10", EVENT_TIME));
+        recon.onEvent(reportedAt(backfillSubject, "level", "20", EVENT_TIME.plusSeconds(5)));
+        recon.onEvent(reportedAt(backfillSubject, "level", "30", EVENT_TIME.plusSeconds(10)));
+        EntityState backfillState = backfillStore.get(backfillId).orElseThrow();
+
+        assertThat(backfillState.attributes().get("level"))
+                .as("backfill reconstructs the SAME attribute value as the native LIVE fold")
+                .isEqualTo(nativeState.attributes().get("level"));
+        assertThat(backfillState.stateVersion())
+                .as("backfill stateVersion = the reconciliation log's event count (3 state_reported), "
+                        + "NOT the native log's, with no double-increment (INV-01)")
+                .isEqualTo(3L);
+        assertThat(nativeState.stateVersion())
+                .as("the native fold legitimately counts the derived state_changed too (3 + 3 = 6)")
+                .isEqualTo(6L);
+    }
+
+    @Test
+    @DisplayName("AMD-50 §5.3 (one-shot): a restart at matching version does NOT reconcile and the backfill does not run")
+    void oneShotMatchingVersionDoesNotBackfill() throws SequenceConflictException {
+        // persisted version == runtime version (2 == 2): no reconciliation, gate
+        // inactive (AMD-50-INV-02). A pre-seeded entity survives; a differing
+        // state_reported delivered in REPLAY is applied but its re-derived draft is
+        // NOT backfilled (gate off) and NOT published (REPLAY) -> attribute dark.
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        InMemoryStateStore store = new InMemoryStateStore();
+        EntityId survivor = new EntityId(UlidFactory.generate());
+        store.put(survivor, freshEntityState(survivor, 7L));
+
+        StateProjection p = projectionFor("one-shot", 2, 2,
+                DerivationRule.production(), store, 50L);
+        p.setMode(SubscriberMode.REPLAY);
+        p.onEvent(reportedAt(subject, "level", "99", EVENT_TIME));
+
+        assertThat(store.get(survivor))
+                .as("matching version => no reconciliation; pre-existing entity survives")
+                .isPresent();
+        assertThat(p.cursorPosition())
+                .as("cursor restored from the persisted checkpoint (50), not reset to 0 — no reconciliation")
+                .isGreaterThanOrEqualTo(50L);
+        EntityState state = store.get(entityId).orElseThrow();
+        assertThat(state.attributes())
+                .as("backfill is dormant at matching version (AMD-50-INV-02); attribute NOT reconstructed")
+                .doesNotContainKey("level");
+        assertThat(state.stateVersion())
+                .as("the inbound state_reported is still applied (cursor advances)")
+                .isEqualTo(1L);
+    }
+
+    @Test
+    @DisplayName("AMD-50 §5.4 (steady-state): gate-inactive replay applies logged state_changed once; re-derived drafts discarded")
+    void steadyStateAppliesLoggedStateChangedOnceAndDiscardsReDerived()
+            throws SequenceConflictException {
+        // Matching version (2 == 2) -> no reconciliation, gate inactive. In a
+        // REPLAY catch-up: a state_reported is applied but its re-derived draft is
+        // discarded for state (gate off + REPLAY no-publish); a logged
+        // state_changed is applied once as inbound (supersession is OFF outside the
+        // gate), so it is the sole source of the attribute.
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = projectionFor("steady-state", 2, 2,
+                DerivationRule.production(), store, 10L);
+        p.setMode(SubscriberMode.REPLAY);
+
+        p.onEvent(reportedAt(subject, "level", "42", EVENT_TIME));
+        assertThat(store.get(entityId).orElseThrow().attributes())
+                .as("re-derived draft discarded for state outside the gate")
+                .doesNotContainKey("level");
+
+        p.onEvent(changedAt(subject, "level", "", "42", EVENT_TIME.plusSeconds(1)));
+        EntityState state = store.get(entityId).orElseThrow();
+        assertThat(state.attributes().get("level"))
+                .as("the logged state_changed is the sole source of the attribute "
+                        + "(supersession OFF outside the gate)")
+                .isEqualTo(new StringValue("42"));
+        assertThat(state.stateVersion())
+                .as("two log events applied once each (report +1, state_changed +1)")
+                .isEqualTo(2L);
+    }
+
+    @Test
+    @DisplayName("AMD-50 §5.5 (supersession/generality): an N->M reconciliation supersedes a spurious prior-version state_changed")
+    void supersessionReconstructsCurrentRuleValueAndSuppressesSpuriousLoggedChange()
+            throws SequenceConflictException {
+        // Scenario 3.3 in miniature: under the prior rule a sensor reported 20.0
+        // then 20.0000001 and a prior-version state_changed(20.0 -> 20.0000001) was
+        // logged (string compare treated them as different). The current rule
+        // (epsilon compare) does NOT treat the within-tolerance second report as a
+        // change. The reconciliation must reconstruct 20.0 (the current rule's
+        // value), suppressing the spurious logged state_changed — while stateVersion
+        // still counts all 3 log events (the suppressed change advances the cursor,
+        // INV-01). This is the regression guard for the AMD-50 review fix; it proves
+        // a rule upgrade takes effect on historical data.
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        EventEnvelope r1 = reportedAt(subject, "temperature_c", "20.0", EVENT_TIME);
+        EventEnvelope r2 = reportedAt(subject, "temperature_c", "20.0000001",
+                EVENT_TIME.plusSeconds(30));
+        EventEnvelope spurious = changedAt(subject, "temperature_c", "20.0", "20.0000001",
+                EVENT_TIME.plusSeconds(31));
+
+        InMemoryStateStore store = new InMemoryStateStore();
+        // A 2->3-shaped transition (loaded 2, runtime 3) with a tolerance rule.
+        StateProjection p = projectionFor("supersession", 2, 3,
+                new ToleranceRule(1e-3), store, 0L);
+        p.setMode(SubscriberMode.REPLAY);
+        p.onEvent(r1);
+        p.onEvent(r2);
+        p.onEvent(spurious);
+
+        EntityState state = store.get(entityId).orElseThrow();
+        assertThat(state.attributes().get("temperature_c"))
+                .as("the current (tolerance) rule's value wins; the spurious within-tolerance change is gone")
+                .isEqualTo(new StringValue("20.0"));
+        assertThat(state.stateVersion())
+                .as("3 log events processed (2 reports + the suppressed state_changed advances the cursor, INV-01)")
+                .isEqualTo(3L);
+    }
+
+    @Test
+    @DisplayName("AMD-50 D-1: the backfill also runs on the processBatch path (BOTH REPLAY paths gated)")
+    void backfillAlsoRunsOnProcessBatchPath() throws SequenceConflictException {
+        // The D-1 lesson: gate BOTH derivation paths. onEvent is covered by the
+        // tests above; this drives the SAME backfill through processBatch (the
+        // advancer-driven batch path). Events must be in the event store so the
+        // advancer can read them.
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        reportedAt(subject, "level", "1", EVENT_TIME);                 // pos 1
+        reportedAt(subject, "level", "2", EVENT_TIME.plusSeconds(5));  // pos 2
+
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = projectionFor("batch-backfill", 1, 2,
+                DerivationRule.production(), store, 0L);
+        p.setMode(SubscriberMode.REPLAY);
+        AdvanceResult result = p.processBatch(10);
+
+        assertThat(result.eventsProcessed())
+                .as("both state_reported processed in one batch")
+                .isEqualTo(2);
+        EntityState state = store.get(entityId).orElseThrow();
+        assertThat(state.attributes().get("level"))
+                .as("the backfill reconstructed the attribute via processBatch too (D-1: both paths gated)")
+                .isEqualTo(new StringValue("2"));
+        assertThat(state.stateVersion())
+                .as("two state_reported -> stateVersion 2; backfill drafts carry no increment")
+                .isEqualTo(2L);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Helpers
     // ──────────────────────────────────────────────────────────────────
 
@@ -372,6 +603,124 @@ class ReconciliationTest {
                 return loadedVersion;
             }
         };
+    }
+
+    /**
+     * Publishes a {@code state_reported} with an explicit {@code eventTime}
+     * (distinct from the projection clock) so the backfill's event-time-sourced
+     * {@code lastChanged} is provable. Returns the persisted envelope.
+     */
+    private EventEnvelope reportedAt(SubjectRef subject, String key, String value,
+                                     Instant eventTime) throws SequenceConflictException {
+        EventDraft draft = new EventDraft(
+                EventTypes.STATE_REPORTED, 1, eventTime, subject,
+                EventPriority.NORMAL, EventOrigin.PHYSICAL,
+                new StateReportedEvent(key, value, null, null, null),
+                null, null);
+        return eventStore.publishRoot(draft);
+    }
+
+    /**
+     * Publishes a prior-version {@code state_changed} (stands in for an event the
+     * pre-transition rule logged) with an explicit {@code eventTime}. Used by the
+     * supersession and steady-state tests.
+     */
+    private EventEnvelope changedAt(SubjectRef subject, String key, String oldValue,
+                                    String newValue, Instant eventTime)
+            throws SequenceConflictException {
+        EventDraft draft = new EventDraft(
+                EventTypes.STATE_CHANGED, 1, eventTime, subject,
+                EventPriority.NORMAL, EventOrigin.SYSTEM,
+                new StateChangedEvent(key, oldValue, newValue, EventId.of(UlidFactory.generate())),
+                null, null);
+        return eventStore.publishRoot(draft);
+    }
+
+    /**
+     * Builds a projection over a seeded checkpoint with a controllable
+     * {@code loadedProjectionVersion} and runtime version, plus the given rule and
+     * state store. When {@code loadedVersion != runtimeVersion} (escape hatch off),
+     * the first {@code onEvent}/{@code processBatch} reconciles and opens the
+     * backfill gate; when they match, the gate stays inactive.
+     */
+    private StateProjection projectionFor(String viewName, int loadedVersion,
+                                          int runtimeVersion, DerivationRule rule,
+                                          StateStore store, long seededPosition) {
+        checkpointStore.writeCheckpoint(viewName, seededPosition, SEEDED_PAYLOAD);
+        return new StateProjection(
+                new ProjectionId(viewName),
+                runtimeVersion,
+                checkpointStore,
+                fixedSource(SEEDED_PAYLOAD, loadedVersion),
+                AtomicCheckpointSink.viewOnly(checkpointStore),
+                store,
+                rule,
+                eventStore,
+                advancer,
+                FixedCheckpointPolicy.HOME_DEFAULT,
+                clock,
+                publishGate,
+                new SelfProducedFilter(clock, Duration.ofSeconds(60)));
+    }
+
+    /**
+     * Test {@link DerivationRule} that suppresses a within-epsilon numeric change —
+     * a stand-in for the typed comparator (REC-90 / AMD-51), which is out of scope
+     * for M4.0b-2. It derives a {@code state_changed} for a genuinely-different
+     * report but NOTHING for a within-tolerance one, so a logged prior-version
+     * {@code state_changed} for that within-tolerance delta has no current-rule
+     * counterpart and is suppressed under the §2.2 supersession gate.
+     */
+    private static final class ToleranceRule implements DerivationRule {
+
+        private final double epsilon;
+
+        ToleranceRule(double epsilon) {
+            this.epsilon = epsilon;
+        }
+
+        @Override
+        public List<EventDraft> evaluate(DerivationContext context) {
+            EventEnvelope env = context.envelope();
+            if (!(env.payload() instanceof StateReportedEvent sr)) {
+                return List.of();
+            }
+            String key = sr.attributeKey();
+            String newValue = sr.value();
+            String oldValue = priorValue(context.priorState(), key);
+            if (oldValue != null && withinTolerance(oldValue, newValue)) {
+                return List.of();
+            }
+            if (Objects.equals(oldValue, newValue)) {
+                return List.of();
+            }
+            String oldNonNull = (oldValue == null) ? "" : oldValue;
+            StateChangedEvent payload =
+                    new StateChangedEvent(key, oldNonNull, newValue, env.eventId());
+            EventDraft draft = new EventDraft(
+                    EventTypes.STATE_CHANGED, 1, env.eventTime(), env.subjectRef(),
+                    EventPriority.NORMAL, EventOrigin.SYSTEM, payload, env.actorRef(), null);
+            return List.of(draft);
+        }
+
+        private boolean withinTolerance(String a, String b) {
+            try {
+                return Math.abs(Double.parseDouble(a) - Double.parseDouble(b)) < epsilon;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+
+        private static String priorValue(EntityState prior, String key) {
+            if (prior == null) {
+                return null;
+            }
+            AttributeValue v = prior.attributes().get(key);
+            if (v == null) {
+                return null;
+            }
+            return (v instanceof StringValue sv) ? sv.value() : v.rawValue().toString();
+        }
     }
 
     /**

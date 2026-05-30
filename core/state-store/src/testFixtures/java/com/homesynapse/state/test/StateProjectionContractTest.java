@@ -45,7 +45,6 @@ import com.homesynapse.test.TestClock;
 
 import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -643,31 +642,27 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
     }
 
     @Test
-    void productionRuleIsDeterministicAcrossRepeatedInvocationsAndClocks() {
+    void productionRuleIsDeterministicAcrossRepeatedInvocations() {
         DerivationRule production = DerivationRule.production();
         // ONE envelope reused across every evaluation so the derived
         // triggeredBy (env.eventId()) is stable — the drafts must be equal.
         EventEnvelope env = makeStateReportedEnvelope(testSubject, 1L, "color", "blue");
 
-        // Two distinct fixed clocks: a deterministic rule must ignore the clock
-        // value entirely (INV-PROJ-01 — no clock branching). Literal-parse fixed
-        // clocks are whitelisted by NO_DIRECT_TIME_ACCESS.
-        Clock clockA = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
-        Clock clockB = Clock.fixed(Instant.parse("2031-12-31T23:59:59Z"), ZoneOffset.UTC);
-
+        // AMD-50 §2.4 removed the Clock from DerivationContext, so determinism is
+        // now structural: there is no clock value to branch on (AMD-50-INV-03), and
+        // the rule is a pure function of (priorState, envelope). Repeated
+        // invocations on the same tuple must yield identical drafts — the property
+        // the reconciliation backfill relies on when it re-executes the rule during
+        // a replay-from-zero rebuild. (The former two-fixed-clocks assertion is gone
+        // because the context can no longer carry a clock to vary.)
         List<EventDraft> first =
-                production.evaluate(new DerivationContext(null, env, clockA));
+                production.evaluate(new DerivationContext(null, env));
         List<EventDraft> repeated =
-                production.evaluate(new DerivationContext(null, env, clockA));
-        List<EventDraft> otherClock =
-                production.evaluate(new DerivationContext(null, env, clockB));
+                production.evaluate(new DerivationContext(null, env));
 
         assertThat(first).hasSize(1);
         assertThat(repeated)
-                .as("identical (priorState, envelope) yields identical drafts")
-                .isEqualTo(first);
-        assertThat(otherClock)
-                .as("clock value must not affect the drafts (no clock branching, INV-PROJ-01)")
+                .as("identical (priorState, envelope) yields identical drafts (AMD-50-INV-03)")
                 .isEqualTo(first);
     }
 
@@ -685,7 +680,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
                 makeStateReportedEnvelope(SubjectRef.entity(entityId), 1L, "color", "blue");
 
         List<EventDraft> drafts =
-                production.evaluate(new DerivationContext(prior, env, clock));
+                production.evaluate(new DerivationContext(prior, env));
 
         assertThat(drafts)
                 .as("no derived event when the reported value equals the prior canonical value")
@@ -694,36 +689,63 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
 
     @Test
     void rebuildIdempotency_replayingSameLogTwiceYieldsIdenticalMaterializedAttributes() {
-        // Build a fixed inbound log of distinct entities and values. Replaying
-        // it through two fresh projections must yield byte-identical
-        // materialized attribute maps per entity:
-        // rebuild(log) == rebuild(rebuild(log)).
+        // Build a fixed inbound state_reported log of distinct entities and values.
+        // Replaying it through two fresh projections must yield identical
+        // materialized state per entity: rebuild(log) == rebuild(rebuild(log)).
         //
-        // EXCLUSIONS (deferred to M4.0b-2, which needs the one-shot backfill):
-        // the backfill-vs-native equivalence and the stateVersion
-        // double-increment assertions are intentionally NOT made here — they
-        // require the projectionVersion 1->2 bump and historical backfill that
-        // this amendment-free slice does not ship.
+        // M4.0b-2 completes the assertions M4.0b-1 deferred: this now also rebuilds
+        // via the AMD-50 one-shot backfill (a 1->2-shaped reconciliation, gate
+        // active) and asserts idempotency on attribute VALUES + stateVersion +
+        // lastChanged, plus the no-double-increment property (INV-01). Full
+        // EntityState equality is deliberately NOT asserted: lastUpdated/lastReported
+        // are wall-clock-stamped by applyToState (all branches, pre-existing) and so
+        // are not rebuild-deterministic in general — under a fixed test clock they
+        // would coincidentally match and mask exactly the non-determinism this WU
+        // must avoid claiming away. lastChanged IS asserted because the backfill
+        // sources it from the causing event's (log-fixed) time (Contract 3).
         List<EventEnvelope> inbound = new ArrayList<>();
         for (int i = 0; i < 5; i++) {
             SubjectRef subj = SubscriberContractTest.freshEntitySubject();
             inbound.add(makeStateReportedEnvelope(subj, i + 1L, "color", "v" + i));
         }
 
-        Map<EntityId, Map<String, AttributeValue>> first =
-                materializeAttributes(inbound, "m40b1-rebuild-1");
-        Map<EntityId, Map<String, AttributeValue>> second =
-                materializeAttributes(inbound, "m40b1-rebuild-2");
+        // (a) LIVE rebuild idempotency (the M4.0b-1 slice — attribute values).
+        Map<EntityId, Map<String, AttributeValue>> liveFirst =
+                materializeAttributes(inbound, "m40b2-live-rebuild-1");
+        Map<EntityId, Map<String, AttributeValue>> liveSecond =
+                materializeAttributes(inbound, "m40b2-live-rebuild-2");
+        assertThat(liveSecond)
+                .as("LIVE rebuild(log) == rebuild(rebuild(log)) — deterministic attributes")
+                .isEqualTo(liveFirst);
 
-        assertThat(second)
-                .as("rebuild(log) == rebuild(rebuild(log)) — deterministic materialized attributes")
-                .isEqualTo(first);
-        assertThat(first)
-                .as("each entity was materialized")
-                .hasSize(5);
-        assertThat(first.values())
-                .as("each entity's attribute was populated by the derived state_changed")
-                .allSatisfy(attrs -> assertThat(attrs).containsKey("color"));
+        // (b) BACKFILL rebuild idempotency (AMD-50): two 1->2 reconciliations over
+        // the same state_reported log reconstruct identical (attributes,
+        // stateVersion, lastChanged) per entity.
+        Map<EntityId, BackfillSignature> backfillFirst =
+                materializeViaBackfill(inbound, "m40b2-backfill-rebuild-1");
+        Map<EntityId, BackfillSignature> backfillSecond =
+                materializeViaBackfill(inbound, "m40b2-backfill-rebuild-2");
+        assertThat(backfillSecond)
+                .as("backfill rebuild is deterministic across (attributes, stateVersion, lastChanged)")
+                .isEqualTo(backfillFirst);
+
+        // Structural + no-double-increment checks.
+        assertThat(backfillFirst).as("each entity was materialized").hasSize(5);
+        assertThat(backfillFirst.values()).allSatisfy(sig -> {
+            assertThat(sig.attributes())
+                    .as("the backfill reconstructed the historical attribute")
+                    .containsKey("color");
+            assertThat(sig.stateVersion())
+                    .as("one state_reported per entity -> stateVersion 1; the backfill "
+                            + "draft carries NO second increment (INV-01, no double-count)")
+                    .isEqualTo(1L);
+        });
+        // Backfill attribute values equal the LIVE rebuild's values for the same
+        // entity (same final canonical value) — attribute-level backfill ≡ native.
+        backfillFirst.forEach((id, sig) ->
+                assertThat(sig.attributes())
+                        .as("backfill attributes equal the native LIVE rebuild's for " + id)
+                        .isEqualTo(liveFirst.get(id)));
     }
 
     /**
@@ -759,6 +781,66 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
         store.getAll().forEach((id, state) -> snapshot.put(id, state.attributes()));
         return snapshot;
     }
+
+    /**
+     * Materializes the given inbound {@code state_reported} log through a fresh
+     * projection driven via the AMD-50 reconciliation backfill: projectionVersion
+     * 2 against the stub source's {@code loadedProjectionVersion() == 0}, with a
+     * seeded checkpoint, so {@code initialize()} clears state, resets the cursor to
+     * 0, and opens the backfill gate (a 1->2-shaped transition). Events are
+     * delivered via {@code onEvent} in REPLAY — the active production replay path —
+     * so re-derived {@code state_changed} drafts are applied to in-memory state
+     * without being published. Returns a per-entity signature of the
+     * rebuild-deterministic fields.
+     *
+     * @param inbound  the inbound envelopes to deliver in order
+     * @param viewName a distinct projection/view name so repeated rebuilds do not
+     *                 share checkpoint state
+     * @return an entityId -> (attributes, stateVersion, lastChanged) snapshot
+     */
+    private Map<EntityId, BackfillSignature> materializeViaBackfill(
+            List<EventEnvelope> inbound, String viewName) {
+        InMemoryStateStore store = new InMemoryStateStore();
+        // Seed a checkpoint so initialize() consults the source; version 2 vs the
+        // stub's loadedProjectionVersion 0 forces the reconciliation backfill.
+        checkpointStore.writeCheckpoint(viewName, 0L, new byte[]{1});
+        StateProjection p = createProjection(
+                new ProjectionId(viewName),
+                2,
+                checkpointStore,
+                checkpointSource,        // stub -> loadedProjectionVersion() == 0
+                store,
+                DerivationRule.production(),
+                spyPublisher,
+                advancer,
+                FixedCheckpointPolicy.HOME_DEFAULT,
+                clock,
+                publishGate);
+        p.setMode(SubscriberMode.REPLAY);
+        for (EventEnvelope env : inbound) {
+            p.onEvent(env);
+        }
+        Map<EntityId, BackfillSignature> snapshot = new HashMap<>();
+        store.getAll().forEach((id, state) -> snapshot.put(id, new BackfillSignature(
+                state.attributes(), state.stateVersion(), state.lastChanged())));
+        return snapshot;
+    }
+
+    /**
+     * The rebuild-deterministic subset of {@link EntityState} compared by the
+     * backfill rebuild-idempotency test: attribute values, the cursor, and the
+     * event-time-sourced {@code lastChanged}. Deliberately excludes
+     * {@code lastUpdated}/{@code lastReported} (wall-clock-stamped, not
+     * rebuild-deterministic).
+     *
+     * @param attributes   the materialized attribute map
+     * @param stateVersion the per-entity idempotency cursor
+     * @param lastChanged  the event-time-sourced last-changed instant
+     */
+    private record BackfillSignature(
+            Map<String, AttributeValue> attributes,
+            long stateVersion,
+            Instant lastChanged) { }
 
     // ──────────────────────────────────────────────────────────────────
     // Helpers

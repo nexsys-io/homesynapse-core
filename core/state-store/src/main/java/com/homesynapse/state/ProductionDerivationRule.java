@@ -55,12 +55,14 @@ import java.util.Objects;
  *
  * <h2>Contract compliance (INV-PROJ-01, AMD-41 §3.2.1)</h2>
  *
- * <p>The rule is a pure function of {@code (priorState, envelope)}: it never
- * reads the clock value (the injected {@link java.time.Clock} on the context is
- * unused — derived {@code eventTime} inherits from the inbound envelope, never
- * {@code Instant.now()}), never publishes, never mutates the {@link StateStore},
+ * <p>The rule is a pure function of {@code (priorState, envelope)}: derived
+ * {@code eventTime} inherits from the inbound envelope, never {@code Instant.now()}
+ * (AMD-50 §2.4 removed the clock from {@link DerivationContext} entirely, so there
+ * is no clock to read). It never publishes, never mutates the {@link StateStore},
  * and performs no I/O or randomness. Identical inputs always yield identical
- * drafts. The projection owns publication (LIVE only) and state mutation.</p>
+ * drafts — the determinism (AMD-50-INV-03) that lets the reconciliation backfill
+ * re-execute it during a replay-from-zero rebuild without diverging. The
+ * projection owns publication (LIVE only) and state mutation.</p>
  *
  * @see DerivationRule#production()
  * @see DerivationRule

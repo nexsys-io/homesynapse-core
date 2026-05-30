@@ -105,6 +105,27 @@ import org.slf4j.LoggerFactory;
  *       from the start of the log.</li>
  * </ul>
  *
+ * <h2>Reconciliation backfill (AMD-50)</h2>
+ *
+ * <p>A plain replay-from-zero would rebuild {@code stateVersion}/timestamps but
+ * leave {@code attributes} empty, because {@code applyToState} writes attributes
+ * only on inbound {@code state_changed} and the pre-transition log holds none.
+ * AMD-50 closes this: a version-transition reconciliation opens a provenance gate
+ * ({@code backfillActive}, set in {@link #initialize} and cleared in
+ * {@link #onCaughtUp}). While the gate is open the projection performs a one-shot,
+ * non-emitting backfill — re-derived {@code state_changed} drafts are applied to
+ * in-memory state ({@link #applyBackfillAttribute}) so the historical attribute
+ * map reconstructs from the {@code state_reported} history, with no second
+ * {@code stateVersion} increment (AMD-50-INV-01) and no publish
+ * (INV-WRITER-01). The gate is honoured on BOTH derivation paths
+ * ({@link #onEvent} and {@link #processBatch}). For generality (any N&rarr;M
+ * transition, §2.5) a logged prior-version {@code state_changed} replaying under
+ * the gate advances the cursor but is suppressed for attributes (supersession,
+ * §2.2 — see {@code applyToState}), so the current rule's re-derivation always
+ * wins. Outside the gate (matching version, escape hatch, or LIVE) the backfill
+ * and supersession are dormant and logged {@code state_changed} is the sole
+ * authority for attributes (AMD-50-INV-02).</p>
+ *
  * <h2>Defence-in-depth on {@code stateVersion} (DEC-M3-02)</h2>
  *
  * <p>If the {@link SelfProducedFilter} misses (e.g., after a process restart
@@ -186,6 +207,18 @@ public final class StateProjection implements Subscriber {
     private Instant reconciledAt;
     private Integer reconciledFromVersion;
     private Integer reconciledToVersion;
+
+    // AMD-50 §2.2 reconciliation provenance gate. Set true ONLY in initialize()'s
+    // version-transition reconciliation branch (genuine N->M mismatch, escape
+    // hatch off); cleared at onCaughtUp() (the REPLAY -> LIVE signal). While true,
+    // the projection is performing a one-shot, replay-from-zero rebuild: re-derived
+    // state_changed drafts are applied to in-memory state (backfill, §2.1/§2.3) and
+    // logged prior-version state_changed events are suppressed for attributes
+    // (supersession, §2.2). False on every non-reconciliation rebuild (matching
+    // version, escape hatch, steady-state catch-up) and in LIVE — there the gate is
+    // dormant and logged state_changed is the sole authority for attributes
+    // (AMD-50-INV-02). Single-threaded like the other init/cursor fields.
+    private boolean backfillActive;
 
     // REC-80 replay-duration metric. replayStartedAt is stamped at the first
     // initialize(); eventsReplayed counts processed events; both are read at
@@ -397,7 +430,7 @@ public final class StateProjection implements Subscriber {
         // Step 4: READ phase — evaluate derivation rule
         List<EventDraft> drafts = List.of();
         if (subjectEntity != null) {
-            DerivationContext ctx = new DerivationContext(priorState, inbound, clock);
+            DerivationContext ctx = new DerivationContext(priorState, inbound);
             drafts = rule.evaluate(ctx);
             if (drafts == null) {
                 drafts = List.of();
@@ -439,6 +472,19 @@ public final class StateProjection implements Subscriber {
                             sce.subjectRef(), sce.conflictingSequence());
                 }
             }
+        } else if (backfillActive && !drafts.isEmpty() && subjectEntity != null) {
+            // AMD-50 §2.1/§2.3 reconciliation backfill (the active production REPLAY
+            // path: ReplayDriver -> supervisor.deliver -> onEvent). The re-derived
+            // state_changed drafts reconstruct the historical attribute map directly
+            // in in-memory state — NEVER published (INV-WRITER-01) and WITHOUT a
+            // second stateVersion increment (INV-01). The triggering state_reported,
+            // applied above, owns the single cursor +1 and lastReported. A rule that
+            // produced no draft (unchanged value) writes nothing. This branch is the
+            // REPLAY twin of the LIVE publish-and-apply above; both must gate the
+            // derived-apply behaviour (the M4.0a D-1 lesson — guard every path).
+            for (EventDraft draft : drafts) {
+                applyBackfillDraft(subjectEntity, inbound, draft);
+            }
         }
 
         // Step 7: checkpoint cadence
@@ -452,6 +498,11 @@ public final class StateProjection implements Subscriber {
     @Override
     public void onCaughtUp() {
         if (caughtUpFired.compareAndSet(false, true)) {
+            // AMD-50 §2.2: exiting REPLAY closes the provenance gate. From LIVE
+            // onward the backfill apply (§2.1) and supersession suppression (§2.2)
+            // are dormant; logged state_changed is the sole authority for
+            // attributes until the next version transition (AMD-50-INV-02).
+            backfillActive = false;
             // REC-80: emit the replay-duration metric at the REPLAY -> LIVE
             // signal. State-store has no metrics facade (the bus uses JFR via a
             // dependency state-store does not carry), so the canonical metric
@@ -517,7 +568,7 @@ public final class StateProjection implements Subscriber {
                     : null;
             List<EventDraft> derived = List.of();
             if (entityId != null) {
-                DerivationContext ctx = new DerivationContext(prior, env, clock);
+                DerivationContext ctx = new DerivationContext(prior, env);
                 derived = rule.evaluate(ctx);
                 if (derived == null) {
                     derived = List.of();
@@ -528,7 +579,22 @@ public final class StateProjection implements Subscriber {
             if (entityId != null) {
                 applyToState(env, entityId);
                 for (EventDraft d : derived) {
-                    buffered.add(new BufferedDerivation(env, entityId, d));
+                    if (backfillActive) {
+                        // AMD-50 §2.1 reconciliation backfill on the batch path
+                        // (the D-1 lesson: gate BOTH derivation paths, not just
+                        // onEvent). Apply the re-derived draft to in-memory state
+                        // immediately — inside the read-tx callback, exactly where
+                        // the inbound apply already happens — so the NEXT event's
+                        // derivation in this batch sees the updated attribute,
+                        // matching the native LIVE fold. Non-emitting; no second
+                        // stateVersion increment (INV-01/INV-WRITER-01). Deferring
+                        // the apply to a post-advance phase (like the LIVE publish
+                        // below) would feed the rule a stale prior across a batch
+                        // boundary and diverge from native — see coder-handoff D-A.
+                        applyBackfillDraft(entityId, env, d);
+                    } else {
+                        buffered.add(new BufferedDerivation(env, entityId, d));
+                    }
                 }
             }
         };
@@ -608,6 +674,12 @@ public final class StateProjection implements Subscriber {
                     reconciledFromVersion = persistedVersion;
                     reconciledToVersion = projectionVersion;
                     reconciledAt = clock.instant();
+                    // AMD-50 §2.2: this is the one genuine version-transition
+                    // reconciliation (mismatch, escape hatch off) — open the
+                    // provenance gate so the replay-from-zero rebuild backfills
+                    // historical attributes (§2.1) and supersedes stale logged
+                    // state_changed (§2.2). Closed at onCaughtUp().
+                    backfillActive = true;
                 }
             } else {
                 cursorPosition = record.position();
@@ -719,18 +791,43 @@ public final class StateProjection implements Subscriber {
                     prior.staleAfter(),
                     prior.stale());
         } else if (envelope.payload() instanceof StateChangedEvent sc) {
-            Map<String, AttributeValue> newAttrs = new HashMap<>(prior.attributes());
-            newAttrs.put(sc.attributeKey(), new StringValue(sc.newValue()));
-            updated = new EntityState(
-                    prior.entityId(),
-                    Map.copyOf(newAttrs),
-                    prior.availability(),
-                    prior.stateVersion() + 1,
-                    now,
-                    now,
-                    prior.lastReported(),
-                    prior.staleAfter(),
-                    prior.stale());
+            if (backfillActive) {
+                // AMD-50 §2.2 supersession. During an active version-transition
+                // reconciliation, a logged PRIOR-VERSION state_changed replaying as
+                // inbound is a log event, so it advances stateVersion (the cursor,
+                // INV-01) — but its attribute/lastChanged write is SUPPRESSED. The
+                // current rule's re-derivation (the backfill) is the sole authority
+                // for attributes during the rebuild, so a stale prior-rule value
+                // cannot win the interleaving. Cursor-only, identical to the "other
+                // payload" branch. (For the production 1->2 transition this path is
+                // never hit — the pre-2 log holds no state_changed — but it is
+                // required for generality, AMD-50 §2.5, and is exercised by the
+                // supersession test.) Outside the gate this branch is unchanged
+                // (the else), so LIVE/steady-state derivation is never a no-op.
+                updated = new EntityState(
+                        prior.entityId(),
+                        prior.attributes(),
+                        prior.availability(),
+                        prior.stateVersion() + 1,
+                        prior.lastChanged(),
+                        now,
+                        prior.lastReported(),
+                        prior.staleAfter(),
+                        prior.stale());
+            } else {
+                Map<String, AttributeValue> newAttrs = new HashMap<>(prior.attributes());
+                newAttrs.put(sc.attributeKey(), new StringValue(sc.newValue()));
+                updated = new EntityState(
+                        prior.entityId(),
+                        Map.copyOf(newAttrs),
+                        prior.availability(),
+                        prior.stateVersion() + 1,
+                        now,
+                        now,
+                        prior.lastReported(),
+                        prior.staleAfter(),
+                        prior.stale());
+            }
         } else if (envelope.payload() instanceof AvailabilityChangedEvent ac) {
             updated = new EntityState(
                     prior.entityId(),
@@ -754,6 +851,91 @@ public final class StateProjection implements Subscriber {
                     prior.staleAfter(),
                     prior.stale());
         }
+        stateStore.put(entityId, updated);
+    }
+
+    /**
+     * Applies a single re-derived draft to in-memory state as part of the
+     * AMD-50 §2.1 reconciliation backfill. Only {@code state_changed} drafts
+     * carry attribute reconstruction (the production and future typed rules emit
+     * nothing else); any other payload is ignored. The write is non-emitting and
+     * cursor-preserving — see {@link #applyBackfillAttribute}.
+     *
+     * @param entityId        the subject entity to update
+     * @param causingEnvelope the inbound event whose re-derivation produced the
+     *                        draft — supplies the deterministic {@code lastChanged}
+     * @param draft           the re-derived draft
+     */
+    private void applyBackfillDraft(EntityId entityId, EventEnvelope causingEnvelope,
+                                    EventDraft draft) {
+        if (draft.payload() instanceof StateChangedEvent sc) {
+            applyBackfillAttribute(entityId, sc, backfillTimestamp(causingEnvelope));
+        }
+    }
+
+    /**
+     * Returns the deterministic, log-fixed instant used as {@code lastChanged} for
+     * a reconciliation backfill write (AMD-50 §2.3): the causing event's
+     * {@code eventTime} when present, else its {@code ingestTime} (the envelope's
+     * recorded/ordering time, always non-null). It is NEVER the projection
+     * wall-clock ({@code clock.instant()}): wall-clock would stamp every
+     * reconstructed historical attribute with the rebuild time (and re-stamp it on
+     * every later transition), which is both semantically wrong and a latent
+     * rebuild non-determinism that a fixed test clock would silently mask — exactly
+     * the failure class AMD-50 exists to prevent.
+     *
+     * @param causingEnvelope the inbound event that triggered the re-derivation
+     * @return the log-fixed timestamp; never {@code null}
+     */
+    private static Instant backfillTimestamp(EventEnvelope causingEnvelope) {
+        Instant eventTime = causingEnvelope.eventTime();
+        return (eventTime != null) ? eventTime : causingEnvelope.ingestTime();
+    }
+
+    /**
+     * Narrow attribute-write path for the reconciliation backfill (AMD-50 §2.3).
+     *
+     * <p>Updates ONLY the entity's {@code attributes} map (to the re-derived value)
+     * and {@code lastChanged} (to the causing event's log-fixed time). It
+     * <em>preserves</em> {@code stateVersion} (no increment — a backfill draft is
+     * not a log event, AMD-50-INV-01), {@code lastReported}, and {@code lastUpdated}:
+     * those, and the single per-event cursor {@code +1}, are owned by the triggering
+     * {@code state_reported} already applied through {@link #applyToState}. It must
+     * NOT route through {@code applyToState}'s {@code state_changed} branch, which
+     * would double-increment the cursor and re-stamp the timestamps.</p>
+     *
+     * <p>Under an active gate this helper is therefore the sole writer of
+     * {@code attributes} (every inbound logged {@code state_changed} is suppressed,
+     * §2.2), so the materialized attribute values are fully determined by
+     * re-derivation over the {@code state_reported} history — independent of any
+     * logged-event interleaving.</p>
+     *
+     * <p>Note (conscious interim, [REVIEW]): {@code lastChanged} is event-time-sourced
+     * here but remains wall-clock-sourced in the LIVE {@code applyToState}
+     * {@code state_changed} branch (pre-existing, deliberately untouched). The
+     * unifier is a scheduled follow-up WU.</p>
+     *
+     * @param entityId       the subject entity to update
+     * @param sc             the re-derived {@code state_changed} payload
+     * @param causeEventTime the causing event's log-fixed time (see
+     *                       {@link #backfillTimestamp})
+     */
+    private void applyBackfillAttribute(EntityId entityId, StateChangedEvent sc,
+                                        Instant causeEventTime) {
+        EntityState prior = stateStore.get(entityId)
+                .orElseGet(() -> initialEntityState(entityId));
+        Map<String, AttributeValue> newAttrs = new HashMap<>(prior.attributes());
+        newAttrs.put(sc.attributeKey(), new StringValue(sc.newValue()));
+        EntityState updated = new EntityState(
+                prior.entityId(),
+                Map.copyOf(newAttrs),
+                prior.availability(),
+                prior.stateVersion(),     // preserved — backfill draft carries no cursor +1
+                causeEventTime,           // lastChanged = log-fixed event time, not wall-clock
+                prior.lastUpdated(),      // preserved (owned by the triggering state_reported)
+                prior.lastReported(),     // preserved (owned by the triggering state_reported)
+                prior.staleAfter(),
+                prior.stale());
         stateStore.put(entityId, updated);
     }
 

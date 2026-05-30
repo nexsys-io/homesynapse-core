@@ -233,13 +233,17 @@ public final class HomeSynapseCore implements ReadinessSource {
                 persistenceFactory.eventPublisher(), eventBus);
 
         // Step 6 — State projection.
-        // projectionVersion stays literal 1 (M4.0b-1 is amendment-free — no
-        // 1->2 bump, so no reconciliation/replay-from-zero fires and historical
-        // attributes are not backfilled; that is M4.0b-2, P2-blocked).
+        // projectionVersion is literal 2 (M4.0b-2). The bump from 1 is the
+        // trigger: first boot on a version-1 checkpoint now mismatches, so the
+        // AMD-41 §3.2.4 reconciliation fires (clear state, replay from 0) and the
+        // AMD-50 one-shot backfill reconstructs historical attributes from the
+        // state_reported log during that replay (gated by StateProjection's
+        // backfillActive provenance gate). Subsequent boots find persisted
+        // version 2 -> no reconciliation -> backfill dormant (AMD-50-INV-02).
         DerivedPublishGate publishGate = rateLimit::acquire;
         this.stateProjection = StateProjection.create(
                 new ProjectionId(PROJECTION_SUBSCRIBER_ID),
-                1,
+                2,
                 persistenceFactory.viewCheckpointStore(),
                 persistenceFactory.stateCheckpointSource(),
                 persistenceFactory.atomicCheckpointSink(), // AMD-45 §2.1 (coupled checkpoint)
