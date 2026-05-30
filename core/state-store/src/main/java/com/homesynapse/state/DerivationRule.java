@@ -46,4 +46,28 @@ public interface DerivationRule {
      *         empty, never {@code null}
      */
     List<EventDraft> evaluate(DerivationContext context);
+
+    /**
+     * Returns the production change-detect rule (REC-28, plan §4.2): on an
+     * inbound {@code state_reported} whose value differs from the entity's prior
+     * canonical value, it emits one derived {@code state_changed} draft;
+     * otherwise it emits nothing. Comparison is string-valued (the existing
+     * serialized form); typed comparison (REC-90) is M4.B3 scope.
+     *
+     * <p>This is the DEC-M3-16 gateway into the package-private
+     * {@code ProductionDerivationRule} — it mirrors
+     * {@link StateCheckpointSource#stub()} and
+     * {@link StateQueryService#materialized}. The composition root wires the
+     * returned rule into {@link StateProjection#create}; the projection publishes
+     * the derived draft on LIVE (and re-derives without publishing on
+     * REPLAY/TRANSITION, AMD-41 §3.2.2).</p>
+     *
+     * <p>The returned rule is stateless, deterministic (INV-PROJ-01), and safe
+     * to share across threads.</p>
+     *
+     * @return the production derivation rule; never {@code null}
+     */
+    static DerivationRule production() {
+        return new ProductionDerivationRule();
+    }
 }

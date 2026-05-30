@@ -31,7 +31,6 @@ import com.homesynapse.test.TestClock;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 
 import org.junit.jupiter.api.Test;
 
@@ -76,7 +75,9 @@ class StateProjectionVerticalIT {
         InMemoryViewCheckpointStore viewCheckpointStore =
                 new InMemoryViewCheckpointStore(clock);
         InMemoryProjectionAdvancer advancer = new InMemoryProjectionAdvancer(eventStore);
-        DerivationRule rule = new EchoStateRule();
+        // M4.0b-1: exercise the production rule through the full vertical
+        // pipeline (was a local EchoStateRule copy before the public factory).
+        DerivationRule rule = DerivationRule.production();
 
         StateProjection projection = StateProjection.create(
                 new ProjectionId("state_projection"),
@@ -195,58 +196,6 @@ class StateProjectionVerticalIT {
         EventPage page = store.readFrom(globalPosition - 1, 1);
         if (!page.events().isEmpty()) {
             subscriber.onEvent(page.events().get(0));
-        }
-    }
-
-    // ──────────────────────────────────────────────────────────────────
-    // Local test-only DerivationRule mirroring the contract test's EchoStateRule.
-    // (Duplicated here because the contract test's rule is a package-private
-    //  static nested class and importing across the test/testFixtures boundary
-    //  would require additional plumbing.)
-    // ──────────────────────────────────────────────────────────────────
-
-    private static final class EchoStateRule implements DerivationRule {
-
-        EchoStateRule() {
-            // Explicit constructor for -Xlint:all -Werror.
-        }
-
-        @Override
-        public List<EventDraft> evaluate(DerivationContext context) {
-            EventEnvelope env = context.envelope();
-            if (!(env.payload() instanceof StateReportedEvent sr)) {
-                return List.of();
-            }
-            String key = sr.attributeKey();
-            String newValue = sr.value();
-            String oldValue = lookupAttribute(context.priorState(), key);
-            if (Objects.equals(oldValue, newValue)) {
-                return List.of();
-            }
-            String oldNonNull = (oldValue == null) ? "" : oldValue;
-            StateChangedEvent payload = new StateChangedEvent(
-                    key, oldNonNull, newValue, env.eventId());
-            return List.of(new EventDraft(
-                    EventTypes.STATE_CHANGED,
-                    1,
-                    env.eventTime(),
-                    env.subjectRef(),
-                    EventPriority.NORMAL,
-                    EventOrigin.SYSTEM,
-                    payload,
-                    env.actorRef(),
-                    null));
-        }
-
-        private static String lookupAttribute(EntityState prior, String key) {
-            if (prior == null) {
-                return null;
-            }
-            var v = prior.attributes().get(key);
-            if (v == null) {
-                return null;
-            }
-            return (v instanceof StringValue sv) ? sv.value() : v.rawValue().toString();
         }
     }
 

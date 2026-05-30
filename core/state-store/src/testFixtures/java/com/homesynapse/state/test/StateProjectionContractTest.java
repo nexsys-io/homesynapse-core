@@ -7,6 +7,7 @@ package com.homesynapse.state.test;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.homesynapse.device.AttributeValue;
 import com.homesynapse.device.StringValue;
 import com.homesynapse.event.CausalContext;
 import com.homesynapse.event.EventDraft;
@@ -44,9 +45,11 @@ import com.homesynapse.test.TestClock;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.AfterEach;
@@ -138,7 +141,10 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
         checkpointStore = new com.homesynapse.state.test.InMemoryViewCheckpointStore(clock);
         advancer = new InMemoryProjectionAdvancer(eventStore);
         spyPublisher = new SpyPublisher(eventStore);
-        rule = new EchoStateRule();
+        // M4.0b-1: the production rule replaces the lifted EchoStateRule fixture
+        // so every inherited contract test pins the production change-detect
+        // behaviour identically to the fixture it was lifted from.
+        rule = DerivationRule.production();
         publishGate = DerivedPublishGate.unbounded();
         checkpointSource = StateCheckpointSource.stub();
 
@@ -549,6 +555,212 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // M4.0b-1 — production DerivationRule contracts (REC-28, AMD-41 §3.2.2,
+    // INV-PROJ-01). The shared `rule` is DerivationRule.production(), so the
+    // nine inherited contract tests above already pin the production rule's
+    // LIVE publish + materialization behaviour (e.g.
+    // derivedEventCarriesIncrementedStateVersion proves the attributes map is
+    // populated for a new state_reported on LIVE — Success Criterion 2). The
+    // tests below add the REPLAY-no-publish proof, determinism, the
+    // no-change branch, and rebuild-idempotency.
+    // ──────────────────────────────────────────────────────────────────
+
+    @Test
+    void productionRuleReplayReDerivesButDoesNotPublishOrApplyDerived() {
+        // REPLAY: a differing state_reported that WOULD publish on LIVE. The
+        // projection still evaluates the rule (re-derives) but must NOT publish
+        // the derived state_changed and must NOT apply it (AMD-41 §3.2.2). The
+        // entry path is onEvent — its publish gate is `mode == LIVE`
+        // (StateProjection.onEvent), the same gate processBatch uses.
+        InMemoryStateStore replayStore = new InMemoryStateStore();
+        StateProjection replayProjection = createProjection(
+                new ProjectionId("m40b1-replay-no-publish"),
+                1,
+                checkpointStore,
+                checkpointSource,
+                replayStore,
+                DerivationRule.production(),
+                spyPublisher,
+                advancer,
+                FixedCheckpointPolicy.HOME_DEFAULT,
+                clock,
+                publishGate);
+        replayProjection.setMode(SubscriberMode.REPLAY);
+
+        SubjectRef replaySubject = SubscriberContractTest.freshEntitySubject();
+        EntityId replayEntityId = new EntityId(replaySubject.id());
+        int beforeReplay = spyPublisher.publishCount();
+
+        replayProjection.onEvent(
+                makeStateReportedEnvelope(replaySubject, 1L, "color", "blue"));
+
+        assertThat(spyPublisher.publishCount())
+                .as("REPLAY re-derives but must NOT publish the derived state_changed")
+                .isEqualTo(beforeReplay);
+        EntityState replayState = replayStore.get(replayEntityId).orElseThrow();
+        assertThat(replayState.attributes())
+                .as("the derived state_changed is NOT applied under REPLAY "
+                        + "(state_reported alone does not populate attributes)")
+                .doesNotContainKey("color");
+        assertThat(replayState.stateVersion())
+                .as("the inbound state_reported is still applied (stateVersion advances)")
+                .isGreaterThan(0L);
+
+        // LIVE: the SAME kind of differing input publishes exactly once and the
+        // attribute IS populated (queried through the projection's StateStore).
+        InMemoryStateStore liveStore = new InMemoryStateStore();
+        StateProjection liveProjection = createProjection(
+                new ProjectionId("m40b1-live-publish"),
+                1,
+                checkpointStore,
+                checkpointSource,
+                liveStore,
+                DerivationRule.production(),
+                spyPublisher,
+                advancer,
+                FixedCheckpointPolicy.HOME_DEFAULT,
+                clock,
+                publishGate);
+        liveProjection.setMode(SubscriberMode.LIVE);
+
+        SubjectRef liveSubject = SubscriberContractTest.freshEntitySubject();
+        EntityId liveEntityId = new EntityId(liveSubject.id());
+        int beforeLive = spyPublisher.publishCount();
+
+        liveProjection.onEvent(
+                makeStateReportedEnvelope(liveSubject, 2L, "color", "blue"));
+
+        assertThat(spyPublisher.publishCount())
+                .as("LIVE publishes the derived state_changed exactly once")
+                .isEqualTo(beforeLive + 1);
+        assertThat(lastPublished().payload())
+                .as("the published derived event is a state_changed")
+                .isInstanceOf(StateChangedEvent.class);
+        EntityState liveState = liveStore.get(liveEntityId).orElseThrow();
+        assertThat(liveState.attributes())
+                .as("LIVE applies the published derived state_changed; attribute populated")
+                .containsEntry("color", new StringValue("blue"));
+    }
+
+    @Test
+    void productionRuleIsDeterministicAcrossRepeatedInvocationsAndClocks() {
+        DerivationRule production = DerivationRule.production();
+        // ONE envelope reused across every evaluation so the derived
+        // triggeredBy (env.eventId()) is stable — the drafts must be equal.
+        EventEnvelope env = makeStateReportedEnvelope(testSubject, 1L, "color", "blue");
+
+        // Two distinct fixed clocks: a deterministic rule must ignore the clock
+        // value entirely (INV-PROJ-01 — no clock branching). Literal-parse fixed
+        // clocks are whitelisted by NO_DIRECT_TIME_ACCESS.
+        Clock clockA = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+        Clock clockB = Clock.fixed(Instant.parse("2031-12-31T23:59:59Z"), ZoneOffset.UTC);
+
+        List<EventDraft> first =
+                production.evaluate(new DerivationContext(null, env, clockA));
+        List<EventDraft> repeated =
+                production.evaluate(new DerivationContext(null, env, clockA));
+        List<EventDraft> otherClock =
+                production.evaluate(new DerivationContext(null, env, clockB));
+
+        assertThat(first).hasSize(1);
+        assertThat(repeated)
+                .as("identical (priorState, envelope) yields identical drafts")
+                .isEqualTo(first);
+        assertThat(otherClock)
+                .as("clock value must not affect the drafts (no clock branching, INV-PROJ-01)")
+                .isEqualTo(first);
+    }
+
+    @Test
+    void productionRuleEmitsNothingWhenValueUnchanged() {
+        DerivationRule production = DerivationRule.production();
+        EntityId entityId = new EntityId(UlidFactory.generate());
+        Instant now = clock.instant();
+        EntityState prior = new EntityState(
+                entityId,
+                Map.of("color", new StringValue("blue")),
+                Availability.AVAILABLE,
+                3L, now, now, now, null, false);
+        EventEnvelope env =
+                makeStateReportedEnvelope(SubjectRef.entity(entityId), 1L, "color", "blue");
+
+        List<EventDraft> drafts =
+                production.evaluate(new DerivationContext(prior, env, clock));
+
+        assertThat(drafts)
+                .as("no derived event when the reported value equals the prior canonical value")
+                .isEmpty();
+    }
+
+    @Test
+    void rebuildIdempotency_replayingSameLogTwiceYieldsIdenticalMaterializedAttributes() {
+        // Build a fixed inbound log of distinct entities and values. Replaying
+        // it through two fresh projections must yield byte-identical
+        // materialized attribute maps per entity:
+        // rebuild(log) == rebuild(rebuild(log)).
+        //
+        // EXCLUSIONS (deferred to M4.0b-2, which needs the one-shot backfill):
+        // the backfill-vs-native equivalence and the stateVersion
+        // double-increment assertions are intentionally NOT made here — they
+        // require the projectionVersion 1->2 bump and historical backfill that
+        // this amendment-free slice does not ship.
+        List<EventEnvelope> inbound = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            SubjectRef subj = SubscriberContractTest.freshEntitySubject();
+            inbound.add(makeStateReportedEnvelope(subj, i + 1L, "color", "v" + i));
+        }
+
+        Map<EntityId, Map<String, AttributeValue>> first =
+                materializeAttributes(inbound, "m40b1-rebuild-1");
+        Map<EntityId, Map<String, AttributeValue>> second =
+                materializeAttributes(inbound, "m40b1-rebuild-2");
+
+        assertThat(second)
+                .as("rebuild(log) == rebuild(rebuild(log)) — deterministic materialized attributes")
+                .isEqualTo(first);
+        assertThat(first)
+                .as("each entity was materialized")
+                .hasSize(5);
+        assertThat(first.values())
+                .as("each entity's attribute was populated by the derived state_changed")
+                .allSatisfy(attrs -> assertThat(attrs).containsKey("color"));
+    }
+
+    /**
+     * Materializes the given inbound log through a fresh LIVE projection (using
+     * the production rule) and returns a snapshot of each entity's attribute
+     * map. Used by the rebuild-idempotency test.
+     *
+     * @param inbound  the inbound envelopes to deliver in order
+     * @param viewName a distinct projection/view name so repeated rebuilds do
+     *                 not share checkpoint state
+     * @return an entityId -> attributes snapshot of the materialized state
+     */
+    private Map<EntityId, Map<String, AttributeValue>> materializeAttributes(
+            List<EventEnvelope> inbound, String viewName) {
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = createProjection(
+                new ProjectionId(viewName),
+                1,
+                checkpointStore,
+                checkpointSource,
+                store,
+                DerivationRule.production(),
+                spyPublisher,
+                advancer,
+                FixedCheckpointPolicy.HOME_DEFAULT,
+                clock,
+                publishGate);
+        p.setMode(SubscriberMode.LIVE);
+        for (EventEnvelope env : inbound) {
+            p.onEvent(env);
+        }
+        Map<EntityId, Map<String, AttributeValue>> snapshot = new HashMap<>();
+        store.getAll().forEach((id, state) -> snapshot.put(id, state.attributes()));
+        return snapshot;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Helpers
     // ──────────────────────────────────────────────────────────────────
 
@@ -591,56 +803,13 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
     // ──────────────────────────────────────────────────────────────────
     // Test derivation rules
     // ──────────────────────────────────────────────────────────────────
-
-    /**
-     * Produces a {@code state_changed} draft only when the inbound
-     * {@code state_reported}'s value differs from the prior canonical value.
-     */
-    static final class EchoStateRule implements DerivationRule {
-
-        EchoStateRule() {
-            // Explicit constructor for -Xlint:all -Werror.
-        }
-
-        @Override
-        public List<EventDraft> evaluate(DerivationContext context) {
-            EventEnvelope env = context.envelope();
-            if (!(env.payload() instanceof StateReportedEvent sr)) {
-                return List.of();
-            }
-            String key = sr.attributeKey();
-            String newValue = sr.value();
-            String oldValue = lookupAttribute(context.priorState(), key);
-            if (Objects.equals(oldValue, newValue)) {
-                return List.of();
-            }
-            String oldNonNull = (oldValue == null) ? "" : oldValue;
-            StateChangedEvent payload = new StateChangedEvent(
-                    key, oldNonNull, newValue, env.eventId());
-            EventDraft draft = new EventDraft(
-                    EventTypes.STATE_CHANGED,
-                    1,
-                    env.eventTime(),
-                    env.subjectRef(),
-                    EventPriority.NORMAL,
-                    EventOrigin.SYSTEM,
-                    payload,
-                    env.actorRef(),
-                    null);
-            return List.of(draft);
-        }
-
-        private static String lookupAttribute(EntityState prior, String key) {
-            if (prior == null) {
-                return null;
-            }
-            var v = prior.attributes().get(key);
-            if (v == null) {
-                return null;
-            }
-            return (v instanceof StringValue sv) ? sv.value() : v.rawValue().toString();
-        }
-    }
+    //
+    // The M3.5a EchoStateRule fixture was lifted into production as
+    // com.homesynapse.state.ProductionDerivationRule (M4.0b-1, reached via
+    // DerivationRule.production()) and is wired as the shared `rule` above, so
+    // the change-detect logic is exercised by the inherited contract tests.
+    // Only AlwaysProducingRule remains here — it deliberately violates the
+    // change-detect contract to drive the projection's defence-in-depth check.
 
     /**
      * Produces a {@code state_changed} draft for every inbound

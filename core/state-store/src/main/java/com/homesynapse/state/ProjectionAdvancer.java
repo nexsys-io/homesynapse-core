@@ -5,6 +5,7 @@
 package com.homesynapse.state;
 
 import com.homesynapse.event.EventEnvelope;
+import com.homesynapse.event.EventStore;
 import java.util.function.Consumer;
 
 public interface ProjectionAdvancer {
@@ -58,4 +59,27 @@ public interface ProjectionAdvancer {
      * @throws RuntimeException any exception thrown by {@code processor.accept} propagates.
      */
     AdvanceResult advance(long fromPosition, int maxRows, Consumer<EventEnvelope> processor);
+
+    /**
+     * Returns the production {@code DispatchingProjectionAdvancer} (Research 8
+     * REC-28) over the given event store. Each {@link #advance} opens a single
+     * bounded read via {@link EventStore#readFrom(long, int)} and dispatches
+     * every envelope by event type to a forwarding handler (REC-28 mod C),
+     * forwarding all types so {@code eventsProcessed} and the cursor advance
+     * exactly as the M3.7 {@code MinimalProjectionAdvancer} did.
+     *
+     * <p>This is the DEC-M3-16 gateway into the package-private
+     * {@code DispatchingProjectionAdvancer} and its package-private handler set
+     * (REC-28 mod A + B — explicit assembly, no {@code ServiceLoader}; no
+     * {@code .handlers} subpackage). Mirrors {@link StateQueryService#materialized}
+     * and {@link StateCheckpointSource#stub()}.</p>
+     *
+     * @param eventStore the production event store (typically
+     *                   {@code PersistenceFactory.eventStore()}); never
+     *                   {@code null}
+     * @return a new dispatching advancer over {@code eventStore}
+     */
+    static ProjectionAdvancer dispatching(EventStore eventStore) {
+        return DispatchingProjectionAdvancer.withDefaultHandlers(eventStore);
+    }
 }

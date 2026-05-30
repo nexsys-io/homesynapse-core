@@ -24,6 +24,7 @@ import com.homesynapse.persistence.PersistenceFactory;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.state.DerivationRule;
 import com.homesynapse.state.DerivedPublishGate;
+import com.homesynapse.state.ProjectionAdvancer;
 import com.homesynapse.state.ProjectionId;
 import com.homesynapse.state.ReadinessSource;
 import com.homesynapse.state.StateProjection;
@@ -129,25 +130,6 @@ public final class HomeSynapseCore implements ReadinessSource {
     /** Subscriber identifier used for the materialized state projection. */
     private static final String PROJECTION_SUBSCRIBER_ID = "state_projection";
 
-    /**
-     * M3.7-scoped derivation rule (closes OR-M3-17 from M3.6d-b).
-     *
-     * <p>The empty-derivation path IS the M3.7 closure of the placeholder.
-     * {@code StateProjection.applyToState} already handles the core
-     * materialization path: on {@code state_reported} the {@code EntityState}
-     * record is replaced (its version and timestamps advance) but the
-     * {@code attributes} map is NOT touched — only {@code state_changed}
-     * updates {@code attributes}.
-     * {@link DerivationRule} is the hook for emitting those additional
-     * {@code state_changed} events whose primary consumer (the automation
-     * engine) is M7/M8 scope (M5 is the Platform API). The full M4.0
-     * replacement
-     * ({@code DispatchingProjectionAdvancer} per Research 8 REC-28) will
-     * dispatch derivation through the {@code @EventType} registry.</p>
-     */
-    private static final DerivationRule MINIMAL_DERIVATION_RULE =
-            context -> List.of();
-
     private final Path dbPath;
     private final HomeSynapseConfig config;
     private final Clock clock;
@@ -162,8 +144,8 @@ public final class HomeSynapseCore implements ReadinessSource {
     private QueueSaturationHealthCheck healthCheck;
     private StateQueryService stateQueryService;
     private Javalin httpServer;
-    /** M3.7 — {@link MinimalProjectionAdvancer} bound to the live event store. */
-    private MinimalProjectionAdvancer projectionAdvancer;
+    /** M4.0b-1 — dispatching {@link ProjectionAdvancer} (REC-28) over the live event store. */
+    private ProjectionAdvancer projectionAdvancer;
     /** M3.7 — decorator that bridges persist → bus notify (Finding 2). */
     private EventPublisher eventPublisher;
     private volatile boolean started = false;
@@ -232,14 +214,16 @@ public final class HomeSynapseCore implements ReadinessSource {
         // Both flow through the persistence factory's public-interface accessors.
 
         // Step 5 — Derived write rate limit + projection advancer.
-        // The MinimalProjectionAdvancer (M3.7, closes OR-M3-18) wraps the
-        // live event store and is what StateProjection.processBatch() invokes
-        // during REPLAY/TRANSITION; the M3.7 MINIMAL_DERIVATION_RULE
-        // (closes OR-M3-17) ships derivation as a no-op until M4.0's
-        // DispatchingProjectionAdvancer (Research 8 REC-28) lands.
+        // The DispatchingProjectionAdvancer (M4.0b-1, Research 8 REC-28, closes
+        // OR-M3-18) wraps the live event store and is what
+        // StateProjection.processBatch() invokes during REPLAY/TRANSITION. It
+        // dispatches the read/forward concern by event type (forwarding all
+        // types — same cursor accounting as the M3.7 MinimalProjectionAdvancer
+        // it replaces); derivation/publication stays in the production
+        // DerivationRule (plan §4.2), wired at step 6.
         this.rateLimit = new DerivedWriteRateLimit(
                 clock, jfrMetrics, PROJECTION_SUBSCRIBER_ID);
-        this.projectionAdvancer = new MinimalProjectionAdvancer(
+        this.projectionAdvancer = ProjectionAdvancer.dispatching(
                 persistenceFactory.eventStore());
 
         // Step 5b — NotifyingEventPublisher decorator (M3.7 Finding 2).
@@ -249,6 +233,9 @@ public final class HomeSynapseCore implements ReadinessSource {
                 persistenceFactory.eventPublisher(), eventBus);
 
         // Step 6 — State projection.
+        // projectionVersion stays literal 1 (M4.0b-1 is amendment-free — no
+        // 1->2 bump, so no reconciliation/replay-from-zero fires and historical
+        // attributes are not backfilled; that is M4.0b-2, P2-blocked).
         DerivedPublishGate publishGate = rateLimit::acquire;
         this.stateProjection = StateProjection.create(
                 new ProjectionId(PROJECTION_SUBSCRIBER_ID),
@@ -257,9 +244,9 @@ public final class HomeSynapseCore implements ReadinessSource {
                 persistenceFactory.stateCheckpointSource(),
                 persistenceFactory.atomicCheckpointSink(), // AMD-45 §2.1 (coupled checkpoint)
                 persistenceFactory.stateStore(),
-                MINIMAL_DERIVATION_RULE,                   // M3.7 (closes OR-M3-17)
+                DerivationRule.production(),               // M4.0b-1 (closes OR-M3-17; REC-28, plan §4.2)
                 eventPublisher,                            // M3.7 (decorated — Finding 2)
-                projectionAdvancer,                        // M3.7 (closes OR-M3-18)
+                projectionAdvancer,                        // M4.0b-1 (closes OR-M3-18; REC-28)
                 config.checkpointPolicy(),                 // AMD-38 (HOME_DEFAULT or TESTING)
                 clock,
                 publishGate);
