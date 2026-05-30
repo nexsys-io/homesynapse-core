@@ -1,4 +1,4 @@
-# device-model — `com.homesynapse.device` — 61 types — Entity/Device/Capability model, sealed hierarchies, registries, discovery pipeline
+# device-model — `com.homesynapse.device` — 62 types — Entity/Device/Capability model, sealed hierarchies, registries, discovery pipeline
 
 ## Purpose
 
@@ -128,7 +128,13 @@ The `requires transitive com.homesynapse.platform` declaration means any module 
 | `DiscoveryPipeline` | interface | Orchestrates device discovery, proposal, and adoption lifecycle | `propose(List<HardwareIdentifier>, String manufacturer, String model, List<ProposedEntity>)` → `ProposedDevice`, `adopt(ProposedDevice, String displayName, AreaId)` → `Device`, `findExistingDevice(List<HardwareIdentifier>)` → `Optional<Device>`. |
 | `AttributeValueUpcaster` | interface — **AMD-47** | Migration seam for evolving stored `AttributeValue`s across type changes (value-layer analogue of the event upcaster) | `canUpcast(String storedTypeName, int fromSchemaVersion)` → `boolean`; `upcast(String storedTypeName, String rawForm, int fromSchemaVersion)` → `AttributeValue` (**strict** — throws on failure, never produces a `DegradedAttributeValue`); `default upcastLenient(...)` → `AttributeValue` (**lenient** — returns a `DegradedAttributeValue` on failure, never throws). **No `ServiceLoader`** (DECIDE-04 — constructor injection downstream). No implementation in M4.B3; projection-path wiring (AMD-47-INV-02, both paths) is **M4.0b-3**. |
 
-**Total: 61 public types + 1 package-info.java + 1 module-info.java = 63 Java files.**
+### Standard Capability Catalogue (M4.0b-3 / DP-K, AMD-51)
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `StandardCapabilities` | **public** final factory class | Production catalogue of the 15 standard (core-namespace) capabilities + their aggregated attribute schemas (DP-K) | `all()` → `List<Capability>` (the 15 standard records; **excludes** `CustomCapability`); `attributeSchemas()` → immutable `Map<String, AttributeSchema>` keyed by `attributeKey`, **fails fast** (`IllegalStateException`) if two standard capabilities declare the same key with different `AttributeType` (the AMD-51 resolver's global-consistency assumption; `power_w` is FLOAT in both `PowerMeasurement` and `PowerMeter`, so no conflict). Plus the 15 typed factory methods (`onOff()`…`powerMeter()`). **Construction logic lifted verbatim from `TestCapabilityFactory`**, which now delegates here (single source of truth, no duplication). Pure, no clock/I/O/locale — an immutable compile-time-shaped catalogue (the `QuantityValue.CATALOGUE` posture), NOT a runtime registry. **Seed for the future `CapabilityRegistry` implementation.** No standard attribute is `QUANTITY`/`ARRAY` at M4.0b-3 — all are `BOOLEAN`/`INT`/`FLOAT`/`ENUM`. |
+
+**Total: 62 public types + 1 package-info.java + 1 module-info.java = 64 Java files.**
 
 ## Dependencies
 

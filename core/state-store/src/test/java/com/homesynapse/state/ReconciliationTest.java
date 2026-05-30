@@ -7,6 +7,7 @@ package com.homesynapse.state;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.homesynapse.device.AttributeValue;
+import com.homesynapse.device.StandardCapabilities;
 import com.homesynapse.device.StringValue;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
@@ -33,6 +34,7 @@ import java.util.Objects;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -537,8 +539,110 @@ class ReconciliationTest {
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // AMD-51 typed comparator — the 2->3 transition + shouldPublishDerived coherence
+    // (§5 tests #6 and #10), driven by the REAL production typed rule (not a stand-in).
+    // ──────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("AMD-51 §5.6: a 2->3 typed reconciliation suppresses a within-epsilon report and supersedes the spurious logged state_changed")
+    void typed2to3ReconciliationSuppressesWithinEpsilonChange()
+            throws SequenceConflictException {
+        // Under the version-2 (string) rule a sensor reported 20.0 then 20.0000000001 and a
+        // prior-version state_changed(20.0 -> 20.0000000001) was logged (string compare saw a
+        // change). The version-3 typed FLOAT rule does NOT treat the within-1e-9 second report
+        // as a change. The 2->3 reconciliation reconstructs 20.0 (the current rule's value),
+        // suppressing the spurious logged change — while stateVersion still counts all 3 log
+        // events (INV-01). temperature_c is FLOAT in StandardCapabilities.
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        EventEnvelope r1 = reportedAt(subject, "temperature_c", "20.0", EVENT_TIME);
+        EventEnvelope r2 = reportedAt(subject, "temperature_c", "20.0000000001",
+                EVENT_TIME.plusSeconds(30));
+        EventEnvelope spurious = changedAt(subject, "temperature_c", "20.0", "20.0000000001",
+                EVENT_TIME.plusSeconds(31));
+
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = projectionFor("typed-2to3", 2, 3, typedRule(), store, 0L);
+        p.setMode(SubscriberMode.REPLAY);
+        p.onEvent(r1);
+        p.onEvent(r2);
+        p.onEvent(spurious);
+
+        EntityState state = store.get(entityId).orElseThrow();
+        assertThat(state.attributes().get("temperature_c"))
+                .as("the within-epsilon second report is suppressed; the spurious logged "
+                        + "change is superseded by the typed rule's re-derivation")
+                .isEqualTo(new StringValue("20.0"));
+        assertThat(state.stateVersion())
+                .as("3 log events advance the cursor (2 reports + the superseded "
+                        + "state_changed, INV-01)")
+                .isEqualTo(3L);
+    }
+
+    @Test
+    @DisplayName("AMD-51 §5.10: shouldPublishDerived stays coherent with the typed verdict on LIVE")
+    void typedRuleStaysCoherentWithStringPublishGuard() throws SequenceConflictException {
+        // Matching versions (3 == 3) => no reconciliation, gate inactive, plain LIVE. The
+        // typed FLOAT rule must emit only genuine changes; the string-based shouldPublishDerived
+        // guard must neither suppress a genuine typed-changed emit nor be reached when the
+        // typed rule emits nothing.
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = projectionFor("typed-live", 3, 3, typedRule(), store, 0L);
+        p.setMode(SubscriberMode.LIVE);
+
+        // First report establishes the attribute (prior null => emit).
+        p.onEvent(reportedAt(subject, "temperature_c", "20.0", EVENT_TIME));
+        assertThat(store.get(entityId).orElseThrow().attributes().get("temperature_c"))
+                .isEqualTo(new StringValue("20.0"));
+
+        // Within-epsilon report: typed-unchanged => the rule emits nothing, so the publish
+        // guard is never reached and the attribute is unchanged.
+        p.onEvent(reportedAt(subject, "temperature_c", "20.0000000001", EVENT_TIME.plusSeconds(1)));
+        assertThat(store.get(entityId).orElseThrow().attributes().get("temperature_c"))
+                .as("typed-unchanged emits nothing; shouldPublishDerived never reached")
+                .isEqualTo(new StringValue("20.0"));
+
+        // Genuine change: typed-changed => published and applied; NOT suppressed by the string
+        // guard (newValue "21.5" != current "20.0").
+        p.onEvent(reportedAt(subject, "temperature_c", "21.5", EVENT_TIME.plusSeconds(2)));
+        assertThat(store.get(entityId).orElseThrow().attributes().get("temperature_c"))
+                .as("typed-changed is not suppressed by shouldPublishDerived")
+                .isEqualTo(new StringValue("21.5"));
+    }
+
+    @Test
+    @Disabled("AMD-51 §5 #9 — catalogue-expansion backfill. Cannot be exercised at M4.0b-3: "
+            + "no new unit is added to the QuantityValue catalogue this WU, so there is no "
+            + "previously-unrecognised-now-recognised unit to replay. Enable (and complete) "
+            + "when a future WU expands QuantityValue.CATALOGUE — a historical state_reported "
+            + "whose unit was unrecognised (degraded) but is now recognised must reconstruct "
+            + "correctly during the next version-transition backfill (AMD-50 generality clause, "
+            + "value-layer case).")
+    @DisplayName("AMD-51 §5.9: catalogue-expansion backfill (later-WU — disabled stub)")
+    void catalogueExpansionBackfillReconstructsNewlyRecognisedUnit() {
+        // TODO(AMD-51 §5 #9): when QuantityValue.CATALOGUE gains a unit, publish a historical
+        // state_reported with that unit (which would previously have degraded), run a
+        // version-transition backfill, and assert the attribute reconstructs to the canonical
+        // QuantityValue rather than staying degraded.
+    }
+
+    // ──────────────────────────────────────────────────────────────────
     // Helpers
     // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Returns the production typed change-detection rule (AMD-51) wired with the structural
+     * comparator, the default float/quantity epsilon, and a resolver over the standard
+     * capability schemas (so {@code temperature_c} resolves to FLOAT).
+     */
+    private static DerivationRule typedRule() {
+        return DerivationRule.production(
+                AttributeValueComparator.structural(),
+                ComparisonPolicy.FP_NOISE_DEFAULT,
+                AttributeSchemaResolver.of(StandardCapabilities.attributeSchemas()));
+    }
 
     private StateProjection createProjection(int projectionVersion,
                                              StateCheckpointSource source) {

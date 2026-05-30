@@ -5,6 +5,7 @@
 package com.homesynapse.lifecycle;
 
 import com.homesynapse.api.rest.RestFilters;
+import com.homesynapse.device.StandardCapabilities;
 import com.homesynapse.event.DomainEvent;
 import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.EventStore;
@@ -22,6 +23,9 @@ import com.homesynapse.integration.IntegrationEvents;
 import com.homesynapse.persistence.DeploymentProfile;
 import com.homesynapse.persistence.PersistenceFactory;
 import com.homesynapse.platform.identity.HomeId;
+import com.homesynapse.state.AttributeSchemaResolver;
+import com.homesynapse.state.AttributeValueComparator;
+import com.homesynapse.state.ComparisonPolicy;
 import com.homesynapse.state.DerivationRule;
 import com.homesynapse.state.DerivedPublishGate;
 import com.homesynapse.state.ProjectionAdvancer;
@@ -233,22 +237,38 @@ public final class HomeSynapseCore implements ReadinessSource {
                 persistenceFactory.eventPublisher(), eventBus);
 
         // Step 6 — State projection.
-        // projectionVersion is literal 2 (M4.0b-2). The bump from 1 is the
-        // trigger: first boot on a version-1 checkpoint now mismatches, so the
+        // projectionVersion is literal 3 (M4.0b-3, AMD-51). The bump from 2 is the
+        // trigger: first boot on a version-2 checkpoint now mismatches, so the
         // AMD-41 §3.2.4 reconciliation fires (clear state, replay from 0) and the
-        // AMD-50 one-shot backfill reconstructs historical attributes from the
-        // state_reported log during that replay (gated by StateProjection's
-        // backfillActive provenance gate). Subsequent boots find persisted
-        // version 2 -> no reconciliation -> backfill dormant (AMD-50-INV-02).
+        // AMD-50 one-shot backfill — reused UNCHANGED for the 2->3 transition —
+        // reconstructs historical attributes from the state_reported log during that
+        // replay (gated by StateProjection's backfillActive provenance gate).
+        // Subsequent boots find persisted version 3 -> no reconciliation -> backfill
+        // dormant (AMD-50-INV-02).
+        //
+        // M4.0b-3 (AMD-51): the typed change-detection comparator + schema-driven
+        // reconstruction replace the string Objects.equals compare. The schema
+        // resolver is an immutable snapshot of the standard capability schemas
+        // (StandardCapabilities — DP-K), so the rule reads injected immutable config,
+        // NOT a live registry (AMD-50-INV-03 determinism preserved — the 2->3 backfill
+        // re-executes reconstruction+compare identically to LIVE). The typed compare
+        // suppresses phantom changes (21.0 vs 21.00, within-epsilon float noise) that
+        // the string rule emitted; the emitted StateChangedEvent payload stays String
+        // (the typed payload is AMD-52, deliberately staged).
         DerivedPublishGate publishGate = rateLimit::acquire;
+        AttributeValueComparator comparator = AttributeValueComparator.structural();
+        ComparisonPolicy comparisonPolicy = ComparisonPolicy.FP_NOISE_DEFAULT;
+        AttributeSchemaResolver schemaResolver =
+                AttributeSchemaResolver.of(StandardCapabilities.attributeSchemas());
         this.stateProjection = StateProjection.create(
                 new ProjectionId(PROJECTION_SUBSCRIBER_ID),
-                2,
+                3,
                 persistenceFactory.viewCheckpointStore(),
                 persistenceFactory.stateCheckpointSource(),
                 persistenceFactory.atomicCheckpointSink(), // AMD-45 §2.1 (coupled checkpoint)
                 persistenceFactory.stateStore(),
-                DerivationRule.production(),               // M4.0b-1 (closes OR-M3-17; REC-28, plan §4.2)
+                DerivationRule.production(                  // M4.0b-3 (AMD-51 typed comparator)
+                        comparator, comparisonPolicy, schemaResolver),
                 eventPublisher,                            // M3.7 (decorated — Finding 2)
                 projectionAdvancer,                        // M4.0b-1 (closes OR-M3-18; REC-28)
                 config.checkpointPolicy(),                 // AMD-38 (HOME_DEFAULT or TESTING)
