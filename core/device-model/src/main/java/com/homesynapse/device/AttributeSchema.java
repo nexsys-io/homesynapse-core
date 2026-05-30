@@ -44,4 +44,20 @@ public record AttributeSchema(
         Set<Permission> permissions,
         boolean nullable,
         boolean persistent
-) { }
+) {
+
+    /**
+     * Rejects the {@link AttributeType#DEGRADED} sentinel as a declared schema type
+     * (AMD-47-INV-04). No other field validation is performed here.
+     *
+     * @throws IllegalArgumentException if {@code type} is {@link AttributeType#DEGRADED}, the
+     *         sentinel classifier for {@link DegradedAttributeValue}, which must never be declared
+     *         in a schema
+     */
+    public AttributeSchema {
+        if (type == AttributeType.DEGRADED) {
+            throw new IllegalArgumentException(
+                    "AttributeType.DEGRADED is a sentinel and must not be declared in an AttributeSchema");
+        }
+    }
+}

@@ -33,5 +33,14 @@ public enum AttributeType {
     STRING,
 
     /** Enumerated string attribute, represented by {@link EnumValue}. The value must belong to the set of valid values defined in the capability's {@link AttributeSchema}. */
-    ENUM
+    ENUM,
+
+    /** Physical-quantity attribute, represented by {@link QuantityValue}. Carries a canonical-normalized magnitude plus its canonical unit symbol (e.g. "°C", "W", "Wh", "lux"). Added by AMD-47. */
+    QUANTITY,
+
+    /** Ordered, full-replacement list attribute, represented by {@link ArrayValue}. Added by AMD-47. */
+    ARRAY,
+
+    /** Sentinel classifier for {@link DegradedAttributeValue} — a stored value that could not be upcast to a current variant. Sentinel only: it must never be declared in an {@link AttributeSchema} (AMD-47-INV-04). Added by AMD-47. */
+    DEGRADED
 }

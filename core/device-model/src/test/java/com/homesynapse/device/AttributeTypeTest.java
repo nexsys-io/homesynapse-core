@@ -12,26 +12,29 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 /**
- * Tests for {@link AttributeType} — primitive data type classifier.
+ * Tests for {@link AttributeType} — primitive data type classifier (AMD-47 §2.5).
  */
 @DisplayName("AttributeType")
 class AttributeTypeTest {
 
     @Test
-    @DisplayName("exactly 5 values declared")
-    void exactlyFiveValues() {
-        assertThat(AttributeType.values()).hasSize(5);
+    @DisplayName("exactly 8 values declared")
+    void exactlyEightValues() {
+        assertThat(AttributeType.values()).hasSize(8);
     }
 
     @Test
-    @DisplayName("all expected values present in order")
+    @DisplayName("all expected values present in declared order")
     void allExpectedValues() {
         assertThat(AttributeType.values()).containsExactly(
                 AttributeType.BOOLEAN,
                 AttributeType.INT,
                 AttributeType.FLOAT,
                 AttributeType.STRING,
-                AttributeType.ENUM);
+                AttributeType.ENUM,
+                AttributeType.QUANTITY,
+                AttributeType.ARRAY,
+                AttributeType.DEGRADED);
     }
 
     @ParameterizedTest

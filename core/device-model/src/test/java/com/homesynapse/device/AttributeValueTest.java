@@ -10,7 +10,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link AttributeValue} sealed interface — hierarchy structure.
+ * Tests for {@link AttributeValue} sealed interface — hierarchy structure (AMD-47-INV-01).
  */
 @DisplayName("AttributeValue sealed interface")
 class AttributeValueTest {
@@ -22,19 +22,20 @@ class AttributeValueTest {
     }
 
     @Test
-    @DisplayName("exactly 5 permitted subtypes")
-    void exactlyFivePermits() {
-        assertThat(AttributeValue.class.getPermittedSubclasses()).hasSize(5);
+    @DisplayName("exactly 8 permitted subtypes")
+    void exactlyEightPermits() {
+        assertThat(AttributeValue.class.getPermittedSubclasses()).hasSize(8);
     }
 
     @Test
-    @DisplayName("permitted subtypes are BooleanValue, IntValue, FloatValue, StringValue, EnumValue")
+    @DisplayName("permitted subtypes are the five primitives plus QuantityValue, ArrayValue, DegradedAttributeValue")
     void permittedSubtypes() {
         Class<?>[] permitted = AttributeValue.class.getPermittedSubclasses();
         assertThat(permitted).extracting(Class::getSimpleName)
                 .containsExactlyInAnyOrder(
                         "BooleanValue", "IntValue", "FloatValue",
-                        "StringValue", "EnumValue");
+                        "StringValue", "EnumValue",
+                        "QuantityValue", "ArrayValue", "DegradedAttributeValue");
     }
 
     @Test

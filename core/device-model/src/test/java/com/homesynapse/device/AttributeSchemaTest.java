@@ -5,6 +5,7 @@
 package com.homesynapse.device;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -149,6 +150,38 @@ class AttributeSchemaTest {
                     Set.of(Permission.READ, Permission.WRITE, Permission.NOTIFY),
                     false, true);
             assertThat(a).isNotEqualTo(b);
+        }
+    }
+
+    @Nested
+    @DisplayName("INV-04 -- DEGRADED is not schema-declarable (AMD-47)")
+    class DegradedTypeRejectionTests {
+
+        @Test
+        @DisplayName("constructing a schema with type DEGRADED throws IllegalArgumentException")
+        void degradedTypeRejectedAtConstruction() {
+            assertThatThrownBy(() -> new AttributeSchema(
+                    "bad", AttributeType.DEGRADED,
+                    null, null, null, null, null, null,
+                    Set.of(Permission.READ), false, true))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("DEGRADED");
+        }
+
+        @Test
+        @DisplayName("QUANTITY and ARRAY schemas construct without error")
+        void quantityAndArrayTypesPermitted() {
+            AttributeSchema quantity = new AttributeSchema(
+                    "temperature_c", AttributeType.QUANTITY,
+                    null, null, null, null, "°C", "°C",
+                    Set.of(Permission.READ), false, true);
+            AttributeSchema array = new AttributeSchema(
+                    "segments", AttributeType.ARRAY,
+                    null, null, null, null, null, null,
+                    Set.of(Permission.READ), false, true);
+
+            assertThat(quantity.type()).isEqualTo(AttributeType.QUANTITY);
+            assertThat(array.type()).isEqualTo(AttributeType.ARRAY);
         }
     }
 }
