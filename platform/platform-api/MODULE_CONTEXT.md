@@ -1,4 +1,4 @@
-# platform-api — `com.homesynapse.platform` — 12 types — Dependency root, zero project dependencies, typed ULID identity system
+# platform-api — `com.homesynapse.platform` — 13 types — Dependency root, zero project dependencies, typed ULID identity system
 
 ## Purpose
 
@@ -24,7 +24,7 @@ No `requires` clauses — this module depends only on `java.base`.
 ## Package Structure
 
 - **`com.homesynapse.platform`** — Platform abstraction interfaces: `PlatformPaths` (filesystem layout contract) and `HealthReporter` (supervisor health reporting contract).
-- **`com.homesynapse.platform.identity`** — The ULID value type (`Ulid`), its generator (`UlidFactory`), and 8 typed ID wrapper records that provide compile-time type safety for domain object identity.
+- **`com.homesynapse.platform.identity`** — The ULID value type (`Ulid`), its generator (`UlidFactory`), and 9 typed ID wrapper records that provide compile-time type safety for domain object identity.
 
 ## Complete Type Inventory
 
@@ -37,7 +37,8 @@ No `requires` clauses — this module depends only on `java.base`.
 | `DeviceId` | record(`Ulid value`) implements `Comparable<DeviceId>` | Typed identifier for a physical device | Factory: `of(Ulid)`, `parse(String)`. Identifies hardware. New ID on device replacement. |
 | `EntityId` | record(`Ulid value`) implements `Comparable<EntityId>` | Typed identifier for a logical entity (functional unit of a device) | Factory: `of(Ulid)`, `parse(String)`. Stable across hardware replacements via `entity_transferred`. Primary subject of state/command events. |
 | `IntegrationId` | record(`Ulid value`) implements `Comparable<IntegrationId>` | Typed identifier for an integration adapter instance | Factory: `of(Ulid)`, `parse(String)`. Appears in event origin metadata. Used for command routing. |
-| `AreaId` | record(`Ulid value`) implements `Comparable<AreaId>` | Typed identifier for a spatial area (room, zone, floor) | Factory: `of(Ulid)`, `parse(String)`. Used for scoped automation and UI organization. |
+| `AreaId` | record(`Ulid value`) implements `Comparable<AreaId>` | Typed identifier for a spatial area (room, zone, or other user-defined spatial grouping) | Factory: `of(Ulid)`, `parse(String)`. Used for scoped automation and UI organization. (M4.B-S1: first-line Javadoc parenthetical de-conflated from "or floor" per AMD-44 §2.1.4 — floor grouping is now `FloorId`.) |
+| `FloorId` | record(`Ulid value`) implements `Comparable<FloorId>` | Typed identifier for a floor — a vertical level grouping of areas (M4.B-S1 / AMD-44 §2.1) | Factory: `of(Ulid)`, `parse(String)`. Mirrors `AreaId` exactly (`of`/`parse`/`compareTo`/`toString`, null-guarded). Referenced by `Floor`/`Area` and the floor/area registries in device-model. Jackson-free (serde is a downstream persistence/rest WU). |
 | `AutomationId` | record(`Ulid value`) implements `Comparable<AutomationId>` | Typed identifier for an automation rule definition | Factory: `of(Ulid)`, `parse(String)`. Stable across edits. Subject reference for automation execution events. |
 | `PersonId` | record(`Ulid value`) implements `Comparable<PersonId>` | Typed identifier for a person (occupant/user) | Factory: `of(Ulid)`, `parse(String)`. Privacy-sensitive — presence events keyed by PersonId are a crypto-shredding boundary (INV-PD-07). |
 | `HomeId` | record(`Ulid value`) implements `Comparable<HomeId>` | Typed identifier for the physical dwelling/site | Factory: `of(Ulid)`, `parse(String)`. One per installation in MVP. Distinct from SystemId — survives reinstallation. |
@@ -50,7 +51,7 @@ No `requires` clauses — this module depends only on `java.base`.
 | `PlatformPaths` | interface | Abstracts deployment-tier filesystem layout | Methods: `binaryDir()`, `configDir()`, `dataDir()`, `logDir()`, `backupDir()`, `tempDir()`. Returns absolute `Path` instances. Resolved once during Phase 0, cached, immutable after. `tempDir()` cleaned on each startup. |
 | `HealthReporter` | interface | Abstracts platform supervisor health reporting | Methods: `reportReady()`, `reportWatchdog()`, `reportStopping()`, `reportStatus(String)`. On Tier 1 (Linux/systemd): sends sd_notify messages. On other tiers: no-op. Watchdog must be called every WatchdogSec/2 (default 30s) after reportReady(). |
 
-**Total: 12 public types + 2 package-info.java files + 1 module-info.java = 15 Java files.**
+**Total: 13 public types + 2 package-info.java files + 1 module-info.java = 16 Java files.** (M4.B-S1 / AMD-44 added `FloorId` to the identity package — no `module-info` change, the package was already exported.)
 
 ## Dependencies
 
@@ -102,7 +103,7 @@ None. This module contains no sealed types.
 
 2. **`UlidFactory` uses `ReentrantLock` instead of `synchronized`.** `synchronized` blocks pin virtual threads to carrier threads. On a Raspberry Pi with 4 cores (4 carrier threads), one pinned carrier is a 25% capacity loss. `ReentrantLock` allows the virtual thread to unmount while waiting. Reference: Virtual Thread Risk Audit (AMD-26).
 
-3. **8 typed ID wrappers in the identity package** (DeviceId, EntityId, IntegrationId, AreaId, AutomationId, PersonId, HomeId, SystemId). EventId is deliberately in event-model (`com.homesynapse.event`), not here, because it is event-specific. SubscriberId in event-bus is a plain `String`, not a typed wrapper, because subscribers are not domain objects.
+3. **9 typed ID wrappers in the identity package** (DeviceId, EntityId, IntegrationId, AreaId, **FloorId** (M4.B-S1), AutomationId, PersonId, HomeId, SystemId). EventId is deliberately in event-model (`com.homesynapse.event`), not here, because it is event-specific. SubscriberId in event-bus is a plain `String`, not a typed wrapper, because subscribers are not domain objects.
 
 4. **No external ULID library dependency.** `Ulid` and `UlidFactory` are implemented from scratch rather than using an external library (e.g., ulid-creator). This eliminates an external dependency for the lowest-level module and ensures full control over the monotonic generation algorithm and virtual thread compatibility.
 
@@ -124,6 +125,6 @@ None. This module contains no sealed types.
 
 - **PlatformPaths needs implementations:** `LinuxSystemPaths` (Tier 1) and `LocalPaths` (development). Both are straightforward — resolve paths and cache them. Test with temporary directories.
 - **HealthReporter needs implementations:** `SystemdHealthReporter` (sends sd_notify via Unix domain socket) and `NoOpHealthReporter` (all methods are no-ops). The systemd implementation is Tier 1 only.
-- **Jackson serialization for typed IDs — IMPLEMENTED externally (M2.4, 2026-04-10, persistence module).** Typed ID wrappers remain Jackson-annotation-free by design. Serialization is handled externally in `com.homesynapse.persistence.PersistenceJacksonModule`, which registers a generic `TypedUlidSerializer<T>` / `TypedUlidDeserializer<T>` pair per wrapper using method references to the wrapper's existing `toString()` and static `parse(String)` methods (`EntityId::toString`, `EntityId::parse`, etc.). This keeps `platform-api` free of any Jackson dependency — the JPMS module does not `require` Jackson, and no source file imports `com.fasterxml.jackson.*`. All 8 typed wrappers (`EntityId`, `DeviceId`, `AreaId`, `AutomationId`, `PersonId`, `HomeId`, `IntegrationId`, `SystemId`) plus the raw `Ulid` are covered. Do NOT add Jackson annotations to this module — the external serde approach is the locked pattern and enforcing Jackson isolation to `core/persistence` is an M2.4 invariant.
+- **Jackson serialization for typed IDs — IMPLEMENTED externally (M2.4, 2026-04-10, persistence module).** Typed ID wrappers remain Jackson-annotation-free by design. Serialization is handled externally in `com.homesynapse.persistence.PersistenceJacksonModule`, which registers a generic `TypedUlidSerializer<T>` / `TypedUlidDeserializer<T>` pair per wrapper using method references to the wrapper's existing `toString()` and static `parse(String)` methods (`EntityId::toString`, `EntityId::parse`, etc.). This keeps `platform-api` free of any Jackson dependency — the JPMS module does not `require` Jackson, and no source file imports `com.fasterxml.jackson.*`. All 8 original typed wrappers (`EntityId`, `DeviceId`, `AreaId`, `AutomationId`, `PersonId`, `HomeId`, `IntegrationId`, `SystemId`) plus the raw `Ulid` are covered. **OPEN (M4.B-S1):** the 9th wrapper `FloorId` (added by AMD-44 Stage 1) is **not yet registered** in `PersistenceJacksonModule` — its serde is an explicitly-deferred downstream persistence/rest WU (AMD-44 §Out of Scope). When floor persistence/REST lands, register `FloorId::toString`/`FloorId::parse` there following the same generic `TypedUlidSerializer`/`TypedUlidDeserializer` pattern. Do NOT add Jackson annotations to this module — the external serde approach is the locked pattern and enforcing Jackson isolation to `core/persistence` is an M2.4 invariant.
 - **Testing strategy:** Unit tests for `Ulid` (encode/decode round-trip, comparison ordering, edge cases), `UlidFactory` (monotonicity within millisecond, clock backward tolerance, thread safety), and each typed wrapper (null rejection, parse/format round-trip). No integration tests needed — this module has no external dependencies.
 - **Performance:** `UlidFactory.generate()` is on the hot path for every event publication. The `ReentrantLock` contention under high event throughput should be profiled. The target is sub-microsecond generation time.

@@ -5,6 +5,7 @@
 package com.homesynapse.device;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.homesynapse.platform.identity.AreaId;
 import com.homesynapse.platform.identity.DeviceId;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Tests for {@link Device} — physical device container record.
@@ -48,7 +50,7 @@ class DeviceTest {
                 AREA_ID,
                 VIA_DEVICE_ID,
                 List.of("lighting", "kitchen"),
-                List.of(new HardwareIdentifier("zigbee_ieee", "00:11:22:33:44:55:66:77")),
+                Set.of(new HardwareIdentifier("zigbee_ieee", "00:11:22:33:44:55:66:77")),
                 CREATED_AT);
     }
 
@@ -97,7 +99,7 @@ class DeviceTest {
         void nullSerialNumber() {
             Device d = new Device(DEVICE_ID, "slug", "name", "mfg", "model",
                     null, "1.0", "rev-A", INTEGRATION_ID, AREA_ID,
-                    null, List.of(), List.of(), CREATED_AT);
+                    null, List.of(), Set.of(), CREATED_AT);
             assertThat(d.serialNumber()).isNull();
         }
 
@@ -106,7 +108,7 @@ class DeviceTest {
         void nullFirmwareVersion() {
             Device d = new Device(DEVICE_ID, "slug", "name", "mfg", "model",
                     "SN", null, "rev-A", INTEGRATION_ID, AREA_ID,
-                    null, List.of(), List.of(), CREATED_AT);
+                    null, List.of(), Set.of(), CREATED_AT);
             assertThat(d.firmwareVersion()).isNull();
         }
 
@@ -115,7 +117,7 @@ class DeviceTest {
         void nullHardwareVersion() {
             Device d = new Device(DEVICE_ID, "slug", "name", "mfg", "model",
                     "SN", "1.0", null, INTEGRATION_ID, AREA_ID,
-                    null, List.of(), List.of(), CREATED_AT);
+                    null, List.of(), Set.of(), CREATED_AT);
             assertThat(d.hardwareVersion()).isNull();
         }
 
@@ -124,7 +126,7 @@ class DeviceTest {
         void nullAreaId() {
             Device d = new Device(DEVICE_ID, "slug", "name", "mfg", "model",
                     null, null, null, INTEGRATION_ID, null,
-                    null, List.of(), List.of(), CREATED_AT);
+                    null, List.of(), Set.of(), CREATED_AT);
             assertThat(d.areaId()).isNull();
         }
 
@@ -133,7 +135,7 @@ class DeviceTest {
         void nullViaDeviceId() {
             Device d = new Device(DEVICE_ID, "slug", "name", "mfg", "model",
                     null, null, null, INTEGRATION_ID, AREA_ID,
-                    null, List.of(), List.of(), CREATED_AT);
+                    null, List.of(), Set.of(), CREATED_AT);
             assertThat(d.viaDeviceId()).isNull();
         }
 
@@ -142,7 +144,7 @@ class DeviceTest {
         void allNullableFieldsNull() {
             Device d = new Device(DEVICE_ID, "slug", "name", "mfg", "model",
                     null, null, null, INTEGRATION_ID, null,
-                    null, List.of(), List.of(), CREATED_AT);
+                    null, List.of(), Set.of(), CREATED_AT);
             assertThat(d.serialNumber()).isNull();
             assertThat(d.firmwareVersion()).isNull();
             assertThat(d.hardwareVersion()).isNull();
@@ -165,11 +167,11 @@ class DeviceTest {
         }
 
         @Test
-        @DisplayName("hardwareIdentifiers list is preserved")
+        @DisplayName("hardwareIdentifiers set is preserved")
         void hardwareIdentifiersPreserved() {
             Device d = fullDevice();
-            assertThat(d.hardwareIdentifiers()).hasSize(1);
-            assertThat(d.hardwareIdentifiers().get(0).namespace()).isEqualTo("zigbee_ieee");
+            assertThat(d.hardwareIdentifiers())
+                    .containsExactly(new HardwareIdentifier("zigbee_ieee", "00:11:22:33:44:55:66:77"));
         }
 
         @Test
@@ -177,9 +179,57 @@ class DeviceTest {
         void emptyCollections() {
             Device d = new Device(DEVICE_ID, "slug", "name", "mfg", "model",
                     null, null, null, INTEGRATION_ID, null,
-                    null, List.of(), List.of(), CREATED_AT);
+                    null, List.of(), Set.of(), CREATED_AT);
             assertThat(d.labels()).isEmpty();
             assertThat(d.hardwareIdentifiers()).isEmpty();
+        }
+    }
+
+    // -- HardwareIdentifier set semantics -------------------------------------
+
+    @Nested
+    @DisplayName("HardwareIdentifier set semantics")
+    class HardwareIdentifierSetTests {
+
+        @Test
+        @DisplayName("duplicate HardwareIdentifiers collapse to a set of distinct elements")
+        void duplicatesCollapse() {
+            HardwareIdentifier id = new HardwareIdentifier("zigbee_ieee", "AA:BB:CC:DD");
+            HardwareIdentifier duplicate = new HardwareIdentifier("zigbee_ieee", "AA:BB:CC:DD");
+            // The set is built from a collection that contains a duplicate (namespace, value) tuple.
+            Set<HardwareIdentifier> withDuplicate = Set.copyOf(List.of(id, duplicate));
+
+            Device d = new Device(DEVICE_ID, "slug", "name", "mfg", "model",
+                    null, null, null, INTEGRATION_ID, null,
+                    null, List.of(), withDuplicate, CREATED_AT);
+
+            assertThat(d.hardwareIdentifiers()).containsExactly(id);
+        }
+
+        @Test
+        @DisplayName("returned hardwareIdentifiers set is unmodifiable")
+        void returnedSetUnmodifiable() {
+            Device d = fullDevice();
+            assertThatThrownBy(() ->
+                    d.hardwareIdentifiers().add(new HardwareIdentifier("zwave_node", "0x1234")))
+                    .isInstanceOf(UnsupportedOperationException.class);
+        }
+
+        @Test
+        @DisplayName("null hardwareIdentifiers throws NullPointerException")
+        void nullHardwareIdentifiersThrows() {
+            assertThatThrownBy(() -> new Device(DEVICE_ID, "slug", "name", "mfg", "model",
+                    null, null, null, INTEGRATION_ID, null,
+                    null, List.of(), null, CREATED_AT))
+                    .isInstanceOf(NullPointerException.class);
+        }
+
+        @Test
+        @DisplayName("returned labels list is unmodifiable (compact-ctor defensive copy)")
+        void returnedLabelsUnmodifiable() {
+            Device d = fullDevice();
+            assertThatThrownBy(() -> d.labels().add("extra"))
+                    .isInstanceOf(UnsupportedOperationException.class);
         }
     }
 
@@ -207,7 +257,7 @@ class DeviceTest {
                     "TRADFRI-E27", "SN-12345", "1.4.2", "rev-B",
                     INTEGRATION_ID, AREA_ID, VIA_DEVICE_ID,
                     List.of("lighting", "kitchen"),
-                    List.of(new HardwareIdentifier("zigbee_ieee", "00:11:22:33:44:55:66:77")),
+                    Set.of(new HardwareIdentifier("zigbee_ieee", "00:11:22:33:44:55:66:77")),
                     CREATED_AT);
             assertThat(a).isNotEqualTo(b);
         }

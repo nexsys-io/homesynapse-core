@@ -10,6 +10,7 @@ import com.homesynapse.platform.identity.IntegrationId;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Represents a physical device managed by HomeSynapse.
@@ -33,8 +34,10 @@ import java.util.List;
  * @param integrationId the integration that manages this device, never {@code null}
  * @param areaId the area this device is assigned to, {@code null} if unassigned
  * @param viaDeviceId the parent device for router/gateway topologies, {@code null} if directly connected
- * @param labels user-assigned classification labels; unmodifiable
- * @param hardwareIdentifiers protocol-level identifiers for discovery deduplication; unmodifiable
+ * @param labels user-assigned classification labels; defensively copied and unmodifiable
+ * @param hardwareIdentifiers protocol-level identifiers for discovery deduplication, a set
+ *        (unique, unordered) since duplicate {@code (namespace, value)} tuples are meaningless;
+ *        defensively copied and unmodifiable
  * @param createdAt the timestamp when this device was adopted, never {@code null}
  * @see Entity
  * @see DeviceRegistry
@@ -54,6 +57,18 @@ public record Device(
         AreaId areaId,
         DeviceId viaDeviceId,
         List<String> labels,
-        List<HardwareIdentifier> hardwareIdentifiers,
+        Set<HardwareIdentifier> hardwareIdentifiers,
         Instant createdAt
-) { }
+) {
+
+    /**
+     * Defensively copies the collection fields into unmodifiable views.
+     *
+     * @throws NullPointerException if {@code labels} or {@code hardwareIdentifiers}
+     *                              (or any element thereof) is {@code null}
+     */
+    public Device {
+        labels = List.copyOf(labels);
+        hardwareIdentifiers = Set.copyOf(hardwareIdentifiers);
+    }
+}

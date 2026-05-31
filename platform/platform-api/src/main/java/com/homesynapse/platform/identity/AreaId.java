@@ -7,7 +7,7 @@ package com.homesynapse.platform.identity;
 import java.util.Objects;
 
 /**
- * Typed identifier for a spatial area (room, zone, or floor) within a home.
+ * Typed identifier for a spatial area (room, zone, or other user-defined spatial grouping) within a home.
  *
  * <p>Areas organize entities and devices into logical spatial groups. An area may represent
  * a physical room ("Kitchen"), a zone ("Upstairs"), or any user-defined spatial grouping.

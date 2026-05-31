@@ -13,6 +13,7 @@ import com.homesynapse.platform.identity.UlidFactory;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Static factory methods and builder for creating {@link Device} instances
@@ -105,7 +106,7 @@ public final class TestDeviceFactory {
         private AreaId areaId;
         private DeviceId viaDeviceId;
         private List<String> labels = List.of();
-        private List<HardwareIdentifier> hardwareIdentifiers;
+        private Set<HardwareIdentifier> hardwareIdentifiers;
         private Instant createdAt = DEFAULT_CREATED_AT;
 
         DeviceBuilder() {
@@ -184,8 +185,8 @@ public final class TestDeviceFactory {
             return this;
         }
 
-        /** Sets the hardware identifiers list. */
-        public DeviceBuilder hardwareIdentifiers(List<HardwareIdentifier> hardwareIdentifiers) {
+        /** Sets the hardware identifiers set. */
+        public DeviceBuilder hardwareIdentifiers(Set<HardwareIdentifier> hardwareIdentifiers) {
             this.hardwareIdentifiers = hardwareIdentifiers;
             return this;
         }
@@ -210,9 +211,9 @@ public final class TestDeviceFactory {
                     ? deviceId : DeviceId.of(UlidFactory.generate());
             IntegrationId effectiveIntegrationId = integrationId != null
                     ? integrationId : IntegrationId.of(UlidFactory.generate());
-            List<HardwareIdentifier> effectiveHwIds = hardwareIdentifiers != null
+            Set<HardwareIdentifier> effectiveHwIds = hardwareIdentifiers != null
                     ? hardwareIdentifiers
-                    : List.of(new HardwareIdentifier("test", "hw-" + deviceSlug));
+                    : Set.of(new HardwareIdentifier("test", "hw-" + deviceSlug));
 
             return new Device(
                     effectiveDeviceId,

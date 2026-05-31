@@ -8,6 +8,7 @@ import com.homesynapse.platform.identity.AreaId;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Orchestrates the device discovery, proposal, and adoption lifecycle.
@@ -30,14 +31,15 @@ public interface DiscoveryPipeline {
     /**
      * Creates a device proposal from detected hardware information.
      *
-     * @param identifiers the hardware identifiers for deduplication, never {@code null}
+     * @param identifiers the hardware identifiers for deduplication, a set (unique, unordered),
+     *        never {@code null}
      * @param manufacturer the detected manufacturer name, never {@code null}
      * @param model the detected model identifier, never {@code null}
      * @param entities the proposed entities for this device, never {@code null}
      * @return the proposed device, never {@code null}
      */
     ProposedDevice propose(
-            List<HardwareIdentifier> identifiers,
+            Set<HardwareIdentifier> identifiers,
             String manufacturer,
             String model,
             List<ProposedEntity> entities);
@@ -55,8 +57,9 @@ public interface DiscoveryPipeline {
     /**
      * Checks for an existing device with matching hardware identifiers (deduplication).
      *
-     * @param identifiers the hardware identifiers to check, never {@code null}
+     * @param identifiers the hardware identifiers to check, a set (unique, unordered),
+     *        never {@code null}
      * @return an {@link Optional} containing the existing device if found, or empty
      */
-    Optional<Device> findExistingDevice(List<HardwareIdentifier> identifiers);
+    Optional<Device> findExistingDevice(Set<HardwareIdentifier> identifiers);
 }
