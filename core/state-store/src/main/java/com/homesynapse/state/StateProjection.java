@@ -5,7 +5,6 @@
 package com.homesynapse.state;
 
 import com.homesynapse.value.AttributeValue;
-import com.homesynapse.value.StringValue;
 import com.homesynapse.event.AvailabilityChangedEvent;
 import com.homesynapse.event.CausalContext;
 import com.homesynapse.event.EventDraft;
@@ -742,6 +741,13 @@ public final class StateProjection implements Subscriber {
      * suppressed silently. This guards against re-publishing self-produced
      * derived events that slipped past the {@link SelfProducedFilter} (e.g.,
      * after a process restart that lost the in-memory filter set).</p>
+     *
+     * <p>Post-AMD-52 the comparison is <strong>typed-to-typed</strong> (the
+     * materialized value and {@code sc.newValue()} are both {@link AttributeValue})
+     * via structural {@code equals}, not string-to-string (§2.6 / AMD-52-INV-07).
+     * The guard only <em>suppresses</em>: structural equality suppresses solely an
+     * exact-match re-publish, so it can never suppress a genuine typed change the
+     * derivation rule emitted (any change beyond the rule's epsilon is not equal).</p>
      */
     private boolean shouldPublishDerived(EventDraft draft, EntityId subjectEntity) {
         if (!(draft.payload() instanceof StateChangedEvent sc)) {
@@ -755,8 +761,7 @@ public final class StateProjection implements Subscriber {
         if (currentValue == null) {
             return true;
         }
-        String currentSerialized = serializeAttribute(currentValue);
-        return !currentSerialized.equals(sc.newValue());
+        return !currentValue.equals(sc.newValue());
     }
 
     /**
@@ -816,7 +821,7 @@ public final class StateProjection implements Subscriber {
                         prior.stale());
             } else {
                 Map<String, AttributeValue> newAttrs = new HashMap<>(prior.attributes());
-                newAttrs.put(sc.attributeKey(), new StringValue(sc.newValue()));
+                newAttrs.put(sc.attributeKey(), sc.newValue());  // typed value (AMD-52 S2)
                 updated = new EntityState(
                         prior.entityId(),
                         Map.copyOf(newAttrs),
@@ -925,7 +930,7 @@ public final class StateProjection implements Subscriber {
         EntityState prior = stateStore.get(entityId)
                 .orElseGet(() -> initialEntityState(entityId));
         Map<String, AttributeValue> newAttrs = new HashMap<>(prior.attributes());
-        newAttrs.put(sc.attributeKey(), new StringValue(sc.newValue()));
+        newAttrs.put(sc.attributeKey(), sc.newValue());  // typed value (AMD-52 S2)
         EntityState updated = new EntityState(
                 prior.entityId(),
                 Map.copyOf(newAttrs),
@@ -971,14 +976,6 @@ public final class StateProjection implements Subscriber {
             return new EntityId(ref.id());
         }
         return null;
-    }
-
-    private static String serializeAttribute(AttributeValue value) {
-        if (value instanceof StringValue sv) {
-            return sv.value();
-        }
-        Object raw = value.rawValue();
-        return (raw == null) ? "" : raw.toString();
     }
 
     /**

@@ -7,7 +7,6 @@ package com.homesynapse.persistence;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.homesynapse.value.AttributeValue;
-import com.homesynapse.value.StringValue;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.state.Availability;
 import com.homesynapse.state.EntityState;
@@ -41,7 +40,7 @@ import java.util.Objects;
  *   "stateMap": {
  *     "<entityId Crockford>": {
  *       "entityId": "<Crockford>",
- *       "attributes": { "<key>": "<string-value>" | null, ... },
+ *       "attributes": { "<key>": {"t":"<AttributeType>","v":...} | null, ... },
  *       "availability": "AVAILABLE" | "UNAVAILABLE" | "UNKNOWN",
  *       "stateVersion": 42,
  *       "lastChanged": "2026-01-01T00:00:00Z",
@@ -54,28 +53,28 @@ import java.util.Objects;
  * }
  * }</pre>
  *
- * <h2>Attribute representation</h2>
+ * <h2>Attribute representation (typed envelope, AMD-52 / AMD-52-INV-06)</h2>
  *
- * <p>For M3.5b, attributes serialize as a {@code Map<String, String>}. This
- * matches what {@link com.homesynapse.state.StateProjection#applyToState}
- * writes — every {@code state_changed} update wraps the new value in a
- * {@link StringValue}, so the full {@link AttributeValue} sealed hierarchy
- * does not appear in the materialized state. When a future projection writes
- * other {@link AttributeValue} kinds, the representation must be extended
- * (a typed envelope per entry, or a per-value polymorphic codec). The
- * deserializer rebuilds attributes as {@code Map<String, AttributeValue>}
- * with {@link StringValue} (or {@code null} when the serialized value was
- * {@code null}).</p>
+ * <p>Attributes serialize as a {@code Map<String, AttributeValue>}, each value written by the
+ * shared {@link AttributeValueSerializer} as the AMD-52 tagged-union envelope
+ * ({@code {"t":"<AttributeType>","v":...}}). This is the typed-envelope extension this class's
+ * original Javadoc anticipated — it fulfils the S2 materialization surface so a typed value the
+ * projection writes ({@code FloatValue}, {@code QuantityValue}, …) round-trips as its real
+ * variant rather than being flattened to a string. The supplied {@link ObjectMapper} MUST
+ * register the {@code AttributeValue} codec (i.e. include {@code PersistenceJacksonModule}) so
+ * the value type resolves. The deserializer rebuilds {@code Map<String, AttributeValue>}
+ * preserving {@code null} entries.</p>
  *
  * <h2>Null handling</h2>
  *
- * <p>{@link EntityState#staleAfter()} is nullable. The supplied
- * {@link ObjectMapper} MUST be configured to preserve null values in
- * serialized output (use {@code JsonInclude.Include.ALWAYS} or do not
- * configure a {@code NON_NULL} default) so that null {@code staleAfter} and
- * null attribute values survive the round trip. The deserializer builds the
- * attribute map via {@code HashMap.put} (never {@code Map.copyOf}) so null
- * values inside the map do not trigger {@code NullPointerException}.</p>
+ * <p>{@link EntityState#staleAfter()} is nullable, and an attribute value may be {@code null}
+ * (a schema-declared attribute that has never received a report). The supplied
+ * {@link ObjectMapper} MUST be configured to preserve null values in serialized output (use
+ * {@code JsonInclude.Include.ALWAYS} or do not configure a {@code NON_NULL} default) so that
+ * null {@code staleAfter} and null attribute values survive the round trip. Both
+ * {@code toSerializable} and {@code fromSerializable} build the attribute map via a
+ * {@code HashMap}/{@code LinkedHashMap} copy (never {@code Map.copyOf}) so null values inside
+ * the map do not trigger {@code NullPointerException}.</p>
  *
  * <h2>Edge cases</h2>
  *
@@ -227,22 +226,10 @@ final class CheckpointSerializer {
     // ──────────────────────────────────────────────────────────────────
 
     private static SerializableEntityState toSerializable(EntityState state) {
-        // Defensive copy of attributes — preserves null values (Map.copyOf
-        // would throw on null values; brief gotcha).
-        Map<String, String> attrs = new LinkedHashMap<>();
-        for (Map.Entry<String, AttributeValue> e : state.attributes().entrySet()) {
-            AttributeValue av = e.getValue();
-            String stringValue;
-            if (av == null) {
-                stringValue = null;
-            } else if (av instanceof StringValue sv) {
-                stringValue = sv.value();
-            } else {
-                Object raw = av.rawValue();
-                stringValue = (raw == null) ? null : raw.toString();
-            }
-            attrs.put(e.getKey(), stringValue);
-        }
+        // Null-preserving copy of the typed attributes (AMD-52 S2). LinkedHashMap, NOT
+        // Map.copyOf — the latter rejects null values (a schema-declared attribute that has
+        // never reported). Each value serializes through the AttributeValue typed envelope.
+        Map<String, AttributeValue> attrs = new LinkedHashMap<>(state.attributes());
 
         return new SerializableEntityState(
                 state.entityId().toString(),
@@ -258,14 +245,11 @@ final class CheckpointSerializer {
 
     private static EntityState fromSerializable(
             SerializableEntityState s, EntityId entityId) {
-        // Rebuild attributes — DO NOT use Map.copyOf (throws on null values).
+        // Rebuild attributes — DO NOT use Map.copyOf (throws on null values). The codec
+        // deserialized each non-null value to its real AttributeValue variant.
         Map<String, AttributeValue> attrs = new HashMap<>();
         if (s.attributes() != null) {
-            for (Map.Entry<String, String> e : s.attributes().entrySet()) {
-                String v = e.getValue();
-                attrs.put(e.getKey(),
-                        (v == null) ? null : new StringValue(v));
-            }
+            attrs.putAll(s.attributes());
         }
 
         return new EntityState(
@@ -285,13 +269,14 @@ final class CheckpointSerializer {
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * Internal Jackson-serializable shape of one entity's state. String-only
-     * attribute values keep the JSON polymorphism-free (the M3.5a projection
-     * only writes {@link StringValue}).
+     * Internal Jackson-serializable shape of one entity's state. Attribute values are the
+     * typed {@link AttributeValue} hierarchy, (de)serialized through the AMD-52 tagged-union
+     * codec ({@link AttributeValueSerializer}/{@link AttributeValueDeserializer}); null values
+     * are preserved (the {@code ALWAYS}-inclusion mapper requirement).
      */
     record SerializableEntityState(
             String entityId,
-            Map<String, String> attributes,
+            Map<String, AttributeValue> attributes,
             String availability,
             long stateVersion,
             Instant lastChanged,

@@ -237,24 +237,26 @@ public final class HomeSynapseCore implements ReadinessSource {
                 persistenceFactory.eventPublisher(), eventBus);
 
         // Step 6 — State projection.
-        // projectionVersion is literal 3 (M4.0b-3, AMD-51). The bump from 2 is the
-        // trigger: first boot on a version-2 checkpoint now mismatches, so the
+        // projectionVersion is literal 4 (M4.0b-4, AMD-52). The bump from 3 is the
+        // trigger: first boot on a version-3 checkpoint now mismatches, so the
         // AMD-41 §3.2.4 reconciliation fires (clear state, replay from 0) and the
-        // AMD-50 one-shot backfill — reused UNCHANGED for the 2->3 transition —
-        // reconstructs historical attributes from the state_reported log during that
-        // replay (gated by StateProjection's backfillActive provenance gate).
-        // Subsequent boots find persisted version 3 -> no reconciliation -> backfill
-        // dormant (AMD-50-INV-02).
+        // AMD-50 one-shot backfill — reused UNCHANGED for the 3->4 transition —
+        // re-derives historical attributes (now TYPED) from the state_reported log
+        // during that replay (gated by StateProjection's backfillActive provenance
+        // gate). Subsequent boots find persisted version 4 -> no reconciliation ->
+        // backfill dormant (AMD-50-INV-02).
         //
-        // M4.0b-3 (AMD-51): the typed change-detection comparator + schema-driven
-        // reconstruction replace the string Objects.equals compare. The schema
-        // resolver is an immutable snapshot of the standard capability schemas
-        // (StandardCapabilities — DP-K), so the rule reads injected immutable config,
-        // NOT a live registry (AMD-50-INV-03 determinism preserved — the 2->3 backfill
-        // re-executes reconstruction+compare identically to LIVE). The typed compare
-        // suppresses phantom changes (21.0 vs 21.00, within-epsilon float noise) that
-        // the string rule emitted; the emitted StateChangedEvent payload stays String
-        // (the typed payload is AMD-52, deliberately staged).
+        // M4.0b-4 (AMD-52): the typed change-detection comparator + schema-driven
+        // reconstruction (M4.0b-3) are now cashed out — the rule emits the TYPED
+        // AttributeValue payload at schema_version = 2 (DP-4), applyToState/backfill
+        // materialize the typed value (S2), and the AttributeValue codec (de)serializes
+        // both the event payload and the checkpoint envelope. The schema resolver is an
+        // immutable snapshot of the standard capability schemas (StandardCapabilities —
+        // DP-K), so the rule reads injected immutable config, NOT a live registry
+        // (AMD-50-INV-03 determinism preserved — the 3->4 backfill re-executes
+        // reconstruction+compare+materialize identically to LIVE). Historical
+        // schema_version = 1 String state_changed rows are superseded (Path A), never
+        // read for state; a forensic typed read of one degrades (Path B).
         DerivedPublishGate publishGate = rateLimit::acquire;
         AttributeValueComparator comparator = AttributeValueComparator.structural();
         ComparisonPolicy comparisonPolicy = ComparisonPolicy.FP_NOISE_DEFAULT;
@@ -262,7 +264,7 @@ public final class HomeSynapseCore implements ReadinessSource {
                 AttributeSchemaResolver.of(StandardCapabilities.attributeSchemas());
         this.stateProjection = StateProjection.create(
                 new ProjectionId(PROJECTION_SUBSCRIBER_ID),
-                3,
+                4,                                          // M4.0b-4 (AMD-52): 3 -> 4 typed materialization
                 persistenceFactory.viewCheckpointStore(),
                 persistenceFactory.stateCheckpointSource(),
                 persistenceFactory.atomicCheckpointSink(), // AMD-45 §2.1 (coupled checkpoint)

@@ -7,6 +7,8 @@ package com.homesynapse.state;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.homesynapse.device.StandardCapabilities;
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.FloatValue;
 import com.homesynapse.value.StringValue;
 import com.homesynapse.event.CausalContext;
 import com.homesynapse.event.EventCategory;
@@ -96,8 +98,8 @@ class ProductionDerivationRuleTest {
     }
 
     @Test
-    @DisplayName("§5 #7: the emitted StateChangedEvent carries String old/new and links to the cause")
-    void preservesStringPayload() {
+    @DisplayName("AMD-52 §5#5: the emitted StateChangedEvent carries TYPED old/new at schema_version 2")
+    void emitsTypedPayloadAtSchemaVersion2() {
         EntityId id = entityId();
         EntityState prior = priorWith(id, "temperature_c", "20.0");
         EventEnvelope env = reported(id, "temperature_c", "21.5");
@@ -107,25 +109,51 @@ class ProductionDerivationRuleTest {
         assertThat(drafts).hasSize(1);
         EventDraft draft = drafts.get(0);
         assertThat(draft.eventType()).isEqualTo(EventTypes.STATE_CHANGED);
+        assertThat(draft.schemaVersion())
+                .as("AMD-52 DP-4: the typed payload is emitted at schema_version 2")
+                .isEqualTo(2);
         assertThat(draft.payload()).isInstanceOf(StateChangedEvent.class);
         StateChangedEvent sc = (StateChangedEvent) draft.payload();
         assertThat(sc.attributeKey()).isEqualTo("temperature_c");
-        assertThat(sc.oldValue()).as("stringified prior").isEqualTo("20.0");
-        assertThat(sc.newValue()).as("reported value verbatim — still String (AMD-52 is staged)")
-                .isEqualTo("21.5");
+        assertThat(sc.oldValue()).as("typed reconstructed prior (temperature_c is FLOAT)")
+                .isEqualTo(new FloatValue(20.0));
+        assertThat(sc.newValue()).as("typed reconstructed inbound")
+                .isEqualTo(new FloatValue(21.5));
         assertThat(sc.triggeredBy()).as("links to the triggering state_reported")
                 .isEqualTo(env.eventId());
     }
 
     @Test
-    @DisplayName("§5 #7: first-report payload carries an empty oldValue")
-    void firstReportPayloadHasEmptyOldValue() {
+    @DisplayName("AMD-52 §5#5 (DP-6): a first-report payload carries a null oldValue")
+    void firstReportPayloadHasNullOldValue() {
         EntityId id = entityId();
         EventEnvelope env = reported(id, "temperature_c", "20.0");
         List<EventDraft> drafts = typedRule.evaluate(new DerivationContext(null, env));
         StateChangedEvent sc = (StateChangedEvent) drafts.get(0).payload();
-        assertThat(sc.oldValue()).isEmpty();
-        assertThat(sc.newValue()).isEqualTo("20.0");
+        assertThat(sc.oldValue()).as("null = no prior (first report)").isNull();
+        assertThat(sc.newValue()).isEqualTo(new FloatValue(20.0));
+    }
+
+    @Test
+    @DisplayName("AMD-52 §5#10: a natively-typed prior (now possible) reconstructs/compares correctly")
+    void nativelyTypedPriorComparesCorrectly() {
+        EntityId id = entityId();
+        // Post-AMD-52 the materialized prior is the typed variant, not a StringValue.
+        EntityState typedPrior = priorWithTyped(id, "temperature_c", new FloatValue(20.0));
+
+        // Within-epsilon second report: the comparator must still suppress.
+        assertThat(typedRule.evaluate(
+                new DerivationContext(typedPrior, reported(id, "temperature_c", "20.0000000001"))))
+                .as("typed prior + within-epsilon report ⇒ no change")
+                .isEmpty();
+
+        // Above-epsilon report: emits, carrying the typed prior unchanged.
+        List<EventDraft> drafts = typedRule.evaluate(
+                new DerivationContext(typedPrior, reported(id, "temperature_c", "21.5")));
+        assertThat(drafts).hasSize(1);
+        StateChangedEvent sc = (StateChangedEvent) drafts.get(0).payload();
+        assertThat(sc.oldValue()).isEqualTo(new FloatValue(20.0));
+        assertThat(sc.newValue()).isEqualTo(new FloatValue(21.5));
     }
 
     @Test
@@ -170,9 +198,13 @@ class ProductionDerivationRuleTest {
     }
 
     private static EntityState priorWith(EntityId entityId, String key, String value) {
+        return priorWithTyped(entityId, key, new StringValue(value));
+    }
+
+    private static EntityState priorWithTyped(EntityId entityId, String key, AttributeValue value) {
         return new EntityState(
                 entityId,
-                Map.of(key, new StringValue(value)),
+                Map.of(key, value),
                 Availability.AVAILABLE,
                 1L,
                 FIXED,

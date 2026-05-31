@@ -46,15 +46,17 @@ import java.util.Objects;
  *   <li>asks the {@link AttributeValueComparator} whether to emit (typed equality with the
  *       pinned float/quantity epsilon, the order-sensitive array compare, and the asymmetric
  *       Degraded / null-prior rules folded in);</li>
- *   <li>when the comparator emits, constructs the <strong>same String</strong>
- *       {@link StateChangedEvent} the pre-typed rule built — {@code oldValue} = the stringified
- *       prior (empty when none), {@code newValue} = {@code StateReportedEvent.value()}, linked
- *       via {@code triggeredBy = envelope.eventId()}.</li>
+ *   <li>when the comparator emits, constructs the <strong>typed</strong>
+ *       {@link StateChangedEvent} carrying those reconstructed values directly —
+ *       {@code oldValue} = {@code priorTyped} (nullable: {@code null} for a first report),
+ *       {@code newValue} = {@code inboundTyped}, linked via
+ *       {@code triggeredBy = envelope.eventId()} — emitted at {@code schema_version = 2}.</li>
  * </ol>
  *
- * <p>The typed values are transient: the materialized attribute and the emitted payload stay
- * {@code String} (the typed payload is AMD-52, deliberately staged — §2.7). Reconstruction is
- * a separate step from the {@code AttributeValueUpcaster} SPI (left unchanged).</p>
+ * <p>AMD-52 cashes out the AMD-51 §2.7 staging: the reconstructed typed values are no longer
+ * transient — they are emitted in the payload (S1) and materialized into state (S2). The draft
+ * carries {@code schema_version = 2} (the typed-payload marker). Reconstruction remains a
+ * separate step from the {@code AttributeValueUpcaster} SPI (left unchanged).</p>
  *
  * <h2>Contract compliance (INV-PROJ-01, AMD-50-INV-03, AMD-41 §3.2.1)</h2>
  *
@@ -118,15 +120,15 @@ final class ProductionDerivationRule implements DerivationRule {
             return List.of();
         }
 
-        // DP-G / §2.7: the StateChangedEvent payload stays String (the typed payload is
-        // AMD-52). oldValue is the stringified prior (empty when none); newValue is the
-        // reported value verbatim — identical to the pre-typed rule's construction.
-        String oldNonNull = priorStringForm(context.priorState(), key);
+        // AMD-52 §2.6: carry the TYPED values the comparison already computed into the
+        // payload (S1) — no re-stringify. priorTyped is null for a first report (the
+        // reconstructor returns null when there is no prior) -> oldValue = null (DP-6).
+        // The draft is written at schema_version = 2 (the typed-payload marker, DP-4).
         StateChangedEvent payload = new StateChangedEvent(
-                key, oldNonNull, sr.value(), env.eventId());
+                key, priorTyped, inboundTyped, env.eventId());
         EventDraft draft = new EventDraft(
                 EventTypes.STATE_CHANGED,
-                1,
+                2,                   // schema_version 1 -> 2: typed payload marker (AMD-52-INV-01)
                 env.eventTime(),     // inherit; never Instant.now() (INV-PROJ-01)
                 env.subjectRef(),
                 EventPriority.NORMAL,
@@ -140,9 +142,12 @@ final class ProductionDerivationRule implements DerivationRule {
     /**
      * Reconstructs the prior canonical value to its schema-declared variant, or returns
      * {@code null} when there is no prior state or no prior value for the key (the comparator
-     * treats a {@code null} prior as a first report). The materialized prior is always a
-     * {@link StringValue} (§1.2), reconstructed by the identical schema-driven parse with the
-     * schema canonical unit (the stored QUANTITY magnitude is already canonical).
+     * treats a {@code null} prior as a first report). Post-AMD-52 the materialized prior is the
+     * typed variant (no longer guaranteed a {@link StringValue}); reconstruction stays
+     * idempotent on an already-typed value (AMD-51-INV-05 / AMD-52 §2.7 erratum) — a
+     * {@link StringValue} prior is parsed, a typed prior round-trips through its
+     * {@code rawValue()} string form to the same variant under the schema canonical unit (the
+     * stored QUANTITY magnitude is already canonical).
      */
     private AttributeValue reconstructPrior(EntityState prior, String key,
                                             AttributeSchema schema, EntityId entityId) {
@@ -158,21 +163,6 @@ final class ProductionDerivationRule implements DerivationRule {
                 : String.valueOf(priorValue.rawValue());
         String priorUnit = (schema != null) ? schema.canonicalUnitSymbol() : null;
         return reconstructor.reconstruct(priorSerialized, priorUnit, schema, key, entityId);
-    }
-
-    /**
-     * Returns the prior canonical value in string form for the {@link StateChangedEvent}
-     * payload (DP-G), or {@code ""} when no prior state or no prior value exists.
-     */
-    private static String priorStringForm(EntityState prior, String key) {
-        if (prior == null) {
-            return "";
-        }
-        AttributeValue value = prior.attributes().get(key);
-        if (value == null) {
-            return "";
-        }
-        return (value instanceof StringValue sv) ? sv.value() : String.valueOf(value.rawValue());
     }
 
     /**

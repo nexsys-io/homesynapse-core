@@ -27,9 +27,9 @@ import org.slf4j.LoggerFactory;
  * <strong>symmetrically to both comparison operands</strong> — the inbound
  * {@code StateReportedEvent.value} and the prior materialized value (always a
  * {@code StringValue}). It is <strong>distinct from</strong> the
- * {@code AttributeValueUpcaster} stored-value-migration SPI, which is left unchanged. The
- * produced typed values are transient: the materialized attribute and the emitted
- * {@code StateChangedEvent} payload remain {@code String} (AMD-51 §2.7).</p>
+ * {@code AttributeValueUpcaster} stored-value-migration SPI, which is left unchanged. Since
+ * AMD-52 the produced typed values are no longer transient — they are emitted in the
+ * {@code StateChangedEvent} payload (S1) and materialized into state (S2).</p>
  *
  * <h2>Per-type behaviour</h2>
  * <ul>

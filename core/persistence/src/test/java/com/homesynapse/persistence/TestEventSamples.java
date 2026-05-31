@@ -24,6 +24,7 @@ import com.homesynapse.event.StateChangedEvent;
 import com.homesynapse.event.StateConfirmedEvent;
 import com.homesynapse.event.StateReportRejectedEvent;
 import com.homesynapse.event.StateReportedEvent;
+import com.homesynapse.value.StringValue;
 import com.homesynapse.event.StoragePressureChangedEvent;
 import com.homesynapse.event.SystemStartedEvent;
 import com.homesynapse.event.SystemStoppedEvent;
@@ -90,7 +91,9 @@ final class TestEventSamples {
     }
 
     static StateChangedEvent stateChanged() {
-        return new StateChangedEvent("power", "off", "on", EVENT_ID_1);
+        // AMD-52: typed AttributeValue payload (oldValue nullable; here a StringValue prior).
+        return new StateChangedEvent(
+                "power", new StringValue("off"), new StringValue("on"), EVENT_ID_1);
     }
 
     static StateConfirmedEvent stateConfirmed() {

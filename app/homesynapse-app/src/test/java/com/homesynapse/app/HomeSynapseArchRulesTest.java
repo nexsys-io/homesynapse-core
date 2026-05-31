@@ -61,4 +61,10 @@ class HomeSynapseArchRulesTest {
     @ArchTest
     static final ArchRule restEndpointsNoEventPublishing_preventsPublishCalls =
             HomeSynapseArchRules.REST_ENDPOINTS_NO_EVENT_PUBLISHING;
+
+    // AMD-52-INV-02 — Jackson isolation of the domain model.
+
+    @ArchTest
+    static final ArchRule noJacksonInDomainModel =
+            HomeSynapseArchRules.NO_JACKSON_IN_DOMAIN_MODEL;
 }

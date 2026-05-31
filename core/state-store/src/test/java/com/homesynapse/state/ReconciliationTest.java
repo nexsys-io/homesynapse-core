@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.homesynapse.value.AttributeValue;
 import com.homesynapse.device.StandardCapabilities;
+import com.homesynapse.value.FloatValue;
 import com.homesynapse.value.StringValue;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
@@ -571,8 +572,8 @@ class ReconciliationTest {
         EntityState state = store.get(entityId).orElseThrow();
         assertThat(state.attributes().get("temperature_c"))
                 .as("the within-epsilon second report is suppressed; the spurious logged "
-                        + "change is superseded by the typed rule's re-derivation")
-                .isEqualTo(new StringValue("20.0"));
+                        + "change is superseded by the typed rule's re-derivation (typed FLOAT, AMD-52 S2)")
+                .isEqualTo(new FloatValue(20.0));
         assertThat(state.stateVersion())
                 .as("3 log events advance the cursor (2 reports + the superseded "
                         + "state_changed, INV-01)")
@@ -583,9 +584,9 @@ class ReconciliationTest {
     @DisplayName("AMD-51 §5.10: shouldPublishDerived stays coherent with the typed verdict on LIVE")
     void typedRuleStaysCoherentWithStringPublishGuard() throws SequenceConflictException {
         // Matching versions (3 == 3) => no reconciliation, gate inactive, plain LIVE. The
-        // typed FLOAT rule must emit only genuine changes; the string-based shouldPublishDerived
-        // guard must neither suppress a genuine typed-changed emit nor be reached when the
-        // typed rule emits nothing.
+        // typed FLOAT rule must emit only genuine changes; the typed-to-typed shouldPublishDerived
+        // guard (AMD-52) must neither suppress a genuine typed-changed emit nor be reached when
+        // the typed rule emits nothing.
         SubjectRef subject = freshSubject();
         EntityId entityId = new EntityId(subject.id());
         InMemoryStateStore store = new InMemoryStateStore();
@@ -595,21 +596,21 @@ class ReconciliationTest {
         // First report establishes the attribute (prior null => emit).
         p.onEvent(reportedAt(subject, "temperature_c", "20.0", EVENT_TIME));
         assertThat(store.get(entityId).orElseThrow().attributes().get("temperature_c"))
-                .isEqualTo(new StringValue("20.0"));
+                .isEqualTo(new FloatValue(20.0));
 
         // Within-epsilon report: typed-unchanged => the rule emits nothing, so the publish
         // guard is never reached and the attribute is unchanged.
         p.onEvent(reportedAt(subject, "temperature_c", "20.0000000001", EVENT_TIME.plusSeconds(1)));
         assertThat(store.get(entityId).orElseThrow().attributes().get("temperature_c"))
                 .as("typed-unchanged emits nothing; shouldPublishDerived never reached")
-                .isEqualTo(new StringValue("20.0"));
+                .isEqualTo(new FloatValue(20.0));
 
-        // Genuine change: typed-changed => published and applied; NOT suppressed by the string
-        // guard (newValue "21.5" != current "20.0").
+        // Genuine change: typed-changed => published and applied; NOT suppressed by the typed
+        // guard (newValue FloatValue(21.5) != current FloatValue(20.0)).
         p.onEvent(reportedAt(subject, "temperature_c", "21.5", EVENT_TIME.plusSeconds(2)));
         assertThat(store.get(entityId).orElseThrow().attributes().get("temperature_c"))
                 .as("typed-changed is not suppressed by shouldPublishDerived")
-                .isEqualTo(new StringValue("21.5"));
+                .isEqualTo(new FloatValue(21.5));
     }
 
     @Test
@@ -732,10 +733,17 @@ class ReconciliationTest {
     private EventEnvelope changedAt(SubjectRef subject, String key, String oldValue,
                                     String newValue, Instant eventTime)
             throws SequenceConflictException {
+        // A historical state_changed stand-in (no schema): typed StringValue payload, empty
+        // oldValue -> null (first-report sentinel). Written at schema_version 1 as a legacy
+        // prior-version row; under the InMemoryEventStore it is replayed as the object (no
+        // codec), so the supersession gate keys on instanceof StateChangedEvent.
+        AttributeValue oldTyped =
+                (oldValue == null || oldValue.isEmpty()) ? null : new StringValue(oldValue);
         EventDraft draft = new EventDraft(
                 EventTypes.STATE_CHANGED, 1, eventTime, subject,
                 EventPriority.NORMAL, EventOrigin.SYSTEM,
-                new StateChangedEvent(key, oldValue, newValue, EventId.of(UlidFactory.generate())),
+                new StateChangedEvent(key, oldTyped, new StringValue(newValue),
+                        EventId.of(UlidFactory.generate())),
                 null, null);
         return eventStore.publishRoot(draft);
     }
@@ -798,11 +806,12 @@ class ReconciliationTest {
             if (Objects.equals(oldValue, newValue)) {
                 return List.of();
             }
-            String oldNonNull = (oldValue == null) ? "" : oldValue;
+            // AMD-52: typed payload (no schema -> StringValue); null oldValue = first report.
+            AttributeValue oldTyped = (oldValue == null) ? null : new StringValue(oldValue);
             StateChangedEvent payload =
-                    new StateChangedEvent(key, oldNonNull, newValue, env.eventId());
+                    new StateChangedEvent(key, oldTyped, new StringValue(newValue), env.eventId());
             EventDraft draft = new EventDraft(
-                    EventTypes.STATE_CHANGED, 1, env.eventTime(), env.subjectRef(),
+                    EventTypes.STATE_CHANGED, 2, env.eventTime(), env.subjectRef(),
                     EventPriority.NORMAL, EventOrigin.SYSTEM, payload, env.actorRef(), null);
             return List.of(draft);
         }

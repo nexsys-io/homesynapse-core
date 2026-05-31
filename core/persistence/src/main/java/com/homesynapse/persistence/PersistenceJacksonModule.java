@@ -6,6 +6,7 @@ package com.homesynapse.persistence;
 
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.homesynapse.event.EventId;
+import com.homesynapse.value.AttributeValue;
 import com.homesynapse.platform.identity.AreaId;
 import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.DeviceId;
@@ -36,11 +37,13 @@ import com.homesynapse.platform.identity.Ulid;
  *   <li>{@link EventId} — typed wrapper from event-model (NOT in platform-api).</li>
  * </ul>
  *
- * <p><strong>Future expansion point (DECIDE-M2-03):</strong> {@code AttributeValue}
- * serde is deliberately NOT registered here. No current event record uses
- * {@code AttributeValue} as a field type; the state-store milestone will add a
- * dedicated handler (or a new module extending this one) when the type becomes
- * part of serialized payloads.</p>
+ * <p><strong>{@code AttributeValue} serde (AMD-52 / M4.0b-4b):</strong> the
+ * {@link AttributeValueSerializer}/{@link AttributeValueDeserializer} pair — the
+ * DECIDE-M2-03 pre-declared expansion point — is now registered here, keyed on the
+ * {@code AttributeValue} interface so all eight variants resolve through it
+ * (Jackson's {@code SimpleSerializers} walks superclasses and interfaces). This is the
+ * ONLY place device value types are Jackson-serialized (AMD-52-INV-02 Jackson isolation);
+ * the codec is a hand-rolled tagged-union envelope, never {@code @JsonTypeInfo}.</p>
  *
  * <p>Package-private — installed only by {@link PersistenceObjectMapper}. External
  * modules receive pre-configured {@code ObjectMapper} instances and never touch
@@ -51,6 +54,8 @@ import com.homesynapse.platform.identity.Ulid;
  * @see UlidDeserializer
  * @see TypedUlidSerializer
  * @see TypedUlidDeserializer
+ * @see AttributeValueSerializer
+ * @see AttributeValueDeserializer
  */
 final class PersistenceJacksonModule extends SimpleModule {
 
@@ -83,6 +88,12 @@ final class PersistenceJacksonModule extends SimpleModule {
 
         // EventId lives in event-model, not platform-api
         registerTypedWrapper(EventId.class, EventId::toString, EventId::parse);
+
+        // AttributeValue serde (AMD-52 / M4.0b-4b — the DECIDE-M2-03 expansion point).
+        // Keyed on the AttributeValue interface so all eight sealed variants dispatch
+        // through the single hand-rolled tagged-union codec (no @JsonTypeInfo).
+        addSerializer(AttributeValue.class, new AttributeValueSerializer());
+        addDeserializer(AttributeValue.class, new AttributeValueDeserializer());
     }
 
     /**

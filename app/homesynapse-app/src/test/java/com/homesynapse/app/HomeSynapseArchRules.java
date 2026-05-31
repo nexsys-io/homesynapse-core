@@ -280,6 +280,37 @@ final class HomeSynapseArchRules {
                     .as("M3.6e.2: REST query endpoints must not publish events"
                             + " — read-only surface");
 
+    // ──────────────────────────────────────────────────────────────────
+    // Rule 10: Jackson isolation of the domain model (AMD-52-INV-02)
+    //
+    // The AttributeValue / event / device / state model must carry NO
+    // Jackson dependency: no @JsonTypeInfo, no @Json* annotation, no
+    // com.fasterxml.jackson.* import. All (de)serialization of these types
+    // — including the AMD-52 AttributeValue tagged-union codec — lives
+    // ONLY in com.homesynapse.persistence (the Jackson-isolation HARD
+    // RULE). This is the bytecode-level complement to event-package-scoped
+    // Rule 7: it covers the device-resident AttributeValue and the typed
+    // StateChangedEvent payload, which Rule 7 alone does not reach.
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * AMD-52-INV-02: the value/event/device/state domain model must not depend on
+     * {@code com.fasterxml.jackson..}. The {@code AttributeValue} serde and all event-payload
+     * (de)serialization is confined to {@code com.homesynapse.persistence}.
+     */
+    static final ArchRule NO_JACKSON_IN_DOMAIN_MODEL =
+            noClasses()
+                    .that().resideInAnyPackage(
+                            "com.homesynapse.value..",
+                            "com.homesynapse.event..",
+                            "com.homesynapse.device..",
+                            "com.homesynapse.state.."
+                    )
+                    .should().dependOnClassesThat().resideInAPackage("com.fasterxml.jackson..")
+                    .as("AMD-52-INV-02: the AttributeValue/event/device/state model is"
+                            + " Jackson-free — the AttributeValue codec lives only in"
+                            + " com.homesynapse.persistence");
+
     /**
      * Validates all rules against the given classes.
      *
@@ -298,5 +329,6 @@ final class HomeSynapseArchRules {
         NO_JSON_TYPE_INFO_IN_EVENTS.check(classes);
         QUERY_SERVICE_READ_ONLY.check(classes);
         REST_ENDPOINTS_NO_EVENT_PUBLISHING.check(classes);
+        NO_JACKSON_IN_DOMAIN_MODEL.check(classes);
     }
 }

@@ -13,10 +13,15 @@ import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.CommandResultEvent;
 import com.homesynapse.event.DegradedEvent;
 import com.homesynapse.event.DomainEvent;
+import com.homesynapse.event.EventId;
 import com.homesynapse.event.EventTypes;
+import com.homesynapse.event.StateChangedEvent;
 import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.integration.IntegrationHealthChanged;
 import com.homesynapse.integration.IntegrationStarted;
+import com.homesynapse.value.FloatValue;
+import com.homesynapse.value.StringValue;
+import com.homesynapse.platform.identity.Ulid;
 
 import java.nio.charset.StandardCharsets;
 
@@ -99,7 +104,13 @@ class EventPayloadCodecTest {
 
         @Test
         void stateChanged() throws Exception {
-            assertRoundTrip(TestEventSamples.stateChanged(), EventTypes.STATE_CHANGED);
+            // AMD-52: the typed StateChangedEvent payload is written at schema_version 2.
+            // (Round-tripping it at version 1 would hit the Path-B legacy gate — see the
+            // AMD-52 nested class below.)
+            StateChangedEvent original = TestEventSamples.stateChanged();
+            byte[] bytes = codec.encode(original);
+            DomainEvent decoded = codec.decode(EventTypes.STATE_CHANGED, 2, bytes);
+            assertThat(decoded).isEqualTo(original);
         }
 
         @Test
@@ -482,6 +493,98 @@ class EventPayloadCodecTest {
             assertThatThrownBy(() -> codec.decode(EventTypes.COMMAND_ISSUED, 1, null))
                     .isInstanceOf(NullPointerException.class)
                     .hasMessageContaining("payload");
+        }
+    }
+
+    // ===== AMD-52: typed StateChangedEvent payload + schema-versioned replay =====
+
+    @Nested
+    @DisplayName("AMD-52 typed StateChangedEvent payload + Path-B replay")
+    class Amd52TypedStateChanged {
+
+        private static final EventId TRIGGER =
+                EventId.of(Ulid.parse("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+
+        @Test
+        @DisplayName("§5#5: a typed FLOAT payload round-trips through decode(.., 2, ..) as its variant")
+        void typedFloatPayload_roundTripsAtSchemaVersion2() {
+            StateChangedEvent original = new StateChangedEvent(
+                    "temperature_c", new FloatValue(20.0), new FloatValue(21.5), TRIGGER);
+
+            byte[] bytes = codecEncode(original);
+            String json = new String(bytes, StandardCharsets.UTF_8);
+            // The hand-rolled tagged-union envelope appears inside the payload (SNAKE_CASE on
+            // the outer record fields; literal "t"/"v" inside the AttributeValue envelope).
+            assertThat(json).contains("\"new_value\"");
+            assertThat(json).contains("\"t\":\"FLOAT\"");
+
+            DomainEvent decoded = codec.decode(EventTypes.STATE_CHANGED, 2, bytes);
+            assertThat(decoded).isEqualTo(original);
+            assertThat(((StateChangedEvent) decoded).newValue()).isEqualTo(new FloatValue(21.5));
+        }
+
+        @Test
+        @DisplayName("§5#5: nullable oldValue (first report) is omitted by NON_NULL and decodes to null")
+        void nullOldValue_omittedAndDecodesToNull() {
+            StateChangedEvent firstReport = new StateChangedEvent(
+                    "power", null, new StringValue("on"), TRIGGER);
+
+            byte[] bytes = codecEncode(firstReport);
+            String json = new String(bytes, StandardCharsets.UTF_8);
+            assertThat(json)
+                    .as("NON_NULL inclusion omits the null old_value field")
+                    .doesNotContain("old_value");
+
+            DomainEvent decoded = codec.decode(EventTypes.STATE_CHANGED, 2, bytes);
+            assertThat(decoded).isEqualTo(firstReport);
+            assertThat(((StateChangedEvent) decoded).oldValue())
+                    .as("an absent old_value decodes to null, not an error")
+                    .isNull();
+        }
+
+        @Test
+        @DisplayName("§5#6 (Path B): a legacy schema_version==1 String state_changed degrades to DegradedEvent")
+        void legacyStringPayloadVersion1_degradesToDegradedEvent() {
+            // A pre-AMD-52 row: String old/new value, written at schema_version 1.
+            String rawJson = "{\"attribute_key\":\"power\",\"old_value\":\"off\","
+                    + "\"new_value\":\"on\",\"triggered_by\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"}";
+            byte[] bytes = rawJson.getBytes(StandardCharsets.UTF_8);
+
+            DomainEvent decoded = codec.decode(EventTypes.STATE_CHANGED, 1, bytes);
+
+            assertThat(decoded)
+                    .as("a v1 state_changed read under the typed reader is a defined DegradedEvent")
+                    .isInstanceOf(DegradedEvent.class);
+            DegradedEvent degraded = (DegradedEvent) decoded;
+            assertThat(degraded.eventType()).isEqualTo(EventTypes.STATE_CHANGED);
+            assertThat(degraded.schemaVersion()).isEqualTo(1);
+            assertThat(degraded.rawPayload())
+                    .as("the raw payload is preserved verbatim — no typed guess")
+                    .isEqualTo(rawJson);
+            assertThat(degraded.failureReason()).contains("schema_version 1");
+            assertThat(degraded.failureReason()).contains("Path B");
+        }
+
+        @Test
+        @DisplayName("§5#6 (Path B): the v1 gate does NOT fire for schema_version >= 2")
+        void schemaVersion2_isNotPathBGated() {
+            StateChangedEvent original = new StateChangedEvent(
+                    "power", new StringValue("off"), new StringValue("on"), TRIGGER);
+            byte[] bytes = codecEncode(original);
+
+            DomainEvent decoded = codec.decode(EventTypes.STATE_CHANGED, 2, bytes);
+
+            assertThat(decoded)
+                    .as("version 2 is the typed reader, not Path B")
+                    .isInstanceOf(StateChangedEvent.class);
+        }
+
+        private byte[] codecEncode(StateChangedEvent event) {
+            try {
+                return codec.encode(event);
+            } catch (Exception e) {
+                throw new AssertionError("encode failed", e);
+            }
         }
     }
 

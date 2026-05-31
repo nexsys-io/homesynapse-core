@@ -80,7 +80,7 @@ The `requires transitive` on platform-api means any module that reads `com.homes
 | Type | Kind | Purpose | Key Fields |
 |---|---|---|---|
 | `StateReportedEvent` | record | Raw attribute observation from integration adapter | `attributeKey`, `value` (String), `unit` (nullable), `rawProtocolValue` (nullable), `rawProtocolUnit` (nullable). Priority: DIAGNOSTIC. |
-| `StateChangedEvent` | record | Attribute's canonical state was updated (derived via State Projection) | `attributeKey`, `oldValue` (String), `newValue` (String), `triggeredBy` (EventId). Priority: NORMAL. |
+| `StateChangedEvent` | record | Attribute's canonical state was updated (derived via State Projection) | `attributeKey`, `oldValue` (**`AttributeValue`, nullable** — null = first report), `newValue` (**`AttributeValue`, non-null**), `triggeredBy` (EventId). Priority: NORMAL. **AMD-52 (M4.0b-4b):** old/new are the typed `com.homesynapse.value.AttributeValue` the derivation rule reconstructed (was `String`); the compact ctor null-guards `attributeKey`/`newValue`/`triggeredBy` only. The typed payload is emitted at `events.schema_version = 2`; a legacy `schema_version = 1` String-payload row read under the typed reader degrades to a `DegradedEvent` (Path B). No Jackson annotation — the `AttributeValue` codec lives only in `core/persistence`. |
 | `StateConfirmedEvent` | record | Command's intended state change confirmed by device report | `commandEventId` (EventId), `reportEventId` (EventId), `attributeKey`, `expectedValue`, `actualValue`, `matchType` (String: "exact", "within_tolerance", "enum_transition", "any_change"). Priority: NORMAL. |
 | `StateReportRejectedEvent` | record | Attribute value rejected due to validation failure | `attributeKey`, `reportedValue`, `reason`, `validationRule`. Priority: DIAGNOSTIC. |
 
@@ -136,7 +136,7 @@ The `requires transitive` on platform-api means any module that reads `com.homes
 
 | Module | Why | Specific Types Used |
 |---|---|---|
-| **value-model** (`com.homesynapse.value`) | `requires transitive` (M4.0b-4a) — peer-over-shared-leaf for the typed `StateChangedEvent` payload (M4.0b-4b). Forward-prep at 4a: no value type is named in event-model code yet. Gradle scope `api`. | `AttributeValue` (the typed `StateChangedEvent.oldValue`/`newValue` fields land at M4.0b-4b). |
+| **value-model** (`com.homesynapse.value`) | `requires transitive` (M4.0b-4a) — peer-over-shared-leaf for the typed `StateChangedEvent` payload. **M4.0b-4b: now in use** — `StateChangedEvent` imports and references `AttributeValue`. Gradle scope `api`. | `AttributeValue` (the `StateChangedEvent.oldValue`/`newValue` field type). |
 | **platform-api** (`com.homesynapse.platform`) | `requires transitive` — Identity types for event subjects and IDs | `Ulid`, `UlidFactory` (for EventId generation), `EntityId`, `DeviceId`, `IntegrationId`, `AutomationId`, `SystemId`, `PersonId` (for SubjectRef factory methods). |
 | **SLF4J** (`slf4j.api`) | API dependency for logging | Logger interface for EventPublisher and EventStore implementations. |
 

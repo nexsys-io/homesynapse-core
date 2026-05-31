@@ -69,8 +69,12 @@ final class SqliteStateStoreTest {
 
     @BeforeEach
     void setUp() {
+        // PersistenceJacksonModule registers the AMD-52 AttributeValue typed-envelope codec
+        // the checkpoint serializer now depends on (matches the composition-root checkpoint
+        // mapper: events mapper + Include.ALWAYS).
         ObjectMapper mapper = JsonMapper.builder()
                 .addModule(new JavaTimeModule())
+                .addModule(new PersistenceJacksonModule())
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
                 .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
                 .serializationInclusion(JsonInclude.Include.ALWAYS)

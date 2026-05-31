@@ -11,6 +11,10 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.BooleanValue;
+import com.homesynapse.value.FloatValue;
+import com.homesynapse.value.IntValue;
+import com.homesynapse.value.QuantityValue;
 import com.homesynapse.value.StringValue;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
@@ -60,8 +64,12 @@ final class CheckpointSerializerTest {
         // ALWAYS inclusion is required so null staleAfter and null attribute
         // values survive the round trip. NON_NULL inclusion (the persistence
         // module's default for event payloads) would silently drop them.
+        // PersistenceJacksonModule registers the AMD-52 AttributeValue typed-envelope
+        // codec, which the typed attribute representation depends on (mirrors the
+        // composition root's checkpoint mapper: events mapper + Include.ALWAYS).
         ObjectMapper mapper = JsonMapper.builder()
                 .addModule(new JavaTimeModule())
+                .addModule(new PersistenceJacksonModule())
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
                 .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
                 .serializationInclusion(JsonInclude.Include.ALWAYS)
@@ -114,6 +122,41 @@ final class CheckpointSerializerTest {
         CheckpointData parsed = serializer.deserialize(bytes);
 
         assertThat(parsed.stateMap().get(ENT_A).staleAfter()).isNull();
+    }
+
+    @Test
+    @DisplayName("AMD-52 §5#7: mixed typed variants + a null attribute value + null staleAfter round-trip equal")
+    void typedEnvelopeMixedVariantsRoundTrip() {
+        Map<String, AttributeValue> attrs = new HashMap<>();
+        attrs.put("on", new BooleanValue(true));
+        attrs.put("brightness", new IntValue(80));
+        attrs.put("temperature_c", new FloatValue(21.5));
+        attrs.put("power", new QuantityValue(1500.0, "W"));
+        attrs.put("firmware", new StringValue("1.2.3"));
+        attrs.put("never_reported", null); // schema-declared but never reported
+
+        Map<EntityId, EntityState> input = Map.of(ENT_A,
+                entityWithAttrs(ENT_A, attrs, Availability.AVAILABLE,
+                        9L, T0, T1, T2, null, false));
+
+        byte[] bytes = serializer.serialize(input, 4, null, null, null);
+        CheckpointData parsed = serializer.deserialize(bytes);
+
+        Map<String, AttributeValue> rt = parsed.stateMap().get(ENT_A).attributes();
+        assertThat(rt.get("on"))
+                .as("typed variant survives round-trip as its real variant, not a StringValue")
+                .isEqualTo(new BooleanValue(true));
+        assertThat(rt.get("brightness")).isEqualTo(new IntValue(80));
+        assertThat(rt.get("temperature_c")).isEqualTo(new FloatValue(21.5));
+        assertThat(rt.get("power")).isEqualTo(new QuantityValue(1500.0, "W"));
+        assertThat(rt.get("firmware")).isEqualTo(new StringValue("1.2.3"));
+        assertThat(rt).containsKey("never_reported");
+        assertThat(rt.get("never_reported"))
+                .as("null attribute value preserved (ALWAYS inclusion)")
+                .isNull();
+        assertThat(parsed.stateMap().get(ENT_A).staleAfter())
+                .as("null staleAfter preserved")
+                .isNull();
     }
 
     @Test

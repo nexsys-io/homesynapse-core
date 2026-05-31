@@ -912,8 +912,10 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
             if (!(env.payload() instanceof StateReportedEvent sr)) {
                 return List.of();
             }
+            // AMD-52: typed payload (oldValue null = first report; newValue StringValue —
+            // this stand-in rule resolves no schema).
             StateChangedEvent payload = new StateChangedEvent(
-                    sr.attributeKey(), "", sr.value(), env.eventId());
+                    sr.attributeKey(), null, new StringValue(sr.value()), env.eventId());
             EventDraft draft = new EventDraft(
                     EventTypes.STATE_CHANGED,
                     1,

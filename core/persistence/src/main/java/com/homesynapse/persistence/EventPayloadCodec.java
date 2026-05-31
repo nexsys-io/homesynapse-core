@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.homesynapse.event.DegradedEvent;
 import com.homesynapse.event.DomainEvent;
+import com.homesynapse.event.StateChangedEvent;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -46,6 +47,13 @@ import org.slf4j.LoggerFactory;
  *       exception and returns a {@code DegradedEvent} carrying the raw payload
  *       and the exception class plus message as the failure reason.</li>
  * </ol>
+ *
+ * <p><strong>AMD-52 Path-B version gate.</strong> Between the two stages, a
+ * {@code state_changed} read at {@code schema_version == 1} (a legacy String payload,
+ * pre-AMD-52) is returned as a {@code DegradedEvent} with the raw payload preserved — a
+ * defined non-upcast, not a lossy guess (DP-5 / AMD-52-INV-05). The typed reader applies only
+ * to {@code schema_version >= 2}. No {@code AttributeValueUpcaster} or schema resolver is
+ * wired into this path.</p>
  *
  * <p><strong>Metadata sanitization.</strong> Corrupt SQLite rows may have blank or
  * null {@code eventType} or {@code schemaVersion} values. {@link DegradedEvent}'s
@@ -153,8 +161,26 @@ final class EventPayloadCodec {
             return new DegradedEvent(safeType, safeVersion, toUtf8String(payload), reason);
         }
 
-        // Stage 2: typed deserialization with catch-all fallback
         Class<? extends DomainEvent> concreteClass = maybeClass.get();
+
+        // AMD-52 Path B (DP-5 / AMD-52-INV-05): a legacy schema_version == 1 state_changed
+        // carried a String payload; the post-AMD-52 typed reader does NOT upcast it — it
+        // degrades to a DEFINED DegradedEvent with the raw payload preserved verbatim. The
+        // version gate lives here (the codec already has the per-event schema_version) so the
+        // behaviour is defined rather than incidental, and no device/state schema knowledge is
+        // pushed down into persistence (no AttributeValueUpcaster, no schema resolver). Path A
+        // (the 3->4 reconciliation over the state_reported log) remains the sole authoritative
+        // state source; this gate is for forensic/typed reads of historical rows only.
+        if (concreteClass == StateChangedEvent.class && schemaVersion == 1) {
+            String reason = "legacy String-payload state_changed (schema_version 1) read under "
+                    + "typed reader — AMD-52 Path B";
+            LOG.warn(
+                    "Decode Path-B degrade (legacy state_changed v1): eventType='{}'",
+                    eventType);
+            return new DegradedEvent(safeType, safeVersion, toUtf8String(payload), reason);
+        }
+
+        // Stage 2: typed deserialization with catch-all fallback
         ObjectReader reader = warmup.readerFor(concreteClass);
         try {
             return reader.readValue(payload);
