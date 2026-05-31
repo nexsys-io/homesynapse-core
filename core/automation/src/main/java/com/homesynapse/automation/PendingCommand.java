@@ -30,7 +30,7 @@ import com.homesynapse.platform.identity.EntityId;
  * </ol>
  *
  * <p>The {@link #expectation()} is evaluated against incoming {@code state_reported}
- * events using {@link Expectation#evaluate(com.homesynapse.device.AttributeValue)},
+ * events using {@link Expectation#evaluate(com.homesynapse.value.AttributeValue)},
  * which returns a {@link com.homesynapse.device.ConfirmationResult}.</p>
  *
  * <p>Defined in Doc 07 §4.3, §8.2.</p>

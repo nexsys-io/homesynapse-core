@@ -2,7 +2,7 @@
  * HomeSynapse Core
  * Copyright (c) 2026 NexSys. All rights reserved.
  */
-package com.homesynapse.device;
+package com.homesynapse.value;
 
 /**
  * Identifies the primitive data type of a device attribute value.

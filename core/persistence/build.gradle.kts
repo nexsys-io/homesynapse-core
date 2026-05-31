@@ -16,6 +16,11 @@ dependencies {
     api(project(":core:event-bus"))
     api(project(":core:state-store"))
 
+    // M4.0b-4a: CheckpointSerializer (package-private) names com.homesynapse.value
+    // .AttributeValue/.StringValue internally; not on persistence's public API →
+    // `requires com.homesynapse.value` (non-transitive) ↔ implementation scope.
+    implementation(project(":core:value-model"))
+
     implementation(libs.sqlite.jdbc)
     implementation(libs.slf4j.api)
 

@@ -4,7 +4,7 @@
  */
 package com.homesynapse.state;
 
-import com.homesynapse.device.AttributeValue;
+import com.homesynapse.value.AttributeValue;
 
 /**
  * Typed change-detection comparator over the eight-variant {@link AttributeValue} sealed

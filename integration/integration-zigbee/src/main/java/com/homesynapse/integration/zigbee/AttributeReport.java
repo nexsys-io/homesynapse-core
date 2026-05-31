@@ -23,7 +23,7 @@ import java.util.Objects;
  *
  * @param entityRef the HomeSynapse entity reference for event production, never {@code null}
  * @param attributeKey the HomeSynapse attribute key per device-model capability, never {@code null}
- * @param value the normalized canonical value typed per device-model AttributeValue, never {@code null}
+ * @param value the normalized canonical value typed per value-model AttributeValue, never {@code null}
  * @param eventTime the timestamp of the observation, never {@code null}
  * @see ClusterHandler
  * @see ManufacturerCodec

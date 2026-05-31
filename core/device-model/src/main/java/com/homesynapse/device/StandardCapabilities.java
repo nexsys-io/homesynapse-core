@@ -4,6 +4,9 @@
  */
 package com.homesynapse.device;
 
+import com.homesynapse.value.AttributeType;
+import com.homesynapse.value.BooleanValue;
+
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;

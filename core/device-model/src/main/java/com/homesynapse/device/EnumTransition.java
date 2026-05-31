@@ -4,6 +4,9 @@
  */
 package com.homesynapse.device;
 
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.EnumValue;
+
 /**
  * An {@link Expectation} that is confirmed when the reported enum value
  * matches the expected transition target string.

@@ -4,6 +4,8 @@
  */
 package com.homesynapse.device;
 
+import com.homesynapse.value.AttributeValue;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.DisplayName;

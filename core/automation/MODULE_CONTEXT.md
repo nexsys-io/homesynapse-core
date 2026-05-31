@@ -35,6 +35,7 @@ module com.homesynapse.automation {
     requires transitive com.homesynapse.event;
     requires transitive com.homesynapse.device;
     requires transitive com.homesynapse.state;
+    requires com.homesynapse.value;
 
     exports com.homesynapse.automation;
 }
@@ -45,6 +46,9 @@ module com.homesynapse.automation {
 - `com.homesynapse.event` — `EventEnvelope` in TriggerEvaluator.evaluate() and RunManager.initiateRun() parameters; `CommandIdempotency` in PendingCommand record component; `EventId` is also transitively available through this module but explicitly declared via platform.
 - `com.homesynapse.device` — `Expectation` (sealed interface from device-model) in PendingCommand record component.
 - `com.homesynapse.state` — `StateSnapshot` in ConditionEvaluator.evaluate() parameter; `Availability` in AvailabilityTrigger record component.
+
+**Plain `requires` (non-transitive), added M4.0b-4a:**
+- `com.homesynapse.value` — `PendingCommand`'s Javadoc references `com.homesynapse.value.AttributeValue` (via `{@link Expectation#evaluate(AttributeValue)}`). No value type is on automation's public API in code, so the edge is plain (non-transitive). The type is also reachable transitively through `requires transitive com.homesynapse.device`; the edge is declared explicitly at its use site per the AttributeValue relocation design note. Gradle scope `implementation`.
 
 **NOT required in Phase 2:**
 - `com.homesynapse.event.bus` — EventBus, SubscriptionFilter, CheckpointStore are Phase 3 implementation details (subscriber registration). Not in any public API signature.
@@ -161,6 +165,7 @@ module com.homesynapse.automation {
 | **event-model** (`com.homesynapse.event`) | `requires transitive` — EventEnvelope and CommandIdempotency in public API signatures | `EventEnvelope` (TriggerEvaluator.evaluate(), RunManager.initiateRun() parameters), `CommandIdempotency` (PendingCommand record component) |
 | **device-model** (`com.homesynapse.device`) | `requires transitive` — Expectation sealed interface in PendingCommand record component | `Expectation` (PendingCommand.expectation field) |
 | **state-store** (`com.homesynapse.state`) | `requires transitive` — StateSnapshot and Availability in public API signatures | `StateSnapshot` (ConditionEvaluator.evaluate() parameter), `Availability` (AvailabilityTrigger.targetAvailability record component) |
+| **value-model** (`com.homesynapse.value`) | `requires` (non-transitive, M4.0b-4a) — `PendingCommand` Javadoc `{@link}` only; not on the public API in code | `AttributeValue` (Javadoc reference via `Expectation#evaluate`). Reachable transitively via device-model too; declared explicitly per the relocation design note. |
 
 ### Gradle Dependencies
 
@@ -170,10 +175,11 @@ dependencies {
     api(project(":core:event-model"))
     api(project(":core:device-model"))
     api(project(":core:state-store"))
+    implementation(project(":core:value-model"))   // M4.0b-4a — PendingCommand Javadoc {@link} to AttributeValue
 }
 ```
 
-All four upstream modules are `api` scope because their types appear in this module's public API signatures. Configuration dependency removed pre-Phase 3 (FIX-07). Will be re-added when automation implementation imports configuration types (SchemaRegistry, ConfigurationService for schema registration and config access).
+The four `api`-scoped upstream modules surface their types on this module's public API signatures; `com.homesynapse.value` is `implementation` scope (non-transitive — only a Javadoc reference, no public-API use). Configuration dependency removed pre-Phase 3 (FIX-07). Will be re-added when automation implementation imports configuration types (SchemaRegistry, ConfigurationService for schema registration and config access).
 
 ## Consumers
 

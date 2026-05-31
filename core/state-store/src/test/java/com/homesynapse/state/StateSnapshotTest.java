@@ -10,7 +10,7 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
 
-import com.homesynapse.device.BooleanValue;
+import com.homesynapse.value.BooleanValue;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
 

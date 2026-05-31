@@ -31,4 +31,11 @@ dependencies {
     // event-bus testFixtures instead of an inner-class StubBus, so a single
     // canonical lightweight EventBus stub is shared across unit tests.
     testImplementation(testFixtures(project(":core:event-bus")))
+
+    // M4.0b-4a: four endpoint tests name com.homesynapse.value.AttributeValue/
+    // EnumValue/StringValue (the AttributeValue hierarchy relocated out of
+    // device-model). rest-api main does not reference value types, so no JPMS
+    // `requires com.homesynapse.value` is added — the test source set compiles on
+    // the classpath, so a testImplementation dependency suffices (relocation, 2026-05-31).
+    testImplementation(project(":core:value-model"))
 }

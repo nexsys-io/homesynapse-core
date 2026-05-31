@@ -4,6 +4,8 @@
  */
 package com.homesynapse.device;
 
+import com.homesynapse.value.AttributeValue;
+
 /**
  * Evaluation contract for the Pending Command Ledger's command confirmation system.
  *

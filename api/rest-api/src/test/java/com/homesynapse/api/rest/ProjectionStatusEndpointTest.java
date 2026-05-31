@@ -6,7 +6,7 @@ package com.homesynapse.api.rest;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.homesynapse.device.AttributeValue;
+import com.homesynapse.value.AttributeValue;
 import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;

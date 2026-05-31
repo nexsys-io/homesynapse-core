@@ -17,13 +17,14 @@ The Identity & Addressing Model (foundations) also governs the `EventId` type an
 
 ```
 module com.homesynapse.event {
+    requires transitive com.homesynapse.value;
     requires transitive com.homesynapse.platform;
 
     exports com.homesynapse.event;
 }
 ```
 
-The `requires transitive` on platform-api means any module that reads `com.homesynapse.event` automatically gets access to all typed ID wrappers in `com.homesynapse.platform.identity`.
+The `requires transitive` on platform-api means any module that reads `com.homesynapse.event` automatically gets access to all typed ID wrappers in `com.homesynapse.platform.identity`. **`requires transitive com.homesynapse.value` was added at M4.0b-4a** (the AttributeValue relocation): it makes event-model and device-model **peers over the shared `com.homesynapse.value` leaf**, which is what lets the typed `StateChangedEvent` payload at M4.0b-4b carry an `AttributeValue` without forcing an `event → device` edge (and the JPMS cycle that would create). At the M4.0b-4a baseline event-model does **not yet name** any value type in code (only a prose Javadoc mention in `StateReportedEvent`), so this edge is **forward-prep for 4b** — harmless and unused until then. **event-model does NOT `requires com.homesynapse.device`** — the cycle is broken.
 
 ## Package Structure
 
@@ -135,6 +136,7 @@ The `requires transitive` on platform-api means any module that reads `com.homes
 
 | Module | Why | Specific Types Used |
 |---|---|---|
+| **value-model** (`com.homesynapse.value`) | `requires transitive` (M4.0b-4a) — peer-over-shared-leaf for the typed `StateChangedEvent` payload (M4.0b-4b). Forward-prep at 4a: no value type is named in event-model code yet. Gradle scope `api`. | `AttributeValue` (the typed `StateChangedEvent.oldValue`/`newValue` fields land at M4.0b-4b). |
 | **platform-api** (`com.homesynapse.platform`) | `requires transitive` — Identity types for event subjects and IDs | `Ulid`, `UlidFactory` (for EventId generation), `EntityId`, `DeviceId`, `IntegrationId`, `AutomationId`, `SystemId`, `PersonId` (for SubjectRef factory methods). |
 | **SLF4J** (`slf4j.api`) | API dependency for logging | Logger interface for EventPublisher and EventStore implementations. |
 

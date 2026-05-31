@@ -4,6 +4,9 @@
  */
 package com.homesynapse.device;
 
+import com.homesynapse.value.AttributeType;
+import com.homesynapse.value.DegradedAttributeValue;
+
 import java.util.Set;
 
 /**

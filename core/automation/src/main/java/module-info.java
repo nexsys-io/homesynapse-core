@@ -19,5 +19,12 @@ module com.homesynapse.automation {
     requires transitive com.homesynapse.device;
     requires transitive com.homesynapse.state;
 
+    // M4.0b-4a: PendingCommand's javadoc references com.homesynapse.value
+    // .AttributeValue (via {@link Expectation#evaluate}); declared non-transitive
+    // (value is not on automation's public API). The type is also reachable
+    // transitively through `requires transitive com.homesynapse.device`; the edge
+    // is declared explicitly at its use site per the relocation design note.
+    requires com.homesynapse.value;
+
     exports com.homesynapse.automation;
 }

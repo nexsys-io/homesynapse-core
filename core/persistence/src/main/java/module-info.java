@@ -41,6 +41,13 @@ module com.homesynapse.persistence {
     // com.homesynapse.state.ViewCheckpointStore which covers view state).
     requires transitive com.homesynapse.event.bus;
 
+    // M4.0b-4a: CheckpointSerializer (package-private) names com.homesynapse.value
+    // .AttributeValue/.StringValue internally — declared non-transitive at its use
+    // site (value is not re-exported on persistence's public API). The AttributeValue
+    // hierarchy relocated from com.homesynapse.device to the new com.homesynapse.value
+    // leaf (AttributeValue Module Relocation Design Note, 2026-05-31).
+    requires com.homesynapse.value;
+
     requires java.sql;
     requires org.slf4j;
 

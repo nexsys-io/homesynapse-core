@@ -5,7 +5,7 @@
 package com.homesynapse.device.test;
 
 import com.homesynapse.device.AttributeSchema;
-import com.homesynapse.device.AttributeType;
+import com.homesynapse.value.AttributeType;
 import com.homesynapse.device.Battery;
 import com.homesynapse.device.BinaryState;
 import com.homesynapse.device.Brightness;

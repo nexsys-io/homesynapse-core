@@ -4,8 +4,8 @@
  */
 package com.homesynapse.state;
 
-import com.homesynapse.device.AttributeValue;
-import com.homesynapse.device.StringValue;
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.StringValue;
 import com.homesynapse.event.AvailabilityChangedEvent;
 import com.homesynapse.event.CausalContext;
 import com.homesynapse.event.EventDraft;

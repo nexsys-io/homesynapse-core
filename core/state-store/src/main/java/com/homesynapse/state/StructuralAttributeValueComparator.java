@@ -4,15 +4,15 @@
  */
 package com.homesynapse.state;
 
-import com.homesynapse.device.ArrayValue;
-import com.homesynapse.device.AttributeValue;
-import com.homesynapse.device.BooleanValue;
-import com.homesynapse.device.DegradedAttributeValue;
-import com.homesynapse.device.EnumValue;
-import com.homesynapse.device.FloatValue;
-import com.homesynapse.device.IntValue;
-import com.homesynapse.device.QuantityValue;
-import com.homesynapse.device.StringValue;
+import com.homesynapse.value.ArrayValue;
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.BooleanValue;
+import com.homesynapse.value.DegradedAttributeValue;
+import com.homesynapse.value.EnumValue;
+import com.homesynapse.value.FloatValue;
+import com.homesynapse.value.IntValue;
+import com.homesynapse.value.QuantityValue;
+import com.homesynapse.value.StringValue;
 
 import java.util.List;
 

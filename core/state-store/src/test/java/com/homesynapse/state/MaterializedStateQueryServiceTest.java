@@ -7,8 +7,8 @@ package com.homesynapse.state;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.homesynapse.device.AttributeValue;
-import com.homesynapse.device.IntValue;
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.IntValue;
 import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;

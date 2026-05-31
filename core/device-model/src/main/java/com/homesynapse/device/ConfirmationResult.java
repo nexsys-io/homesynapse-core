@@ -4,6 +4,8 @@
  */
 package com.homesynapse.device;
 
+import com.homesynapse.value.AttributeValue;
+
 /**
  * The outcome of evaluating a reported attribute value against an expected
  * command outcome in the Pending Command Ledger.

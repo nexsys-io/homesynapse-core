@@ -4,6 +4,8 @@
  */
 package com.homesynapse.device;
 
+import com.homesynapse.value.AttributeValue;
+
 import java.util.Map;
 
 /**

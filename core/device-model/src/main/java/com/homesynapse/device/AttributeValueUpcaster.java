@@ -4,6 +4,9 @@
  */
 package com.homesynapse.device;
 
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.DegradedAttributeValue;
+
 /**
  * Migration seam for evolving stored attribute values across {@link AttributeValue} type
  * changes — the value-layer analogue of the event upcaster pipeline (Doc 01 §3.10).

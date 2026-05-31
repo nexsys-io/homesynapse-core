@@ -6,9 +6,9 @@ package com.homesynapse.state;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.homesynapse.device.AttributeValue;
+import com.homesynapse.value.AttributeValue;
 import com.homesynapse.device.StandardCapabilities;
-import com.homesynapse.device.StringValue;
+import com.homesynapse.value.StringValue;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventId;

@@ -78,7 +78,7 @@ public interface DerivationRule {
     /**
      * Returns the production change-detect rule in <strong>typed mode</strong> (AMD-51 /
      * M4.0b-3): it reconstructs both the inbound {@code state_reported} value and the prior
-     * canonical value to their schema-declared {@link com.homesynapse.device.AttributeValue}
+     * canonical value to their schema-declared {@link com.homesynapse.value.AttributeValue}
      * variant and asks the {@code comparator} whether a {@code state_changed} should be
      * emitted, under {@code policy}. The emitted payload stays String (§2.7).
      *

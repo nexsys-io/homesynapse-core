@@ -2,7 +2,7 @@
  * HomeSynapse Core
  * Copyright (c) 2026 NexSys. All rights reserved.
  */
-package com.homesynapse.device;
+package com.homesynapse.value;
 
 /**
  * Typed representation of a device attribute's reported or commanded value.

@@ -10,9 +10,9 @@ import java.time.Instant;
 import java.util.Collections;
 import java.util.Map;
 
-import com.homesynapse.device.AttributeValue;
-import com.homesynapse.device.BooleanValue;
-import com.homesynapse.device.IntValue;
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.BooleanValue;
+import com.homesynapse.value.IntValue;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
 

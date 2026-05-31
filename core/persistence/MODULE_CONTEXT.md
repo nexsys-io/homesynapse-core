@@ -27,6 +27,7 @@ module com.homesynapse.persistence {
     requires com.homesynapse.state;
     requires com.homesynapse.event;
     requires com.homesynapse.event.bus;
+    requires com.homesynapse.value;
 
     requires java.sql;
     requires org.slf4j;
@@ -44,7 +45,7 @@ module com.homesynapse.persistence {
 
 The four Jackson `requires` directives were added for M2.4. They are non-transitive — Jackson types MUST NOT appear in this module's public API. See the Jackson isolation invariant in Cross-Module Contracts and the matching gotcha below. Only the four internal serialization classes (`PersistenceJacksonModule`, `PersistenceObjectMapper`, `JacksonWarmup`, `EventPayloadCodec`) and the four ser/deser classes (`UlidSerializer`, `UlidDeserializer`, `TypedUlidSerializer`, `TypedUlidDeserializer`) import Jackson types. No other module in the codebase imports Jackson transitively through persistence.
 
-The `requires transitive com.homesynapse.platform` declaration is required because `EntityId` (from platform-api) appears in `TelemetrySample`'s public API signature. Any module that reads `com.homesynapse.persistence` automatically gets access to all identity types without needing to declare the dependency. The non-transitive `requires com.homesynapse.state` provides access to `ViewCheckpointStore` which this module implements. The non-transitive `requires com.homesynapse.event` provides access to event types referenced in Javadoc. The non-transitive `requires com.homesynapse.event.bus` directive was added for M2.6 so that `SqliteCheckpointStore` can implement `com.homesynapse.event.bus.CheckpointStore` — the subscriber checkpoint interface owned by the event-bus module (distinct from `ViewCheckpointStore` in state-store, which is a separate interface for view-projection checkpoints).
+The `requires transitive com.homesynapse.platform` declaration is required because `EntityId` (from platform-api) appears in `TelemetrySample`'s public API signature. Any module that reads `com.homesynapse.persistence` automatically gets access to all identity types without needing to declare the dependency. The non-transitive `requires com.homesynapse.state` provides access to `ViewCheckpointStore` which this module implements. The non-transitive `requires com.homesynapse.event` provides access to event types referenced in Javadoc. The non-transitive `requires com.homesynapse.event.bus` directive was added for M2.6 so that `SqliteCheckpointStore` can implement `com.homesynapse.event.bus.CheckpointStore` — the subscriber checkpoint interface owned by the event-bus module (distinct from `ViewCheckpointStore` in state-store, which is a separate interface for view-projection checkpoints). The non-transitive `requires com.homesynapse.value` directive was added at **M4.0b-4a** (the AttributeValue relocation): the package-private `CheckpointSerializer` names `com.homesynapse.value.AttributeValue`/`StringValue` internally when (de)serializing `EntityState.attributes` — it does **not** re-export them on persistence's public API, so the edge is plain (non-transitive), declared at its use site. (This is the one place the AMD-52-INV-02 "the codec adds no `requires`" wording is corrected — see the AMD-52 §11/§12 erratum: the codec now declares `requires com.homesynapse.value`, which did not exist pre-relocation. The AMD-52 typed-payload codec itself is M4.0b-4b.)
 
 ## Package Structure
 
@@ -151,6 +152,7 @@ The 9 new internal types added in M2.4 form the serialization infrastructure tha
 | **state-store** (`com.homesynapse.state`) | `requires` (non-transitive) — Persistence implements `ViewCheckpointStore` | `ViewCheckpointStore`, `CheckpointRecord` (implementation target; not re-exported). |
 | **event-model** (`com.homesynapse.event`) | `requires` (non-transitive) — Event types referenced in Javadoc | `EventPriority` (referenced in RetentionResult Javadoc `@see` tag). Not used in public API signatures. |
 | **event-bus** (`com.homesynapse.event.bus`) | `requires` (non-transitive) — Persistence implements the subscriber `CheckpointStore` interface (M2.6) | `CheckpointStore` (implementation target for `SqliteCheckpointStore`; not re-exported). Distinct from `ViewCheckpointStore` in state-store. |
+| **value-model** (`com.homesynapse.value`) | `requires` (non-transitive, M4.0b-4a) — the package-private `CheckpointSerializer` (de)serializes `AttributeValue`s internally; not re-exported | `AttributeValue`, `StringValue` (in `CheckpointSerializer` only; the AMD-52 typed codec is M4.0b-4b). |
 
 ### Gradle Dependencies
 
@@ -160,6 +162,7 @@ dependencies {
     implementation(project(":core:event-model"))
     implementation(project(":core:event-bus"))
     implementation(project(":core:state-store"))
+    implementation(project(":core:value-model"))   // M4.0b-4a — CheckpointSerializer names AttributeValue/StringValue internally
     implementation(libs.sqlite.jdbc)
     implementation(libs.slf4j.api)
     implementation(libs.jackson.databind)

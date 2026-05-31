@@ -17,6 +17,7 @@ include("platform:platform-systemd")
 // Core modules
 // ---------------------------------------------------------------------------
 include("core:event-model")
+include("core:value-model")
 include("core:device-model")
 include("core:state-store")
 include("core:persistence")

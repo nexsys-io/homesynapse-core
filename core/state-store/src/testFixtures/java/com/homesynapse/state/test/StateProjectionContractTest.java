@@ -7,8 +7,8 @@ package com.homesynapse.state.test;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.homesynapse.device.AttributeValue;
-import com.homesynapse.device.StringValue;
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.StringValue;
 import com.homesynapse.event.CausalContext;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;

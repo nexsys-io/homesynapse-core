@@ -4,7 +4,7 @@
  */
 package com.homesynapse.state;
 
-import com.homesynapse.device.AttributeValue;
+import com.homesynapse.value.AttributeValue;
 import com.homesynapse.platform.identity.EntityId;
 
 import java.time.Instant;
@@ -79,7 +79,7 @@ import java.util.Map;
  * @see StateQueryService
  * @see StateSnapshot
  * @see Availability
- * @see com.homesynapse.device.AttributeValue
+ * @see com.homesynapse.value.AttributeValue
  * @see com.homesynapse.event.EventEnvelope
  * @since 1.0
  */

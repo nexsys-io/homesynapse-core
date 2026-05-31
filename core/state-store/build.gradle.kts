@@ -5,6 +5,12 @@ plugins {
 description = "State store: projections, snapshots, query service"
 
 dependencies {
+    // M4.0b-4a: state-store names com.homesynapse.value types directly (EntityState
+    // exposes Map<String, AttributeValue> on its public API; the comparators and
+    // AttributeValueReconstructor consume them) → `requires transitive
+    // com.homesynapse.value` ↔ api scope. Declared explicitly rather than inherited
+    // via device/event's re-export (AttributeValue Module Relocation, 2026-05-31).
+    api(project(":core:value-model"))
     api(project(":core:event-model"))
     api(project(":core:device-model"))
     api(project(":core:event-bus"))

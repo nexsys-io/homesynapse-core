@@ -6,8 +6,8 @@ package com.homesynapse.persistence;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.homesynapse.device.AttributeValue;
-import com.homesynapse.device.StringValue;
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.StringValue;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.state.Availability;
 import com.homesynapse.state.EntityState;

@@ -4,6 +4,8 @@
  */
 package com.homesynapse.device;
 
+import com.homesynapse.value.AttributeValue;
+
 /**
  * An {@link Expectation} that is confirmed when the reported numeric value
  * is within ±tolerance of the target.

@@ -4,6 +4,11 @@
  */
 package com.homesynapse.device;
 
+import com.homesynapse.value.AttributeType;
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.DegradedAttributeValue;
+import com.homesynapse.value.QuantityValue;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 

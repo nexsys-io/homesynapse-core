@@ -4,6 +4,10 @@
  */
 package com.homesynapse.device;
 
+import com.homesynapse.value.AttributeType;
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.StringValue;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 

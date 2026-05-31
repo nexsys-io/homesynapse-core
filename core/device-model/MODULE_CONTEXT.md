@@ -1,4 +1,4 @@
-# device-model — `com.homesynapse.device` — 62 types — Entity/Device/Capability model, sealed hierarchies, registries, discovery pipeline
+# device-model — `com.homesynapse.device` — 52 types — Entity/Device/Capability model, sealed hierarchies, registries, discovery pipeline
 
 ## Purpose
 
@@ -17,6 +17,7 @@ The Identity & Addressing Model (foundations) also governs DeviceId/EntityId lif
 
 ```
 module com.homesynapse.device {
+    requires transitive com.homesynapse.value;
     requires com.homesynapse.event;
     requires transitive com.homesynapse.platform;
 
@@ -24,11 +25,11 @@ module com.homesynapse.device {
 }
 ```
 
-The `requires transitive com.homesynapse.platform` declaration means any module that reads `com.homesynapse.device` automatically gets access to all identity types (`DeviceId`, `EntityId`, etc.) without needing to declare the dependency. Event-model is non-transitive because no event-model types (`EventEnvelope`, `EventPublisher`, etc.) appear in device-model's public API signatures — only Javadoc `@see` cross-references. Only platform-api is `requires transitive`.
+`requires transitive com.homesynapse.value` (M4.0b-4a) re-exports the `AttributeValue` hierarchy + `AttributeType` that device-model **used to own** and now depends on — `AttributeSchema`, the `Expectation` hierarchy, `StandardCapabilities`, and the capability records all name them on device-model's public API, so any module reading `com.homesynapse.device` continues to resolve the value types transitively (unchanged from before the relocation, when they lived in this module). The `requires transitive com.homesynapse.platform` declaration likewise re-exports all identity types (`DeviceId`, `EntityId`, etc.). Event-model is non-transitive because no event-model types (`EventEnvelope`, `EventPublisher`, etc.) appear in device-model's public API signatures — only Javadoc `@see` cross-references (and that edge is now vestigial; see Gotchas). value-model and platform-api are the two `requires transitive` edges.
 
 ## Package Structure
 
-- **`com.homesynapse.device`** — All types in a single flat package. Contains: core domain records (Device, Entity), sealed capability hierarchy (15 standard records + CustomCapability), sealed AttributeValue hierarchy (8 records — AMD-47), the `AttributeValueUpcaster` SPI (AMD-47), sealed Expectation hierarchy (4 records), schema/definition records, validation interfaces, registry interfaces, discovery pipeline types, and supporting enums.
+- **`com.homesynapse.device`** — All types in a single flat package. Contains: core domain records (Device, Entity), sealed capability hierarchy (15 standard records + CustomCapability), the `AttributeValueUpcaster` SPI (AMD-47 — stays here; imports `AttributeValue`/`DegradedAttributeValue` from value-model), sealed Expectation hierarchy (4 records), schema/definition records (incl. `AttributeSchema` — stays here; imports `AttributeType`/`DegradedAttributeValue` from value-model), validation interfaces, registry interfaces, discovery pipeline types, and supporting enums. **The `AttributeValue` sealed hierarchy (8 records + the `AttributeValue` interface) and the `AttributeType` enum relocated to the new `com.homesynapse.value` leaf module at M4.0b-4a (AMD-52 §11 erratum) — they are no longer owned here; this module re-exports them via `requires transitive com.homesynapse.value`.**
 
 ## Complete Type Inventory
 
@@ -54,19 +55,9 @@ The `requires transitive com.homesynapse.platform` declaration means any module 
 | `PowerMeter` | record implements `Capability` | Power with voltage/current measurement | Attributes: `power_w` (float), `voltage_v` (float, **nullable**), `current_a` (float, **nullable**). Read-only. Confirmation: DISABLED. Optional for ENERGY_METER. |
 | `CustomCapability` | **final class** (NOT record) | Runtime-registered capabilities from JSON schemas | Implements all `Capability` methods. Constructor validates namespace is not "core". Uses `equals()`/`hashCode()`/`toString()` overrides. Final class (not record) because fields are constructed from runtime JSON, not compile-time components. |
 
-### Sealed AttributeValue Hierarchy (1 sealed interface + 8 records — AMD-47)
+### Sealed AttributeValue Hierarchy — RELOCATED to `com.homesynapse.value` (M4.0b-4a)
 
-| Type | Kind | Purpose | Key Details |
-|---|---|---|---|
-| `AttributeValue` | sealed interface (permits 8 types) | Typed representation of attribute values in the device model | Methods: `rawValue()` → `Object`, `attributeType()` → `AttributeType`. Expanded 5→8 by AMD-47. |
-| `BooleanValue` | record(`boolean value`) implements `AttributeValue` | Boolean attribute value | Returns `AttributeType.BOOLEAN`. |
-| `IntValue` | record(`long value`) implements `AttributeValue` | Integer attribute value (uses `long` for full range) | Returns `AttributeType.INT`. |
-| `FloatValue` | record(`double value`) implements `AttributeValue` | Floating-point attribute value | Returns `AttributeType.FLOAT`. |
-| `StringValue` | record(`String value`) implements `AttributeValue` | Free-form string attribute value | Non-null validation. Returns `AttributeType.STRING`. |
-| `EnumValue` | record(`String value`) implements `AttributeValue` | Constrained enum string attribute value | Non-null validation. Returns `AttributeType.ENUM`. |
-| `QuantityValue` | record(`double value, String unit`) implements `AttributeValue` — **AMD-47** | Physical quantity carrying a (value, unit) pair, **canonical-normalized at construction** | Compact ctor: hand-rolled, table-driven, deterministic conversion to the dimension's canonical unit (temperature `°C`, power `W`, energy `Wh`, illuminance `lux`, percent `%`); no units library (AMD-47-INV-03). Fail-closed: null unit → NPE; blank unit / non-finite magnitude / unrecognised unit → IAE. `rawValue()` → canonical magnitude boxed as `Double` (never null). Returns `AttributeType.QUANTITY`. |
-| `ArrayValue` | record(`List<AttributeValue> elements`) implements `AttributeValue` — **AMD-47** | Ordered, unmodifiable, **full-replacement** list (no delta/patch — bounded-window-advancer compatible, AMD-47-INV-05) | Compact ctor: `List.copyOf(elements)` (rejects null list + null elements; empty permitted; unmodifiable). `rawValue()` → the unmodifiable `List<AttributeValue>` (never null). Returns `AttributeType.ARRAY`. Element homogeneity is a schema-level concern (future validator), not enforced here; nesting permitted by type, discouraged by schema. |
-| `DegradedAttributeValue` | record(`String originalTypeName, String rawForm, String failureReason`) implements `AttributeValue` — **AMD-47** | Subtype-level upcast-failure fallback (the `AttributeValue` analogue of `DegradedEvent`); lenient-mode/forensic artifact only | Compact ctor mirrors `DegradedEvent`: all three non-null; `originalTypeName`/`failureReason` non-blank; **blank `rawForm` permitted**. `rawValue()` → `rawForm`. Returns sentinel `AttributeType.DEGRADED`. Never written to canonical state under strict mode (AMD-47-INV-04). |
+The `AttributeValue` sealed interface + its 8 variant records (`BooleanValue`, `IntValue`, `FloatValue`, `StringValue`, `EnumValue`, `QuantityValue`, `ArrayValue`, `DegradedAttributeValue`) **left this module** for the new `com.homesynapse.value` leaf at M4.0b-4a (AMD-52 §11 erratum; behavior-preserving, contracts unchanged). **See `core/value-model/MODULE_CONTEXT.md` for the full inventory + the AMD-47 contracts.** device-model re-exports them via `requires transitive com.homesynapse.value`, so consumers that read `com.homesynapse.device` resolve the types exactly as before. The `AttributeType` enum (the 10th relocated type) likewise moved — it is no longer in this module's Enums table below.
 
 ### Sealed Expectation Hierarchy (1 sealed interface + 4 records)
 
@@ -94,7 +85,7 @@ The `requires transitive com.homesynapse.platform` declaration means any module 
 
 | Type | Kind | Purpose | Key Fields |
 |---|---|---|---|
-| `AttributeSchema` | record | Defines schema for a single attribute within a capability | `attributeKey`, `type` (AttributeType), `minimum` (Number, **nullable**), `maximum` (Number, **nullable**), `step` (Number, **nullable**), `validValues` (Set\<String\>, **nullable**), `unitSymbol` (String, **nullable**), `canonicalUnitSymbol` (String, **nullable**), `permissions` (Set\<Permission\>), `nullable` (boolean), `persistent` (boolean). **Compact constructor (AMD-47-INV-04, M4.B3):** rejects `type == AttributeType.DEGRADED` (IAE) — the only validation; no other field checks (those belong to the future `SchemaAttributeValidator`). |
+| `AttributeSchema` | record (**stays in device-model**; M4.0b-4a: now `import`s `AttributeType`/`DegradedAttributeValue` from `com.homesynapse.value`) | Defines schema for a single attribute within a capability | `attributeKey`, `type` (AttributeType), `minimum` (Number, **nullable**), `maximum` (Number, **nullable**), `step` (Number, **nullable**), `validValues` (Set\<String\>, **nullable**), `unitSymbol` (String, **nullable**), `canonicalUnitSymbol` (String, **nullable**), `permissions` (Set\<Permission\>), `nullable` (boolean), `persistent` (boolean). **Compact constructor (AMD-47-INV-04, M4.B3):** rejects `type == AttributeType.DEGRADED` (IAE) — the only validation; no other field checks (those belong to the future `SchemaAttributeValidator`). |
 | `ParameterSchema` | record | Describes a single parameter accepted by a device command | `parameterName`, `type` (AttributeType), `minimum` (Number, **nullable**), `maximum` (Number, **nullable**), `required` (boolean), `requiredFeatures` (int bitmask), `validValues` (Set\<String\>, **nullable**). |
 | `CommandDefinition` | record | Defines a command that can be issued to a device through a capability | `commandType`, `parameters` (List\<ParameterSchema\>), `requiredFeatures` (int), `expectedOutcomes` (List\<ExpectedOutcome\>), `defaultTimeout` (Duration), `idempotencyClass` (IdempotencyClass). |
 | `ConfirmationPolicy` | record | Governs how Pending Command Ledger confirms command execution | `mode` (ConfirmationMode), `authoritativeAttributes` (List\<String\>), `defaultTolerance` (Number, **nullable**), `defaultTimeoutMs` (long). |
@@ -107,7 +98,6 @@ The `requires transitive com.homesynapse.platform` declaration means any module 
 | Type | Kind | Purpose | Values |
 |---|---|---|---|
 | `EntityType` | enum | Functional classification of a device entity | LIGHT (requires OnOff; optional Brightness, ColorTemperature), SWITCH (requires OnOff), PLUG (requires OnOff; optional PowerMeasurement, EnergyMeter), SENSOR (requires 1+ measurement), BINARY_SENSOR (requires 1+ of BinaryState/Contact/Motion/Occupancy), ENERGY_METER (requires EnergyMeter; optional PowerMeter, Battery, DeviceHealth). **Only 6 MVP values declared.** |
-| `AttributeType` | enum | Primitive/value data type classifier for attribute values | BOOLEAN, INT, FLOAT, STRING, ENUM, **QUANTITY, ARRAY, DEGRADED** (last three added by AMD-47; declared in that order). `QUANTITY`/`ARRAY` are schema-declarable; `DEGRADED` is a sentinel — never declarable in an `AttributeSchema` (AMD-47-INV-04). |
 | `Permission` | enum | Access modes for an attribute in capability schema | READ, WRITE, NOTIFY. |
 | `EnergyDirection` | enum | Direction of energy flow for energy metering | IMPORT, EXPORT, BIDIRECTIONAL. |
 | `IdempotencyClass` | enum | Idempotency semantics of a device command | IDEMPOTENT, NOT_IDEMPOTENT, CONDITIONAL. |
@@ -126,7 +116,7 @@ The `requires transitive com.homesynapse.platform` declaration means any module 
 | `ExpectationFactory` | interface | Factory for creating Expectation instances for command confirmation | `createExpectation(String capabilityId, String commandType, Map<String, Object> params, AttributeValue previousValue)` → `Expectation`. |
 | `DeviceReplacementService` | interface | Checks capability compatibility and transfers entities during device replacement | `checkCompatibility(DeviceId old, DeviceId new)` → `CapabilityCompatibilityReport`, `transferEntities(DeviceId old, DeviceId new, boolean userConfirmedLosses)`. |
 | `DiscoveryPipeline` | interface | Orchestrates device discovery, proposal, and adoption lifecycle | `propose(List<HardwareIdentifier>, String manufacturer, String model, List<ProposedEntity>)` → `ProposedDevice`, `adopt(ProposedDevice, String displayName, AreaId)` → `Device`, `findExistingDevice(List<HardwareIdentifier>)` → `Optional<Device>`. |
-| `AttributeValueUpcaster` | interface — **AMD-47** | Migration seam for evolving stored `AttributeValue`s across type changes (value-layer analogue of the event upcaster) | `canUpcast(String storedTypeName, int fromSchemaVersion)` → `boolean`; `upcast(String storedTypeName, String rawForm, int fromSchemaVersion)` → `AttributeValue` (**strict** — throws on failure, never produces a `DegradedAttributeValue`); `default upcastLenient(...)` → `AttributeValue` (**lenient** — returns a `DegradedAttributeValue` on failure, never throws). **No `ServiceLoader`** (DECIDE-04 — constructor injection downstream). No implementation in M4.B3; projection-path wiring (AMD-47-INV-02, both paths) is **M4.0b-3**. |
+| `AttributeValueUpcaster` | interface — **AMD-47** (**stays in device-model**; M4.0b-4a: now `import`s `AttributeValue`/`DegradedAttributeValue` from `com.homesynapse.value`) | Migration seam for evolving stored `AttributeValue`s across type changes (value-layer analogue of the event upcaster) | `canUpcast(String storedTypeName, int fromSchemaVersion)` → `boolean`; `upcast(String storedTypeName, String rawForm, int fromSchemaVersion)` → `AttributeValue` (**strict** — throws on failure, never produces a `DegradedAttributeValue`); `default upcastLenient(...)` → `AttributeValue` (**lenient** — returns a `DegradedAttributeValue` on failure, never throws). **No `ServiceLoader`** (DECIDE-04 — constructor injection downstream). No implementation in M4.B3; projection-path wiring (AMD-47-INV-02, both paths) is **M4.0b-3**. |
 
 ### Standard Capability Catalogue (M4.0b-3 / DP-K, AMD-51)
 
@@ -134,13 +124,14 @@ The `requires transitive com.homesynapse.platform` declaration means any module 
 |---|---|---|---|
 | `StandardCapabilities` | **public** final factory class | Production catalogue of the 15 standard (core-namespace) capabilities + their aggregated attribute schemas (DP-K) | `all()` → `List<Capability>` (the 15 standard records; **excludes** `CustomCapability`); `attributeSchemas()` → immutable `Map<String, AttributeSchema>` keyed by `attributeKey`, **fails fast** (`IllegalStateException`) if two standard capabilities declare the same key with different `AttributeType` (the AMD-51 resolver's global-consistency assumption; `power_w` is FLOAT in both `PowerMeasurement` and `PowerMeter`, so no conflict). Plus the 15 typed factory methods (`onOff()`…`powerMeter()`). **Construction logic lifted verbatim from `TestCapabilityFactory`**, which now delegates here (single source of truth, no duplication). Pure, no clock/I/O/locale — an immutable compile-time-shaped catalogue (the `QuantityValue.CATALOGUE` posture), NOT a runtime registry. **Seed for the future `CapabilityRegistry` implementation.** No standard attribute is `QUANTITY`/`ARRAY` at M4.0b-3 — all are `BOOLEAN`/`INT`/`FLOAT`/`ENUM`. |
 
-**Total: 62 public types + 1 package-info.java + 1 module-info.java = 64 Java files.**
+**Total: 52 public types + 1 package-info.java + 1 module-info.java = 54 Java files.** (Was 62/64 before M4.0b-4a; the 10 value types — `AttributeValue` + 8 variants + `AttributeType` — relocated to `com.homesynapse.value`.)
 
 ## Dependencies
 
 | Module | Why | Specific Types Used |
 |---|---|---|
-| **event-model** (`com.homesynapse.event`) | `requires` (non-transitive) — Event types referenced only in Javadoc `@see` tags, not in public API signatures | `EventId` (in CommandDefinition/ExpectedOutcome cross-references), `CommandIdempotency` (mapped to device-model's `IdempotencyClass`). |
+| **value-model** (`com.homesynapse.value`) | `requires transitive` (M4.0b-4a) — the `AttributeValue` hierarchy + `AttributeType` device-model used to own, re-exported on its public API | `AttributeValue`, `AttributeType` (`AttributeSchema`, `ParameterSchema`, `CommandDefinition`, capability records, `Expectation` hierarchy, `AttributeValidator`, `ExpectationFactory`, `StandardCapabilities`), `BooleanValue`/`QuantityValue` (`StandardCapabilities`), `EnumValue` (`EnumTransition`), `DegradedAttributeValue` (`AttributeSchema`, `AttributeValueUpcaster`). |
+| **event-model** (`com.homesynapse.event`) | `requires` (non-transitive) — Event types referenced only in Javadoc `@see` tags, not in public API signatures (vestigial — see Gotchas) | `EventId` (in CommandDefinition/ExpectedOutcome cross-references), `CommandIdempotency` (mapped to device-model's `IdempotencyClass`). |
 | **platform-api** (`com.homesynapse.platform`) | `requires transitive` — Identity types for device/entity/area identification | `DeviceId`, `EntityId`, `IntegrationId`, `AreaId` (fields on Device, Entity, and discovery types), `Ulid` (underlying identity). |
 
 ## Consumers
@@ -174,10 +165,11 @@ None directly — device-model defines contracts consumed by downstream modules.
 | **INV-CS-02** | Entity identifiers are stable. EntityId survives device replacement, area reassignment, and capability changes. |
 | **INV-CS-04** | Integration API stability. Device model types versioned via semver independently from core. |
 | **INV-CE-04** | Protocol agnosticism. Device model must not be locked to any protocol. HardwareIdentifiers are protocol-specific but device/entity identity is protocol-independent. |
-| **AMD-47-INV-01** | `AttributeValue` sealing stays total — `permits` is exactly the 8 variants `{BooleanValue, IntValue, FloatValue, StringValue, EnumValue, QuantityValue, ArrayValue, DegradedAttributeValue}`; every exhaustive `switch` handles all eight, no `default`. (Also registered in `Architecture_Invariants_v1.md` §20.) |
+| **AMD-47 value-type contracts** | **As of M4.0b-4a, the `AttributeValue` hierarchy + `AttributeType` live in `com.homesynapse.value`, so the value-type halves of AMD-47-INV-01/03/05 travel with them — see `core/value-model/MODULE_CONTEXT.md`.** The rows below are retained here because device-model still consumes the types and INV-04's structural guard is owned here. |
+| **AMD-47-INV-01** | `AttributeValue` sealing stays total — `permits` is exactly the 8 variants `{BooleanValue, IntValue, FloatValue, StringValue, EnumValue, QuantityValue, ArrayValue, DegradedAttributeValue}`; every exhaustive `switch` handles all eight, no `default`. (Also registered in `Architecture_Invariants_v1.md` §20.) Types now in `com.homesynapse.value`. |
 | **AMD-47-INV-02** | Upcaster-before-derivation: when the `AttributeValueUpcaster` is wired (M4.0b-3), it runs strictly before `DerivationRule.evaluate()` on **both** `onEvent` and `processBatch`. The SPI + contract exist at M4.B3; the production both-paths wiring + path test are carried to M4.0b-3. |
 | **AMD-47-INV-03** | `QuantityValue` normalizes to its canonical unit at construction via a pure, hand-rolled, deterministic, table-driven conversion — no units library, no I/O, no locale/clock dependence; same-dimension values are magnitude-comparable on canonical `value`; null/blank/non-finite/unrecognised unit fails closed (NPE/IAE). |
-| **AMD-47-INV-04** | `AttributeType.DEGRADED` is never schema-declarable — enforced **structurally at `AttributeSchema` construction** (compact-ctor guard, M4.B3; stronger than the literal "validator rejects it"). The never-written-to-canonical-state-under-strict-mode clause rides with the upcaster wiring → M4.0b-3. `DegradedAttributeValue` preserves its fields without mutation. |
+| **AMD-47-INV-04** | `AttributeType.DEGRADED` is never schema-declarable — enforced **structurally at `AttributeSchema` construction** (compact-ctor guard, M4.B3; stronger than the literal "validator rejects it"). **This guard stays in device-model** (`AttributeSchema` did not move), even though `AttributeType`/`DegradedAttributeValue` now live in `com.homesynapse.value`. The never-written-to-canonical-state-under-strict-mode clause rides with the upcaster wiring → M4.0b-3. `DegradedAttributeValue` preserves its fields without mutation. |
 | **AMD-47-INV-05** | `ArrayValue` is full-replacement — no delta/patch semantics (bounded-window-advancer compatible); `elements` is an unmodifiable, null-free, possibly-empty `List<AttributeValue>`. |
 
 ## Sealed Hierarchies
@@ -214,9 +206,10 @@ switch (capability) {
 }
 ```
 
-### AttributeValue Hierarchy (8 variants — AMD-47)
+### AttributeValue Hierarchy (8 variants — AMD-47) — RELOCATED to `com.homesynapse.value` (M4.0b-4a)
+*The hierarchy now lives in the `com.homesynapse.value` leaf module — see `core/value-model/MODULE_CONTEXT.md`. Retained here because device-model consumes it (e.g. the `Expectation.evaluate(AttributeValue)` contract) and re-exports it via `requires transitive com.homesynapse.value`.*
 ```
-sealed interface AttributeValue
+sealed interface AttributeValue   // now: package com.homesynapse.value
     permits BooleanValue, IntValue, FloatValue, StringValue, EnumValue,
             QuantityValue, ArrayValue, DegradedAttributeValue
 ```
@@ -268,7 +261,9 @@ switch (expectation) {
 
 **GOTCHA: unit fields are `String` canonical-unit symbols — do NOT add a units library.** `unitSymbol`/`canonicalUnitSymbol`/`QuantityValue.unit` are plain `String`s, and this is **permanent** (REC-93 / AMD-47-INV-03, RATIFIED 2026-05-30) — the old "Phase 3 adds JSR 385" note is retired. Unit normalization lives in `QuantityValue`'s hand-rolled, table-driven, deterministic catalogue (canonical-at-construction, fail-closed on unknown units). Do not pull in `javax.measure`/`indriya`/any unit-of-measure library, and match units by exact string equality against the catalogue (no locale-folding).
 
-**GOTCHA: `module-info.java` uses `requires transitive` for platform-api only.** Event-model is non-transitive (`requires com.homesynapse.event`) because no event-model types appear in device-model's public API signatures — only Javadoc `@see` cross-references. `Device` uses `DeviceId` (platform-api), which IS transitive. Removing `transitive` from platform-api will break downstream compilation, but event-model is correctly non-transitive.
+**GOTCHA: `module-info.java` has two `requires transitive` edges — `com.homesynapse.value` and `com.homesynapse.platform`.** `requires transitive com.homesynapse.value` (M4.0b-4a) re-exports the `AttributeValue` hierarchy + `AttributeType` (on `AttributeSchema`, the `Expectation` contract, capabilities, `StandardCapabilities`); `requires transitive com.homesynapse.platform` re-exports `DeviceId`/`EntityId` etc. Event-model is non-transitive (`requires com.homesynapse.event`) because no event-model types appear in device-model's public API signatures — only Javadoc `@see` cross-references. Removing `transitive` from value-model or platform-api will break downstream compilation; event-model is correctly non-transitive.
+
+**GOTCHA: the `requires com.homesynapse.event` edge is vestigial (M4.0b-4a finding — do NOT invert it).** Device-model main source has **zero** `import com.homesynapse.event` — only three Javadoc `@see com.homesynapse.event.*` references (`Expectation`, `ExpectationFactory`, `IdempotencyClass`). The edge is therefore dead for compilation. It was deliberately **left in place** at M4.0b-4a (the relocation WU scope excludes touching it). Dropping it is optional independent hygiene; **never** "fix" anything by inverting to `event → device` (wrong layering — events are produced about devices; the dependency flows device → event, never the reverse — design-note §7).
 
 **GOTCHA: Nullable fields on `Device`.** `serialNumber`, `firmwareVersion`, `hardwareVersion` are nullable (not all hardware reports these). `areaId` is nullable (device not yet assigned to an area). `viaDeviceId` is nullable (only set for devices connected through a router/coordinator). These were audit findings against Doc 02 during Block G — do not regress them to non-null.
 
