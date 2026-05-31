@@ -778,10 +778,30 @@ public final class StateProjection implements Subscriber {
      *   <li>Other payload types → only {@code stateVersion} and
      *       {@code lastUpdated} advance.</li>
      * </ul>
+     *
+     * <p><b>Timestamp sourcing (AMD-53 §2.1, AMD-53-INV-01).</b> Every activity
+     * timestamp this method writes — {@code lastChanged}, {@code lastUpdated},
+     * {@code lastReported} — is sourced from the causing envelope's event-time
+     * ({@code eventTime ?? ingestTime} via {@link #eventTimestamp}), computed once
+     * at the top and reused for all writes in the call. It is <em>never</em> the
+     * projection wall-clock, so the materialized {@code EntityState} is a pure
+     * function of the event log for those fields and is identical across every
+     * rebuild path (extends AMD-50-INV-03 from the {@code DerivationRule} to the
+     * materialization). After this change {@code applyToState} does not read
+     * {@code clock}. {@code staleAfter}/{@code stale} are untouched and stay
+     * wall-clock (the real-time freshness carve-out, AMD-53-INV-02).</p>
      */
     private void applyToState(EventEnvelope envelope, EntityId entityId) {
-        EntityState prior = stateStore.get(entityId).orElseGet(() -> initialEntityState(entityId));
-        Instant now = clock.instant();
+        // AMD-53 §2.1: the activity timestamps source from the causing envelope's
+        // event-time (eventTime ?? ingestTime), computed once and reused for every
+        // activity-timestamp write below — never the projection wall-clock
+        // (AMD-53-INV-01). The same stamp seeds a brand-new entity (§1.5), so a
+        // field a given event does not overwrite is still a pure function of the
+        // log. clock is retained for reconciledAt / checkpoint cadence / replay
+        // metric / staleness, but applyToState no longer reads it.
+        Instant stamp = eventTimestamp(envelope);
+        EntityState prior = stateStore.get(entityId)
+                .orElseGet(() -> initialEntityState(entityId, stamp));
 
         EntityState updated;
         if (envelope.payload() instanceof StateReportedEvent) {
@@ -791,8 +811,8 @@ public final class StateProjection implements Subscriber {
                     prior.availability(),
                     prior.stateVersion() + 1,
                     prior.lastChanged(),
-                    now,
-                    now,
+                    stamp,
+                    stamp,
                     prior.staleAfter(),
                     prior.stale());
         } else if (envelope.payload() instanceof StateChangedEvent sc) {
@@ -815,7 +835,7 @@ public final class StateProjection implements Subscriber {
                         prior.availability(),
                         prior.stateVersion() + 1,
                         prior.lastChanged(),
-                        now,
+                        stamp,
                         prior.lastReported(),
                         prior.staleAfter(),
                         prior.stale());
@@ -827,8 +847,8 @@ public final class StateProjection implements Subscriber {
                         Map.copyOf(newAttrs),
                         prior.availability(),
                         prior.stateVersion() + 1,
-                        now,
-                        now,
+                        stamp,
+                        stamp,
                         prior.lastReported(),
                         prior.staleAfter(),
                         prior.stale());
@@ -840,7 +860,7 @@ public final class StateProjection implements Subscriber {
                     parseAvailability(ac.newStatus()),
                     prior.stateVersion() + 1,
                     prior.lastChanged(),
-                    now,
+                    stamp,
                     prior.lastReported(),
                     prior.staleAfter(),
                     prior.stale());
@@ -851,7 +871,7 @@ public final class StateProjection implements Subscriber {
                     prior.availability(),
                     prior.stateVersion() + 1,
                     prior.lastChanged(),
-                    now,
+                    stamp,
                     prior.lastReported(),
                     prior.staleAfter(),
                     prior.stale());
@@ -874,27 +894,36 @@ public final class StateProjection implements Subscriber {
     private void applyBackfillDraft(EntityId entityId, EventEnvelope causingEnvelope,
                                     EventDraft draft) {
         if (draft.payload() instanceof StateChangedEvent sc) {
-            applyBackfillAttribute(entityId, sc, backfillTimestamp(causingEnvelope));
+            applyBackfillAttribute(entityId, sc, eventTimestamp(causingEnvelope));
         }
     }
 
     /**
-     * Returns the deterministic, log-fixed instant used as {@code lastChanged} for
-     * a reconciliation backfill write (AMD-50 §2.3): the causing event's
+     * Returns the deterministic, log-fixed event-time stamp for an envelope: its
      * {@code eventTime} when present, else its {@code ingestTime} (the envelope's
-     * recorded/ordering time, always non-null). It is NEVER the projection
-     * wall-clock ({@code clock.instant()}): wall-clock would stamp every
-     * reconstructed historical attribute with the rebuild time (and re-stamp it on
-     * every later transition), which is both semantically wrong and a latent
-     * rebuild non-determinism that a fixed test clock would silently mask — exactly
-     * the failure class AMD-50 exists to prevent.
+     * recorded/ordering time, always non-null). This is the single
+     * {@code eventTime ?? ingestTime} rule that sources <em>every</em>
+     * {@link EntityState} activity timestamp — {@code lastChanged},
+     * {@code lastUpdated}, {@code lastReported} — in both the LIVE
+     * {@link #applyToState} path and the AMD-50 reconciliation backfill
+     * ({@link #applyBackfillAttribute}), plus the entity-adoption seed
+     * ({@link #initialEntityState}). It is shared so LIVE and backfill agree by
+     * construction (AMD-53 §2.1, AMD-53-INV-01).
      *
-     * @param causingEnvelope the inbound event that triggered the re-derivation
-     * @return the log-fixed timestamp; never {@code null}
+     * <p>It is NEVER the projection wall-clock ({@code clock.instant()}):
+     * {@code eventTime}/{@code ingestTime} are immutable log facts (INV-ES-01), so a
+     * field sourced from them is identical on every rebuild path (from-zero replay,
+     * reconciliation backfill, steady-state catch-up). Wall-clock would stamp the
+     * rebuild time (and re-stamp it on every later transition) — semantically wrong
+     * and a latent rebuild non-determinism that a fixed test clock would silently
+     * mask, exactly the failure class AMD-50/AMD-53 exist to prevent.
+     *
+     * @param envelope the causing event
+     * @return the log-fixed event-time stamp; never {@code null}
      */
-    private static Instant backfillTimestamp(EventEnvelope causingEnvelope) {
-        Instant eventTime = causingEnvelope.eventTime();
-        return (eventTime != null) ? eventTime : causingEnvelope.ingestTime();
+    private static Instant eventTimestamp(EventEnvelope envelope) {
+        Instant eventTime = envelope.eventTime();
+        return (eventTime != null) ? eventTime : envelope.ingestTime();
     }
 
     /**
@@ -915,20 +944,22 @@ public final class StateProjection implements Subscriber {
      * re-derivation over the {@code state_reported} history — independent of any
      * logged-event interleaving.</p>
      *
-     * <p>Note (conscious interim, [REVIEW]): {@code lastChanged} is event-time-sourced
-     * here but remains wall-clock-sourced in the LIVE {@code applyToState}
-     * {@code state_changed} branch (pre-existing, deliberately untouched). The
-     * unifier is a scheduled follow-up WU.</p>
+     * <p>Note (AMD-53, resolved): the former LIVE-wall-clock vs backfill-event-time
+     * {@code lastChanged} split is gone. {@link #applyToState} now sources all three
+     * activity timestamps from the same {@code eventTime ?? ingestTime} rule
+     * ({@link #eventTimestamp}), so LIVE and this backfill agree by construction
+     * (AMD-53-INV-01). This helper is itself unchanged — it was already
+     * event-time-sourced (AMD-50 §2.3).</p>
      *
      * @param entityId       the subject entity to update
      * @param sc             the re-derived {@code state_changed} payload
      * @param causeEventTime the causing event's log-fixed time (see
-     *                       {@link #backfillTimestamp})
+     *                       {@link #eventTimestamp})
      */
     private void applyBackfillAttribute(EntityId entityId, StateChangedEvent sc,
                                         Instant causeEventTime) {
         EntityState prior = stateStore.get(entityId)
-                .orElseGet(() -> initialEntityState(entityId));
+                .orElseGet(() -> initialEntityState(entityId, causeEventTime));
         Map<String, AttributeValue> newAttrs = new HashMap<>(prior.attributes());
         newAttrs.put(sc.attributeKey(), sc.newValue());  // typed value (AMD-52 S2)
         EntityState updated = new EntityState(
@@ -944,16 +975,29 @@ public final class StateProjection implements Subscriber {
         stateStore.put(entityId, updated);
     }
 
-    private EntityState initialEntityState(EntityId entityId) {
-        Instant now = clock.instant();
+    /**
+     * Seeds the initial {@link EntityState} for a brand-new entity. The three
+     * activity timestamps are seeded from {@code seed} — the triggering event's
+     * event-time stamp ({@link #eventTimestamp}), NOT the projection wall-clock
+     * (AMD-53 §1.5/§2.1, AMD-53-INV-01) — so a field that the entity's events never
+     * overwrite (e.g. {@code lastChanged} for an entity that only ever reports an
+     * unchanged value) is still a pure function of the log and is deterministic
+     * across rebuilds. {@code staleAfter} stays {@code null} and {@code stale} stays
+     * {@code false} (the real-time freshness carve-out, AMD-53-INV-02).
+     *
+     * @param entityId the entity being adopted
+     * @param seed     the triggering event's event-time stamp; never {@code null}
+     * @return the seeded initial state
+     */
+    private EntityState initialEntityState(EntityId entityId, Instant seed) {
         return new EntityState(
                 entityId,
                 Map.of(),
                 Availability.UNKNOWN,
                 0L,
-                now,
-                now,
-                now,
+                seed,
+                seed,
+                seed,
                 null,
                 false);
     }

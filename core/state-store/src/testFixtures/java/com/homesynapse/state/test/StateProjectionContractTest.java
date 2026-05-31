@@ -10,8 +10,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.homesynapse.value.AttributeValue;
 import com.homesynapse.value.StringValue;
 import com.homesynapse.event.CausalContext;
+import com.homesynapse.event.EventCategory;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
+import com.homesynapse.event.EventId;
 import com.homesynapse.event.EventOrigin;
 import com.homesynapse.event.EventPriority;
 import com.homesynapse.event.EventPublisher;
@@ -39,6 +41,7 @@ import com.homesynapse.state.ProjectionAdvancer;
 import com.homesynapse.state.ProjectionId;
 import com.homesynapse.state.StateCheckpointSource;
 import com.homesynapse.state.StateProjection;
+import com.homesynapse.state.StateQueryService;
 import com.homesynapse.state.StateStore;
 import com.homesynapse.state.ViewCheckpointStore;
 import com.homesynapse.test.TestClock;
@@ -841,6 +844,219 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
             Map<String, AttributeValue> attributes,
             long stateVersion,
             Instant lastChanged) { }
+
+    // ──────────────────────────────────────────────────────────────────
+    // M4.0b-5 — AMD-53 event-time activity-timestamp materialization
+    // (AMD-53-INV-01 / -02). §5 #1 (the gate), #3 (carve-out), #6 (no-op).
+    // ──────────────────────────────────────────────────────────────────
+
+    @Test
+    void liveEqualsReplayFromZeroForAllThreeActivityTimestamps() {
+        // GATE (AMD-53 §5 #1, AMD-53-INV-01): process a multi-entity state_reported
+        // log LIVE, capture each entity's lastChanged/lastUpdated/lastReported; rebuild
+        // the same log from position 0 (the reconciliation replay-from-zero); assert the
+        // THREE timestamps are identical per entity. This is the test that makes Nick's
+        // §2.4 caveat a gate: it fails if lastUpdated/lastReported are not event-time
+        // post-replay, not only lastChanged.
+        //
+        // The corpus event-times are all in 2025-09 while the projection Clock is fixed
+        // at 2026-01-01 (TestClock.createDefault) — so every captured value differs from
+        // clock.instant() and a wall-clock regression cannot pass.
+        SubjectRef sA = SubscriberContractTest.freshEntitySubject();
+        SubjectRef sB = SubscriberContractTest.freshEntitySubject();
+        EntityId idA = new EntityId(sA.id());
+        EntityId idB = new EntityId(sB.id());
+        Instant t1 = Instant.parse("2025-09-15T08:00:00Z");
+        Instant t2 = Instant.parse("2025-09-15T08:05:00Z");
+        Instant t3 = Instant.parse("2025-09-15T08:02:00Z");
+        List<EventEnvelope> corpus = List.of(
+                reportedEnvelopeAt(sA, 1L, "level", "10", t1, t1),
+                reportedEnvelopeAt(sB, 2L, "level", "5", t3, t3),
+                reportedEnvelopeAt(sA, 3L, "level", "20", t2, t2));
+
+        Map<EntityId, ActivityStamps> live = liveActivityStamps(corpus, "amd53-gate-live");
+        Map<EntityId, ActivityStamps> replay = backfillActivityStamps(corpus, "amd53-gate-replay");
+
+        assertThat(replay)
+                .as("LIVE ≡ replay-from-zero across ALL THREE activity timestamps "
+                        + "(fails if lastUpdated/lastReported are not event-time post-replay)")
+                .isEqualTo(live);
+
+        // The captured values ARE the event-times (last write per entity), not the clock.
+        assertThat(live.get(idA))
+                .as("entity A: last report at t2 governs all three activity timestamps")
+                .isEqualTo(new ActivityStamps(t2, t2, t2));
+        assertThat(live.get(idB))
+                .as("entity B: single report at t3 governs all three activity timestamps")
+                .isEqualTo(new ActivityStamps(t3, t3, t3));
+        assertThat(t2).as("the gate clock differs from the corpus event-times")
+                .isNotEqualTo(clock.instant());
+        assertThat(t3).as("the gate clock differs from the corpus event-times")
+                .isNotEqualTo(clock.instant());
+    }
+
+    @Test
+    void noOpReportAdvancesLastUpdatedAndLastReportedButKeepsLastChanged() {
+        // AMD-53 §5 #6 + Doc 03 §3.2 LIVE contract: a state_reported whose value matches
+        // canonical state advances lastUpdated/lastReported (to the report's event-time)
+        // and stateVersion, but leaves lastChanged unchanged.
+        SubjectRef subject = SubscriberContractTest.freshEntitySubject();
+        EntityId entityId = new EntityId(subject.id());
+        Instant t1 = Instant.parse("2025-09-15T10:00:00Z");
+        Instant t2 = Instant.parse("2025-09-15T10:30:00Z");
+
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = createProjection(
+                new ProjectionId("amd53-noop"), 1, checkpointStore, checkpointSource,
+                store, DerivationRule.production(), spyPublisher, advancer,
+                FixedCheckpointPolicy.HOME_DEFAULT, clock, publishGate);
+        p.setMode(SubscriberMode.LIVE);
+
+        // First report establishes "blue" and lastChanged = t1 (via the derived
+        // state_changed, event-time-sourced).
+        p.onEvent(reportedEnvelopeAt(subject, 1L, "color", "blue", t1, t1));
+        EntityState afterFirst = store.get(entityId).orElseThrow();
+        assertThat(afterFirst.lastChanged()).isEqualTo(t1);
+        assertThat(afterFirst.attributes()).containsEntry("color", new StringValue("blue"));
+        long versionAfterFirst = afterFirst.stateVersion();
+
+        // Second report, SAME value at t2: the production rule derives nothing, so
+        // lastChanged is untouched; the state_reported still advances
+        // lastUpdated/lastReported (to t2) and stateVersion.
+        int publishesBefore = spyPublisher.publishCount();
+        p.onEvent(reportedEnvelopeAt(subject, 2L, "color", "blue", t2, t2));
+
+        assertThat(spyPublisher.publishCount())
+                .as("a no-op report derives no state_changed")
+                .isEqualTo(publishesBefore);
+        EntityState afterSecond = store.get(entityId).orElseThrow();
+        assertThat(afterSecond.lastChanged())
+                .as("lastChanged unchanged across a no-op report (Doc 03 §3.2)")
+                .isEqualTo(t1);
+        assertThat(afterSecond.lastUpdated())
+                .as("lastUpdated advances to the no-op report's event-time")
+                .isEqualTo(t2);
+        assertThat(afterSecond.lastReported())
+                .as("lastReported advances to the no-op report's event-time")
+                .isEqualTo(t2);
+        assertThat(afterSecond.stateVersion())
+                .as("stateVersion advances on every processed event, including the no-op report")
+                .isGreaterThan(versionAfterFirst);
+    }
+
+    @Test
+    void staleAfterAndStaleStayRealTimeIndependentOfEventTimeActivityTimestamps() {
+        // AMD-53 §5 #3 / AMD-53-INV-02 (carve-out): staleAfter/stale are the ONLY
+        // real-time-clock-dependent fields on EntityState. `stale` is derived at read time
+        // from the injected clock vs staleAfter and flips accordingly — independent of the
+        // event-time activity timestamps, which the read does not touch. (This proves the
+        // activity-timestamp change did not bleed into the staleness machinery.)
+        EntityId entityId = new EntityId(UlidFactory.generate());
+        Instant activity = Instant.parse("2025-09-15T08:00:00Z"); // event-time activity stamps
+        Instant threshold = Instant.parse("2026-03-01T00:00:00Z"); // staleAfter target
+        InMemoryStateStore store = new InMemoryStateStore();
+        store.put(entityId, new EntityState(
+                entityId, Map.of("level", new StringValue("7")), Availability.AVAILABLE,
+                4L, activity, activity, activity, threshold, false));
+
+        // Read BEFORE the threshold -> not stale; activity timestamps untouched.
+        StateQueryService beforeView = StateQueryService.materialized(
+                store, () -> SubscriberMode.LIVE, () -> 0L,
+                TestClock.at(Instant.parse("2026-02-01T00:00:00Z")));
+        EntityState before = beforeView.getState(entityId).orElseThrow();
+        assertThat(before.stale()).as("clock before staleAfter -> not stale").isFalse();
+        assertThat(before.lastChanged()).isEqualTo(activity);
+        assertThat(before.lastUpdated()).isEqualTo(activity);
+        assertThat(before.lastReported()).isEqualTo(activity);
+
+        // Read AFTER the threshold -> stale flips true; activity timestamps STILL event-time.
+        StateQueryService afterView = StateQueryService.materialized(
+                store, () -> SubscriberMode.LIVE, () -> 0L,
+                TestClock.at(Instant.parse("2026-04-01T00:00:00Z")));
+        EntityState after = afterView.getState(entityId).orElseThrow();
+        assertThat(after.stale()).as("clock after staleAfter -> stale").isTrue();
+        assertThat(after.lastChanged())
+                .as("the event-time activity timestamp is independent of the real-time stale flip")
+                .isEqualTo(activity);
+        assertThat(after.staleAfter())
+                .as("staleAfter is the real-time target, not event-timed by the projection")
+                .isEqualTo(threshold);
+    }
+
+    /**
+     * The three activity timestamps captured for a rebuild-equivalence assertion.
+     *
+     * @param lastChanged  the event-time-sourced last-changed instant
+     * @param lastUpdated  the event-time-sourced last-updated instant
+     * @param lastReported the event-time-sourced last-reported instant
+     */
+    private record ActivityStamps(Instant lastChanged, Instant lastUpdated,
+                                  Instant lastReported) { }
+
+    /**
+     * Materializes the inbound log through a fresh LIVE projection (production rule)
+     * and snapshots each entity's three activity timestamps.
+     */
+    private Map<EntityId, ActivityStamps> liveActivityStamps(
+            List<EventEnvelope> corpus, String viewName) {
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = createProjection(
+                new ProjectionId(viewName), 1, checkpointStore, checkpointSource,
+                store, DerivationRule.production(), spyPublisher, advancer,
+                FixedCheckpointPolicy.HOME_DEFAULT, clock, publishGate);
+        p.setMode(SubscriberMode.LIVE);
+        for (EventEnvelope env : corpus) {
+            p.onEvent(env);
+        }
+        return activityStampSnapshot(store);
+    }
+
+    /**
+     * Materializes the inbound log through a fresh projection driven via the AMD-50
+     * reconciliation backfill (projectionVersion 2 vs the stub source's
+     * loadedProjectionVersion 0 + a seeded checkpoint, so {@code initialize()} clears
+     * state, resets the cursor to 0, and opens the backfill gate — a from-zero replay),
+     * delivered via {@code onEvent} in REPLAY. Snapshots each entity's three activity
+     * timestamps. Per AMD-53 the timestamps come out identical to {@link #liveActivityStamps}.
+     */
+    private Map<EntityId, ActivityStamps> backfillActivityStamps(
+            List<EventEnvelope> corpus, String viewName) {
+        InMemoryStateStore store = new InMemoryStateStore();
+        checkpointStore.writeCheckpoint(viewName, 0L, new byte[]{1});
+        StateProjection p = createProjection(
+                new ProjectionId(viewName), 2, checkpointStore, checkpointSource,
+                store, DerivationRule.production(), spyPublisher, advancer,
+                FixedCheckpointPolicy.HOME_DEFAULT, clock, publishGate);
+        p.setMode(SubscriberMode.REPLAY);
+        for (EventEnvelope env : corpus) {
+            p.onEvent(env);
+        }
+        return activityStampSnapshot(store);
+    }
+
+    private static Map<EntityId, ActivityStamps> activityStampSnapshot(StateStore store) {
+        Map<EntityId, ActivityStamps> snapshot = new HashMap<>();
+        store.getAll().forEach((id, s) -> snapshot.put(id,
+                new ActivityStamps(s.lastChanged(), s.lastUpdated(), s.lastReported())));
+        return snapshot;
+    }
+
+    /**
+     * Builds a {@code state_reported} envelope with an explicit {@code eventTime} AND
+     * {@code ingestTime}, both distinct from the projection clock — so a wall-clock
+     * regression in {@code applyToState} cannot pass the AMD-53 gate. Delivered directly
+     * to {@code onEvent} (not round-tripped through the event store).
+     */
+    private EventEnvelope reportedEnvelopeAt(SubjectRef subject, long position,
+                                             String key, String value,
+                                             Instant eventTime, Instant ingestTime) {
+        EventId eventId = EventId.of(UlidFactory.generate());
+        return new EventEnvelope(
+                eventId, EventTypes.STATE_REPORTED, 1, ingestTime, eventTime, subject,
+                position, position, EventPriority.DIAGNOSTIC, EventOrigin.PHYSICAL,
+                List.of(EventCategory.DEVICE_STATE), CausalContext.root(eventId.value()),
+                null, new StateReportedEvent(key, value, null, null, null));
+    }
 
     // ──────────────────────────────────────────────────────────────────
     // Helpers

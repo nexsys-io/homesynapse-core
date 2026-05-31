@@ -10,6 +10,9 @@ import com.homesynapse.value.AttributeValue;
 import com.homesynapse.device.StandardCapabilities;
 import com.homesynapse.value.FloatValue;
 import com.homesynapse.value.StringValue;
+import com.homesynapse.event.AvailabilityChangedEvent;
+import com.homesynapse.event.CausalContext;
+import com.homesynapse.event.EventCategory;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventId;
@@ -627,6 +630,270 @@ class ReconciliationTest {
         // state_reported with that unit (which would previously have degraded), run a
         // version-transition backfill, and assert the attribute reconstructs to the canonical
         // QuantityValue rather than staying degraded.
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // M4.0b-5 — AMD-53 event-time activity-timestamp materialization
+    // (AMD-53-INV-01). §5 #2 (event-time sourcing + null fallback),
+    // #4 (adoption-seeding determinism), #5 (the 4->5 reconciliation heal).
+    // ──────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("AMD-53 §5 #2: a state_reported sources lastUpdated/lastReported from event-time")
+    void stateReportedSourcesLastUpdatedAndLastReportedFromEventTime() {
+        // Matching version (1 == 1) => no reconciliation, gate off, plain LIVE; noopRule
+        // => no derived events, so lastUpdated/lastReported come solely from the
+        // state_reported branch of applyToState.
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = projectionFor("amd53-reported", 1, 1, noopRule, store, 0L);
+        p.setMode(SubscriberMode.LIVE);
+
+        p.onEvent(reportedEnvelope(subject, 1L, "level", "7", EVENT_TIME, EVENT_TIME));
+
+        EntityState state = store.get(entityId).orElseThrow();
+        assertThat(state.lastUpdated()).isEqualTo(EVENT_TIME);
+        assertThat(state.lastReported()).isEqualTo(EVENT_TIME);
+        assertThat(state.lastUpdated())
+                .as("event-time, not the projection wall-clock")
+                .isNotEqualTo(clock.instant());
+    }
+
+    @Test
+    @DisplayName("AMD-53 §5 #2: a logged state_changed sources lastChanged/lastUpdated from event-time (lastReported untouched)")
+    void stateChangedSourcesLastChangedAndLastUpdatedFromEventTime() {
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = projectionFor("amd53-changed", 1, 1, noopRule, store, 0L);
+        p.setMode(SubscriberMode.LIVE);
+
+        Instant tReport = EVENT_TIME;
+        Instant tChange = EVENT_TIME.plusSeconds(90);
+        // The report fixes lastReported = tReport; a later logged state_changed must move
+        // lastChanged + lastUpdated to tChange but leave lastReported at tReport.
+        p.onEvent(reportedEnvelope(subject, 1L, "level", "7", tReport, tReport));
+        p.onEvent(changedEnvelope(subject, 2L, "level", "7", "9", tChange, tChange));
+
+        EntityState state = store.get(entityId).orElseThrow();
+        assertThat(state.lastChanged()).isEqualTo(tChange);
+        assertThat(state.lastUpdated()).isEqualTo(tChange);
+        assertThat(state.lastReported())
+                .as("state_changed does not touch lastReported")
+                .isEqualTo(tReport);
+        assertThat(state.lastChanged()).isNotEqualTo(clock.instant());
+    }
+
+    @Test
+    @DisplayName("AMD-53 §5 #2: an availability_changed sources lastUpdated from event-time")
+    void availabilityChangedSourcesLastUpdatedFromEventTime() {
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = projectionFor("amd53-avail", 1, 1, noopRule, store, 0L);
+        p.setMode(SubscriberMode.LIVE);
+
+        Instant tReport = EVENT_TIME;
+        Instant tAvail = EVENT_TIME.plusSeconds(120);
+        p.onEvent(reportedEnvelope(subject, 1L, "level", "7", tReport, tReport));
+        p.onEvent(availabilityEnvelope(subject, 2L, "online", "offline", tAvail, tAvail));
+
+        EntityState state = store.get(entityId).orElseThrow();
+        assertThat(state.availability()).isEqualTo(Availability.UNAVAILABLE);
+        assertThat(state.lastUpdated())
+                .as("availability_changed sources lastUpdated from event-time")
+                .isEqualTo(tAvail);
+        assertThat(state.lastReported())
+                .as("availability_changed does not touch lastReported")
+                .isEqualTo(tReport);
+        assertThat(state.lastUpdated()).isNotEqualTo(clock.instant());
+    }
+
+    @Test
+    @DisplayName("AMD-53 §5 #2: eventTime == null falls back to ingestTime (never the wall-clock)")
+    void eventTimeNullFallsBackToIngestTimeForActivityTimestamps() {
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = projectionFor("amd53-nullfallback", 1, 1, noopRule, store, 0L);
+        p.setMode(SubscriberMode.LIVE);
+
+        // eventTime == null => the activity timestamps fall back to ingestTime (always
+        // present), NOT the projection wall-clock. ingestTime is chosen distinct from the
+        // clock so a wall-clock regression cannot pass.
+        Instant ingest = Instant.parse("2025-07-04T12:00:00Z");
+        p.onEvent(reportedEnvelope(subject, 1L, "level", "7", null, ingest));
+
+        EntityState state = store.get(entityId).orElseThrow();
+        assertThat(state.lastUpdated()).isEqualTo(ingest);
+        assertThat(state.lastReported()).isEqualTo(ingest);
+        assertThat(state.lastChanged())
+                .as("the adoption seed also falls back to ingestTime when eventTime is null")
+                .isEqualTo(ingest);
+        assertThat(state.lastUpdated())
+                .as("the fallback is ingestTime, NOT the projection wall-clock")
+                .isNotEqualTo(clock.instant());
+    }
+
+    @Test
+    @DisplayName("AMD-53 §5 #4: adoption seeding sources lastChanged from event-time, deterministic across rebuilds (§1.5)")
+    void adoptionSeedingSourcesLastChangedFromEventTimeDeterministically() {
+        // A never-changed entity: its state_reported is applied (lastUpdated/lastReported
+        // = event-time) but in steady-state REPLAY (gate off) the derived state_changed is
+        // NOT applied, so lastChanged is the adoption SEED. Under AMD-53 the seed is the
+        // seeding event's event-time, so it is deterministic across rebuilds — never the
+        // projection wall-clock (the §1.5 determinism hole this WU closes).
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        EventEnvelope report = reportedEnvelope(subject, 1L, "level", "7", EVENT_TIME, EVENT_TIME);
+
+        Instant firstRebuild = seedLastChangedRebuild("adopt-rebuild-A", entityId, report);
+        Instant secondRebuild = seedLastChangedRebuild("adopt-rebuild-B", entityId, report);
+
+        assertThat(firstRebuild)
+                .as("adoption-seeded lastChanged is the seeding event's event-time (§1.5)")
+                .isEqualTo(EVENT_TIME);
+        assertThat(firstRebuild)
+                .as("...and NOT the projection wall-clock — the determinism hole AMD-53 closes")
+                .isNotEqualTo(clock.instant());
+        assertThat(secondRebuild)
+                .as("deterministic across two independent rebuilds")
+                .isEqualTo(firstRebuild);
+    }
+
+    @Test
+    @DisplayName("AMD-53 §5 #5 / §3.4: a 4->5 reconciliation heals legacy wall-clock activity timestamps to event-time")
+    void reconciliation4to5HealsLegacyWallClockActivityTimestamps() {
+        // Legacy regime: an entity materialized under a wall-clock-stamped checkpoint (all
+        // three activity timestamps = the projection clock). A 4->5 reconciliation replays
+        // the state_reported history and re-derives ALL THREE activity timestamps from
+        // event-time — proving the §2.4 caveat: the heal is complete because applyToState's
+        // state_reported branch + adoption seeding are event-time, not just the backfill
+        // helper's lastChanged.
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        Instant t1 = EVENT_TIME;
+        Instant t2 = EVENT_TIME.plusSeconds(45);
+        List<EventEnvelope> corpus = List.of(
+                reportedEnvelope(subject, 1L, "level", "10", t1, t1),
+                reportedEnvelope(subject, 2L, "level", "20", t2, t2));
+
+        // Fresh-from-zero heal (no legacy pre-seed) — the reference output.
+        EntityState fresh = healViaReconciliation("heal-fresh", entityId, corpus, null);
+        // Heal over a legacy wall-clock-stamped entity (same id): reconciliation clears it
+        // and re-materializes from the log.
+        EntityState legacy = new EntityState(
+                entityId, Map.of("level", new StringValue("999")), Availability.AVAILABLE,
+                42L, clock.instant(), clock.instant(), clock.instant(), null, false);
+        EntityState healed = healViaReconciliation("heal-legacy", entityId, corpus, legacy);
+
+        // All three activity timestamps healed to the last report's event-time...
+        assertThat(healed.lastChanged()).isEqualTo(t2);
+        assertThat(healed.lastUpdated()).isEqualTo(t2);
+        assertThat(healed.lastReported()).isEqualTo(t2);
+        // ...equal to a fresh-from-zero replay's (checkpoint == replay output)...
+        assertThat(healed.lastChanged()).isEqualTo(fresh.lastChanged());
+        assertThat(healed.lastUpdated()).isEqualTo(fresh.lastUpdated());
+        assertThat(healed.lastReported()).isEqualTo(fresh.lastReported());
+        // ...and the legacy wall-clock value is gone (the heal).
+        assertThat(healed.lastChanged()).isNotEqualTo(clock.instant());
+        assertThat(healed.lastUpdated()).isNotEqualTo(clock.instant());
+        assertThat(healed.lastReported()).isNotEqualTo(clock.instant());
+        // stateVersion + attribute values are unchanged by the timestamp heal
+        // (AMD-50-INV-01, no double-increment): two state_reported -> stateVersion 2;
+        // backfill drafts add no increment.
+        assertThat(healed.attributes().get("level")).isEqualTo(new StringValue("20"));
+        assertThat(healed.attributes().get("level")).isEqualTo(fresh.attributes().get("level"));
+        assertThat(healed.stateVersion()).isEqualTo(2L);
+        assertThat(healed.stateVersion()).isEqualTo(fresh.stateVersion());
+    }
+
+    /**
+     * Rebuilds a never-changed entity through a steady-state REPLAY (matching version
+     * 1 == 1, gate off — the derived state_changed is not applied), returning its
+     * adoption-seeded {@code lastChanged}. Each call uses a fresh store and a distinct
+     * view name so the two rebuilds are independent.
+     */
+    private Instant seedLastChangedRebuild(String viewName, EntityId entityId,
+                                           EventEnvelope report) {
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = projectionFor(viewName, 1, 1, DerivationRule.production(), store, 0L);
+        p.setMode(SubscriberMode.REPLAY);
+        p.onEvent(report);
+        return store.get(entityId).orElseThrow().lastChanged();
+    }
+
+    /**
+     * Drives a 4->5 reconciliation over the given state_reported corpus, optionally over a
+     * pre-seeded legacy entity that the reconciliation must clear and re-materialize.
+     * Returns the re-materialized {@link EntityState}.
+     */
+    private EntityState healViaReconciliation(String viewName, EntityId entityId,
+                                              List<EventEnvelope> corpus,
+                                              EntityState legacyPreseed) {
+        InMemoryStateStore store = new InMemoryStateStore();
+        if (legacyPreseed != null) {
+            store.put(entityId, legacyPreseed);
+        }
+        // loaded 4 != runtime 5 (escape hatch off) => reconciliation: clear state, reset
+        // the cursor to 0, open the backfill gate (AMD-50 §2.2, ridden unchanged per §2.5).
+        StateProjection p = projectionFor(viewName, 4, 5, DerivationRule.production(), store, 0L);
+        p.setMode(SubscriberMode.REPLAY);
+        for (EventEnvelope env : corpus) {
+            p.onEvent(env);
+        }
+        return store.get(entityId).orElseThrow();
+    }
+
+    /**
+     * Builds a {@code state_reported} envelope with explicit {@code eventTime} (nullable)
+     * and {@code ingestTime}, delivered directly to {@code onEvent}. Used by the AMD-53
+     * tests so the activity-timestamp source is provable against a distinct projection
+     * clock (and the {@code eventTime == null} fallback to {@code ingestTime}).
+     */
+    private EventEnvelope reportedEnvelope(SubjectRef subject, long position, String key,
+                                           String value, Instant eventTime, Instant ingestTime) {
+        EventId eventId = EventId.of(UlidFactory.generate());
+        return new EventEnvelope(
+                eventId, EventTypes.STATE_REPORTED, 1, ingestTime, eventTime, subject,
+                position, position, EventPriority.NORMAL, EventOrigin.PHYSICAL,
+                List.of(EventCategory.DEVICE_STATE), CausalContext.root(eventId.value()),
+                null, new StateReportedEvent(key, value, null, null, null));
+    }
+
+    /**
+     * Builds a logged {@code state_changed} envelope (typed {@link StringValue} payload;
+     * empty {@code oldValue} -> {@code null} first-report sentinel) with explicit
+     * {@code eventTime}/{@code ingestTime}, delivered directly to {@code onEvent}.
+     */
+    private EventEnvelope changedEnvelope(SubjectRef subject, long position, String key,
+                                          String oldValue, String newValue,
+                                          Instant eventTime, Instant ingestTime) {
+        EventId eventId = EventId.of(UlidFactory.generate());
+        AttributeValue oldTyped =
+                (oldValue == null || oldValue.isEmpty()) ? null : new StringValue(oldValue);
+        return new EventEnvelope(
+                eventId, EventTypes.STATE_CHANGED, 1, ingestTime, eventTime, subject,
+                position, position, EventPriority.NORMAL, EventOrigin.SYSTEM,
+                List.of(EventCategory.DEVICE_STATE), CausalContext.root(eventId.value()),
+                null, new StateChangedEvent(key, oldTyped, new StringValue(newValue),
+                        EventId.of(UlidFactory.generate())));
+    }
+
+    /**
+     * Builds an {@code availability_changed} envelope with explicit
+     * {@code eventTime}/{@code ingestTime}, delivered directly to {@code onEvent}.
+     */
+    private EventEnvelope availabilityEnvelope(SubjectRef subject, long position,
+                                               String previousStatus, String newStatus,
+                                               Instant eventTime, Instant ingestTime) {
+        EventId eventId = EventId.of(UlidFactory.generate());
+        return new EventEnvelope(
+                eventId, EventTypes.AVAILABILITY_CHANGED, 1, ingestTime, eventTime, subject,
+                position, position, EventPriority.NORMAL, EventOrigin.PHYSICAL,
+                List.of(EventCategory.DEVICE_STATE), CausalContext.root(eventId.value()),
+                null, new AvailabilityChangedEvent(previousStatus, newStatus));
     }
 
     // ──────────────────────────────────────────────────────────────────
