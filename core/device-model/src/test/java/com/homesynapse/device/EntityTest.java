@@ -5,6 +5,7 @@
 package com.homesynapse.device;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.homesynapse.platform.identity.AreaId;
 import com.homesynapse.platform.identity.DeviceId;
@@ -16,6 +17,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -77,9 +79,125 @@ class EntityTest {
         }
 
         @Test
-        @DisplayName("record has exactly 11 components")
-        void exactlyElevenFields() {
-            assertThat(Entity.class.getRecordComponents()).hasSize(11);
+        @DisplayName("record has exactly 12 components")
+        void exactlyTwelveFields() {
+            assertThat(Entity.class.getRecordComponents()).hasSize(12);
+        }
+    }
+
+    // -- EntityRole (AMD-44 §2.5.3) -------------------------------------------
+
+    @Nested
+    @DisplayName("entityRole")
+    class EntityRoleTests {
+
+        private static Entity withRole(EntityType type, EntityRole role) {
+            return new Entity(
+                    ENTITY_ID, "slug", type, "Name", DEVICE_ID, 0, null, true,
+                    List.of(), List.of(), role, CREATED_AT);
+        }
+
+        @Test
+        @DisplayName("12-arg ctor with DIAGNOSTIC on a SENSOR exposes DIAGNOSTIC")
+        void entityRoleAccessible() {
+            Entity e = withRole(EntityType.SENSOR, EntityRole.DIAGNOSTIC);
+
+            assertThat(e.entityRole()).isEqualTo(EntityRole.DIAGNOSTIC);
+        }
+
+        @Test
+        @DisplayName("SWITCH + CONFIG is constructible (AMD-44 Worked Example 2)")
+        void switchConfigConstructible() {
+            Entity e = withRole(EntityType.SWITCH, EntityRole.CONFIG);
+
+            assertThat(e.entityRole()).isEqualTo(EntityRole.CONFIG);
+        }
+
+        @Test
+        @DisplayName("11-arg convenience ctor defaults entityRole to PRIMARY")
+        void elevenArgCtorDefaultsPrimary() {
+            Entity e = fullEntity();
+
+            assertThat(e.entityRole()).isEqualTo(EntityRole.PRIMARY);
+        }
+
+        @Test
+        @DisplayName("null entityRole coerces to PRIMARY without NPE (coercion-before-guard, PLUG)")
+        void nullEntityRoleCoercesToPrimary() {
+            Entity e = new Entity(
+                    ENTITY_ID, "slug", EntityType.PLUG, "Name", DEVICE_ID, 0, null, true,
+                    List.of(), List.of(), null, CREATED_AT);
+
+            assertThat(e.entityRole()).isEqualTo(EntityRole.PRIMARY);
+        }
+
+        @Test
+        @DisplayName("illegal (type, role) pairs are rejected with IAE naming both")
+        void illegalRolePairRejected() {
+            assertThatThrownBy(() -> withRole(EntityType.LIGHT, EntityRole.CONFIG))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("CONFIG")
+                    .hasMessageContaining("LIGHT");
+
+            assertThatThrownBy(() -> withRole(EntityType.PLUG, EntityRole.DIAGNOSTIC))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("DIAGNOSTIC")
+                    .hasMessageContaining("PLUG");
+        }
+    }
+
+    // -- Defensive copies (AMD-44 DP-4) ---------------------------------------
+
+    @Nested
+    @DisplayName("Defensive copies")
+    class DefensiveCopyTests {
+
+        @Test
+        @DisplayName("labels are defensively copied and unmodifiable")
+        void labelsDefensivelyCopied() {
+            List<String> source = new ArrayList<>(List.of("a"));
+            Entity e = new Entity(
+                    ENTITY_ID, "slug", EntityType.SWITCH, "Name", DEVICE_ID, 0, null, true,
+                    source, List.of(), EntityRole.PRIMARY, CREATED_AT);
+
+            source.add("b");
+
+            assertThat(e.labels()).containsExactly("a");
+            assertThatThrownBy(() -> e.labels().add("c"))
+                    .isInstanceOf(UnsupportedOperationException.class);
+        }
+
+        @Test
+        @DisplayName("capabilities are defensively copied and unmodifiable")
+        void capabilitiesDefensivelyCopied() {
+            List<CapabilityInstance> source = new ArrayList<>(List.of(SAMPLE_CAPABILITY));
+            Entity e = new Entity(
+                    ENTITY_ID, "slug", EntityType.LIGHT, "Name", DEVICE_ID, 0, null, true,
+                    List.of(), source, EntityRole.PRIMARY, CREATED_AT);
+
+            source.clear();
+
+            assertThat(e.capabilities()).containsExactly(SAMPLE_CAPABILITY);
+            assertThatThrownBy(() -> e.capabilities().add(SAMPLE_CAPABILITY))
+                    .isInstanceOf(UnsupportedOperationException.class);
+        }
+
+        @Test
+        @DisplayName("null labels collection throws NPE")
+        void nullLabelsThrows() {
+            assertThatThrownBy(() -> new Entity(
+                    ENTITY_ID, "slug", EntityType.SWITCH, "Name", DEVICE_ID, 0, null, true,
+                    null, List.of(), EntityRole.PRIMARY, CREATED_AT))
+                    .isInstanceOf(NullPointerException.class);
+        }
+
+        @Test
+        @DisplayName("null capabilities collection throws NPE")
+        void nullCapabilitiesThrows() {
+            assertThatThrownBy(() -> new Entity(
+                    ENTITY_ID, "slug", EntityType.SWITCH, "Name", DEVICE_ID, 0, null, true,
+                    List.of(), null, EntityRole.PRIMARY, CREATED_AT))
+                    .isInstanceOf(NullPointerException.class);
         }
     }
 

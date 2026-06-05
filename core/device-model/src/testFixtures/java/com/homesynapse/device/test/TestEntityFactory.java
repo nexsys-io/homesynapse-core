@@ -6,6 +6,7 @@ package com.homesynapse.device.test;
 
 import com.homesynapse.device.CapabilityInstance;
 import com.homesynapse.device.Entity;
+import com.homesynapse.device.EntityRole;
 import com.homesynapse.device.EntityType;
 import com.homesynapse.platform.identity.AreaId;
 import com.homesynapse.platform.identity.DeviceId;
@@ -20,7 +21,7 @@ import java.util.List;
  * with sensible defaults in tests.
  *
  * <p>Without this class, every test that needs an {@code Entity} must construct
- * the full 11-field record manually. This class provides one-liner defaults for
+ * the full 12-field record manually. This class provides one-liner defaults for
  * the common case, convenience methods for common entity types ({@link #light()},
  * {@link #sensor()}, {@link #binarySensor()}), and a builder for full
  * customization.</p>
@@ -140,7 +141,7 @@ public final class TestEntityFactory {
     /**
      * Mutable builder for {@link Entity} instances with fluent API.
      *
-     * <p>All 11 fields are pre-initialized to sensible defaults. Call setters
+     * <p>All 12 fields are pre-initialized to sensible defaults. Call setters
      * only for the fields you want to override, then call {@link #build()}.</p>
      */
     public static final class EntityBuilder {
@@ -155,6 +156,7 @@ public final class TestEntityFactory {
         private boolean enabled = true;
         private List<String> labels = List.of();
         private List<CapabilityInstance> capabilities = List.of();
+        private EntityRole entityRole = EntityRole.PRIMARY;
         private Instant createdAt = DEFAULT_CREATED_AT;
 
         EntityBuilder() {
@@ -221,6 +223,12 @@ public final class TestEntityFactory {
             return this;
         }
 
+        /** Sets the UX-role classification ({@link EntityRole#PRIMARY} by default). */
+        public EntityBuilder entityRole(EntityRole entityRole) {
+            this.entityRole = entityRole;
+            return this;
+        }
+
         /** Sets the creation timestamp. */
         public EntityBuilder createdAt(Instant createdAt) {
             this.createdAt = createdAt;
@@ -253,6 +261,7 @@ public final class TestEntityFactory {
                     enabled,
                     labels,
                     capabilities,
+                    entityRole,
                     createdAt);
         }
     }

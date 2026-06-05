@@ -266,12 +266,13 @@ class TypedIdTest {
         }
 
         @Test
-        @DisplayName("all 8 wrapper types are distinct despite wrapping same Ulid")
+        @DisplayName("all 9 wrapper types are distinct despite wrapping same Ulid")
         void allTypesDistinct() {
             Object[] ids = {
                     DeviceId.of(ULID_A),
                     EntityId.of(ULID_A),
                     AreaId.of(ULID_A),
+                    FloorId.of(ULID_A),
                     IntegrationId.of(ULID_A),
                     AutomationId.of(ULID_A),
                     PersonId.of(ULID_A),
