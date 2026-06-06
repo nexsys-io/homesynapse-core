@@ -116,14 +116,14 @@ final class EventCategoryMappingTest {
     @Test
     @DisplayName("explicit mapping count matches the Doc 01 §4.4 enumeration")
     void explicitMappingCount_matchesDocEnumeration() {
-        // Doc 01 §4.4 enumerates 27 production event types (22 core + 5
-        // integration lifecycle), matching the size of
-        // AllEventClasses.ALL_EVENTS. Holding this as a hard assertion makes
-        // silent entry removal from the table a test failure rather than a
+        // Doc 01 §4.4 enumerates 34 production event types (22 core + 10
+        // integration lifecycle + 2 capability — AMD-58/AMD-59), matching the
+        // size of AllEventClasses.ALL_EVENTS. Holding this as a hard assertion
+        // makes silent entry removal from the table a test failure rather than a
         // runtime fallback surprise.
         assertThat(EventCategoryMapping.explicitMappingCount())
                 .as("explicit mapping count — update Doc 01 §4.4 and this "
                         + "assertion together if a new production event type is added")
-                .isEqualTo(27);
+                .isEqualTo(34);
     }
 }

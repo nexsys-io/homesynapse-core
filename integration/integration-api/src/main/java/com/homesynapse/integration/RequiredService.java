@@ -48,5 +48,27 @@ public enum RequiredService {
      * high-frequency measurements (e.g., energy meters, power monitors)
      * alongside domain events.</p>
      */
-    TELEMETRY_WRITER
+    TELEMETRY_WRITER,
+
+    /**
+     * The discovery service family for publishing post-adoption capability
+     * changes (AMD-59).
+     *
+     * <p>When declared, the supervisor provisions a {@link DiscoveryServices}
+     * aggregator (carrying a {@link CapabilityPublisher}) on
+     * {@link IntegrationContext#discovery()}. Used by adapters whose devices gain
+     * or lose capabilities after adoption (firmware updates, endpoint
+     * reconfiguration).</p>
+     */
+    DISCOVERY,
+
+    /**
+     * The security service family for persisting rotated credentials (AMD-60).
+     *
+     * <p>When declared, the supervisor provisions a {@link SecurityServices}
+     * aggregator (carrying a {@link CredentialRotator}) on
+     * {@link IntegrationContext#security()}. Used by cloud-connected adapters that
+     * complete a re-authentication flow and must durably store new credentials.</p>
+     */
+    SECURITY
 }

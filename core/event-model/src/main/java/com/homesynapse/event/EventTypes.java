@@ -212,6 +212,31 @@ public final class EventTypes {
 	/** Event issued when an integration adapter exceeds a resource quota. */
 	public static final String INTEGRATION_RESOURCE_EXCEEDED = "integration_resource_exceeded";
 
+	// ========== Integration Lifecycle — dot-namespaced (AMD-58) ==========
+
+	/** Event issued when an adapter applies (or rejects) a runtime configuration change. */
+	public static final String INTEGRATION_CONFIG_UPDATED = "integration.config.updated";
+
+	/** Event issued when an adapter applies (or rejects) a runtime-tunable options change. */
+	public static final String INTEGRATION_OPTIONS_UPDATED = "integration.options.updated";
+
+	/** Event issued when the supervisor demands re-authentication from an adapter. */
+	public static final String INTEGRATION_REAUTH_REQUIRED = "integration.reauth.required";
+
+	/** Event issued when an adapter completes asynchronous re-authentication. */
+	public static final String INTEGRATION_REAUTH_COMPLETED = "integration.reauth.completed";
+
+	/** Event issued when an adapter migrates its configuration schema. */
+	public static final String INTEGRATION_MIGRATION_COMPLETED = "integration.migration.completed";
+
+	// ========== Capability Lifecycle — dot-namespaced (AMD-59) ==========
+
+	/** Event issued when an entity gains a capability after adoption. */
+	public static final String CAPABILITY_ADDED = "capability.added";
+
+	/** Event issued when an entity loses a capability after adoption. */
+	public static final String CAPABILITY_REMOVED = "capability.removed";
+
 	// ========== Core Production Event Class Manifest (M3.6c, DECIDE-04) ==========
 
 	/**

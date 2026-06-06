@@ -6,7 +6,13 @@ The Integration Runtime module is the supervisory layer that loads, isolates, mo
 
 Where integration-api (Block I) defines *what an adapter declares and receives*, this module defines *what the supervisor does with those declarations*: lifecycle management, health state machine, restart intensity enforcement, exception classification, thread allocation, and shutdown orchestration. The `IntegrationSupervisor` interface is consumed by the Startup/Lifecycle module for boot/shutdown, the REST API for integration management endpoints, and the Observability module for composite health indicators.
 
-This Phase 2 specification contains 6 Java files: 1 enum (ExceptionClassification — 3 values), 2 records (SlidingWindow — 3 fields, IntegrationHealthRecord — 13 fields), 1 interface (IntegrationSupervisor — 9 methods), package-info.java, and module-info.java.
+This module now contains 7 Java files: 2 enums (ExceptionClassification — **4 values** after AMD-56; HealthDetail — **12 values**, new in AMD-57), 2 records (SlidingWindow — 3 fields, IntegrationHealthRecord — **14 fields** after AMD-57), 1 interface (IntegrationSupervisor — 9 methods), package-info.java, and module-info.java.
+
+### M4.C changes (AMD-54..64 freeze, 2026-06-05)
+
+- **`ExceptionClassification` 3 → 4 values** (AMD-56): appended `AUTH_FAILED` last (after `SHUTDOWN_SIGNAL`). Auth failures route to reauth-or-suspend, never transient-backoff retry (AMD-56-INV-01). Append-only; declaration order frozen. M9 exhaustive switches over this enum must add an arm (no silent `default`).
+- **`HealthDetail` (new, 12 values)** (AMD-57): the machine-readable cause vocabulary — `NONE, HEARTBEAT_TIMEOUT, KEEPALIVE_TIMEOUT, ERROR_RATE_EXCEEDED, TIMEOUT_RATE_EXCEEDED, SLOW_CALL_RATE_EXCEEDED, PROBE_FAILED, RESTART_LIMIT_EXCEEDED, SUSPENSION_LIMIT_EXCEEDED, RESOURCE_QUOTA_EXCEEDED, AUTH_FAILURE, PERMANENT_FAILURE`. Each value maps 1:1 to a supervisor transition trigger (a metrics-driven FSM can emit it truthfully — the self-report-vs-aggregation rationale, Nick arbitration A1). Append-only (AMD-57-INV-02).
+- **`IntegrationHealthRecord` 13 → 14 components** (AMD-57): inserted `HealthDetail detail` immediately after `state` (component 3 of 14), non-null-guarded (`NONE` is the explicit no-cause value, AMD-57-INV-01). The record is supervisor-internal (constructed only by integration-runtime, read-only for rest-api/observability), so the canonical-ctor change is breaking-but-acceptable — **no convenience ctor was added** (zero production construction callers at `e76b925`). Adapters never set `detail` (no write path to the record).
 
 ## Design Doc Reference
 

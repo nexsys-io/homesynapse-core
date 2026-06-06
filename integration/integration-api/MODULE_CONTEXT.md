@@ -1,4 +1,4 @@
-# integration-api — `com.homesynapse.integration` — 22 types — Adapter-facing API boundary, re-exports all core modules, IntegrationFactory/Adapter/Context
+# integration-api — `com.homesynapse.integration` — 40 types — Adapter-facing API boundary, re-exports all core modules, IntegrationFactory/Adapter/Context
 
 ## Purpose
 
@@ -6,7 +6,33 @@ The Integration API module defines the adapter-facing contract boundary between 
 
 This is the single module that every integration adapter depends on. It re-exports all the core modules an adapter needs (event-model, device-model, state-store, persistence, configuration, platform-api, java.net.http) via `requires transitive`, so adapter modules only need to declare `requires com.homesynapse.integration`.
 
-The Phase 2 specification contains 22 public Java types: 4 enums (HealthState, IoType, RequiredService, DataPath), 9 records (4 non-lifecycle: IntegrationDescriptor, HealthParameters, IntegrationContext, CommandEnvelope; 5 lifecycle event subtypes: IntegrationStarted, IntegrationStopped, IntegrationHealthChanged, IntegrationRestarted, IntegrationResourceExceeded), 1 sealed interface (IntegrationLifecycleEvent), 4 service interfaces (IntegrationFactory, IntegrationAdapter, HealthReporter, CommandHandler), 2 optional service interfaces (SchedulerService, ManagedHttpClient), 1 exception class (PermanentIntegrationException), and 1 final utility class (IntegrationEvents — M3.6c per-module event-class manifest).
+The Phase 2 specification contained 22 public Java types. **M4.C (the AMD-54..64 interface freeze, 2026-06-05) raised this to 40** — see the M4.C section below. The 22 Phase-2 types were: 4 enums (HealthState, IoType, RequiredService, DataPath), 9 records (4 non-lifecycle: IntegrationDescriptor, HealthParameters, IntegrationContext, CommandEnvelope; 5 lifecycle event subtypes: IntegrationStarted, IntegrationStopped, IntegrationHealthChanged, IntegrationRestarted, IntegrationResourceExceeded), 1 sealed interface (IntegrationLifecycleEvent), 4 service interfaces (IntegrationFactory, IntegrationAdapter, HealthReporter, CommandHandler), 2 optional service interfaces (SchedulerService, ManagedHttpClient), 1 exception class (PermanentIntegrationException), and 1 final utility class (IntegrationEvents — M3.6c per-module event-class manifest).
+
+## M4.C Interface Freeze (AMD-54..64) — added 2026-06-05
+
+The integration-api interface freeze landed every contract a protocol adapter compiles against at its M4-final shape (contract-only — no supervisor behavior). **Type count 22 → 40** (+5 enums, +10 records, +1 sealed interface, +2 service interfaces). The M9 supervisor and M14 Zigbee adapter build against this frozen surface.
+
+**18 new types:**
+
+| Kind | New types | AMD |
+|---|---|---|
+| Enums (5) | `ConfigUpdateOutcome` (APPLIED, RESTART_REQUIRED, REJECTED), `MigrationOutcome` (MIGRATED, NOT_REQUIRED), `ReauthOutcome` (INITIATED, UNSUPPORTED), `CapabilityRemovalReason` (FIRMWARE_DOWNGRADE, DEVICE_REPLACED, TRANSIENT_LOSS, UNREGISTERED), `IsolationLevel` (IN_JVM, RESERVED_SUBPROCESS) | 55/59/63 |
+| Lifecycle event records (5) | `IntegrationConfigUpdated`, `IntegrationOptionsUpdated`, `IntegrationReauthRequired`, `IntegrationReauthCompleted`, `IntegrationMigrationCompleted` — all `IntegrationLifecycleEvent` permits, dot-namespaced | 58 |
+| Capability hierarchy (3) | `CapabilityEvent` (sealed, permits `CapabilityAdded`/`CapabilityRemoved`; accessors integrationId/deviceId/entityId/capabilityId), `CapabilityAdded` (carries full `CapabilityInstance`), `CapabilityRemoved` (carries `CapabilityRemovalReason`) | 59 |
+| Aggregator records (2) | `SecurityServices(CredentialRotator)`, `DiscoveryServices(CapabilityPublisher)` — the NQ-1 doctrine: context grows by service-family aggregator, never per-service | 59/60 |
+| Service interfaces (2) | `CredentialRotator` (`rotate(Map<String,String>)` primary + `default rotate(String,String)`), `CapabilityPublisher` (`publishAdded` x2 + `publishRemoved(.., CapabilityRemovalReason)`) | 59/60 |
+| Backoff record (1) | `BackoffParameters(initialDelay, multiplier, maxDelay)` + `defaults()` = 5/10/20/40/80/80 s | 62 |
+
+**Evolved existing types:**
+
+- **`IntegrationDescriptor` 8 → 14 components.** Renamed `schemaVersion` → `descriptorSchemaVersion` (AMD-54). Final order: `integrationType, displayName, ioType, requiredServices, dataPaths, healthParameters, dependsOn, descriptorSchemaVersion, configSchemaMajor, configSchemaMinor, softDependencies, backoffParameters, isolationLevel, plannedRestartTimeout`. Canonical 14-arg ctor + **8-arg convenience ctor** (defaults `configSchemaMajor=1, configSchemaMinor=0, softDependencies=Set.of(), backoffParameters=defaults(), isolationLevel=IN_JVM, plannedRestartTimeout=null`). Guards: descriptorSchemaVersion≥1, configSchemaMajor≥1, configSchemaMinor≥0, plannedRestartTimeout positive-if-present, `dependsOn ∩ softDependencies = ∅`.
+- **`IntegrationContext` 10 → 12 components.** Appended `SecurityServices security` (11) and `DiscoveryServices discovery` (12), both nullable (gated by `RequiredService.SECURITY`/`DISCOVERY`). Canonical 12-arg ctor + **10-arg convenience ctor** (defaults both null).
+- **`IntegrationAdapter` 4 → 8 declared methods.** Four `default` hooks (AMD-55): `onConfigUpdated(ConfigChangeSet)→RESTART_REQUIRED`, `onOptionsUpdated(ConfigChangeSet)→RESTART_REQUIRED`, `onReauthRequired()→ReauthOutcome.UNSUPPORTED`, `migrate(int,int) throws PermanentIntegrationException →MigrationOutcome.NOT_REQUIRED`. All default → every existing adapter compiles unchanged (AMD-55-INV-01).
+- **`RequiredService` 3 → 5** (append-only): `…, TELEMETRY_WRITER, DISCOVERY, SECURITY`.
+- **`IntegrationLifecycleEvent` 5 → 10 permits.**
+- **`IntegrationEvents`** gained `CAPABILITY_EVENT_CLASSES` (2 entries) alongside `LIFECYCLE_EVENT_CLASSES` (now 10). Both are aggregated by the composition root.
+- **`PermanentIntegrationException`** gained an append-only code-bearing ctor pair `(String errorCode, String message[, Throwable cause])`; no-code ctors permanently yield `integration.permanent_failure`; errorCode guard requires a dotted-lowercase Register C code (AMD-56-INV-03).
+- **`HealthParameters.defaults()`** Javadoc-only: documents the OTP-derived embedded override (maxRestarts=1, restartWindow=60s) and the pre-M9 Zigbee restart-frequency spike (AMD-62 §2.3).
 
 ## Design Doc Reference
 
@@ -199,6 +225,16 @@ api(project(":config:configuration"))
 **GOTCHA: `ManagedHttpClient.send()` throws checked exceptions (IOException, InterruptedException).** These are standard java.net.http exceptions. The supervisor classifies IOException as TRANSIENT and InterruptedException as SHUTDOWN_SIGNAL per Doc 05 §3.7.
 
 **GOTCHA: No `@Nullable` annotations.** HomeSynapse uses Javadoc `{@code null} if...` patterns. No nullability annotation library in libs.versions.toml.
+
+**GOTCHA (M4.C / AMD-65): `CapabilityAdded` does NOT round-trip a command-bearing `CapabilityInstance` yet.** `CapabilityAdded` carries the full `CapabilityInstance` (AMD-59-INV-02, replay self-sufficiency). A **command-less** instance (e.g. a sensor capability like `occupancy()`) round-trips losslessly through `EventPayloadCodec` today — its subtree is plain-Jackson-serializable. But a **command-bearing** instance (e.g. `onOff()`) embeds `CommandDefinition → ExpectedOutcome → Expectation`, and `Expectation` is a sealed interface (`com.homesynapse.device`, permits ExactMatch/WithinTolerance/EnumTransition/AnyChange) with **no (de)serializer registered in `PersistenceJacksonModule`** (only ULIDs + `AttributeValue` are). Jackson cannot deserialize a sealed-interface field with no codec, so decode degrades to a `DegradedEvent`. **M9 must NOT publish command-bearing `CapabilityAdded` events until the `Expectation` persisted codec lands** — tracked as a follow-up (~AMD-65: `WithinTolerance(double,double)` needs the AMD-52 bit-anchored-float treatment; the other three variants are trivial — ExactMatch/AnyChange wrap `AttributeValue` which already has a codec, EnumTransition wraps a String). The executable acceptance test is `EventPayloadCodecTest.CapabilityEvents.capabilityAdded_onOff_roundTrips` (`@Disabled("AMD-65 pending …")`) — enable it when the codec ships.
+
+**GOTCHA (M4.C / AMD-58/59): new event-type strings are dot-namespaced; the legacy five are frozen.** The five new lifecycle strings (`integration.config.updated`, `integration.options.updated`, `integration.reauth.required`, `integration.reauth.completed`, `integration.migration.completed`) and the two capability strings (`capability.added`, `capability.removed`) use the `.`-namespace. The legacy five snake_case strings (`integration_started` … `integration_resource_exceeded`) are **frozen forever** (persisted in event logs). `IntegrationEventTypeAnnotationTest` accepts `integration_` OR `integration.`; `CapabilityEventTypeAnnotationTest` pins `capability.`.
+
+**GOTCHA (M4.C / AMD-59): `CapabilityAdded.capabilityId()` is a derived accessor, not a record component.** It returns `instance.capabilityId()` — exactly the `IntegrationStarted.previousState()` pattern. Jackson serializes only the 4 record components (integrationId, deviceId, entityId, instance), never a phantom `capability_id` field.
+
+**GOTCHA (M4.C / AMD-58): `previousState()` is non-null for all five new lifecycle permits.** Only `IntegrationStarted` returns `null`. The five AMD-58 permits carry the current state in both `previousState` and `newState` (lifecycle flows do not change `HealthState`), so their compact ctors null-guard `previousState` — do NOT copy `IntegrationStarted`'s null-allowance.
+
+**GOTCHA (M4.C / AMD-59/60): `IntegrationContext.security()` and `.discovery()` are nullable aggregators.** Null unless the adapter declared `RequiredService.SECURITY`/`DISCOVERY` (same rule as scheduler/telemetry/http — do not add null checks that throw). Inside a present aggregator, the declared service is non-null (`SecurityServices.credentialRotator()` is guarded; AMD-60-INV-02).
 
 ## Test Fixtures and Contract Tests
 

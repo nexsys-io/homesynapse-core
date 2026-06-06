@@ -118,6 +118,14 @@ public record HealthParameters(
      *   <li>{@code probeSuccessThreshold}: 2</li>
      * </ul>
      *
+     * <p><strong>Restart intensity (AMD-62 §2.3, NQ-5/NQ-6).</strong> The
+     * OTP-derived embedded-systems override is {@code maxRestarts = 1},
+     * {@code restartWindow = 60s}. Radio-based adapters (Zigbee/Matter) that
+     * legitimately glitch during radio initialization should rely on a
+     * per-descriptor {@code HealthParameters} override rather than a loosened
+     * global default. An empirical spike measuring real Zigbee/Matter restart
+     * frequency on Pi 5 hardware is scheduled before M9.</p>
+     *
      * @return a new {@code HealthParameters} with all default values, never {@code null}
      */
     public static HealthParameters defaults() {

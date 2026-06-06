@@ -86,5 +86,22 @@ public enum ExceptionClassification {
      * {@code SHUTDOWN_SIGNAL} when the per-adapter {@code shuttingDown} flag
      * is set.</p>
      */
-    SHUTDOWN_SIGNAL
+    SHUTDOWN_SIGNAL,
+
+    /**
+     * Authentication or authorization failure against the external system —
+     * expired token, revoked credentials, rejected API key (AMD-56). Retry with
+     * backoff cannot succeed; the remediation path is re-authentication: the
+     * supervisor invokes
+     * {@link com.homesynapse.integration.IntegrationAdapter#onReauthRequired()}
+     * and emits {@code integration.reauth.required}. If the adapter does not
+     * implement re-auth
+     * ({@link com.homesynapse.integration.ReauthOutcome#UNSUPPORTED} — the AMD-55
+     * default), the supervisor degrades to the standard suspension policy with the
+     * failure reason preserved.
+     *
+     * <p>This value is appended last (after {@link #SHUTDOWN_SIGNAL}); the enum is
+     * append-only with frozen declaration order (AMD-56-INV-02).</p>
+     */
+    AUTH_FAILED
 }

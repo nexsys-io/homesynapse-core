@@ -9,11 +9,13 @@ import com.homesynapse.device.Entity;
 import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.test.InMemoryEventStore;
+import com.homesynapse.integration.DiscoveryServices;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.HealthState;
 import com.homesynapse.integration.IntegrationContext;
 import com.homesynapse.integration.ManagedHttpClient;
 import com.homesynapse.integration.SchedulerService;
+import com.homesynapse.integration.SecurityServices;
 import com.homesynapse.persistence.TelemetryWriter;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
@@ -101,9 +103,10 @@ public final class StubIntegrationContext {
      *
      * <p>All 7 required fields are populated: fresh ULID identities,
      * {@link InMemoryEventStore} as {@link EventPublisher}, empty stub
-     * registries, and a no-op {@link StubHealthReporter}. The 3 optional
+     * registries, and a no-op {@link StubHealthReporter}. The 5 optional
      * fields ({@code schedulerService}, {@code telemetryWriter},
-     * {@code httpClient}) are {@code null}.</p>
+     * {@code httpClient}, {@code security}, {@code discovery}) are
+     * {@code null}.</p>
      *
      * @return a valid IntegrationContext with default stubs
      */
@@ -130,7 +133,7 @@ public final class StubIntegrationContext {
     /**
      * Mutable builder for {@link IntegrationContext} instances with fluent API.
      *
-     * <p>All 10 fields are pre-initialized to sensible defaults. Call setters
+     * <p>All 12 fields are pre-initialized to sensible defaults. Call setters
      * only for the fields you want to override, then call {@link #build()}.
      * The builder also provides convenience methods for pre-populating stub
      * data ({@link #withEntity(Entity)}, {@link #withConfig(String, Object)},
@@ -148,6 +151,8 @@ public final class StubIntegrationContext {
         private SchedulerService schedulerService;
         private TelemetryWriter telemetryWriter;
         private ManagedHttpClient httpClient;
+        private SecurityServices security;
+        private DiscoveryServices discovery;
 
         // Internal state for convenience methods
         private Clock clock = DEFAULT_CLOCK;
@@ -216,6 +221,18 @@ public final class StubIntegrationContext {
         /** Sets the managed HTTP client ({@code null} to omit). */
         public Builder httpClient(ManagedHttpClient httpClient) {
             this.httpClient = httpClient;
+            return this;
+        }
+
+        /** Sets the security services aggregator ({@code null} to omit). */
+        public Builder security(SecurityServices security) {
+            this.security = security;
+            return this;
+        }
+
+        /** Sets the discovery services aggregator ({@code null} to omit). */
+        public Builder discovery(DiscoveryServices discovery) {
+            this.discovery = discovery;
             return this;
         }
 
@@ -332,7 +349,9 @@ public final class StubIntegrationContext {
                     effectiveConfig,
                     schedulerService,
                     telemetryWriter,
-                    httpClient);
+                    httpClient,
+                    security,
+                    discovery);
         }
     }
 

@@ -18,17 +18,24 @@ import com.homesynapse.platform.identity.IntegrationId;
  * {@code EventOrigin.SYSTEM} — they are system-initiated, not
  * integration-initiated.</p>
  *
- * <p>Five permitted subtypes correspond to the five lifecycle event types:</p>
+ * <p>Ten permitted subtypes correspond to the ten lifecycle event types. The
+ * original five use the frozen snake_case strings; the five added by AMD-58 use
+ * the dot-namespaced {@code integration.} convention (AMD-58 §2.2):</p>
  * <ul>
  *   <li>{@link IntegrationStarted} — {@code integration_started}</li>
  *   <li>{@link IntegrationStopped} — {@code integration_stopped}</li>
  *   <li>{@link IntegrationHealthChanged} — {@code integration_health_changed}</li>
  *   <li>{@link IntegrationRestarted} — {@code integration_restarted}</li>
  *   <li>{@link IntegrationResourceExceeded} — {@code integration_resource_exceeded}</li>
+ *   <li>{@link IntegrationConfigUpdated} — {@code integration.config.updated}</li>
+ *   <li>{@link IntegrationOptionsUpdated} — {@code integration.options.updated}</li>
+ *   <li>{@link IntegrationReauthRequired} — {@code integration.reauth.required}</li>
+ *   <li>{@link IntegrationReauthCompleted} — {@code integration.reauth.completed}</li>
+ *   <li>{@link IntegrationMigrationCompleted} — {@code integration.migration.completed}</li>
  * </ul>
  *
  * <p>Every subtype carries the common fields: {@code integrationId},
- * {@code integrationType}, {@code previousState} (nullable for
+ * {@code integrationType}, {@code previousState} (nullable <em>only</em> for
  * {@link IntegrationStarted}), {@code newState}, and {@code reason}
  * (human-readable). The {@code reason} field uses Register C voice
  * (direct, neutral) because it surfaces in dashboards and logs
@@ -39,6 +46,11 @@ import com.homesynapse.platform.identity.IntegrationId;
  * @see IntegrationHealthChanged
  * @see IntegrationRestarted
  * @see IntegrationResourceExceeded
+ * @see IntegrationConfigUpdated
+ * @see IntegrationOptionsUpdated
+ * @see IntegrationReauthRequired
+ * @see IntegrationReauthCompleted
+ * @see IntegrationMigrationCompleted
  * @see com.homesynapse.event.EventPublisher
  */
 public sealed interface IntegrationLifecycleEvent extends DomainEvent
@@ -46,7 +58,12 @@ public sealed interface IntegrationLifecycleEvent extends DomainEvent
                 IntegrationStopped,
                 IntegrationHealthChanged,
                 IntegrationRestarted,
-                IntegrationResourceExceeded {
+                IntegrationResourceExceeded,
+                IntegrationConfigUpdated,
+                IntegrationOptionsUpdated,
+                IntegrationReauthRequired,
+                IntegrationReauthCompleted,
+                IntegrationMigrationCompleted {
 
     /**
      * Returns the integration instance identity.

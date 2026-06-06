@@ -45,12 +45,15 @@ import java.util.Objects;
  *
  * <h2>Optional Services</h2>
  *
- * <p>The {@link #schedulerService()}, {@link #httpClient()}, and
- * {@link #telemetryWriter()} fields are {@code null} unless the adapter
- * declared the corresponding {@link RequiredService} in its
+ * <p>The {@link #schedulerService()}, {@link #httpClient()},
+ * {@link #telemetryWriter()}, {@link #security()}, and {@link #discovery()}
+ * fields are {@code null} unless the adapter declared the corresponding
+ * {@link RequiredService} in its
  * {@link IntegrationDescriptor#requiredServices()}. The supervisor only
  * provisions services the adapter declares — undeclared services are not
- * available.</p>
+ * available. Per the NQ-1 doctrine, security and discovery arrive as
+ * service-family aggregators ({@link SecurityServices}, {@link DiscoveryServices}),
+ * so the context never grows per-service (AMD-60-INV-01).</p>
  *
  * @param integrationId     the instance identity assigned by the supervisor
  *                          (a ULID stable across restarts); never {@code null}
@@ -84,6 +87,13 @@ import java.util.Objects;
  *                          concurrency limits and rate limiting, or
  *                          {@code null} if {@link RequiredService#HTTP_CLIENT}
  *                          was not declared
+ * @param security          the security service aggregator (credential rotation),
+ *                          or {@code null} if {@link RequiredService#SECURITY}
+ *                          was not declared (AMD-60)
+ * @param discovery         the discovery service aggregator (capability
+ *                          publishing), or {@code null} if
+ *                          {@link RequiredService#DISCOVERY} was not declared
+ *                          (AMD-59)
  *
  * @see IntegrationFactory#create(IntegrationContext)
  * @see IntegrationAdapter
@@ -100,14 +110,17 @@ public record IntegrationContext(
         ConfigurationAccess configAccess,
         SchedulerService schedulerService,
         TelemetryWriter telemetryWriter,
-        ManagedHttpClient httpClient
+        ManagedHttpClient httpClient,
+        SecurityServices security,
+        DiscoveryServices discovery
 ) {
 
     /**
      * Validates that all required fields are non-null. Optional fields
-     * ({@code schedulerService}, {@code telemetryWriter}, {@code httpClient})
-     * may be {@code null} based on the adapter's declared requirements.
-     * {@code configAccess} is always required (not gated by RequiredService).
+     * ({@code schedulerService}, {@code telemetryWriter}, {@code httpClient},
+     * {@code security}, {@code discovery}) may be {@code null} based on the
+     * adapter's declared requirements. {@code configAccess} is always required
+     * (not gated by RequiredService).
      */
     public IntegrationContext {
         Objects.requireNonNull(integrationId, "integrationId must not be null");
@@ -120,5 +133,38 @@ public record IntegrationContext(
         // schedulerService may be null if RequiredService.SCHEDULER not declared
         // telemetryWriter may be null if RequiredService.TELEMETRY_WRITER not declared
         // httpClient may be null if RequiredService.HTTP_CLIENT not declared
+        // security may be null if RequiredService.SECURITY not declared (AMD-60)
+        // discovery may be null if RequiredService.DISCOVERY not declared (AMD-59)
+    }
+
+    /**
+     * Convenience constructor preserving the pre-AMD-59/60 10-argument signature;
+     * {@code security} and {@code discovery} both default to {@code null}.
+     *
+     * @param integrationId     the instance identity; never {@code null}
+     * @param integrationType   the software identity; never {@code null}
+     * @param eventPublisher    write-only event production interface; never {@code null}
+     * @param entityRegistry    integration-scoped entity registry; never {@code null}
+     * @param stateQueryService integration-scoped state query service; never {@code null}
+     * @param healthReporter    health signal channel; never {@code null}
+     * @param configAccess      integration-scoped configuration access; never {@code null}
+     * @param schedulerService  task scheduler, or {@code null}
+     * @param telemetryWriter   telemetry writer, or {@code null}
+     * @param httpClient        managed HTTP client, or {@code null}
+     */
+    public IntegrationContext(
+            IntegrationId integrationId,
+            String integrationType,
+            EventPublisher eventPublisher,
+            EntityRegistry entityRegistry,
+            StateQueryService stateQueryService,
+            HealthReporter healthReporter,
+            ConfigurationAccess configAccess,
+            SchedulerService schedulerService,
+            TelemetryWriter telemetryWriter,
+            ManagedHttpClient httpClient) {
+        this(integrationId, integrationType, eventPublisher, entityRegistry,
+                stateQueryService, healthReporter, configAccess, schedulerService,
+                telemetryWriter, httpClient, null, null);
     }
 }

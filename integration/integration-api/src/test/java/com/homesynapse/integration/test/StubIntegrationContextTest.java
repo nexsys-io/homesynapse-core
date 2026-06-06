@@ -4,12 +4,18 @@
  */
 package com.homesynapse.integration.test;
 
+import com.homesynapse.device.Capability;
+import com.homesynapse.device.CapabilityInstance;
 import com.homesynapse.device.Entity;
 import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.device.test.TestEntityFactory;
 import com.homesynapse.event.test.InMemoryEventStore;
+import com.homesynapse.integration.CapabilityPublisher;
+import com.homesynapse.integration.CapabilityRemovalReason;
 import com.homesynapse.integration.CommandEnvelope;
+import com.homesynapse.integration.DiscoveryServices;
 import com.homesynapse.integration.HealthReporter;
+import com.homesynapse.integration.SecurityServices;
 import com.homesynapse.integration.HealthState;
 import com.homesynapse.integration.IntegrationContext;
 import com.homesynapse.integration.PermanentIntegrationException;
@@ -591,6 +597,69 @@ class StubIntegrationContextTest {
             // StubHealthReporter is package-private, so verify via HealthReporter interface
             // The reporter should not throw on any signal type
             assertThat(reporter).isNotNull();
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // SECTION 5: AMD-59/60 security & discovery aggregators
+    // ──────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("Security & Discovery (AMD-59/60)")
+    class SecurityAndDiscoveryTests {
+
+        /** Creates a new test instance. */
+        SecurityAndDiscoveryTests() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        @Test
+        @DisplayName("defaults() leaves security and discovery null")
+        void defaults_securityAndDiscoveryNull() {
+            IntegrationContext ctx = StubIntegrationContext.defaults();
+
+            assertThat(ctx.security()).isNull();
+            assertThat(ctx.discovery()).isNull();
+        }
+
+        @Test
+        @DisplayName("builder().security(...) applies the override")
+        void builder_securityOverride() {
+            SecurityServices security = new SecurityServices(secrets -> { /* no-op */ });
+
+            IntegrationContext ctx = StubIntegrationContext.builder()
+                    .security(security)
+                    .build();
+
+            assertThat(ctx.security()).isSameAs(security);
+        }
+
+        @Test
+        @DisplayName("builder().discovery(...) applies the override")
+        void builder_discoveryOverride() {
+            DiscoveryServices discovery = new DiscoveryServices(new CapabilityPublisher() {
+                @Override
+                public void publishAdded(EntityId entityId, CapabilityInstance instance) {
+                    // no-op
+                }
+
+                @Override
+                public void publishAdded(EntityId entityId, Class<? extends Capability> capability) {
+                    // no-op
+                }
+
+                @Override
+                public void publishRemoved(
+                        EntityId entityId, String capabilityId, CapabilityRemovalReason reason) {
+                    // no-op
+                }
+            });
+
+            IntegrationContext ctx = StubIntegrationContext.builder()
+                    .discovery(discovery)
+                    .build();
+
+            assertThat(ctx.discovery()).isSameAs(discovery);
         }
     }
 }

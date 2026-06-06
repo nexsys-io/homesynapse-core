@@ -26,14 +26,16 @@ import com.homesynapse.platform.identity.Ulid;
 import java.nio.charset.StandardCharsets;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 /**
- * Full round-trip tests for {@link EventPayloadCodec} across all 27 registered
- * event types, plus DegradedEvent fallback verification (DECIDE-M2-06,
- * DECIDE-M2-07) and SNAKE_CASE property naming verification.
+ * Full round-trip tests for {@link EventPayloadCodec} across all 34 registered
+ * event types (22 core + 10 integration lifecycle + 2 capability), plus
+ * DegradedEvent fallback verification (DECIDE-M2-06, DECIDE-M2-07) and SNAKE_CASE
+ * property naming verification.
  */
 @DisplayName("EventPayloadCodec")
 class EventPayloadCodecTest {
@@ -245,6 +247,82 @@ class EventPayloadCodecTest {
             assertRoundTrip(
                     TestEventSamples.integrationResourceExceeded(),
                     EventTypes.INTEGRATION_RESOURCE_EXCEEDED);
+        }
+
+        // --- AMD-58: five new dot-namespaced lifecycle events ---
+
+        @Test
+        void integrationConfigUpdated() throws Exception {
+            assertRoundTrip(
+                    TestEventSamples.integrationConfigUpdated(),
+                    EventTypes.INTEGRATION_CONFIG_UPDATED);
+        }
+
+        @Test
+        void integrationOptionsUpdated() throws Exception {
+            assertRoundTrip(
+                    TestEventSamples.integrationOptionsUpdated(),
+                    EventTypes.INTEGRATION_OPTIONS_UPDATED);
+        }
+
+        @Test
+        void integrationReauthRequired() throws Exception {
+            assertRoundTrip(
+                    TestEventSamples.integrationReauthRequired(),
+                    EventTypes.INTEGRATION_REAUTH_REQUIRED);
+        }
+
+        @Test
+        void integrationReauthCompleted() throws Exception {
+            assertRoundTrip(
+                    TestEventSamples.integrationReauthCompleted(),
+                    EventTypes.INTEGRATION_REAUTH_COMPLETED);
+        }
+
+        @Test
+        void integrationMigrationCompleted() throws Exception {
+            assertRoundTrip(
+                    TestEventSamples.integrationMigrationCompleted(),
+                    EventTypes.INTEGRATION_MIGRATION_COMPLETED);
+        }
+    }
+
+    // ===== Capability event round-trips (2) — AMD-59 =====
+
+    @Nested
+    @DisplayName("capability event round-trips")
+    class CapabilityEvents {
+
+        /** Creates a new test instance. */
+        CapabilityEvents() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        @Test
+        @DisplayName("capability.added with a command-less instance round-trips losslessly")
+        void capabilityAdded_occupancy_roundTrips() throws Exception {
+            // The occupancy-derived instance has an empty commands map, so its subtree
+            // embeds no Expectation/AttributeValue and round-trips through the existing
+            // PersistenceJacksonModule (AttributeSchema + ConfirmationPolicy are plain
+            // Jackson-serializable). Proves AMD-59-INV-02 for command-less capabilities.
+            assertRoundTrip(TestEventSamples.capabilityAdded(), EventTypes.CAPABILITY_ADDED);
+        }
+
+        @Test
+        void capabilityRemoved() throws Exception {
+            assertRoundTrip(TestEventSamples.capabilityRemoved(), EventTypes.CAPABILITY_REMOVED);
+        }
+
+        @Test
+        @Disabled("AMD-65 pending: Expectation persisted codec. The onOff-derived instance"
+                + " embeds the sealed Expectation type (ExactMatch) via its command outcomes,"
+                + " which has no (de)serializer registered in PersistenceJacksonModule, so"
+                + " decode currently degrades to a DegradedEvent. This is the executable"
+                + " acceptance test for the follow-up — enable it once the Expectation"
+                + " tagged-union codec lands (AMD-52 AttributeValue-codec precedent).")
+        @DisplayName("capability.added with a command-bearing instance round-trips (AMD-65 acceptance)")
+        void capabilityAdded_onOff_roundTrips() throws Exception {
+            assertRoundTrip(TestEventSamples.capabilityAddedOnOff(), EventTypes.CAPABILITY_ADDED);
         }
     }
 

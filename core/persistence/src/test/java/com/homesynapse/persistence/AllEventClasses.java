@@ -12,17 +12,19 @@ import java.util.List;
 import java.util.stream.Stream;
 
 /**
- * Test-only event class roster for the M2.4 persistence serialization tests that
+ * Test-only event class roster for the persistence serialization tests that
  * register classes with the {@link EventTypeRegistry}.
  *
- * <p>As of M3.6c the lists are aliased to the canonical per-module manifests:
- * {@link EventTypes#CORE_PRODUCTION_EVENT_CLASSES} contributes the 22 core records and
- * {@link IntegrationEvents#LIFECYCLE_EVENT_CLASSES} contributes the 5 integration
- * lifecycle records. Both manifests are public production API in their respective
+ * <p>The lists are aliased to the canonical per-module manifests:
+ * {@link EventTypes#CORE_PRODUCTION_EVENT_CLASSES} contributes the 22 core records,
+ * {@link IntegrationEvents#LIFECYCLE_EVENT_CLASSES} contributes the 10 integration
+ * lifecycle records (5 original + 5 added by AMD-58), and
+ * {@link IntegrationEvents#CAPABILITY_EVENT_CLASSES} contributes the 2 capability
+ * records (AMD-59). All manifests are public production API in their respective
  * modules; this class exposes them under the shorter field names that the persistence
- * test suite already references and combines them via {@link Stream#concat}.
+ * test suite already references and combines them via {@link Stream}.
  *
- * <p>The aggregation pattern here mirrors what the M3.6d composition root performs at
+ * <p>The aggregation pattern here mirrors what the composition root performs at
  * startup to construct the production {@code EventTypeRegistry}.
  */
 final class AllEventClasses {
@@ -35,14 +37,17 @@ final class AllEventClasses {
     static final List<Class<? extends DomainEvent>> CORE_EVENTS =
             EventTypes.CORE_PRODUCTION_EVENT_CLASSES;
 
-    /** 5 integration lifecycle event records from integration-api. */
+    /** 10 integration lifecycle event records from integration-api. */
     static final List<Class<? extends DomainEvent>> INTEGRATION_EVENTS =
             IntegrationEvents.LIFECYCLE_EVENT_CLASSES;
 
-    /** All 27 registered event record classes — core + integration. */
+    /** 2 capability event records from integration-api (AMD-59). */
+    static final List<Class<? extends DomainEvent>> CAPABILITY_EVENTS =
+            IntegrationEvents.CAPABILITY_EVENT_CLASSES;
+
+    /** All 34 registered event record classes — core + integration lifecycle + capability. */
     static final List<Class<? extends DomainEvent>> ALL_EVENTS =
-            Stream.concat(
-                            EventTypes.CORE_PRODUCTION_EVENT_CLASSES.stream(),
-                            IntegrationEvents.LIFECYCLE_EVENT_CLASSES.stream())
+            Stream.of(CORE_EVENTS, INTEGRATION_EVENTS, CAPABILITY_EVENTS)
+                    .flatMap(List::stream)
                     .toList();
 }

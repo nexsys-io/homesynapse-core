@@ -4,6 +4,8 @@
  */
 package com.homesynapse.integration;
 
+import com.homesynapse.config.ConfigChangeSet;
+
 /**
  * Lifecycle contract for integration adapter modules (Doc 05 §8.1, §8.4).
  *
@@ -118,4 +120,87 @@ public interface IntegrationAdapter extends AutoCloseable {
      *         does not handle commands
      */
     CommandHandler commandHandler();
+
+    // ──────────────────────────────────────────────────────────────────
+    // Post-setup lifecycle hooks (AMD-55)
+    //
+    // All four are default methods so that every existing adapter remains
+    // source- and binary-compatible with behaviour identical to today
+    // (AMD-55-INV-01). The conservative defaults never silently claim a
+    // capability the adapter does not have. The supervisor invokes these
+    // sequentially on the adapter's thread, never concurrently with another
+    // lifecycle method (AMD-55-INV-02).
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Called when this integration's configuration changed at runtime.
+     *
+     * <p>The adapter decides whether it can apply the change in place. The
+     * conservative default requests a restart-to-apply
+     * ({@link ConfigUpdateOutcome#RESTART_REQUIRED}), preserving today's
+     * semantics for an adapter that does not override this hook.</p>
+     *
+     * @param changes the configuration diff; never {@code null}
+     * @return how the adapter handled the change; never {@code null}
+     */
+    default ConfigUpdateOutcome onConfigUpdated(ConfigChangeSet changes) {
+        return ConfigUpdateOutcome.RESTART_REQUIRED;
+    }
+
+    /**
+     * Called when this integration's runtime-tunable options changed (the
+     * additive/minor subset of configuration — polling intervals, rate limits,
+     * log verbosity).
+     *
+     * <p>The conservative default requests a restart-to-apply
+     * ({@link ConfigUpdateOutcome#RESTART_REQUIRED}).</p>
+     *
+     * @param changes the options diff; never {@code null}
+     * @return how the adapter handled the change; never {@code null}
+     */
+    default ConfigUpdateOutcome onOptionsUpdated(ConfigChangeSet changes) {
+        return ConfigUpdateOutcome.RESTART_REQUIRED;
+    }
+
+    /**
+     * Called when the supervisor detects an authentication failure
+     * ({@link com.homesynapse.integration.runtime.ExceptionClassification#AUTH_FAILED},
+     * AMD-56).
+     *
+     * <p>{@link ReauthOutcome#INITIATED} signals that the adapter has begun
+     * asynchronous re-authentication and will report completion via the
+     * {@code integration.reauth.completed} lifecycle event
+     * ({@link IntegrationReauthCompleted}); {@link ReauthOutcome#UNSUPPORTED}
+     * signals that the adapter does not implement re-authentication, so the
+     * supervisor falls back to the standard restart/suspension policy. The
+     * default is {@link ReauthOutcome#UNSUPPORTED} — truthfully reporting that no
+     * reauth path exists.</p>
+     *
+     * @return whether re-authentication was initiated or is unsupported;
+     *         never {@code null}
+     */
+    default ReauthOutcome onReauthRequired() {
+        return ReauthOutcome.UNSUPPORTED;
+    }
+
+    /**
+     * Called before {@link #initialize()} when the adapter's stored configuration
+     * schema (the {@link IntegrationDescriptor} config-schema pair) is older than
+     * the version the adapter declares.
+     *
+     * <p>The adapter migrates its configuration section via the injected
+     * {@code ConfigurationAccess}. A {@link PermanentIntegrationException} from
+     * this method drives the FAILED transition without retry, mirroring
+     * {@link #initialize()} (AMD-55-INV-03). The default reports nothing to
+     * migrate ({@link MigrationOutcome#NOT_REQUIRED}).</p>
+     *
+     * @param fromMajor the stored configuration schema major version
+     * @param fromMinor the stored configuration schema minor version
+     * @return whether a migration was performed; never {@code null}
+     * @throws PermanentIntegrationException if the migration cannot be completed
+     */
+    default MigrationOutcome migrate(int fromMajor, int fromMinor)
+            throws PermanentIntegrationException {
+        return MigrationOutcome.NOT_REQUIRED;
+    }
 }

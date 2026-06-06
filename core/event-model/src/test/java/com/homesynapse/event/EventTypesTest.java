@@ -41,9 +41,9 @@ class EventTypesTest {
 	}
 
 	@Test
-	@DisplayName("exactly 46 public static final String constants")
+	@DisplayName("exactly 53 public static final String constants")
 	void exactConstantCount() {
-		assertThat(stringConstants()).hasSize(46);
+		assertThat(stringConstants()).hasSize(53);
 	}
 
 	@Test
@@ -71,13 +71,18 @@ class EventTypesTest {
 	}
 
 	@Test
-	@DisplayName("all values are lowercase with underscores")
+	@DisplayName("all values are lowercase snake or dot-namespaced segments")
 	void allLowercaseWithUnderscores() throws Exception {
+		// AMD-58/AMD-59 introduced dot-namespaced event types
+		// (integration.config.updated, capability.added). Each dot-separated
+		// segment is lowercase snake; the legacy values (state_changed) have no
+		// dots. The regex accepts both and still rejects uppercase, leading or
+		// trailing dots, and double dots.
 		for (Field f : stringConstants()) {
 			String val = (String) f.get(null);
 			assertThat(val)
 					.as(f.getName())
-					.matches("[a-z][a-z0-9_]*");
+					.matches("[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*");
 		}
 	}
 }

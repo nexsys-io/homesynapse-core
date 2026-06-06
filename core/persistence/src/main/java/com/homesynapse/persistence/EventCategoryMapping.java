@@ -135,7 +135,25 @@ final class EventCategoryMapping {
                 Map.entry(EventTypes.INTEGRATION_RESTARTED,
                         List.of(EventCategory.SYSTEM, EventCategory.DEVICE_HEALTH)),
                 Map.entry(EventTypes.INTEGRATION_RESOURCE_EXCEEDED,
-                        List.of(EventCategory.SYSTEM, EventCategory.DEVICE_HEALTH))
+                        List.of(EventCategory.SYSTEM, EventCategory.DEVICE_HEALTH)),
+
+                // ─── Integration lifecycle — dot-namespaced (AMD-58) ──────────
+                Map.entry(EventTypes.INTEGRATION_CONFIG_UPDATED,
+                        List.of(EventCategory.SYSTEM, EventCategory.DEVICE_HEALTH)),
+                Map.entry(EventTypes.INTEGRATION_OPTIONS_UPDATED,
+                        List.of(EventCategory.SYSTEM, EventCategory.DEVICE_HEALTH)),
+                Map.entry(EventTypes.INTEGRATION_REAUTH_REQUIRED,
+                        List.of(EventCategory.SYSTEM, EventCategory.DEVICE_HEALTH)),
+                Map.entry(EventTypes.INTEGRATION_REAUTH_COMPLETED,
+                        List.of(EventCategory.SYSTEM, EventCategory.DEVICE_HEALTH)),
+                Map.entry(EventTypes.INTEGRATION_MIGRATION_COMPLETED,
+                        List.of(EventCategory.SYSTEM, EventCategory.DEVICE_HEALTH)),
+
+                // ─── Capability lifecycle (AMD-59) ────────────────────────────
+                Map.entry(EventTypes.CAPABILITY_ADDED,
+                        List.of(EventCategory.DEVICE_STATE)),
+                Map.entry(EventTypes.CAPABILITY_REMOVED,
+                        List.of(EventCategory.DEVICE_STATE))
         );
     }
 

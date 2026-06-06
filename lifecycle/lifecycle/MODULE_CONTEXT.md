@@ -27,8 +27,9 @@ module com.homesynapse.lifecycle {
     requires transitive com.homesynapse.state;
 
     // M3.6d-b — HomeSynapseCore aggregates IntegrationEvents.LIFECYCLE_EVENT_CLASSES
-    // for the event-type registry. Non-transitive; IntegrationEvents is internal
-    // to the composition root, not exposed on the public API.
+    // (10 since M4.C/AMD-58) and CAPABILITY_EVENT_CLASSES (2, M4.C/AMD-59) for the
+    // event-type registry. Non-transitive; IntegrationEvents is internal to the
+    // composition root, not exposed on the public API.
     requires com.homesynapse.integration;
 
     // M3.6e.1 — HomeSynapseCore registers ReadinessFilter (from rest-api) as

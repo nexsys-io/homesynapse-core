@@ -194,10 +194,15 @@ public final class HomeSynapseCore implements ReadinessSource {
         }
 
         // Step 1 — Persistence subsystem.
-        List<Class<? extends DomainEvent>> eventClasses = Stream.concat(
-                EventTypes.CORE_PRODUCTION_EVENT_CLASSES.stream(),
-                IntegrationEvents.LIFECYCLE_EVENT_CLASSES.stream()
-        ).toList();
+        // Aggregate the per-module event-class manifests (M3.6c / DECIDE-04): core +
+        // integration lifecycle + capability (AMD-59). All three feed the production
+        // EventTypeRegistry so every shipped DomainEvent record can be (de)serialized.
+        List<Class<? extends DomainEvent>> eventClasses = Stream.of(
+                        EventTypes.CORE_PRODUCTION_EVENT_CLASSES,
+                        IntegrationEvents.LIFECYCLE_EVENT_CLASSES,
+                        IntegrationEvents.CAPABILITY_EVENT_CLASSES)
+                .flatMap(List::stream)
+                .toList();
         this.persistenceFactory = PersistenceFactory.start(
                 dbPath, config.persistence(), clock, homeId, eventClasses);
 

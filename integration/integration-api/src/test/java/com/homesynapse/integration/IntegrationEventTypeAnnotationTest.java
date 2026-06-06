@@ -48,14 +48,20 @@ class IntegrationEventTypeAnnotationTest {
     /**
      * The authoritative list of {@link IntegrationLifecycleEvent} subtype
      * record classes that must carry {@link EventType}. Must contain exactly
-     * 5 entries, matching the sealed {@code permits} clause.
+     * 10 entries (the original 5 plus the 5 added by AMD-58), matching the sealed
+     * {@code permits} clause.
      */
     private static final List<Class<? extends IntegrationLifecycleEvent>> EXPECTED_SUBTYPES = List.of(
             IntegrationStarted.class,
             IntegrationStopped.class,
             IntegrationHealthChanged.class,
             IntegrationRestarted.class,
-            IntegrationResourceExceeded.class);
+            IntegrationResourceExceeded.class,
+            IntegrationConfigUpdated.class,
+            IntegrationOptionsUpdated.class,
+            IntegrationReauthRequired.class,
+            IntegrationReauthCompleted.class,
+            IntegrationMigrationCompleted.class);
 
     @Test
     @DisplayName("every IntegrationLifecycleEvent subtype has @EventType")
@@ -126,7 +132,7 @@ class IntegrationEventTypeAnnotationTest {
     }
 
     @Test
-    @DisplayName("subtype @EventType values use the integration_ prefix")
+    @DisplayName("subtype @EventType values use the integration_ or integration. prefix")
     void annotationValues_doNotCollideWithCoreEvents() {
         var nonPrefixed = new ArrayList<String>();
         for (Class<? extends IntegrationLifecycleEvent> cls : EXPECTED_SUBTYPES) {
@@ -134,21 +140,25 @@ class IntegrationEventTypeAnnotationTest {
             if (ann == null) {
                 continue;
             }
-            if (!ann.value().startsWith("integration_")) {
-                nonPrefixed.add(cls.getSimpleName() + " -> '" + ann.value() + "'");
+            // AMD-58 §2.2: the legacy five use the frozen snake_case "integration_" prefix;
+            // the five added by AMD-58 use the dot-namespaced "integration." prefix. Both
+            // preserve the collision-prevention purpose against core EventTypes.
+            String value = ann.value();
+            if (!value.startsWith("integration_") && !value.startsWith("integration.")) {
+                nonPrefixed.add(cls.getSimpleName() + " -> '" + value + "'");
             }
         }
 
         assertThat(nonPrefixed)
-                .as("integration subtype @EventType values must use the 'integration_' prefix to avoid collisions with core event types: %s",
+                .as("integration subtype @EventType values must use the 'integration_' or 'integration.' prefix to avoid collisions with core event types: %s",
                         nonPrefixed)
                 .isEmpty();
     }
 
     @Test
-    @DisplayName("exactly 5 IntegrationLifecycleEvent subtypes carry @EventType")
+    @DisplayName("exactly 10 IntegrationLifecycleEvent subtypes carry @EventType")
     void exactSubtypeCount() {
-        assertThat(EXPECTED_SUBTYPES).hasSize(5);
+        assertThat(EXPECTED_SUBTYPES).hasSize(10);
 
         long annotatedCount = EXPECTED_SUBTYPES.stream()
                 .filter(Class::isRecord)
@@ -156,7 +166,7 @@ class IntegrationEventTypeAnnotationTest {
                 .filter(cls -> cls.getAnnotation(EventType.class) != null)
                 .count();
 
-        assertThat(annotatedCount).isEqualTo(5L);
+        assertThat(annotatedCount).isEqualTo(10L);
     }
 
     private static Set<String> collectEventTypesConstants() throws IllegalAccessException {

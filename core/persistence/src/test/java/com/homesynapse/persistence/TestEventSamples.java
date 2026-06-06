@@ -29,12 +29,27 @@ import com.homesynapse.event.StoragePressureChangedEvent;
 import com.homesynapse.event.SystemStartedEvent;
 import com.homesynapse.event.SystemStoppedEvent;
 import com.homesynapse.event.TelemetrySummaryEvent;
+import com.homesynapse.device.Capability;
+import com.homesynapse.device.CapabilityInstance;
+import com.homesynapse.device.StandardCapabilities;
+import com.homesynapse.integration.CapabilityAdded;
+import com.homesynapse.integration.CapabilityRemovalReason;
+import com.homesynapse.integration.CapabilityRemoved;
+import com.homesynapse.integration.ConfigUpdateOutcome;
 import com.homesynapse.integration.HealthState;
+import com.homesynapse.integration.IntegrationConfigUpdated;
 import com.homesynapse.integration.IntegrationHealthChanged;
+import com.homesynapse.integration.IntegrationMigrationCompleted;
+import com.homesynapse.integration.IntegrationOptionsUpdated;
+import com.homesynapse.integration.IntegrationReauthCompleted;
+import com.homesynapse.integration.IntegrationReauthRequired;
 import com.homesynapse.integration.IntegrationResourceExceeded;
 import com.homesynapse.integration.IntegrationRestarted;
 import com.homesynapse.integration.IntegrationStarted;
 import com.homesynapse.integration.IntegrationStopped;
+import com.homesynapse.integration.MigrationOutcome;
+import com.homesynapse.platform.identity.DeviceId;
+import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.Ulid;
 
@@ -55,6 +70,8 @@ final class TestEventSamples {
     static final EventId EVENT_ID_2 = EventId.of(ULID_2);
 
     static final IntegrationId INTEGRATION_ID_1 = IntegrationId.of(ULID_3);
+    static final DeviceId DEVICE_ID_1 = DeviceId.of(ULID_2);
+    static final EntityId ENTITY_ID_1 = EntityId.of(ULID_1);
 
     private TestEventSamples() {
         // Utility class — non-instantiable
@@ -217,5 +234,115 @@ final class TestEventSamples {
                 "memory",
                 "256 MB",
                 "128 MB");
+    }
+
+    // ===== Integration lifecycle events — dot-namespaced (AMD-58) =====
+
+    static IntegrationConfigUpdated integrationConfigUpdated() {
+        return new IntegrationConfigUpdated(
+                INTEGRATION_ID_1,
+                "zigbee",
+                HealthState.HEALTHY,
+                HealthState.HEALTHY,
+                "configuration applied in place",
+                ConfigUpdateOutcome.APPLIED);
+    }
+
+    static IntegrationOptionsUpdated integrationOptionsUpdated() {
+        return new IntegrationOptionsUpdated(
+                INTEGRATION_ID_1,
+                "zigbee",
+                HealthState.HEALTHY,
+                HealthState.HEALTHY,
+                "polling interval changed",
+                ConfigUpdateOutcome.RESTART_REQUIRED);
+    }
+
+    static IntegrationReauthRequired integrationReauthRequired() {
+        return new IntegrationReauthRequired(
+                INTEGRATION_ID_1,
+                "zigbee",
+                HealthState.HEALTHY,
+                HealthState.HEALTHY,
+                "access token expired");
+    }
+
+    static IntegrationReauthCompleted integrationReauthCompleted() {
+        return new IntegrationReauthCompleted(
+                INTEGRATION_ID_1,
+                "zigbee",
+                HealthState.HEALTHY,
+                HealthState.HEALTHY,
+                "re-authentication succeeded",
+                true);
+    }
+
+    static IntegrationMigrationCompleted integrationMigrationCompleted() {
+        return new IntegrationMigrationCompleted(
+                INTEGRATION_ID_1,
+                "zigbee",
+                HealthState.HEALTHY,
+                HealthState.HEALTHY,
+                "configuration migrated from schema 1.0 to 2.0",
+                1, 0, 2, 0,
+                MigrationOutcome.MIGRATED);
+    }
+
+    // ===== Capability events — dot-namespaced (AMD-59) =====
+
+    /**
+     * A command-less {@link CapabilityInstance} derived from
+     * {@code StandardCapabilities.occupancy()} — its commands map is empty, so the
+     * subtree embeds no {@code Expectation}/{@code AttributeValue} and round-trips
+     * losslessly through the persistence codec today.
+     */
+    static CapabilityInstance occupancyInstance() {
+        Capability occupancy = StandardCapabilities.occupancy();
+        return new CapabilityInstance(
+                occupancy.capabilityId(),
+                occupancy.version(),
+                occupancy.namespace(),
+                0,
+                occupancy.attributeSchemas(),
+                occupancy.commandDefinitions(),
+                occupancy.confirmationPolicy());
+    }
+
+    /**
+     * A fully-populated {@link CapabilityInstance} derived from
+     * {@code StandardCapabilities.onOff()} — its command outcomes embed the sealed
+     * {@code Expectation} type, which has no persisted codec yet. Used only by the
+     * {@code @Disabled} AMD-65 acceptance test; it degrades on decode until the
+     * {@code Expectation} codec lands.
+     */
+    static CapabilityInstance onOffInstance() {
+        Capability onOff = StandardCapabilities.onOff();
+        return new CapabilityInstance(
+                onOff.capabilityId(),
+                onOff.version(),
+                onOff.namespace(),
+                0,
+                onOff.attributeSchemas(),
+                onOff.commandDefinitions(),
+                onOff.confirmationPolicy());
+    }
+
+    static CapabilityAdded capabilityAdded() {
+        return new CapabilityAdded(
+                INTEGRATION_ID_1, DEVICE_ID_1, ENTITY_ID_1, occupancyInstance());
+    }
+
+    static CapabilityAdded capabilityAddedOnOff() {
+        return new CapabilityAdded(
+                INTEGRATION_ID_1, DEVICE_ID_1, ENTITY_ID_1, onOffInstance());
+    }
+
+    static CapabilityRemoved capabilityRemoved() {
+        return new CapabilityRemoved(
+                INTEGRATION_ID_1,
+                DEVICE_ID_1,
+                ENTITY_ID_1,
+                "occupancy",
+                CapabilityRemovalReason.TRANSIENT_LOSS);
     }
 }

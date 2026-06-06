@@ -52,6 +52,9 @@ import java.util.Objects;
  * @param integrationId       the identity of the integration instance;
  *                            never {@code null}
  * @param state               the current health state; never {@code null}
+ * @param detail              the machine-readable cause accompanying the state
+ *                            ({@link HealthDetail#NONE} when HEALTHY with no active
+ *                            cause); never {@code null} (AMD-57)
  * @param healthScore         the weighted composite health score, 0.0 (worst)
  *                            to 1.0 (best)
  * @param lastHeartbeat       timestamp of the last
@@ -99,6 +102,7 @@ import java.util.Objects;
 public record IntegrationHealthRecord(
         IntegrationId integrationId,
         HealthState state,
+        HealthDetail detail,
         double healthScore,
         Instant lastHeartbeat,
         Instant lastKeepalive,
@@ -123,6 +127,7 @@ public record IntegrationHealthRecord(
     public IntegrationHealthRecord {
         Objects.requireNonNull(integrationId, "integrationId must not be null");
         Objects.requireNonNull(state, "state must not be null");
+        Objects.requireNonNull(detail, "detail must not be null");
         Objects.requireNonNull(lastHeartbeat, "lastHeartbeat must not be null");
         // lastKeepalive is nullable — null if no keepalive reported yet
         Objects.requireNonNull(stateChangedAt, "stateChangedAt must not be null");

@@ -76,6 +76,8 @@ The `requires transitive` on platform-api means any module that reads `com.homes
 
 > **All 22 core payload records below carry `@EventType(EventTypes.CONSTANT)`** (M2.1). The annotation value always references an `EventTypes` constant — never a raw string literal. `DegradedEvent` is the sole `DomainEvent` implementor in this module without `@EventType`: it is the fallback wrapper for failed upcasts, not a typed event, and must not be registered in `EventTypeRegistry`. See the `EventType` row in Core Infrastructure Types and the gotcha below.
 
+> **M4.C note (AMD-58/59, 2026-06-05): `EventTypes` gained 7 string constants used by `com.homesynapse.integration`, not by any event-model record.** Five dot-namespaced integration-lifecycle strings (`INTEGRATION_CONFIG_UPDATED`="integration.config.updated", `INTEGRATION_OPTIONS_UPDATED`, `INTEGRATION_REAUTH_REQUIRED`, `INTEGRATION_REAUTH_COMPLETED`, `INTEGRATION_MIGRATION_COMPLETED`) and two capability strings (`CAPABILITY_ADDED`="capability.added", `CAPABILITY_REMOVED`="capability.removed"). This follows the precedent of the existing five `INTEGRATION_*` snake_case constants: `EventTypes` holds the canonical strings (event-model owns the type taxonomy), while the records that carry them live in integration-api. **No new core record and no `CORE_PRODUCTION_EVENT_CLASSES` entry** — the new records register via `IntegrationEvents.LIFECYCLE_EVENT_CLASSES`/`CAPABILITY_EVENT_CLASSES`. The legacy five snake_case integration strings are frozen forever (persisted contract).
+
 #### State Events
 | Type | Kind | Purpose | Key Fields |
 |---|---|---|---|
