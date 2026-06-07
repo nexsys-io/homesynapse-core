@@ -11,6 +11,7 @@ import com.homesynapse.platform.identity.AreaId;
 import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
+import com.homesynapse.platform.identity.FloorId;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.PersonId;
@@ -28,12 +29,12 @@ import com.homesynapse.platform.identity.Ulid;
  * serde for each of the ten ULID-based types so they round-trip as bare 26-character
  * Crockford Base32 JSON strings.</p>
  *
- * <p><strong>Registered types (10):</strong></p>
+ * <p><strong>Registered types (11):</strong></p>
  * <ul>
  *   <li>{@link Ulid} — raw ULID value type from platform-api.</li>
- *   <li>{@link EntityId}, {@link DeviceId}, {@link AreaId}, {@link AutomationId},
- *       {@link PersonId}, {@link HomeId}, {@link IntegrationId}, {@link SystemId}
- *       — typed wrappers from platform-api.</li>
+ *   <li>{@link EntityId}, {@link DeviceId}, {@link AreaId}, {@link FloorId},
+ *       {@link AutomationId}, {@link PersonId}, {@link HomeId}, {@link IntegrationId},
+ *       {@link SystemId} — typed wrappers from platform-api.</li>
  *   <li>{@link EventId} — typed wrapper from event-model (NOT in platform-api).</li>
  * </ul>
  *
@@ -76,10 +77,11 @@ final class PersistenceJacksonModule extends SimpleModule {
         addSerializer(Ulid.class, new UlidSerializer());
         addDeserializer(Ulid.class, new UlidDeserializer());
 
-        // Typed wrappers from platform-api (8)
+        // Typed wrappers from platform-api (9)
         registerTypedWrapper(EntityId.class, EntityId::toString, EntityId::parse);
         registerTypedWrapper(DeviceId.class, DeviceId::toString, DeviceId::parse);
         registerTypedWrapper(AreaId.class, AreaId::toString, AreaId::parse);
+        registerTypedWrapper(FloorId.class, FloorId::toString, FloorId::parse);
         registerTypedWrapper(AutomationId.class, AutomationId::toString, AutomationId::parse);
         registerTypedWrapper(PersonId.class, PersonId::toString, PersonId::parse);
         registerTypedWrapper(HomeId.class, HomeId::toString, HomeId::parse);

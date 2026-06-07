@@ -13,6 +13,7 @@ import com.homesynapse.platform.identity.AreaId;
 import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
+import com.homesynapse.platform.identity.FloorId;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.PersonId;
@@ -102,7 +103,7 @@ class UlidSerializationTest {
     }
 
     @Test
-    @DisplayName("all 10 typed wrappers serialize as bare Crockford Base32 strings")
+    @DisplayName("all 11 typed wrappers serialize as bare Crockford Base32 strings")
     void allTypedWrappers_serializeAsBareStrings() throws Exception {
         String expected = "\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"";
 
@@ -110,6 +111,7 @@ class UlidSerializationTest {
         assertThat(mapper.writeValueAsString(EntityId.of(ULID))).isEqualTo(expected);
         assertThat(mapper.writeValueAsString(DeviceId.of(ULID))).isEqualTo(expected);
         assertThat(mapper.writeValueAsString(AreaId.of(ULID))).isEqualTo(expected);
+        assertThat(mapper.writeValueAsString(FloorId.of(ULID))).isEqualTo(expected);
         assertThat(mapper.writeValueAsString(AutomationId.of(ULID))).isEqualTo(expected);
         assertThat(mapper.writeValueAsString(PersonId.of(ULID))).isEqualTo(expected);
         assertThat(mapper.writeValueAsString(HomeId.of(ULID))).isEqualTo(expected);
