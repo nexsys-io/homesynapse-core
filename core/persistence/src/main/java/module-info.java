@@ -48,6 +48,15 @@ module com.homesynapse.persistence {
     // leaf (AttributeValue Module Relocation Design Note, 2026-05-31).
     requires com.homesynapse.value;
 
+    // M5-A Part 2 (AMD-87): the package-private ExpectationSerializer/Deserializer name
+    // com.homesynapse.device.Expectation + its four permits (ExactMatch/AnyChange/
+    // EnumTransition/WithinTolerance) internally so a command-bearing CapabilityAdded
+    // round-trips — declared non-transitive at its use site (device is not re-exported on
+    // persistence's public API). Acyclic: com.homesynapse.device requires value/event/
+    // platform only, NOT persistence. Persistence already read device transitively via
+    // `requires transitive state -> transitive device`; this makes that read direct.
+    requires com.homesynapse.device;
+
     requires java.sql;
     requires org.slf4j;
 

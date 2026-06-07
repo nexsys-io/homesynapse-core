@@ -26,7 +26,6 @@ import com.homesynapse.platform.identity.Ulid;
 import java.nio.charset.StandardCharsets;
 
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -314,13 +313,7 @@ class EventPayloadCodecTest {
         }
 
         @Test
-        @Disabled("AMD-65 pending: Expectation persisted codec. The onOff-derived instance"
-                + " embeds the sealed Expectation type (ExactMatch) via its command outcomes,"
-                + " which has no (de)serializer registered in PersistenceJacksonModule, so"
-                + " decode currently degrades to a DegradedEvent. This is the executable"
-                + " acceptance test for the follow-up — enable it once the Expectation"
-                + " tagged-union codec lands (AMD-52 AttributeValue-codec precedent).")
-        @DisplayName("capability.added with a command-bearing instance round-trips (AMD-65 acceptance)")
+        @DisplayName("capability.added with a command-bearing instance round-trips (AMD-87 acceptance)")
         void capabilityAdded_onOff_roundTrips() throws Exception {
             assertRoundTrip(TestEventSamples.capabilityAddedOnOff(), EventTypes.CAPABILITY_ADDED);
         }

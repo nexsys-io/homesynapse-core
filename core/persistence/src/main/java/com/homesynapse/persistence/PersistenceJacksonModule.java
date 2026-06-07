@@ -5,6 +5,7 @@
 package com.homesynapse.persistence;
 
 import com.fasterxml.jackson.databind.module.SimpleModule;
+import com.homesynapse.device.Expectation;
 import com.homesynapse.event.EventId;
 import com.homesynapse.value.AttributeValue;
 import com.homesynapse.platform.identity.AreaId;
@@ -46,6 +47,15 @@ import com.homesynapse.platform.identity.Ulid;
  * ONLY place device value types are Jackson-serialized (AMD-52-INV-02 Jackson isolation);
  * the codec is a hand-rolled tagged-union envelope, never {@code @JsonTypeInfo}.</p>
  *
+ * <p><strong>{@code Expectation} serde (AMD-87 / M5-A Part 2):</strong> the
+ * {@link ExpectationSerializer}/{@link ExpectationDeserializer} pair is registered here,
+ * keyed on the {@code Expectation} interface so all four permits ({@code ExactMatch},
+ * {@code AnyChange}, {@code EnumTransition}, {@code WithinTolerance}) resolve through it. It
+ * closes the command-bearing {@code CapabilityAdded} round-trip gap (the embedded
+ * {@code CommandDefinition → ExpectedOutcome → Expectation} subtree previously degraded on
+ * decode); {@code ExactMatch}/{@code AnyChange} delegate their wrapped {@code AttributeValue}
+ * to the codec above. Same hand-rolled tagged-union discipline — no {@code @JsonTypeInfo}.</p>
+ *
  * <p>Package-private — installed only by {@link PersistenceObjectMapper}. External
  * modules receive pre-configured {@code ObjectMapper} instances and never touch
  * this module directly.</p>
@@ -57,6 +67,8 @@ import com.homesynapse.platform.identity.Ulid;
  * @see TypedUlidDeserializer
  * @see AttributeValueSerializer
  * @see AttributeValueDeserializer
+ * @see ExpectationSerializer
+ * @see ExpectationDeserializer
  */
 final class PersistenceJacksonModule extends SimpleModule {
 
@@ -96,6 +108,15 @@ final class PersistenceJacksonModule extends SimpleModule {
         // through the single hand-rolled tagged-union codec (no @JsonTypeInfo).
         addSerializer(AttributeValue.class, new AttributeValueSerializer());
         addDeserializer(AttributeValue.class, new AttributeValueDeserializer());
+
+        // Expectation serde (AMD-87 / M5-A Part 2). Keyed on the Expectation interface so
+        // all four sealed permits (ExactMatch/AnyChange/EnumTransition/WithinTolerance)
+        // dispatch through the single hand-rolled tagged-union codec — same mechanism as the
+        // AttributeValue pair above (no @JsonTypeInfo). Closes the command-bearing
+        // CapabilityAdded round-trip gap (AMD-59-INV-02): ExactMatch/AnyChange delegate their
+        // wrapped AttributeValue to the codec registered just above.
+        addSerializer(Expectation.class, new ExpectationSerializer());
+        addDeserializer(Expectation.class, new ExpectationDeserializer());
     }
 
     /**

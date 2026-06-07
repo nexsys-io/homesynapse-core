@@ -311,9 +311,9 @@ final class TestEventSamples {
     /**
      * A fully-populated {@link CapabilityInstance} derived from
      * {@code StandardCapabilities.onOff()} — its command outcomes embed the sealed
-     * {@code Expectation} type, which has no persisted codec yet. Used only by the
-     * {@code @Disabled} AMD-65 acceptance test; it degrades on decode until the
-     * {@code Expectation} codec lands.
+     * {@code Expectation} type ({@code ExactMatch}). Used by the
+     * {@code capabilityAdded_onOff_roundTrips} acceptance test; it round-trips losslessly
+     * now that the AMD-87 {@code Expectation} persisted codec is registered.
      */
     static CapabilityInstance onOffInstance() {
         Capability onOff = StandardCapabilities.onOff();
