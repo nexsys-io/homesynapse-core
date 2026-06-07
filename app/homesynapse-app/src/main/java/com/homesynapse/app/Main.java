@@ -17,6 +17,6 @@ public final class Main {
     }
 
     public static void main(String[] args) {
-        System.out.println("HomeSynapse Core — not yet implemented");
+        System.out.println("HomeSynapse Core not yet implemented");
     }
 }
