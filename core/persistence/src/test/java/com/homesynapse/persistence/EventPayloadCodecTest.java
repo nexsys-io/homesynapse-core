@@ -31,8 +31,8 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 /**
- * Full round-trip tests for {@link EventPayloadCodec} across all 34 registered
- * event types (22 core + 10 integration lifecycle + 2 capability), plus
+ * Full round-trip tests for {@link EventPayloadCodec} across all 35 registered
+ * event types (23 core + 10 integration lifecycle + 2 capability), plus
  * DegradedEvent fallback verification (DECIDE-M2-06, DECIDE-M2-07) and SNAKE_CASE
  * property naming verification.
  */
@@ -63,7 +63,7 @@ class EventPayloadCodecTest {
                 .isEqualTo(original);
     }
 
-    // ===== Core event round-trips (22) =====
+    // ===== Core event round-trips (23) =====
 
     @Nested
     @DisplayName("core event round-trips")
@@ -197,6 +197,15 @@ class EventPayloadCodecTest {
         @Test
         void configError() throws Exception {
             assertRoundTrip(TestEventSamples.configError(), EventTypes.CONFIG_ERROR);
+        }
+
+        @Test
+        void configValidationCompleted() throws Exception {
+            // AMD-70: the Map<String, Integer> severityCounts component must
+            // survive the codec round-trip losslessly.
+            assertRoundTrip(
+                    TestEventSamples.configValidationCompleted(),
+                    EventTypes.CONFIG_VALIDATION_COMPLETED);
         }
 
         @Test

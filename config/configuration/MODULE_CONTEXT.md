@@ -1,4 +1,4 @@
-# configuration — `com.homesynapse.config` — 22 types — YAML 1.2 config loading, JSON Schema validation, AES-256-GCM secrets, hot reload
+# configuration — `com.homesynapse.config` — 24 types — YAML 1.2 config loading, JSON Schema validation, AES-256-GCM secrets, hot reload
 
 ## Purpose
 
@@ -36,7 +36,7 @@ The `requires transitive com.homesynapse.event` declaration is required because 
 
 ## Package Structure
 
-- **`com.homesynapse.config`** — All types in a single flat package. Contains: 3 enums (Severity, ReloadClassification, ChangeType), 11 data records (ConfigIssue, SecretEntry, ConfigMutation, ConfigSection, ConfigChange, MigrationChange, ConfigChangeSet, MigrationResult, MigrationPreview, ConfigModel, ReloadResult), 2 exceptions (ConfigurationLoadException, ConfigurationReloadException), 6 service interfaces (ConfigurationService, ConfigurationAccess, SecretStore, ConfigValidator, ConfigMigrator, SchemaRegistry), and package-info.java.
+- **`com.homesynapse.config`** — All types in a single flat package. Contains: 3 enums (Severity, ReloadClassification, ChangeType), 11 data records (ConfigIssue, SecretEntry, ConfigMutation, ConfigSection, ConfigChange, MigrationChange, ConfigChangeSet, MigrationResult, MigrationPreview, ConfigModel, ReloadResult), 2 exceptions (ConfigurationLoadException, ConfigurationReloadException), 7 service interfaces (ConfigurationService, ConfigurationAccess, SecretStore, ConfigValidator, ConfigMigrator, SchemaRegistry, ConfigurationChangeListener — AMD-66, M6.1), 1 package-private implementation class (ScopedConfigurationAccess — M6.1), and package-info.java.
 
 ## Complete Type Inventory
 
@@ -60,8 +60,8 @@ The `requires transitive com.homesynapse.event` declaration is required because 
 | `MigrationChange` | record (5 fields) | A single modification applied by a ConfigMigrator (§3.7) — renamed from Doc 06's second `ConfigChange` to avoid collision | Fields: `type` (ChangeType), `path` (String), `oldValue` (Object, nullable), `newValue` (Object, nullable), `reason` (String). |
 | `ConfigChangeSet` | record (2 fields) | Complete diff between two ConfigModels from the reload pipeline | Fields: `timestamp` (Instant), `changes` (List<ConfigChange>, unmodifiable via List.copyOf()). Convenience filter methods (hot(), integrationRestart(), processRestart()) are Phase 3. |
 | `MigrationResult` | record (2 fields) | Output of a single ConfigMigrator.migrate() invocation | Fields: `migratedConfig` (Map<String, Object>, unmodifiable), `changes` (List<MigrationChange>, unmodifiable). |
-| `MigrationPreview` | record (4 fields) | Dry-run report of migration changes without modifying the file | Fields: `fromVersion` (int), `toVersion` (int), `plannedChanges` (List<MigrationChange>, unmodifiable), `requiresUserReview` (boolean — true when migrations remove keys or transform values in lossy ways). |
-| `ConfigModel` | record (5 fields) | Immutable, validated in-memory configuration — the single source of truth at runtime | Fields: `schemaVersion` (int), `loadedAt` (Instant), `fileModifiedAt` (Instant — optimistic concurrency token for write path), `sections` (Map<String, ConfigSection>, unmodifiable), `rawMap` (Map<String, Object>, unmodifiable). **Phase 2 simplification:** uses Map-based sections, not typed subsystem records (EventBusConfig etc. are Phase 3). |
+| `MigrationPreview` | record (6 fields) | Dry-run report of migration changes without modifying the file | Fields: `fromMajor`/`fromMinor`/`toMajor`/`toMinor` (int — AMD-67, guards `major>=1`/`minor>=0`), `plannedChanges` (List<MigrationChange>, unmodifiable), `requiresUserReview` (boolean — true when migrations remove keys or transform values in lossy ways). |
+| `ConfigModel` | record (6 fields) | Immutable, validated in-memory configuration — the single source of truth at runtime | Fields: `configSchemaMajor` (int, `>=1`) + `configSchemaMinor` (int, `>=0`) — the AMD-67 schema pair (was single `schemaVersion`; major mismatch is the sole migration trigger, AMD-67-INV-02; distinct surface from `IntegrationDescriptor.configSchemaMajor/Minor`, AMD-67-INV-01; on-disk form `schema_version: { major: N, minor: M }`), `loadedAt` (Instant), `fileModifiedAt` (Instant — optimistic concurrency token for write path), `sections` (Map<String, ConfigSection>, unmodifiable), `rawMap` (Map<String, Object>, unmodifiable). **Phase 2 simplification:** uses Map-based sections, not typed subsystem records (EventBusConfig etc. are Phase 3). |
 | `ReloadResult` | record (3 fields) | Result of a configuration reload — new model + diff + issues | Fields: `newModel` (ConfigModel), `changeSet` (ConfigChangeSet), `issues` (List<ConfigIssue>, unmodifiable — only WARNING issues survive, since FATAL/ERROR cause rejection). |
 
 ### Exceptions
@@ -79,10 +79,17 @@ The `requires transitive com.homesynapse.event` declaration is required because 
 | `ConfigurationAccess` | interface | Read-only, integration-scoped configuration access (Doc 05 §3.8, Doc 06 §8.4) | `getConfig()` → Map<String, Object> (unmodifiable), `getString(String)` → Optional<String>, `getInt(String)` → Optional<Integer>, `getBoolean(String)` → Optional<Boolean> |
 | `SecretStore` | interface | Manages encrypted secrets store (§3.4, §8.5) | `resolve(String)` → String (throws IllegalArgumentException if not found), `set(String, String)`, `remove(String)` (throws if not found), `list()` → Set<String> (unmodifiable) |
 | `ConfigValidator` | interface | Pure validation function — validates parsed config against composed schema (§8.1) | `validate(Map<String, Object>, String)` → List<ConfigIssue> (unmodifiable). String parameter is JSON text, not a file path. |
-| `ConfigMigrator` | interface | Forward-only migration from one schema version to the next (§3.7) | `fromVersion()` → int, `toVersion()` → int, `migrate(Map<String, Object>)` → MigrationResult. Idempotent. Does not modify input map. |
+| `ConfigMigrator` | interface | Forward-only migration of the system config document from one `(major, minor)` schema version to the next (§3.7, AMD-67) | `fromMajor()`/`fromMinor()`/`toMajor()`/`toMinor()` → int (was `fromVersion`/`toVersion`), `migrate(Map<String, Object>)` → MigrationResult (signature unchanged). Triggers on **major** mismatch only (AMD-67-INV-02); chain orders by `(major, minor)`. Idempotent. Does not modify input map. |
 | `SchemaRegistry` | interface | Manages JSON Schema composition for validation (§8.6) | `registerCoreSchema(String, String)`, `registerIntegrationSchema(String, String)`, `getComposedSchema()` → String, `writeComposedSchema(Path)`. All schema parameters are String (JSON text), NOT JsonSchema library type. |
+| `ConfigurationChangeListener` | interface (AMD-66, M6.1) | Per-section reload-reaction seam — a subsystem classifies the runtime impact of a change to its own section | `sectionPath()` → String (matches `ConfigSection.path()`), `onSectionChanged(ConfigSection previous, ConfigSection candidate)` → ReloadClassification. Plain non-generic non-sealed (F7). Registered via constructor-injected map keyed by `sectionPath()` on the service, no ServiceLoader (DEC-M3-16); duplicate path = construction-time IllegalArgumentException (AMD-66 §2.4). Invoked synchronously before observability-event publication (AMD-66-INV-02); side-effect-free w.r.t. ConfigModel (AMD-66-INV-01). *Defined* in M6.1; *exercised under swap* in M6.4. |
 
-**Total: 22 public types + 1 module-info.java + 1 package-info.java = 24 Java files.**
+### Package-Private Implementation Classes (Phase 3)
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `ScopedConfigurationAccess` | final class implements `ConfigurationAccess` (M6.1) | Integration-scoped read over a validated ConfigModel (Doc 06 §8.4, Doc 05 §3.8) | Ctor `(String integrationType, ConfigModel model)` — guards null/blank type, null model. Captures `sections().get("integrations." + type).values()` at construction (snapshot semantics — matches the interface's immutability contract; a section change is INTEGRATION_RESTART, which re-scopes a fresh instance). Unconfigured integration → empty map (INV-CE-02). Typed accessors are strict `instanceof` (no coercion). |
+
+**Total: 23 public types + 1 package-private class + 1 module-info.java + 1 package-info.java = 26 Java files.** *(M6.1: +`ConfigurationChangeListener` public, +`ScopedConfigurationAccess` package-private; `ConfigModel` 5→6 components, `ConfigMigrator` 3→5 methods, `MigrationPreview` 4→6 components per AMD-67.)*
 
 ## Dependencies
 
@@ -193,6 +200,14 @@ None. This module contains no sealed types.
 
 **GOTCHA: `package-info.java` was repurposed, not deleted.** The handoff said to delete the scaffold. Due to VM disk space constraints preventing bash execution, it was repurposed as a proper package-level Javadoc file. This is benign and arguably better practice.
 
+**GOTCHA (M6.1a BLOCKER — open escalation): the load/validate pipeline cannot compile without new third-party `requires` directives.** snakeyaml-engine 2.9 is an explicit JPMS module (`org.snakeyaml.engine.v2`, multi-release module-info) and networknt json-schema-validator 1.5.6 is an explicit JPMS module (`com.networknt.schema`, which `requires com.fasterxml.jackson.databind` NON-transitively). The build resolves library deps on the module path (precedent: persistence's `requires com.fasterxml.jackson.databind`), so `YamlLoader`/`JsonSchemaCompositeValidator`/`StandardSchemaRegistry` inside `com.homesynapse.config` need at minimum `requires org.snakeyaml.engine.v2; requires com.networknt.schema;` (+ likely `com.fasterxml.jackson.databind` for Map→JsonNode/schema composition and `org.slf4j` for LTD-15 logging). This collides with the M6.1 instruction's "module-info unchanged" mandate — STOP-and-report fired; M6.1a (load/validate) is held pending the PM/Nick ruling. Gradle `implementation` scope does NOT exempt a named module from needing `requires` — that is the lockstep's blind spot in reverse.
+
+**GOTCHA: `MigrationResult` was deliberately NOT modified by AMD-67 (E67-1).** It carries no version field — only `MigrationPreview` carries the `(major, minor)` pairs. The M6.1 instruction's file table listed it MODIFY, but the ratified AMD makes the edit conditional on adding applied-version reporting, which M6.1b did not add.
+
+**GOTCHA: `ScopedConfigurationAccess` is package-private with snapshot semantics.** It captures its section's values at construction (the `ConfigurationAccess` Javadoc promises immutability). The Integration Supervisor (M9, module integration-runtime) cannot construct a package-private config class — the exposure seam (factory on `ConfigurationService` impl or a public gateway) is deliberately deferred to the M9 wiring decision.
+
+**GOTCHA: AMD-66 listener registration tests live with the service, not the interface.** Duplicate-section-path rejection (AMD-66 §2.4) is `StandardConfigurationService` constructor behavior (M6.1a-held). `ConfigurationChangeListenerTest` covers the interface shape + behavioral contract only. Note DP-4 says the service takes a `Map<String, ConfigurationChangeListener>` while AMD-66 §2.4/§5 describes duplicate-registration rejection that a Map parameter cannot express — flagged to the PM in the M6.1b completion report (suggest `List<ConfigurationChangeListener>` ctor param, service builds the map).
+
 ## Test Fixtures and Contract Tests
 
 The `testFixtures` source set (`src/testFixtures/java/com/homesynapse/config/test/`) provides two helper types so downstream modules can construct valid configuration values without standing up the YAML loader, schema validator, or secret store.
@@ -221,8 +236,9 @@ Both declarations are required for the same reason described in the event-model 
 
 ## Phase 3 Notes
 
-- **ConfigurationService implementation needed:** `YamlConfigurationService` (or similar) implementing the full loading pipeline (§3.1), reload mechanism (§3.3), and write path (§3.5). Thread-safe with a single `ReentrantLock` for write serialization. The active ConfigModel is held via a `volatile` reference for lock-free reads.
-- **ConfigurationAccess implementation needed:** Scoped implementation that wraps a section of the raw map, filtered to `integrations.{type}:` keys. Constructed by the Integration Supervisor when provisioning adapter contexts. Immutable after construction.
+- **M6.1 status (2026-06-09):** split at the Fork-2 seam. **M6.1b COMPLETE (files produced, build gate deferred):** AMD-67 shapes (`ConfigModel`/`ConfigMigrator`/`MigrationPreview` + fixtures), AMD-66 `ConfigurationChangeListener`, `ScopedConfigurationAccess`, AMD-70 `config.validation_completed` event + full P2 manifest registration (event-model + persistence). **M6.1a HELD (load/validate):** `YamlLoader`, `JsonSchemaCompositeValidator`, `StandardSchemaRegistry`, `StandardConfigurationService` + their tests — blocked on the third-party-`requires` escalation (see Gotchas). AMD-71 layout/include/traversal-guard behavior rides M6.1a.
+- **ConfigurationService implementation needed (M6.1a-held):** `StandardConfigurationService` implementing the loading pipeline (§3.1) — `load()`, `getCurrentModel()`, `getSection()`, listener registration (AMD-66 §2.4), fires `config.validation_completed` (AMD-70; DIAGNOSTIC priority proposed, eventTime null, `publishRoot`, system subject). Takes the resolved config-dir `Path` from the composition root (DP-3/AMD-71-A — NO config→platform edge) + injected `Clock` (§4c) + `EventPublisher`. Reload mechanism (§3.3) and write path (§3.5) are M6.4+.
+- **ConfigurationAccess implementation DONE (M6.1b):** `ScopedConfigurationAccess` (package-private; see inventory). The M9 Integration Supervisor needs an exposure seam — deferred to M9 wiring.
 - **ConfigValidator implementation needed:** Wraps `networknt:json-schema-validator` in allErrors mode. Takes `String` (JSON text) parameters and parses them into `JsonSchema` internally. Returns unmodifiable `List<ConfigIssue>`.
 - **SchemaRegistry implementation needed:** Collects core and integration schema fragments. Composes them into a single root schema document with `$ref` pointers. Writes composed schema to `/etc/homesynapse/schema/config.schema.json` for VS Code auto-completion.
 - **SecretStore implementation needed:** AES-256-GCM encryption/decryption of `secrets.enc`. Key file at `/etc/homesynapse/.secret-key` with POSIX 0400 permissions. Per-operation backup rotation (AMD-16, max 5 backups).

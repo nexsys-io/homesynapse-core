@@ -17,7 +17,7 @@ import java.util.Map;
  * {@link ConfigSection} instances with sensible defaults in tests.
  *
  * <p>Without this class, every test that needs a {@code ConfigModel} must
- * construct the full 5-field record manually, ensuring all non-null
+ * construct the full 6-field record manually, ensuring all non-null
  * constraints and {@link Map#copyOf(Map)} defensive copying. This class
  * provides one-liner factories for common scenarios.</p>
  *
@@ -40,14 +40,14 @@ public final class TestConfigFactory {
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * Creates a minimal valid {@link ConfigModel} with schema version 1,
+     * Creates a minimal valid {@link ConfigModel} with schema version 1.0,
      * current-time timestamps, empty sections, and an empty raw map.
      *
      * @return a valid ConfigModel with sensible defaults
      */
     public static ConfigModel minimalModel() {
         Instant now = Clock.systemUTC().instant();
-        return new ConfigModel(1, now, now, Map.of(), Map.of());
+        return new ConfigModel(1, 0, now, now, Map.of(), Map.of());
     }
 
     /**
@@ -62,7 +62,7 @@ public final class TestConfigFactory {
      */
     public static ConfigModel minimalModel(Clock clock) {
         Instant now = clock.instant();
-        return new ConfigModel(1, now, now, Map.of(), Map.of());
+        return new ConfigModel(1, 0, now, now, Map.of(), Map.of());
     }
 
     /**
@@ -77,7 +77,7 @@ public final class TestConfigFactory {
     public static ConfigModel modelWithSection(String path, Map<String, Object> values) {
         Instant now = Clock.systemUTC().instant();
         ConfigSection section = new ConfigSection(path, values, Map.of());
-        return new ConfigModel(1, now, now, Map.of(path, section), Map.copyOf(values));
+        return new ConfigModel(1, 0, now, now, Map.of(path, section), Map.copyOf(values));
     }
 
     /**
@@ -165,11 +165,11 @@ public final class TestConfigFactory {
             rawMap.put("automation_" + i + ".enabled", true);
         }
 
-        return new ConfigModel(1, now, now, sections, rawMap);
+        return new ConfigModel(1, 0, now, now, sections, rawMap);
     }
 
     /**
-     * Creates an empty {@link ConfigModel} with schema version 1 and all
+     * Creates an empty {@link ConfigModel} with schema version 1.0 and all
      * timestamps set to {@link Instant#EPOCH}.
      *
      * <p>Useful for tests that need a valid but fully empty configuration.</p>
@@ -177,6 +177,6 @@ public final class TestConfigFactory {
      * @return a valid ConfigModel with epoch timestamps and no content
      */
     public static ConfigModel emptyConfig() {
-        return new ConfigModel(1, Instant.EPOCH, Instant.EPOCH, Map.of(), Map.of());
+        return new ConfigModel(1, 0, Instant.EPOCH, Instant.EPOCH, Map.of(), Map.of());
     }
 }

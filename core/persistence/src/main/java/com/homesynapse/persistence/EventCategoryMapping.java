@@ -120,6 +120,8 @@ final class EventCategoryMapping {
                         List.of(EventCategory.SYSTEM)),
                 Map.entry(EventTypes.CONFIG_ERROR,
                         List.of(EventCategory.SYSTEM)),
+                Map.entry(EventTypes.CONFIG_VALIDATION_COMPLETED,
+                        List.of(EventCategory.SYSTEM)),
                 Map.entry(EventTypes.STORAGE_PRESSURE_CHANGED,
                         List.of(EventCategory.SYSTEM, EventCategory.DEVICE_HEALTH)),
                 Map.entry(EventTypes.TELEMETRY_SUMMARY,

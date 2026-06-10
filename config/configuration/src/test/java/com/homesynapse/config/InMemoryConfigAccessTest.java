@@ -161,11 +161,12 @@ class InMemoryConfigAccessTest {
         }
 
         @Test
-        @DisplayName("minimalModel has valid fields (all non-null, schema v1)")
+        @DisplayName("minimalModel has valid fields (all non-null, schema 1.0)")
         void minimalModel_hasValidFields() {
             ConfigModel model = TestConfigFactory.minimalModel();
 
-            assertThat(model.schemaVersion()).isEqualTo(1);
+            assertThat(model.configSchemaMajor()).isEqualTo(1);
+            assertThat(model.configSchemaMinor()).isEqualTo(0);
             assertThat(model.loadedAt()).isNotNull();
             assertThat(model.fileModifiedAt()).isNotNull();
             assertThat(model.sections()).isNotNull();

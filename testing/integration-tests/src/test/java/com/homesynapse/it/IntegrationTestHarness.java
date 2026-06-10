@@ -75,9 +75,9 @@ import java.util.stream.Stream;
 final class IntegrationTestHarness implements AutoCloseable {
 
     /**
-     * The full production event class list (22 core + 10 integration lifecycle +
-     * 2 capability = 34 records, AMD-58/AMD-59). Aggregated from the canonical
-     * per-module manifests shipped by {@code com.homesynapse.event} and
+     * The full production event class list (23 core + 10 integration lifecycle +
+     * 2 capability = 35 records, AMD-58/AMD-59/AMD-70). Aggregated from the
+     * canonical per-module manifests shipped by {@code com.homesynapse.event} and
      * {@code com.homesynapse.integration} (M3.6c). This is the same
      * aggregation pattern the M3.6d composition root performs at startup.
      */

@@ -114,16 +114,27 @@ final class EventCategoryMappingTest {
     }
 
     @Test
+    @DisplayName("config.validation_completed is classified as [SYSTEM]")
+    void configValidationCompleted_isSystem() {
+        // AMD-70: observability-only config event, consistent with the
+        // CONFIG_CHANGED / CONFIG_ERROR -> [SYSTEM] siblings.
+        List<EventCategory> categories =
+                EventCategoryMapping.categoriesFor(EventTypes.CONFIG_VALIDATION_COMPLETED);
+
+        assertThat(categories).containsExactly(EventCategory.SYSTEM);
+    }
+
+    @Test
     @DisplayName("explicit mapping count matches the Doc 01 §4.4 enumeration")
     void explicitMappingCount_matchesDocEnumeration() {
-        // Doc 01 §4.4 enumerates 34 production event types (22 core + 10
-        // integration lifecycle + 2 capability — AMD-58/AMD-59), matching the
-        // size of AllEventClasses.ALL_EVENTS. Holding this as a hard assertion
+        // Doc 01 §4.4 enumerates 35 production event types (23 core + 10
+        // integration lifecycle + 2 capability — AMD-58/AMD-59/AMD-70), matching
+        // the size of AllEventClasses.ALL_EVENTS. Holding this as a hard assertion
         // makes silent entry removal from the table a test failure rather than a
         // runtime fallback surprise.
         assertThat(EventCategoryMapping.explicitMappingCount())
                 .as("explicit mapping count — update Doc 01 §4.4 and this "
                         + "assertion together if a new production event type is added")
-                .isEqualTo(34);
+                .isEqualTo(35);
     }
 }

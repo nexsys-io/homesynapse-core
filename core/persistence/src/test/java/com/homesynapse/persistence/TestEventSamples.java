@@ -14,6 +14,7 @@ import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.CommandResultEvent;
 import com.homesynapse.event.ConfigChangedEvent;
 import com.homesynapse.event.ConfigErrorEvent;
+import com.homesynapse.event.ConfigValidationCompletedEvent;
 import com.homesynapse.event.DeviceAdoptedEvent;
 import com.homesynapse.event.DeviceDiscoveredEvent;
 import com.homesynapse.event.DeviceRemovedEvent;
@@ -173,6 +174,13 @@ final class TestEventSamples {
     static ConfigErrorEvent configError() {
         return new ConfigErrorEvent(
                 "retention.diagnostic_days", "warning", "value out of range", "7");
+    }
+
+    static ConfigValidationCompletedEvent configValidationCompleted() {
+        // AMD-70 flattened payload: severityCounts keys are Severity.name()
+        // strings; their values sum to issueCount.
+        return new ConfigValidationCompletedEvent(
+                2, 1, 3, java.util.Map.of("ERROR", 2, "WARNING", 1));
     }
 
     static TelemetrySummaryEvent telemetrySummary() {
