@@ -16,5 +16,15 @@
 module com.homesynapse.config {
     requires transitive com.homesynapse.event;
 
+    // Third-party, non-transitive (Nick ruling 2026-06-10): consumed only by
+    // the package-private M6.1a pipeline classes; never exposed on the public
+    // API (-Xlint:exports silent). The HomeSynapse-module edge set above is
+    // unchanged — the [AMD-71-A] zero-new-edge property holds.
+    requires org.snakeyaml.engine.v2;
+    requires com.networknt.schema;
+    requires com.fasterxml.jackson.core;
+    requires com.fasterxml.jackson.databind;
+    requires org.slf4j;
+
     exports com.homesynapse.config;
 }

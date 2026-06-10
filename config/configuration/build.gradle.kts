@@ -9,6 +9,10 @@ dependencies {
 
     implementation(libs.snakeyaml.engine)
     implementation(libs.json.schema.validator)
+    // module-info lockstep (Nick ruling 2026-06-10): jackson-databind otherwise
+    // arrives only transitively via networknt's POM; slf4j backs LTD-15 logging.
+    implementation(libs.jackson.databind)
+    implementation(libs.slf4j.api)
 
     // testFixtures dependencies — InMemoryConfigAccess and TestConfigFactory
     testFixturesImplementation(libs.junit.jupiter)

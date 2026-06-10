@@ -161,12 +161,28 @@ final class HomeSynapseArchRules {
     // Production code outside platform modules should not use
     // java.io.File or java.nio.file.Files directly — use the
     // PlatformPaths abstraction instead.
+    //
+    // com.homesynapse.config.. is exempt (PM ruling 2026-06-10): ratified
+    // AMD-71/[AMD-71-A] designates config the filesystem consumer for its
+    // own document tree, rooted at the configDir Path injected by the
+    // composition root (no config→platform edge). The compensating
+    // control is AMD-71-INV-01 canonicalization-containment — every
+    // !include target toRealPath()-resolved and contained under
+    // integrations/ — test-pinned by ConfigLayoutTest.
     // ──────────────────────────────────────────────────────────────────
 
     /**
      * Production code outside platform modules should not use
      * {@code java.io.File} or {@code java.nio.file.Files} directly.
      * Use {@code PlatformPaths} abstraction instead.
+     *
+     * <p>{@code com.homesynapse.config..} is deliberately absent from the
+     * package list (PM ruling 2026-06-10): ratified AMD-71/[AMD-71-A]
+     * makes the Configuration System the designated filesystem consumer,
+     * rooted at the composition-root-injected {@code configDir}
+     * {@code Path}. The compensating control is the AMD-71-INV-01
+     * canonicalization-containment guard, test-pinned by
+     * {@code ConfigLayoutTest}.
      */
     static final ArchRule NO_DIRECT_FILESYSTEM_IN_CORE =
             noClasses()
@@ -174,8 +190,7 @@ final class HomeSynapseArchRules {
                             "com.homesynapse.event..",
                             "com.homesynapse.device..",
                             "com.homesynapse.state..",
-                            "com.homesynapse.automation..",
-                            "com.homesynapse.config.."
+                            "com.homesynapse.automation.."
                     )
                     .should().accessClassesThat().belongToAnyOf(
                             java.io.File.class,

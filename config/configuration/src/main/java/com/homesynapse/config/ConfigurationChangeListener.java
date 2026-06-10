@@ -10,9 +10,11 @@ package com.homesynapse.config;
  * change to that section.
  *
  * <p>Listeners are registered with {@code ConfigurationService} at composition
- * time — a constructor-injected map keyed by {@link #sectionPath()}, no
+ * time — a constructor-injected registration list from which the service
+ * builds its internal map keyed by {@link #sectionPath()}, no
  * {@code ServiceLoader} (DEC-M3-16). At most one listener per section path;
- * a duplicate registration is a construction-time error (AMD-66 §2.4).</p>
+ * a duplicate registration is a construction-time
+ * {@code IllegalArgumentException} (AMD-66 §2.4, corrected 2026-06-10).</p>
  *
  * <p>When no listener is registered for a changed section, the reload
  * pipeline falls back to the per-property {@code x-reload} JSON Schema
