@@ -31,8 +31,8 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 /**
- * Full round-trip tests for {@link EventPayloadCodec} across all 35 registered
- * event types (23 core + 10 integration lifecycle + 2 capability), plus
+ * Full round-trip tests for {@link EventPayloadCodec} across all 36 registered
+ * event types (24 core + 10 integration lifecycle + 2 capability), plus
  * DegradedEvent fallback verification (DECIDE-M2-06, DECIDE-M2-07) and SNAKE_CASE
  * property naming verification.
  */
@@ -63,7 +63,7 @@ class EventPayloadCodecTest {
                 .isEqualTo(original);
     }
 
-    // ===== Core event round-trips (23) =====
+    // ===== Core event round-trips (24) =====
 
     @Nested
     @DisplayName("core event round-trips")
@@ -206,6 +206,13 @@ class EventPayloadCodecTest {
             assertRoundTrip(
                     TestEventSamples.configValidationCompleted(),
                     EventTypes.CONFIG_VALIDATION_COMPLETED);
+        }
+
+        @Test
+        void configSectionReloaded() throws Exception {
+            assertRoundTrip(
+                    TestEventSamples.configSectionReloaded(),
+                    EventTypes.CONFIG_SECTION_RELOADED);
         }
 
         @Test

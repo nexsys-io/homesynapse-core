@@ -4,7 +4,9 @@
  */
 package com.homesynapse.config;
 
+import com.homesynapse.event.ConfigErrorEvent;
 import com.homesynapse.event.ConfigValidationCompletedEvent;
+import com.homesynapse.event.EventDraft;
 import com.homesynapse.platform.identity.SystemId;
 import com.homesynapse.platform.identity.Ulid;
 
@@ -261,10 +263,27 @@ class ConfigLayoutTest {
         // ERROR at startup: the key reverts to its schema default (DP-2).
         assertThat(model.sections().get("integrations.zigbee").values())
                 .containsEntry("channel", 15);
-        assertThat(publisher.rootDrafts).hasSize(1);
-        ConfigValidationCompletedEvent event =
-                (ConfigValidationCompletedEvent) publisher.rootDrafts.get(0).payload();
-        assertThat(event.severityCounts()).containsEntry("ERROR", 1);
+        // Pin went 1 -> 2 at M6.4 (2026-06-11, R1/DP-10 ruling): a completed
+        // validation pass with an ERROR issue now publishes one config_error
+        // per ERROR alongside the validation summary. No ordering contract
+        // between the two — select by type.
+        assertThat(publisher.rootDrafts).hasSize(2);
+        List<ConfigErrorEvent> errorEvents = publisher.rootDrafts.stream()
+                .map(EventDraft::payload)
+                .filter(ConfigErrorEvent.class::isInstance)
+                .map(ConfigErrorEvent.class::cast)
+                .toList();
+        assertThat(errorEvents).hasSize(1);
+        assertThat(errorEvents.get(0).path()).endsWith("channel");
+        assertThat(errorEvents.get(0).severity()).isEqualTo("ERROR");
+        assertThat(errorEvents.get(0).appliedDefault()).isEqualTo("15");
+        List<ConfigValidationCompletedEvent> summaryEvents = publisher.rootDrafts.stream()
+                .map(EventDraft::payload)
+                .filter(ConfigValidationCompletedEvent.class::isInstance)
+                .map(ConfigValidationCompletedEvent.class::cast)
+                .toList();
+        assertThat(summaryEvents).hasSize(1);
+        assertThat(summaryEvents.get(0).severityCounts()).containsEntry("ERROR", 1);
     }
 
     // ──────────────────────────────────────────────────────────────────

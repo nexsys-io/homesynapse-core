@@ -37,7 +37,7 @@ class EventTypeAnnotationTest {
 
     /**
      * The authoritative list of core {@link DomainEvent} payload record classes
-     * that must carry {@link EventType}. Must contain exactly 23 entries.
+     * that must carry {@link EventType}. Must contain exactly 24 entries.
      * {@link DegradedEvent} is deliberately absent — it is the fallback wrapper
      * and is never serialized under its own type discriminator.
      */
@@ -64,6 +64,7 @@ class EventTypeAnnotationTest {
             ConfigChangedEvent.class,
             ConfigErrorEvent.class,
             ConfigValidationCompletedEvent.class,
+            ConfigSectionReloadedEvent.class,
             TelemetrySummaryEvent.class);
 
     @Test
@@ -142,9 +143,9 @@ class EventTypeAnnotationTest {
     }
 
     @Test
-    @DisplayName("exactly 23 core event records carry @EventType")
-    void exactlyTwentyThreeAnnotatedRecords() {
-        assertThat(EXPECTED_EVENT_RECORDS).hasSize(23);
+    @DisplayName("exactly 24 core event records carry @EventType")
+    void exactlyTwentyFourAnnotatedRecords() {
+        assertThat(EXPECTED_EVENT_RECORDS).hasSize(24);
 
         long annotatedCount = EXPECTED_EVENT_RECORDS.stream()
                 .filter(cls -> cls.isRecord())
@@ -152,7 +153,7 @@ class EventTypeAnnotationTest {
                 .filter(cls -> cls.getAnnotation(EventType.class) != null)
                 .count();
 
-        assertThat(annotatedCount).isEqualTo(23L);
+        assertThat(annotatedCount).isEqualTo(24L);
     }
 
     @Test

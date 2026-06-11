@@ -18,9 +18,12 @@ import java.util.Objects;
  * {@link ConfigurationService#reload()} and consumed by the REST API for
  * change notification and by subscribers for targeted reconfiguration.</p>
  *
- * <p>The {@link #changes()} list is unmodifiable. Convenience filter methods
- * ({@code hot()}, {@code integrationRestart()}, {@code processRestart()})
- * are Phase 3 implementation.</p>
+ * <p>The {@link #changes()} list is unmodifiable. The convenience filter
+ * methods ({@link #hot()}, {@link #integrationRestart()},
+ * {@link #processRestart()}) slice it by the per-property {@code x-reload}
+ * classification each {@link ConfigChange} carries (Doc 06 §4.3) — note
+ * this is the schema-derived per-key classification, independent of any
+ * AMD-66 listener's section-level override.</p>
  *
  * @param timestamp the instant the reload diff was computed; never {@code null}
  * @param changes   the list of individual key-level changes, unmodifiable;
@@ -43,5 +46,44 @@ public record ConfigChangeSet(
         Objects.requireNonNull(timestamp, "timestamp must not be null");
         Objects.requireNonNull(changes, "changes must not be null");
         changes = List.copyOf(changes);
+    }
+
+    /**
+     * Returns the changes whose properties are {@code x-reload: hot} —
+     * applied by the swap itself, no restart required.
+     *
+     * @return the {@link ReloadClassification#HOT} changes, unmodifiable;
+     *         never {@code null}
+     */
+    public List<ConfigChange> hot() {
+        return filterBy(ReloadClassification.HOT);
+    }
+
+    /**
+     * Returns the changes whose properties require an integration restart
+     * to take effect.
+     *
+     * @return the {@link ReloadClassification#INTEGRATION_RESTART} changes,
+     *         unmodifiable; never {@code null}
+     */
+    public List<ConfigChange> integrationRestart() {
+        return filterBy(ReloadClassification.INTEGRATION_RESTART);
+    }
+
+    /**
+     * Returns the changes whose properties require a full process restart
+     * to take effect — the default for unannotated properties.
+     *
+     * @return the {@link ReloadClassification#PROCESS_RESTART} changes,
+     *         unmodifiable; never {@code null}
+     */
+    public List<ConfigChange> processRestart() {
+        return filterBy(ReloadClassification.PROCESS_RESTART);
+    }
+
+    private List<ConfigChange> filterBy(ReloadClassification classification) {
+        return changes.stream()
+                .filter(change -> change.reload() == classification)
+                .toList();
     }
 }

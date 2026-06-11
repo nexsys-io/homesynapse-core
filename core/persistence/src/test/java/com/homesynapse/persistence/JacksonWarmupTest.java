@@ -40,7 +40,7 @@ class JacksonWarmupTest {
     void warmup_createsWritersAndReadersForAllTypes() {
         JacksonWarmup warmup = JacksonWarmup.warmup(mapper, registry);
 
-        assertThat(warmup.size()).isEqualTo(35);
+        assertThat(warmup.size()).isEqualTo(36);
 
         for (Class<? extends DomainEvent> eventClass : AllEventClasses.ALL_EVENTS) {
             assertThat(warmup.writerFor(eventClass))
@@ -103,13 +103,13 @@ class JacksonWarmupTest {
     }
 
     @Test
-    @DisplayName("warmup accepts a core-only registry of 23 classes")
+    @DisplayName("warmup accepts a core-only registry of 24 classes")
     void warmup_acceptsCoreOnlyRegistry() {
         EventTypeRegistry coreOnly = new EventTypeRegistry(AllEventClasses.CORE_EVENTS);
 
         JacksonWarmup warmup = JacksonWarmup.warmup(mapper, coreOnly);
 
-        assertThat(warmup.size()).isEqualTo(23);
+        assertThat(warmup.size()).isEqualTo(24);
     }
 
     @Test

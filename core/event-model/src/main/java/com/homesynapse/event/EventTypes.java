@@ -12,7 +12,7 @@ import java.util.List;
  *
  * <p>This class defines all core event type string constants referenced by
  * {@link EventEnvelope#eventType()} and the {@link EventType} annotation values on
- * the 23 core payload records. Each constant uses UPPER_SNAKE_CASE names with
+ * the 24 core payload records. Each constant uses UPPER_SNAKE_CASE names with
  * lower_snake_case string values for consistency with the taxonomy defined in
  * Doc 01 §4.3.
  *
@@ -27,7 +27,7 @@ import java.util.List;
  * shared across all HomeSynapse deployments.
  *
  * <p><strong>Core production event class manifest (M3.6c):</strong>
- * {@link #CORE_PRODUCTION_EVENT_CLASSES} is the canonical, ordered list of the 23 core
+ * {@link #CORE_PRODUCTION_EVENT_CLASSES} is the canonical, ordered list of the 24 core
  * {@link DomainEvent} payload record classes that ship with HomeSynapse Core. The composition
  * root aggregates this list with the per-module manifests contributed by other modules
  * (currently {@code IntegrationEvents.LIFECYCLE_EVENT_CLASSES} in
@@ -242,10 +242,13 @@ public final class EventTypes {
 	/** Event issued when a configuration load/reload validation pass completes. */
 	public static final String CONFIG_VALIDATION_COMPLETED = "config.validation_completed";
 
+	/** Event issued per configuration section actually changed by a reload. */
+	public static final String CONFIG_SECTION_RELOADED = "config.section_reloaded";
+
 	// ========== Core Production Event Class Manifest (M3.6c, DECIDE-04) ==========
 
 	/**
-	 * Canonical, ordered list of the 23 core {@link DomainEvent} payload record classes
+	 * Canonical, ordered list of the 24 core {@link DomainEvent} payload record classes
 	 * that ship with HomeSynapse Core. Every entry carries an {@link EventType} annotation
 	 * whose value is one of the string constants above and which is registered with the
 	 * {@code EventTypeRegistry} at startup.
@@ -295,5 +298,6 @@ public final class EventTypes {
 					ConfigChangedEvent.class,
 					ConfigErrorEvent.class,
 					ConfigValidationCompletedEvent.class,
+					ConfigSectionReloadedEvent.class,
 					TelemetrySummaryEvent.class);
 }

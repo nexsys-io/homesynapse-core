@@ -14,6 +14,7 @@ import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.CommandResultEvent;
 import com.homesynapse.event.ConfigChangedEvent;
 import com.homesynapse.event.ConfigErrorEvent;
+import com.homesynapse.event.ConfigSectionReloadedEvent;
 import com.homesynapse.event.ConfigValidationCompletedEvent;
 import com.homesynapse.event.DeviceAdoptedEvent;
 import com.homesynapse.event.DeviceDiscoveredEvent;
@@ -181,6 +182,13 @@ final class TestEventSamples {
         // strings; their values sum to issueCount.
         return new ConfigValidationCompletedEvent(
                 2, 1, 3, java.util.Map.of("ERROR", 2, "WARNING", 1));
+    }
+
+    static ConfigSectionReloadedEvent configSectionReloaded() {
+        // AMD-70 flattened payload (M6.4): appliedClassification is the
+        // config module's ReloadClassification.name() carried as a string.
+        return new ConfigSectionReloadedEvent(
+                "integrations.zigbee", 3, 1, "INTEGRATION_RESTART");
     }
 
     static TelemetrySummaryEvent telemetrySummary() {

@@ -4,6 +4,7 @@
  */
 package com.homesynapse.config;
 
+import com.homesynapse.event.ConfigErrorEvent;
 import com.homesynapse.event.ConfigValidationCompletedEvent;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventOrigin;
@@ -35,20 +36,23 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Tests for {@link StandardConfigurationService} — the M6.1a load path:
+ * Tests for {@link StandardConfigurationService} — the load path:
  * the Doc 06 §3.1 pipeline (parse, migrate, default-merge, validate,
  * model construction), DP-2 startup error handling (ERROR reverts to the
  * schema default, FATAL aborts), the AMD-67 migration-trigger semantics
  * pinned by {@link ConfigMigratorChainTest}, AMD-66 §2.4 listener
- * registration, and the AMD-70 {@code config.validation_completed}
+ * registration, the AMD-70 {@code config.validation_completed}
  * publish path (DIAGNOSTIC, SYSTEM origin, null eventTime, system subject,
- * via {@code publishRoot}).
+ * via {@code publishRoot}), the M6.4 per-ERROR {@code config_error}
+ * startup publication (DP-10) with the §12.4 sensitivity fence, and the
+ * M6.4 §3.7 step-7 migration write-back with its pre-migration backup
+ * (DP-11).
  *
- * <p>The reload pipeline and the write path are M6.4 — both methods are
- * staged as {@link UnsupportedOperationException} here and asserted as
- * such.</p>
+ * <p>The reload pipeline and the write path live in
+ * {@link StandardConfigurationServiceReloadTest} and
+ * {@link StandardConfigurationServiceWriteTest}.</p>
  */
-@DisplayName("StandardConfigurationService (M6.1a load path)")
+@DisplayName("StandardConfigurationService (load path)")
 class StandardConfigurationServiceTest {
 
     private static final Instant CLOCK_INSTANT = Instant.parse("2026-06-10T00:00:00Z");
@@ -140,8 +144,23 @@ class StandardConfigurationServiceTest {
     }
 
     private ConfigValidationCompletedEvent publishedEvent() {
-        assertThat(publisher.rootDrafts).hasSize(1);
-        return (ConfigValidationCompletedEvent) publisher.rootDrafts.get(0).payload();
+        // DP-10 (M6.4) adds per-ERROR config_error drafts to the same load,
+        // so the validation summary is selected by type, not by position.
+        List<ConfigValidationCompletedEvent> events = publisher.rootDrafts.stream()
+                .map(EventDraft::payload)
+                .filter(ConfigValidationCompletedEvent.class::isInstance)
+                .map(ConfigValidationCompletedEvent.class::cast)
+                .toList();
+        assertThat(events).hasSize(1);
+        return events.get(0);
+    }
+
+    private List<ConfigErrorEvent> configErrorEvents() {
+        return publisher.rootDrafts.stream()
+                .map(EventDraft::payload)
+                .filter(ConfigErrorEvent.class::isInstance)
+                .map(ConfigErrorEvent.class::cast)
+                .toList();
     }
 
     /** Listener stub for registration tests; classification is M6.4. */
@@ -647,32 +666,327 @@ class StandardConfigurationServiceTest {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // M6.4 staging
+    // DP-10: per-ERROR config_error startup publication (M6.4, R1)
     // ──────────────────────────────────────────────────────────────────
 
     @Nested
-    @DisplayName("M6.4 staging")
-    class StagingTests {
+    @DisplayName("config_error startup publication")
+    class ConfigErrorPublicationTests {
 
         /** Creates a new test instance. */
-        StagingTests() {
+        ConfigErrorPublicationTests() {
             // Explicit constructor per -Xlint:all -Werror requirement.
         }
 
         @Test
-        @DisplayName("reload() is staged until M6.4")
-        void reloadStagedUntilM64() {
-            assertThatThrownBy(() -> service().reload())
-                    .isInstanceOf(UnsupportedOperationException.class)
-                    .hasMessageContaining("M6.4");
+        @DisplayName("load with 2 ERROR + 1 WARNING publishes exactly 2 config_error events")
+        void oneEventPerErrorIssue() throws Exception {
+            writeRoot("""
+                    event_bus:
+                      queue_capacity: -5
+                      dispatch_mode: bogus
+                      qeue_capacity: 9
+                    """);
+
+            service().load();
+
+            List<ConfigErrorEvent> events = configErrorEvents();
+            assertThat(events).hasSize(2);
+            assertThat(events)
+                    .extracting(ConfigErrorEvent::path)
+                    .containsExactlyInAnyOrder(
+                            "event_bus.queue_capacity", "event_bus.dispatch_mode");
+            assertThat(events)
+                    .allSatisfy(event -> {
+                        assertThat(event.severity()).isEqualTo("ERROR");
+                        assertThat(event.message()).isNotBlank();
+                    });
+            assertThat(events)
+                    .extracting(ConfigErrorEvent::appliedDefault)
+                    .containsExactlyInAnyOrder("1024", "serial");
         }
 
         @Test
-        @DisplayName("write() is staged until M6.4")
-        void writeStagedUntilM64() {
-            assertThatThrownBy(() -> service().write(List.of(), CLOCK_INSTANT))
-                    .isInstanceOf(UnsupportedOperationException.class)
-                    .hasMessageContaining("M6.4");
+        @DisplayName("config_error drafts carry the DP-9 metadata")
+        void errorEventsCarryRuledMetadata() throws Exception {
+            writeRoot("event_bus:\n  queue_capacity: -5\n");
+
+            service().load();
+
+            EventDraft draft = publisher.rootDrafts.stream()
+                    .filter(d -> EventTypes.CONFIG_ERROR.equals(d.eventType()))
+                    .findFirst()
+                    .orElseThrow();
+            assertThat(draft.schemaVersion()).isEqualTo(1);
+            assertThat(draft.eventTime()).isNull();
+            assertThat(draft.priority()).isEqualTo(EventPriority.DIAGNOSTIC);
+            assertThat(draft.origin()).isEqualTo(EventOrigin.SYSTEM);
+            assertThat(draft.subjectRef().type()).isEqualTo(SubjectType.SYSTEM);
+            assertThat(draft.subjectRef().id()).isEqualTo(SYSTEM_ID.value());
+            assertThat(draft.actorRef()).isNull();
+            assertThat(draft.idempotencyKey()).isNull();
+        }
+
+        @Test
+        @DisplayName("a FATAL pass still publishes config_error for its ERROR rows before the throw")
+        void fatalPassStillPublishesErrorEvents() throws Exception {
+            StandardSchemaRegistry registry = registry(1, 0);
+            registry.registerCoreSchema("security", SECURITY_SCHEMA);
+            StandardConfigurationService svc = new StandardConfigurationService(
+                    configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry,
+                    new JsonSchemaCompositeValidator(), List.of(), List.of());
+            writeRoot("""
+                    security: {}
+                    event_bus:
+                      queue_capacity: -5
+                    """);
+
+            assertThatThrownBy(svc::load)
+                    .isInstanceOf(ConfigurationLoadException.class);
+
+            // The ERROR row publishes; the FATAL row itself does not
+            // (config_error is the §4.5 revert-to-default diagnostic).
+            List<ConfigErrorEvent> events = configErrorEvents();
+            assertThat(events).hasSize(1);
+            assertThat(events.get(0).path()).isEqualTo("event_bus.queue_capacity");
+            assertThat(events.get(0).severity()).isEqualTo("ERROR");
+        }
+
+        @Test
+        @DisplayName("a null schema default publishes the literal \"(none)\"")
+        void nullSchemaDefaultPublishesNone() throws Exception {
+            StandardSchemaRegistry registry = registry(1, 0);
+            registry.registerCoreSchema("security", SECURITY_SCHEMA);
+            StandardConfigurationService svc = new StandardConfigurationService(
+                    configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry,
+                    new JsonSchemaCompositeValidator(), List.of(), List.of());
+            // api_token is present (required satisfied) but mistyped — an
+            // ERROR on a key whose schema declares no default.
+            writeRoot("security:\n  api_token: 123\n");
+
+            svc.load();
+
+            List<ConfigErrorEvent> events = configErrorEvents();
+            assertThat(events).hasSize(1);
+            assertThat(events.get(0).path()).isEqualTo("security.api_token");
+            assertThat(events.get(0).appliedDefault()).isEqualTo("(none)");
+        }
+
+        @Test
+        @DisplayName("an x-sensitive path publishes \"[REDACTED]\" and \"(none)\" (§12.4 fence)")
+        void sensitivePathRedacted() throws Exception {
+            StandardSchemaRegistry registry = registry(1, 0);
+            registry.registerCoreSchema("vault", """
+                    {
+                      "type": "object",
+                      "properties": {
+                        "api_secret": {
+                          "type": "string",
+                          "x-sensitive": true,
+                          "default": "rotate-me"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                    """);
+            StandardConfigurationService svc = new StandardConfigurationService(
+                    configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry,
+                    new JsonSchemaCompositeValidator(), List.of(), List.of());
+            writeRoot("vault:\n  api_secret: 123\n");
+
+            svc.load();
+
+            List<ConfigErrorEvent> events = configErrorEvents();
+            assertThat(events).hasSize(1);
+            assertThat(events.get(0).path()).isEqualTo("vault.api_secret");
+            assertThat(events.get(0).message()).isEqualTo("[REDACTED]");
+            // Never the schema default, never the invalid value.
+            assertThat(events.get(0).appliedDefault()).isEqualTo("(none)");
+        }
+
+        @Test
+        @DisplayName("a clean load publishes no config_error")
+        void cleanLoadPublishesNoConfigError() throws Exception {
+            writeRoot("event_bus:\n  queue_capacity: 64\n");
+
+            service().load();
+
+            assertThat(configErrorEvents()).isEmpty();
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // DP-11: §3.7 step-7 migration write-back + pre-migration backup (M6.4, R2)
+    // ──────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("Migration write-back")
+    class MigrationWriteBackTests {
+
+        /** Creates a new test instance. */
+        MigrationWriteBackTests() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        private Path rootFile() {
+            return configDir.resolve("homesynapse.yaml");
+        }
+
+        private Path preMigrationBackup() {
+            return configDir.resolve("homesynapse.yaml.pre-migration-v1.0");
+        }
+
+        /** 1.0→2.0 migrator with an observable transform (64 → 640). */
+        private ConfigMigrator scalingMigrator(List<String> applications) {
+            return new ConfigMigrator() {
+                @Override
+                public int fromMajor() {
+                    return 1;
+                }
+
+                @Override
+                public int fromMinor() {
+                    return 0;
+                }
+
+                @Override
+                public int toMajor() {
+                    return 2;
+                }
+
+                @Override
+                public int toMinor() {
+                    return 0;
+                }
+
+                @Override
+                public MigrationResult migrate(Map<String, Object> rawConfig) {
+                    applications.add("1.0->2.0");
+                    Map<String, Object> migrated = new HashMap<>(rawConfig);
+                    Object eventBus = migrated.get("event_bus");
+                    if (eventBus instanceof Map<?, ?> section) {
+                        Map<String, Object> updated = new HashMap<>();
+                        section.forEach((k, v) -> updated.put(String.valueOf(k), v));
+                        updated.put("queue_capacity", 640);
+                        migrated.put("event_bus", updated);
+                    }
+                    return new MigrationResult(migrated, List.of());
+                }
+            };
+        }
+
+        @Test
+        @DisplayName("a migrated load persists the migrated document with the declared pair stamped")
+        void migratedLoadPersistsMigratedDocument() throws Exception {
+            String original = """
+                    schema_version: { major: 1, minor: 0 }
+                    event_bus:
+                      queue_capacity: 64
+                    """;
+            writeRoot(original);
+            List<String> applications = new ArrayList<>();
+
+            ConfigModel model = service(2, 0,
+                    List.of(scalingMigrator(applications)), List.of()).load();
+
+            assertThat(applications).containsExactly("1.0->2.0");
+            assertThat(model.sections().get("event_bus").values())
+                    .containsEntry("queue_capacity", 640);
+            String onDisk = Files.readString(rootFile());
+            assertThat(onDisk).contains("640");
+            assertThat(onDisk).contains("schema_version");
+            assertThat(onDisk).contains("major: 2");
+            assertThat(onDisk).doesNotContain("major: 1");
+            // INV-CE-06: backup-before-migrate, never auto-deleted.
+            assertThat(preMigrationBackup()).exists();
+            assertThat(Files.readString(preMigrationBackup())).isEqualTo(original);
+        }
+
+        @Test
+        @DisplayName("the write-back refreshes the concurrency token from the NEW file mtime")
+        void writeBackRefreshesToken() throws Exception {
+            writeRoot("""
+                    schema_version: { major: 1, minor: 0 }
+                    event_bus:
+                      queue_capacity: 64
+                    """);
+
+            ConfigModel model = service(2, 0,
+                    List.of(scalingMigrator(new ArrayList<>())), List.of()).load();
+
+            Instant fileMtime = Files.getLastModifiedTime(rootFile()).toInstant();
+            assertThat(model.fileModifiedAt()).isEqualTo(fileMtime);
+        }
+
+        @Test
+        @DisplayName("a failure inside the write-back window leaves backup + original, never a torn file")
+        void crashWindowLeavesOriginalRecoverable() throws Exception {
+            String original = """
+                    schema_version: { major: 1, minor: 0 }
+                    event_bus:
+                      queue_capacity: 64
+                    """;
+            writeRoot(original);
+            // A directory squatting on the temp-file name fails the atomic
+            // flush AFTER the backup copy — the inside-the-window injection.
+            Files.createDirectory(configDir.resolve("homesynapse.yaml.tmp"));
+
+            ConfigModel model = service(2, 0,
+                    List.of(scalingMigrator(new ArrayList<>())), List.of()).load();
+
+            // The in-memory model is migrated (idempotency makes the next
+            // boot's re-migration safe); on disk the original is intact and
+            // the backup exists — recoverable, never torn (REC-135).
+            assertThat(model.sections().get("event_bus").values())
+                    .containsEntry("queue_capacity", 640);
+            assertThat(Files.readString(rootFile())).isEqualTo(original);
+            assertThat(preMigrationBackup()).exists();
+            assertThat(Files.readString(preMigrationBackup())).isEqualTo(original);
+        }
+
+        @Test
+        @DisplayName("a second load of the written-back file runs no migration (chain idempotency)")
+        void secondLoadRunsNoMigration() throws Exception {
+            writeRoot("""
+                    schema_version: { major: 1, minor: 0 }
+                    event_bus:
+                      queue_capacity: 64
+                    """);
+            List<String> applications = new ArrayList<>();
+            StandardConfigurationService svc = service(2, 0,
+                    List.of(scalingMigrator(applications)), List.of());
+            svc.load();
+            assertThat(applications).hasSize(1);
+
+            svc.load();
+
+            assertThat(applications)
+                    .as("the written-back file is at the declared major —"
+                            + " no second migration may trigger")
+                    .hasSize(1);
+        }
+
+        @Test
+        @DisplayName("a no-migration load writes nothing back")
+        void noMigrationLoadWritesNothingBack() throws Exception {
+            String original = "event_bus:\n  queue_capacity: 64\n";
+            writeRoot(original);
+
+            service(1, 0, List.of(scalingMigrator(new ArrayList<>())), List.of())
+                    .load();
+
+            assertThat(Files.readString(rootFile())).isEqualTo(original);
+            assertThat(preMigrationBackup()).doesNotExist();
+        }
+
+        @Test
+        @DisplayName("a zero-config (absent file) load writes nothing back")
+        void zeroConfigLoadWritesNothingBack() throws Exception {
+            service(2, 0, List.of(scalingMigrator(new ArrayList<>())), List.of())
+                    .load();
+
+            assertThat(rootFile()).doesNotExist();
+            assertThat(preMigrationBackup()).doesNotExist();
         }
     }
 }
