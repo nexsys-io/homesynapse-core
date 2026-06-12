@@ -1,4 +1,4 @@
-# automation — `com.homesynapse.automation` — ~52 types — Trigger→Condition→Action rule engine, 4 sealed hierarchies, cascade governance
+# automation — `com.homesynapse.automation` — ~53 types — Trigger→Condition→Action rule engine, 4 sealed hierarchies, cascade governance
 
 ## Purpose
 
@@ -56,7 +56,7 @@ module com.homesynapse.automation {
 
 ## Package Structure
 
-- **`com.homesynapse.automation`** — All types in a single flat package. Contains: 5 enums (ConcurrencyMode, RunStatus, PendingStatus, UnavailablePolicy, MaxExceededSeverity), 1 typed ULID wrapper (RunId), 4 sealed interfaces (Selector, TriggerDefinition, ConditionDefinition, ActionDefinition), 27 sealed interface subtypes (6 selectors, 9 triggers, 7 conditions, 8 actions — including Tier 2 reserved empty records), 4 data records (AutomationDefinition, RunContext, PendingCommand, DurationTimer), 9 service interfaces (AutomationRegistry, TriggerEvaluator, ConditionEvaluator, ActionExecutor, RunManager, CommandDispatchService, PendingCommandLedger, SelectorResolver, ConflictDetector), and package-info.java.
+- **`com.homesynapse.automation`** — All types in a single flat package. Contains: 5 enums (ConcurrencyMode, RunStatus, PendingStatus, UnavailablePolicy, MaxExceededSeverity), 1 typed ULID wrapper (RunId), 4 sealed interfaces (Selector, TriggerDefinition, ConditionDefinition, ActionDefinition), 30 sealed interface subtypes (6 selectors, 9 triggers, 7 conditions, 8 actions — including Tier 2 reserved empty records; count corrected 2026-06-12, re-derived 6+9+7+8 from source — the prior "27" was a stale copied-forward count), 4 data records (AutomationDefinition, RunContext, PendingCommand, DurationTimer), 9 service interfaces (AutomationRegistry, TriggerEvaluator, ConditionEvaluator, ActionExecutor, RunManager, CommandDispatchService, PendingCommandLedger, SelectorResolver, ConflictDetector), and package-info.java.
 
 ## Complete Type Inventory
 
@@ -155,7 +155,7 @@ module com.homesynapse.automation {
 | `SelectorResolver` | interface | Resolves selectors to entity ID sets (§3.12, §8.1) | `resolve(Selector)` → Set<EntityId>. Direct/slug → 0 or 1 entity. Area/label/type → 0+. Compound → intersection. Thread-safe. |
 | `ConflictDetector` | interface | Detects contradictory commands across Runs (§3.13, §8.1) | `scanForConflicts(EventId, List<RunContext>)`. Post-execution only. Both commands execute in Tier 1 (D6). Produces automation_conflict_detected DIAGNOSTIC events. Thread-safe. |
 
-**Total: ~52 public types + 1 module-info.java + 1 package-info.java = ~54 Java files.**
+**Total: 53 public types (5 enums + 1 wrapper + 4 sealed roots + 30 permits + 4 records + 9 interfaces) + package-info.java = 54 files in the package, + module-info.java (counts re-derived 2026-06-12 with the 30-permit correction; the 54-file source-tree count matches the 2026-05-22 v3 inspection).**
 
 ## Dependencies
 
