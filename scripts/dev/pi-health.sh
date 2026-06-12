@@ -153,7 +153,7 @@ JAVA_VER_HAS_CORRETTO=$(echo "$JAVA_VER_FULL" | grep -ci corretto || true)
 echo "JAVA_VERSION:$JAVA_VER_LINE1"
 echo "JAVA_CORRETTO:$JAVA_VER_HAS_CORRETTO"
 
-TS_ONLINE=$(tailscale status --json 2>/dev/null | grep -o '"Online":true' || echo offline)
+TS_ONLINE=$(tailscale status --json 2>/dev/null | grep -Eo '"Online": ?true' | head -1 || echo offline)
 echo "TAILSCALE:$TS_ONLINE"
 
 echo "UPTIME:$(uptime)"
@@ -317,7 +317,7 @@ fi
 # ---------------------------------------------------------------------------
 header "Network"
 TAILSCALE_STATUS=$(get_val TAILSCALE)
-if echo "$TAILSCALE_STATUS" | grep -q '"Online":true'; then
+if echo "$TAILSCALE_STATUS" | grep -Eq '"Online": ?true'; then
     check_pass "Tailscale: online"
 else
     check_warn "Tailscale: status unclear (SSH works, but mesh health check returned: ${TAILSCALE_STATUS})"
