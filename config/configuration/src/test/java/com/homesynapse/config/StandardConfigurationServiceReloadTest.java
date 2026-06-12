@@ -134,11 +134,20 @@ class StandardConfigurationServiceReloadTest {
         return registry;
     }
 
+    /** Real-but-empty secret machinery (M6.2) — lazy, so tag-free loads
+     * touch no key files (INV-CE-02). Tag behavior is covered by
+     * {@link StandardConfigurationServiceSecretsTest}. */
+    private SecretStore noSecrets() {
+        return SecretStore.create(configDir,
+                ScopeKeyManager.create(configDir, FIXED_CLOCK), FIXED_CLOCK);
+    }
+
     private StandardConfigurationService service(
             List<ConfigurationChangeListener> listeners) {
         return new StandardConfigurationService(
                 configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry(),
-                new JsonSchemaCompositeValidator(), List.of(), listeners);
+                new JsonSchemaCompositeValidator(), List.of(), listeners,
+                noSecrets(), key -> null);
     }
 
     private StandardConfigurationService service() {
@@ -416,7 +425,8 @@ class StandardConfigurationServiceReloadTest {
             withSecurity.registerCoreSchema("security", SECURITY_SCHEMA);
             StandardConfigurationService svc = new StandardConfigurationService(
                     configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, withSecurity,
-                    new JsonSchemaCompositeValidator(), List.of(), List.of());
+                    new JsonSchemaCompositeValidator(), List.of(), List.of(),
+                    noSecrets(), key -> null);
             writeRoot("security:\n  api_token: abc\n");
             ConfigModel active = svc.load();
             int draftsAfterLoad = publisher.rootDrafts.size();

@@ -86,7 +86,16 @@ class StandardConfigurationServiceWriteTest {
         registry.registerCoreSchema("event_bus", EVENT_BUS_SCHEMA);
         return new StandardConfigurationService(
                 configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry,
-                new JsonSchemaCompositeValidator(), List.of(), List.of());
+                new JsonSchemaCompositeValidator(), List.of(), List.of(),
+                noSecrets(), key -> null);
+    }
+
+    /** Real-but-empty secret machinery (M6.2) — lazy, so the write path's
+     * documents here never touch key files. The tag-bearing write rejection
+     * is covered by {@link StandardConfigurationServiceSecretsTest}. */
+    private SecretStore noSecrets() {
+        return SecretStore.create(configDir,
+                ScopeKeyManager.create(configDir, FIXED_CLOCK), FIXED_CLOCK);
     }
 
     private Path rootFile() {

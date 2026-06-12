@@ -124,6 +124,14 @@ class StandardConfigurationServiceTest {
         return registry;
     }
 
+    /** Real-but-empty secret machinery (M6.2) — lazy, so tag-free loads
+     * touch no key files (INV-CE-02). Tag behavior is covered by
+     * {@link StandardConfigurationServiceSecretsTest}. */
+    private SecretStore noSecrets() {
+        return SecretStore.create(configDir,
+                ScopeKeyManager.create(configDir, FIXED_CLOCK), FIXED_CLOCK);
+    }
+
     private StandardConfigurationService service() {
         return service(1, 0, List.of(), List.of());
     }
@@ -134,7 +142,8 @@ class StandardConfigurationServiceTest {
         return new StandardConfigurationService(
                 configDir, expectedMajor, expectedMinor, FIXED_CLOCK, SYSTEM_ID,
                 publisher, registry(expectedMajor, expectedMinor),
-                new JsonSchemaCompositeValidator(), migrators, listeners);
+                new JsonSchemaCompositeValidator(), migrators, listeners,
+                noSecrets(), key -> null);
     }
 
     private void writeRoot(String yaml) throws IOException {
@@ -269,13 +278,13 @@ class StandardConfigurationServiceTest {
                     .isThrownBy(() -> new StandardConfigurationService(
                             configDir, 0, 0, FIXED_CLOCK, SYSTEM_ID, publisher,
                             registry(1, 0), new JsonSchemaCompositeValidator(),
-                            List.of(), List.of()))
+                            List.of(), List.of(), noSecrets(), key -> null))
                     .withMessageContaining("Major");
             assertThatIllegalArgumentException()
                     .isThrownBy(() -> new StandardConfigurationService(
                             configDir, 1, -1, FIXED_CLOCK, SYSTEM_ID, publisher,
                             registry(1, 0), new JsonSchemaCompositeValidator(),
-                            List.of(), List.of()))
+                            List.of(), List.of(), noSecrets(), key -> null))
                     .withMessageContaining("Minor");
         }
     }
@@ -419,7 +428,8 @@ class StandardConfigurationServiceTest {
             registry.registerCoreSchema("security", SECURITY_SCHEMA);
             StandardConfigurationService svc = new StandardConfigurationService(
                     configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry,
-                    new JsonSchemaCompositeValidator(), List.of(), List.of());
+                    new JsonSchemaCompositeValidator(), List.of(), List.of(),
+                    noSecrets(), key -> null);
             writeRoot("""
                     security:
                       api_token: null
@@ -437,7 +447,8 @@ class StandardConfigurationServiceTest {
             registry.registerCoreSchema("security", SECURITY_SCHEMA);
             StandardConfigurationService svc = new StandardConfigurationService(
                     configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry,
-                    new JsonSchemaCompositeValidator(), List.of(), List.of());
+                    new JsonSchemaCompositeValidator(), List.of(), List.of(),
+                    noSecrets(), key -> null);
             writeRoot("security: {}\n");
 
             assertThatThrownBy(svc::load)
@@ -734,7 +745,8 @@ class StandardConfigurationServiceTest {
             registry.registerCoreSchema("security", SECURITY_SCHEMA);
             StandardConfigurationService svc = new StandardConfigurationService(
                     configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry,
-                    new JsonSchemaCompositeValidator(), List.of(), List.of());
+                    new JsonSchemaCompositeValidator(), List.of(), List.of(),
+                    noSecrets(), key -> null);
             writeRoot("""
                     security: {}
                     event_bus:
@@ -759,7 +771,8 @@ class StandardConfigurationServiceTest {
             registry.registerCoreSchema("security", SECURITY_SCHEMA);
             StandardConfigurationService svc = new StandardConfigurationService(
                     configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry,
-                    new JsonSchemaCompositeValidator(), List.of(), List.of());
+                    new JsonSchemaCompositeValidator(), List.of(), List.of(),
+                    noSecrets(), key -> null);
             // api_token is present (required satisfied) but mistyped — an
             // ERROR on a key whose schema declares no default.
             writeRoot("security:\n  api_token: 123\n");
@@ -791,7 +804,8 @@ class StandardConfigurationServiceTest {
                     """);
             StandardConfigurationService svc = new StandardConfigurationService(
                     configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry,
-                    new JsonSchemaCompositeValidator(), List.of(), List.of());
+                    new JsonSchemaCompositeValidator(), List.of(), List.of(),
+                    noSecrets(), key -> null);
             writeRoot("vault:\n  api_secret: 123\n");
 
             svc.load();

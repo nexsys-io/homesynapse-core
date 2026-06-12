@@ -23,21 +23,36 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
- * Stages 1–2 of the configuration loading pipeline (Doc 06 §3.1): reads the
+ * Stages 1–3 of the configuration loading pipeline (Doc 06 §3.1): reads the
  * AMD-71 root document {@code homesynapse.yaml} and parses it as YAML 1.2
  * via snakeyaml-engine (LTD-09), splicing one-level {@code !include}
- * directives from the {@code integrations/} directory.
+ * directives from the {@code integrations/} directory and resolving the
+ * stage-3 {@code !secret}/{@code !env} tags (M6.2, DP-10).
  *
  * <h2>Safety properties</h2>
  *
  * <ul>
  *   <li><strong>Safe-by-default parse.</strong> The engine's standard
  *       constructor set builds only maps, lists, and scalars — an unknown
- *       tag is a constructor error (FATAL), never a Java instantiation.
- *       {@code !secret}/{@code !env} resolution is the M6.2 SecretStore
- *       seam; until it lands those tags fail as unknown.</li>
+ *       tag is a constructor error (FATAL), never a Java instantiation.</li>
+ *   <li><strong>Stage-3 tag resolution (Doc 06 §3.1/§3.4 — M6.2).</strong>
+ *       In the resolving form, {@code !secret <key>} resolves through
+ *       {@link SecretStore#resolve} and {@code !env <VAR>} /
+ *       {@code !env <VAR>:<default>} through the injected environment
+ *       lookup, in the root AND in included documents. A missing secret
+ *       key or unset variable without a default is a FATAL
+ *       {@link ConfigIssue} naming the key or variable — never any value
+ *       (LTD-15/§12.3) — and failures are collected across the whole
+ *       parse, not thrown at the first one. Resolved values exist only in
+ *       the parse tree (§3.4).</li>
+ *   <li><strong>Write-path form rejects tags fail-closed.</strong> The
+ *       one-argument constructor performs NO tag resolution: a document
+ *       carrying {@code !secret}/{@code !env} is rejected FATAL, because
+ *       the §3.5 programmatic rewrite re-emits the parsed tree — resolving
+ *       first would bake plaintext secrets into the file (INV-SE-03).</li>
  *   <li><strong>YAML 1.2 Core-schema scalar resolution (LTD-09).</strong>
  *       Root and included files are both parsed with an explicit
  *       {@link CoreSchema} — the engine's default is the JSON schema,
@@ -62,7 +77,8 @@ import java.util.Objects;
  * a validation pass never runs over a structurally broken document.</p>
  *
  * <p>Instances are single-use per load: construct, call {@link #load()},
- * discard. No state is retained between loads.</p>
+ * discard. No state is retained between loads — the collected tag issues
+ * make reuse incorrect by construction.</p>
  */
 final class YamlLoader {
 
@@ -73,11 +89,26 @@ final class YamlLoader {
     static final String INTEGRATIONS_DIRECTORY = "integrations";
 
     private static final Tag INCLUDE_TAG = new Tag("!include");
+    private static final Tag SECRET_TAG = new Tag("!secret");
+    private static final Tag ENV_TAG = new Tag("!env");
 
     private final Path configDir;
+    private final SecretStore secretStore;
+    private final Function<String, String> envLookup;
+    private final boolean resolving;
 
     /**
-     * Creates a loader rooted at the resolved configuration directory.
+     * Stage-3 tag failures collected across the whole parse (DP-10 —
+     * every missing key/variable is reported in one pass, matching the
+     * §3.6 comprehensive-not-fatal validation spirit).
+     */
+    private final List<ConfigIssue> tagIssues = new ArrayList<>();
+
+    /**
+     * Creates the NON-resolving write-path loader (Doc 06 §3.5). A
+     * {@code !secret}/{@code !env} tag is a FATAL issue under this form —
+     * the write path re-emits the parsed tree, and a resolved tag would be
+     * re-emitted as its plaintext value (INV-SE-03 fail-closed).
      *
      * @param configDir the resolved {@code PlatformPaths.configDir()} path,
      *                  injected by the composition root (DP-3 / AMD-71-A —
@@ -86,6 +117,31 @@ final class YamlLoader {
      */
     YamlLoader(Path configDir) {
         this.configDir = Objects.requireNonNull(configDir, "configDir must not be null");
+        this.secretStore = null;
+        this.envLookup = null;
+        this.resolving = false;
+    }
+
+    /**
+     * Creates the resolving load/reload-pipeline loader (Doc 06 §3.1
+     * stage 3, M6.2).
+     *
+     * @param configDir   the resolved configuration directory;
+     *                    never {@code null}
+     * @param secretStore resolver for {@code !secret} tags; the decrypted
+     *                    store is consulted per tag and discarded (§3.4);
+     *                    never {@code null}
+     * @param envLookup   resolver for {@code !env} tags — the composition
+     *                    root passes {@code System::getenv}, tests pass a
+     *                    map; never {@code null}
+     */
+    YamlLoader(Path configDir, SecretStore secretStore,
+               Function<String, String> envLookup) {
+        this.configDir = Objects.requireNonNull(configDir, "configDir must not be null");
+        this.secretStore =
+                Objects.requireNonNull(secretStore, "secretStore must not be null");
+        this.envLookup = Objects.requireNonNull(envLookup, "envLookup must not be null");
+        this.resolving = true;
     }
 
     /**
@@ -96,8 +152,9 @@ final class YamlLoader {
      * partially returned. The document map is freshly built and mutable so
      * the pipeline can migrate and merge without copying.</p>
      *
-     * @param document the parsed root document with includes spliced;
-     *                 string-keyed throughout, {@code null} values dropped
+     * @param document the parsed root document with includes spliced and
+     *                 (in the resolving form) tags resolved; string-keyed
+     *                 throughout, {@code null} values dropped
      * @param issues   FATAL structural issues; empty on success
      */
     record Result(Map<String, Object> document, List<ConfigIssue> issues) {
@@ -109,11 +166,14 @@ final class YamlLoader {
     }
 
     /**
-     * Reads and parses the root document, splicing includes.
+     * Reads and parses the root document, splicing includes and resolving
+     * stage-3 tags in the resolving form.
      *
      * <p>An absent, empty, or comment-only root document yields an empty
      * map with no issues — zero-configuration is valid (INV-CE-02); the
-     * schema-default merge produces the complete model downstream.</p>
+     * schema-default merge produces the complete model downstream. A
+     * tag-free document consults neither the secret store nor the
+     * environment, so a no-secrets install touches no key files.</p>
      *
      * @return the parse outcome; never {@code null}
      */
@@ -148,6 +208,13 @@ final class YamlLoader {
             return fatal(ROOT_DOCUMENT_NAME, e.getMessage(), null);
         }
 
+        // Stage-3 failures are collected, not thrown — report them all in
+        // one pass (DP-10). The document is discarded: a partially
+        // resolved tree must never reach validation.
+        if (!tagIssues.isEmpty()) {
+            return new Result(new LinkedHashMap<>(), tagIssues);
+        }
+
         if (raw == null) {
             return new Result(new LinkedHashMap<>(), List.of());
         }
@@ -172,7 +239,10 @@ final class YamlLoader {
                 .setLabel(ROOT_DOCUMENT_NAME)
                 .setAllowDuplicateKeys(false)
                 .setSchema(new CoreSchema())
-                .setTagConstructors(Map.of(INCLUDE_TAG, new IncludeConstructor()))
+                .setTagConstructors(Map.of(
+                        INCLUDE_TAG, new IncludeConstructor(),
+                        SECRET_TAG, secretConstructor(),
+                        ENV_TAG, envConstructor()))
                 .build();
     }
 
@@ -180,16 +250,33 @@ final class YamlLoader {
      * Settings for parsing an included file. Deliberately registers NO
      * {@code !include} constructor so a nested include is an unknown-tag
      * constructor error — the one-level restriction is structural, not a
-     * depth counter (AMD-71 §4). The schema MUST match {@link #rootSettings()}
-     * — root and included files resolve scalars identically or the same
-     * literal means different things depending on which file it sits in.
+     * depth counter (AMD-71 §4). {@code !secret}/{@code !env} ARE
+     * registered: stage-3 resolution applies to included documents too
+     * (DP-10). The schema MUST match {@link #rootSettings()} — root and
+     * included files resolve scalars identically or the same literal means
+     * different things depending on which file it sits in.
      */
-    private static LoadSettings includedSettings(String label) {
+    private LoadSettings includedSettings(String label) {
         return LoadSettings.builder()
                 .setLabel(label)
                 .setAllowDuplicateKeys(false)
                 .setSchema(new CoreSchema())
+                .setTagConstructors(Map.of(
+                        SECRET_TAG, secretConstructor(),
+                        ENV_TAG, envConstructor()))
                 .build();
+    }
+
+    private ConstructNode secretConstructor() {
+        return resolving
+                ? new SecretConstructor()
+                : new WritePathRejectingConstructor(SECRET_TAG.getValue());
+    }
+
+    private ConstructNode envConstructor() {
+        return resolving
+                ? new EnvConstructor()
+                : new WritePathRejectingConstructor(ENV_TAG.getValue());
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -268,6 +355,116 @@ final class YamlLoader {
                                 + " (" + problemOf(e) + ")");
             }
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Stage-3 tag constructors (Doc 06 §3.1/§3.4 — M6.2, DP-10)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Resolves {@code !secret <key>} through the secret store. A missing
+     * key collects a FATAL issue naming the KEY — never any value
+     * (LTD-15/§12.3) — and the parse continues so every failure is
+     * reported in one pass.
+     */
+    private final class SecretConstructor implements ConstructNode {
+
+        /** Creates the secret constructor. */
+        SecretConstructor() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        @Override
+        public Object construct(Node node) {
+            if (!(node instanceof ScalarNode scalar) || scalar.getValue().isBlank()) {
+                return collectTagIssue(SECRET_TAG.getValue(),
+                        "!secret requires a single secret-key scalar");
+            }
+            String key = scalar.getValue();
+            try {
+                return secretStore.resolve(key);
+            } catch (IllegalArgumentException e) {
+                return collectTagIssue(key,
+                        "secret key is not in the secret store: " + key);
+            }
+        }
+    }
+
+    /**
+     * Resolves {@code !env <VAR>} or {@code !env <VAR>:<default>} through
+     * the injected environment lookup. The default is everything after the
+     * FIRST colon (it may itself contain colons, or be empty). An unset
+     * variable without a default collects a FATAL issue naming the
+     * variable.
+     */
+    private final class EnvConstructor implements ConstructNode {
+
+        /** Creates the env constructor. */
+        EnvConstructor() {
+            // Explicit constructor per -Xlint:all -Werror requirement.
+        }
+
+        @Override
+        public Object construct(Node node) {
+            if (!(node instanceof ScalarNode scalar)) {
+                return collectTagIssue(ENV_TAG.getValue(),
+                        "!env requires a single VAR or VAR:default scalar");
+            }
+            String spec = scalar.getValue();
+            int separator = spec.indexOf(':');
+            String variable = separator >= 0 ? spec.substring(0, separator) : spec;
+            String fallback = separator >= 0 ? spec.substring(separator + 1) : null;
+            if (variable.isBlank()) {
+                return collectTagIssue(ENV_TAG.getValue(),
+                        "!env requires a variable name before the default");
+            }
+            String value = envLookup.apply(variable);
+            if (value != null) {
+                return value;
+            }
+            if (fallback != null) {
+                return fallback;
+            }
+            return collectTagIssue(variable,
+                    "environment variable is not set and no default is given: "
+                            + variable);
+        }
+    }
+
+    /**
+     * The write-path stance on stage-3 tags (Doc 06 §3.5): the
+     * programmatic rewrite re-emits the parsed tree, so a resolved tag
+     * would be re-emitted as its plaintext value. Rejected fail-closed
+     * (INV-SE-03) — documents carrying these tags are edited in the file,
+     * not through the UI/API write path.
+     */
+    private final class WritePathRejectingConstructor implements ConstructNode {
+
+        private final String tagName;
+
+        WritePathRejectingConstructor(String tagName) {
+            this.tagName = tagName;
+        }
+
+        @Override
+        public Object construct(Node node) {
+            return collectTagIssue(tagName,
+                    tagName + " tags cannot be preserved by a programmatic"
+                            + " rewrite; the UI/API write path rejects documents"
+                            + " carrying secret/environment tags fail-closed"
+                            + " (Doc 06 §3.5, INV-SE-03) — edit "
+                            + ROOT_DOCUMENT_NAME + " directly");
+        }
+    }
+
+    /**
+     * Records one stage-3 FATAL and returns {@code null} as the construct
+     * placeholder — the document is discarded once any tag issue exists,
+     * so the placeholder never reaches a consumer.
+     */
+    private Object collectTagIssue(String path, String message) {
+        tagIssues.add(new ConfigIssue(Severity.FATAL, path, message, null, null, null));
+        return null;
     }
 
     // ──────────────────────────────────────────────────────────────────

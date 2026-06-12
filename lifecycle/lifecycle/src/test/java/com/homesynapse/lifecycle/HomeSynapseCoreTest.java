@@ -14,6 +14,8 @@ import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.bus.SubscriberMode;
+import com.homesynapse.persistence.EncryptedPayload;
+import com.homesynapse.persistence.PayloadCipher;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.platform.identity.Ulid;
@@ -27,6 +29,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -217,5 +221,43 @@ final class HomeSynapseCoreTest {
                 .pollInterval(Duration.ofMillis(50))
                 .until(() -> core.mode() == SubscriberMode.LIVE);
         assertThat(core.mode()).isEqualTo(SubscriberMode.LIVE);
+    }
+
+    // ── M6.2 — PayloadCipher seam (Doc 15 §3.8 / CARRY 1) ───────────────
+
+    @Test
+    @DisplayName("the five-arg constructor accepts and holds the M6.2"
+            + " PayloadCipher seam; the runtime boots and stops with it")
+    void constructorAcceptsPayloadCipherSeam(@TempDir Path tempDir) {
+        // A trivial stand-in is enough here: the lifecycle module holds the
+        // cipher for the M6.3 write path and consumes nothing in M6.2. The
+        // real adapter round-trip lives in the app module's
+        // PayloadCipherBridgeTest (only app reads both config and
+        // persistence — the zero-new-edge property).
+        PayloadCipher cipher = new PayloadCipher() {
+            @Override
+            public EncryptedPayload encrypt(String scopeId, byte[] plaintext) {
+                return new EncryptedPayload(plaintext.clone(), new byte[12], 1);
+            }
+
+            @Override
+            public byte[] decrypt(String scopeId, int keyVersion,
+                                  byte[] ciphertext, byte[] iv) {
+                return ciphertext.clone();
+            }
+        };
+        // Clock.fixed per the M6.2 §4c rule — the runtime boots and stops
+        // under a fixed clock (the CrashRecoveryHttpIT precedent); this
+        // file's systemUTC convention is only needed by tests that await
+        // mode transitions in real time.
+        core = new HomeSynapseCore(
+                tempDir.resolve("homesynapse-events.db"),
+                HomeSynapseConfig.HOME_DEFAULT,
+                Clock.fixed(Instant.parse("2026-06-11T00:00:00Z"), ZoneOffset.UTC),
+                TEST_HOME_ID,
+                cipher);
+
+        assertThatCode(() -> core.start().join()).doesNotThrowAnyException();
+        assertThatCode(core::stop).doesNotThrowAnyException();
     }
 }

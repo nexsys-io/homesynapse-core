@@ -90,7 +90,16 @@ class ConfigLayoutTest {
     private StandardConfigurationService service(StandardSchemaRegistry registry) {
         return new StandardConfigurationService(
                 configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry,
-                new JsonSchemaCompositeValidator(), List.of(), List.of());
+                new JsonSchemaCompositeValidator(), List.of(), List.of(),
+                noSecrets(), key -> null);
+    }
+
+    /** Real-but-empty secret machinery (M6.2) — lazy, so the layout rows
+     * stay byte-identical: a tag-free load creates no key files
+     * (INV-CE-02). */
+    private SecretStore noSecrets() {
+        return SecretStore.create(configDir,
+                ScopeKeyManager.create(configDir, FIXED_CLOCK), FIXED_CLOCK);
     }
 
     private StandardConfigurationService service() {

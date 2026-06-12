@@ -200,8 +200,10 @@ class YamlLoaderTest {
         }
 
         @Test
-        @DisplayName("unresolved !secret tag is FATAL in M6.1 (resolution lands with the M6.2 SecretStore)")
-        void secretTagIsFatalUntilM62() throws IOException {
+        @DisplayName("!secret is FATAL under the one-arg write-path form —"
+                + " resolution needs the M6.2 three-arg form"
+                + " (YamlLoaderSecretEnvTest)")
+        void secretTagIsFatalInWritePathForm() throws IOException {
             writeRoot("""
                     section:
                       token: !secret api_token

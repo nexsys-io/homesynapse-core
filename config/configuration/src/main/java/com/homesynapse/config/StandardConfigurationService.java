@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -52,11 +53,16 @@ import java.util.stream.Stream;
  * <h2>Load pipeline (Doc 06 §3.1)</h2>
  *
  * <p>{@link #load()} reads and parses the AMD-71 layout (via
- * {@link YamlLoader}), runs the AMD-67 migration chain on a major mismatch,
- * merges JSON Schema defaults, validates the merged whole against the
- * composed schema (AMD-71 §2.4 compose-after-merge), applies the §3.6
- * startup error model, constructs the immutable {@link ConfigModel}, and
- * publishes the AMD-70 observability events.</p>
+ * {@link YamlLoader}, which since M6.2 also resolves the stage-3
+ * {@code !secret}/{@code !env} tags through the injected
+ * {@link SecretStore} and environment lookup — DP-10; resolved values
+ * exist only in the parse tree, §3.4), runs the AMD-67 migration chain on
+ * a major mismatch, merges JSON Schema defaults, validates the merged
+ * whole against the composed schema (AMD-71 §2.4 compose-after-merge),
+ * applies the §3.6 startup error model, constructs the immutable
+ * {@link ConfigModel}, and publishes the AMD-70 observability events.
+ * The reload pipeline shares the same stages, so tags resolve identically
+ * on reload.</p>
  *
  * <h2>Startup error model (DP-2 / Doc 06 §3.6)</h2>
  *
@@ -121,7 +127,13 @@ import java.util.stream.Stream;
  * failure at any step leaves the prior file intact), and finally the
  * reload pipeline over the new file — which is also the only event leg:
  * the write itself publishes nothing (DP-7). Comment loss on programmatic
- * writes is the documented Locked-doc limitation (§3.5).</p>
+ * writes is the documented Locked-doc limitation (§3.5). The write path's
+ * re-parse deliberately performs NO stage-3 tag resolution (M6.2): the
+ * mutated tree is re-emitted to disk, and a resolved {@code !secret} would
+ * be re-emitted as its plaintext value — documents carrying
+ * {@code !secret}/{@code !env} tags are therefore rejected fail-closed
+ * with {@link ConfigurationValidationException} (INV-SE-03/§12.3), the
+ * file untouched.</p>
  *
  * <h2>Observability (AMD-70; rulings 2026-06-10)</h2>
  *
@@ -203,6 +215,8 @@ final class StandardConfigurationService implements ConfigurationService {
     private final SchemaRegistry schemaRegistry;
     private final ConfigValidator validator;
     private final List<ConfigMigrator> migrators;
+    private final SecretStore secretStore;
+    private final Function<String, String> envLookup;
 
     /**
      * Listener registrations keyed by section path (AMD-66 §2.4). Built and
@@ -252,6 +266,13 @@ final class StandardConfigurationService implements ConfigurationService {
      *                            never {@code null}
      * @param listeners           AMD-66 listener registrations; at most one
      *                            per section path; never {@code null}
+     * @param secretStore         resolver for {@code !secret} tags in the
+     *                            load/reload pipeline (Doc 06 §3.1 stage 3,
+     *                            M6.2 DP-10); never {@code null}
+     * @param envLookup           resolver for {@code !env} tags — the
+     *                            composition root passes
+     *                            {@code System::getenv}, tests pass a map;
+     *                            never {@code null}
      * @throws IllegalArgumentException if the declared pair is out of range
      *                                  or two listeners share a section path
      */
@@ -264,7 +285,9 @@ final class StandardConfigurationService implements ConfigurationService {
                                  SchemaRegistry schemaRegistry,
                                  ConfigValidator validator,
                                  List<ConfigMigrator> migrators,
-                                 List<ConfigurationChangeListener> listeners) {
+                                 List<ConfigurationChangeListener> listeners,
+                                 SecretStore secretStore,
+                                 Function<String, String> envLookup) {
         this.configDir = Objects.requireNonNull(configDir, "configDir must not be null");
         if (declaredSchemaMajor < 1) {
             throw new IllegalArgumentException(
@@ -285,6 +308,9 @@ final class StandardConfigurationService implements ConfigurationService {
         this.validator = Objects.requireNonNull(validator, "validator must not be null");
         this.migrators = List.copyOf(
                 Objects.requireNonNull(migrators, "migrators must not be null"));
+        this.secretStore =
+                Objects.requireNonNull(secretStore, "secretStore must not be null");
+        this.envLookup = Objects.requireNonNull(envLookup, "envLookup must not be null");
         Objects.requireNonNull(listeners, "listeners must not be null");
         Map<String, ConfigurationChangeListener> bySection = new LinkedHashMap<>();
         for (ConfigurationChangeListener listener : listeners) {
@@ -562,7 +588,10 @@ final class StandardConfigurationService implements ConfigurationService {
         // file is truth (INV-CE-01), and YamlLoader returns a fresh mutable
         // tree, so this IS the deep working copy (DP-6). The sparse user
         // document is preserved: schema defaults are never baked into the
-        // file by a write.
+        // file by a write. The one-arg NON-resolving loader is deliberate
+        // (M6.2): this tree is re-emitted to disk, and resolving !secret
+        // here would bake plaintext secrets into the file — tag-bearing
+        // documents are rejected fail-closed instead (INV-SE-03/§12.3).
         YamlLoader.Result parsed = new YamlLoader(configDir).load();
         if (!parsed.issues().isEmpty()) {
             throw new ConfigurationValidationException(
@@ -756,14 +785,17 @@ final class StandardConfigurationService implements ConfigurationService {
     /**
      * Runs §3.1 stages 1-5: parse (via {@link YamlLoader} — the single
      * {@code LoadSettings} construction point, so the reload re-parse
-     * carries the YAML 1.2 Core schema by construction, DP-12), the AMD-67
-     * migration chain, the default merge, and allErrors validation.
+     * carries the YAML 1.2 Core schema by construction, DP-12 — in the
+     * resolving form, so {@code !secret}/{@code !env} resolve on load AND
+     * reload, M6.2 DP-10), the AMD-67 migration chain, the default merge,
+     * and allErrors validation.
      */
     private PipelineOutcome runPipeline() {
         Path rootFile = configDir.resolve(YamlLoader.ROOT_DOCUMENT_NAME);
         Instant fileModifiedAt = readFileModifiedAt(rootFile);
 
-        YamlLoader.Result parsed = new YamlLoader(configDir).load();
+        YamlLoader.Result parsed =
+                new YamlLoader(configDir, secretStore, envLookup).load();
         if (!parsed.issues().isEmpty()) {
             throw new PipelineAbortException(parsed.issues());
         }

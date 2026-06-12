@@ -21,6 +21,7 @@ import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.event.bus.SubscriptionFilter;
 import com.homesynapse.integration.IntegrationEvents;
 import com.homesynapse.persistence.DeploymentProfile;
+import com.homesynapse.persistence.PayloadCipher;
 import com.homesynapse.persistence.PersistenceFactory;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.state.AttributeSchemaResolver;
@@ -139,6 +140,17 @@ public final class HomeSynapseCore implements ReadinessSource {
     private final Clock clock;
     private final HomeId homeId;
 
+    /**
+     * M6.2 (Doc 15 §3.8 / CARRY 1) — the config-supplied payload-encryption
+     * adapter, injected by the composition root and HELD here for the M6.3
+     * at-rest write path's consumption. Nullable by design (the DP-6
+     * smallest-honest-seam pin): nothing consumes it in M6.2, existing
+     * harnesses construct without it, and M6.3 makes it required when the
+     * write path lands. No persistence code receives it yet — forwarding
+     * into the persistence factory is the M6.3 wiring step.
+     */
+    private final PayloadCipher payloadCipher;
+
     // Constructed during start()
     private PersistenceFactory persistenceFactory;
     private InProcessEventBus eventBus;
@@ -156,7 +168,10 @@ public final class HomeSynapseCore implements ReadinessSource {
     private volatile boolean abandoned = false;
 
     /**
-     * Constructs a new composition root.
+     * Constructs a new composition root without a payload cipher — the
+     * M6.2 nullable seam (DP-6). Equivalent to passing {@code null} to the
+     * five-argument constructor; existing harnesses and tests use this
+     * form unchanged. M6.3 makes the cipher required.
      *
      * @param dbPath full path to the SQLite database file; never {@code null}
      * @param config consolidated runtime configuration; never {@code null}.
@@ -170,10 +185,40 @@ public final class HomeSynapseCore implements ReadinessSource {
                            HomeSynapseConfig config,
                            Clock clock,
                            HomeId homeId) {
+        this(dbPath, config, clock, homeId, null);
+    }
+
+    /**
+     * Constructs a new composition root with the M6.2 payload-encryption
+     * seam (Doc 15 §3.8 / CARRY 1).
+     *
+     * @param dbPath        full path to the SQLite database file; never
+     *                      {@code null}
+     * @param config        consolidated runtime configuration; never
+     *                      {@code null}. Use
+     *                      {@link HomeSynapseConfig#HOME_DEFAULT} for the
+     *                      MVP default.
+     * @param clock         injected clock; never {@code null}
+     * @param homeId        home identity for this installation (AMD-34);
+     *                      never {@code null}
+     * @param payloadCipher the config-supplied {@link PayloadCipher}
+     *                      adapter constructed by {@code Main} over the
+     *                      {@code ScopeKeyManager}; held for the M6.3
+     *                      at-rest write path. Nullable until M6.3 — a
+     *                      {@code null} cipher means at-rest payload
+     *                      encryption is unavailable, which is the M6.2
+     *                      production state.
+     */
+    public HomeSynapseCore(Path dbPath,
+                           HomeSynapseConfig config,
+                           Clock clock,
+                           HomeId homeId,
+                           PayloadCipher payloadCipher) {
         this.dbPath = Objects.requireNonNull(dbPath, "dbPath");
         this.config = Objects.requireNonNull(config, "config");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.homeId = Objects.requireNonNull(homeId, "homeId");
+        this.payloadCipher = payloadCipher;
     }
 
     /**

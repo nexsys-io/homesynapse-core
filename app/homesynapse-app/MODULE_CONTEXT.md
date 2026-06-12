@@ -90,7 +90,7 @@ All module dependencies are `implementation` scope — no `api` because nothing 
 
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
-| `Main` | final class (private constructor) | Application entry point | `main(String[])` — Phase 2 scaffold. Phase 3 replaces body with subsystem construction, lifecycle delegation, shutdown hook registration. |
+| `Main` | final class (private constructor) | Application entry point + the M6.2 E2 bridge host | `main(String[])` — still the Phase 2 scaffold body (full bootstrap is a later WU). **M6.2 added the package-private `static PayloadCipher payloadCipher(Path configDir, Clock clock)` factory** (Doc 15 §3.8 / CARRY 1): constructs config's `ScopeKeyManager.create(configDir, clock)` and wraps it in an anonymous adapter of persistence's consumer-defined `PayloadCipher` seam — `app` is the only module reading BOTH `config` and `persistence`, so the bridge closes the key-management cycle with zero new module edges (AMD-45 composition-root discipline). Package-private so `PayloadCipherBridgeTest` exercises the real adapter; the future bootstrap passes it to `HomeSynapseCore`'s 5-arg ctor. |
 | `ExitCode` | enum (5 values) | Process exit codes for fatal startup failures | Values: `CONFIGURATION_FAILURE(10)`, `PERSISTENCE_FAILURE(11)`, `EVENT_BUS_FAILURE(12)`, `SUBSYSTEM_INIT_TIMEOUT(13)`, `UNEXPECTED_ERROR(99)`. Method: `code()` → int. Codes map to Doc 12 §3 initialization phases. |
 
 **Total: 2 public types + 1 package-info.java + 1 module-info.java = 4 Java files.**
