@@ -3,6 +3,12 @@
 # Copyright (c) 2026 NexSys. All rights reserved.
 #
 # pi-health.sh — Preflight Pi health check for development sessions
+#
+# 2026-06-12 additions (pre-OQ-15-2 microbench session): throttle-flag check
+# (vcgencmd bitfield incl. since-boot history — benchmark validity), clock
+# sync, NVMe mount options (noatime), swap usage, on-Pi repo state
+# (PI_PROJECT_DIR is now actually checked), reboot-required, and a final
+# machine-parseable READINESS: line for agent-assisted (Claude) workflows.
 
 set -euo pipefail
 
@@ -120,7 +126,7 @@ verbose "ssh ${PI_HOST} bash -ls  (batched diagnostic script via stdin)"
 # The heredoc delimiter is single-quoted ('HEALTHCHECK') so the LOCAL shell
 # performs zero expansion — every $, ", and \ is passed verbatim to the
 # remote bash -ls (login shell, read from stdin).
-REMOTE_DATA=$(ssh "${PI_HOST}" bash -ls <<'HEALTHCHECK'
+REMOTE_DATA=$(ssh "${PI_HOST}" PI_PROJECT_DIR="${PI_PROJECT_DIR}" bash -ls <<'HEALTHCHECK'
 echo "HOSTNAME:$(hostname)"
 echo "PRETTY_NAME:$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"')"
 echo "TEMP:$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo ERROR)"
@@ -151,6 +157,31 @@ TS_ONLINE=$(tailscale status --json 2>/dev/null | grep -o '"Online":true' || ech
 echo "TAILSCALE:$TS_ONLINE"
 
 echo "UPTIME:$(uptime)"
+
+# Throttle bitfield: authoritative benchmark-validity signal.
+# vcgencmd path differs across OS images; try both, fall back to sysfs-absent.
+THROTTLED=$( (command -v vcgencmd >/dev/null && vcgencmd get_throttled) 2>/dev/null || (test -x /usr/bin/vcgencmd && /usr/bin/vcgencmd get_throttled) 2>/dev/null || echo "throttled=UNAVAILABLE")
+echo "THROTTLED:${THROTTLED#throttled=}"
+
+echo "NTP_SYNC:$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo UNKNOWN)"
+
+echo "NVME_OPTS:$(findmnt -no OPTIONS /mnt/nvme 2>/dev/null || echo UNKNOWN)"
+
+SWAP_LINE=$(free -m | grep -i swap)
+echo "SWAP_TOTAL:$(echo "$SWAP_LINE" | awk '{print $2}')"
+echo "SWAP_USED:$(echo "$SWAP_LINE" | awk '{print $3}')"
+
+if [ -d "$HOME/$PI_PROJECT_DIR/.git" ]; then
+    echo "REPO_PRESENT:yes"
+    echo "REPO_HEAD:$(git -C "$HOME/$PI_PROJECT_DIR" log --oneline -1 2>/dev/null | cut -c1-60)"
+    echo "REPO_DIRTY:$(git -C "$HOME/$PI_PROJECT_DIR" status --porcelain 2>/dev/null | wc -l)"
+else
+    echo "REPO_PRESENT:no"
+    echo "REPO_HEAD:"
+    echo "REPO_DIRTY:"
+fi
+
+if [ -f /var/run/reboot-required ]; then echo "REBOOT_REQUIRED:yes"; else echo "REBOOT_REQUIRED:no"; fi
 
 FHS_COUNT=0
 for d in /var/lib/homesynapse /var/lib/homesynapse/tmp /mnt/nvme/homesynapse/backups /var/log/homesynapse /etc/homesynapse /opt/homesynapse; do
@@ -300,6 +331,83 @@ UPTIME_LINE=$(get_val UPTIME)
 info "${UPTIME_LINE}"
 
 # ---------------------------------------------------------------------------
+# 9a. Throttle Flags (benchmark validity — temperature alone is NOT sufficient)
+# ---------------------------------------------------------------------------
+header "Throttle Flags"
+THROTTLED_VAL=$(get_val THROTTLED)
+if [ "$THROTTLED_VAL" = "UNAVAILABLE" ] || [ -z "$THROTTLED_VAL" ]; then
+    check_warn "Throttle bitfield unavailable (vcgencmd missing?) — rely on temperature only"
+elif [ "$THROTTLED_VAL" = "0x0" ]; then
+    check_pass "Throttle flags: 0x0 (no under-voltage/throttling now or since boot)"
+else
+    # Bits: 0=under-volt NOW, 1=freq-capped NOW, 2=throttled NOW, 3=soft-temp NOW;
+    # 16-19 = the same conditions SINCE BOOT (history).
+    check_fail "Throttle flags: ${THROTTLED_VAL} — non-zero. Benchmark numbers are INVALID under throttle/under-voltage. Check PSU/cooling; reboot to clear history bits before benching."
+fi
+
+# ---------------------------------------------------------------------------
+# 9b. Clock Sync (event-sourced timestamps + bench timing)
+# ---------------------------------------------------------------------------
+header "Clock"
+NTP_SYNC=$(get_val NTP_SYNC)
+if [ "$NTP_SYNC" = "yes" ]; then
+    check_pass "Clock: NTP-synchronized"
+else
+    check_warn "Clock: NTP sync = '${NTP_SYNC}' — verify timedatectl before timestamp-sensitive runs"
+fi
+
+# ---------------------------------------------------------------------------
+# 9c. NVMe Mount Options (noatime is the documented requirement)
+# ---------------------------------------------------------------------------
+header "NVMe Mount Options"
+NVME_OPTS=$(get_val NVME_OPTS)
+if [ "$NVME_OPTS" = "UNKNOWN" ] || [ -z "$NVME_OPTS" ]; then
+    check_warn "NVMe mount options unreadable"
+elif echo "$NVME_OPTS" | grep -q "noatime"; then
+    check_pass "NVMe options: ${NVME_OPTS}"
+else
+    check_warn "NVMe mounted WITHOUT noatime (${NVME_OPTS}) — write-amplification + bench skew; fix fstab"
+fi
+
+# ---------------------------------------------------------------------------
+# 9d. Swap (swapping during a bench invalidates numbers)
+# ---------------------------------------------------------------------------
+header "Swap"
+SWAP_TOTAL=$(get_val SWAP_TOTAL)
+SWAP_USED=$(get_val SWAP_USED)
+if [ -n "$SWAP_USED" ] && [ "$SWAP_USED" -gt 64 ] 2>/dev/null; then
+    check_warn "Swap in use: ${SWAP_USED} MB of ${SWAP_TOTAL} MB — memory pressure; investigate before benching"
+else
+    check_pass "Swap: ${SWAP_USED:-0} MB used of ${SWAP_TOTAL:-0} MB"
+fi
+
+# ---------------------------------------------------------------------------
+# 9e. On-Pi Repo State (PI_PROJECT_DIR)
+# ---------------------------------------------------------------------------
+header "Repo (~/${PI_PROJECT_DIR})"
+REPO_PRESENT=$(get_val REPO_PRESENT)
+if [ "$REPO_PRESENT" = "yes" ]; then
+    REPO_HEAD=$(get_val REPO_HEAD)
+    REPO_DIRTY=$(get_val REPO_DIRTY)
+    info "HEAD: ${REPO_HEAD}"
+    if [ "${REPO_DIRTY:-0}" -gt 0 ] 2>/dev/null; then
+        check_warn "Repo present but DIRTY (${REPO_DIRTY} modified/untracked) — reconcile before deploying"
+    else
+        check_pass "Repo present, clean"
+    fi
+else
+    check_warn "No repo at ~/${PI_PROJECT_DIR} (deploy flows may use /opt/homesynapse-tests instead — fine if intentional)"
+fi
+
+# ---------------------------------------------------------------------------
+# 9f. Pending Reboot
+# ---------------------------------------------------------------------------
+REBOOT_REQUIRED=$(get_val REBOOT_REQUIRED)
+if [ "$REBOOT_REQUIRED" = "yes" ]; then
+    check_warn "OS reports reboot-required (pending kernel/firmware update) — reboot before long runs"
+fi
+
+# ---------------------------------------------------------------------------
 # 10. FHS Directory Integrity
 # ---------------------------------------------------------------------------
 header "FHS Directories"
@@ -323,10 +431,14 @@ if [ "$FAILURES" -eq 0 ]; then
     printf "${BOLD}${GREEN}═══════════════════════════════════════${NC}\n"
     printf "${BOLD}${GREEN}  Pi Health: ALL CHECKS PASSED ✓${NC}\n"
     printf "${BOLD}${GREEN}═══════════════════════════════════════${NC}\n"
+    # Machine-parseable summary (agents parse pasted output on this line):
+    echo "READINESS:PASS"
     exit 0
 else
     printf "${BOLD}${RED}═══════════════════════════════════════${NC}\n"
     printf "${BOLD}${RED}  Pi Health: ${FAILURES} CHECK(S) FAILED ✗${NC}\n"
     printf "${BOLD}${RED}═══════════════════════════════════════${NC}\n"
+    # Machine-parseable summary (agents parse pasted output on this line):
+    echo "READINESS:FAIL:${FAILURES}"
     exit 1
 fi
