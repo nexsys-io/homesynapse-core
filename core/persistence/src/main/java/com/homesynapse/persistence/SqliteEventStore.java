@@ -34,6 +34,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.StringJoiner;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -109,6 +110,25 @@ final class SqliteEventStore implements EventPublisher, EventStore {
     private static final String CATEGORY_DELIMITER = ",";
 
     /**
+     * Separator in the {@code dek_ref} TEXT column's {@code scope_id:key_version}
+     * form (Doc 15 §4.1). Parsed with a last-colon split on read so a scope-id
+     * could in principle contain a colon (the current scope-ids do not);
+     * pinned by {@code AtRestEncryptionWritePathTest}.
+     */
+    private static final String DEK_REF_DELIMITER = ":";
+
+    /**
+     * Persistence-side scope-id constant mirroring config's
+     * {@code EncryptionScope.PRESENCE_PERSONAL}. The persistence module must
+     * not name a {@code config} type (zero-new-edge, Doc 15 §3.8), so the one
+     * MVP event-category → scope edge is mirrored here as a {@code String} —
+     * the same discipline that keeps {@link EncryptedPayload} distinct from
+     * config's {@code ScopeCipherResult}. Pinned by
+     * {@code AtRestEncryptionWritePathTest}.
+     */
+    private static final String PRESENCE_PERSONAL_SCOPE_ID = "presence_personal";
+
+    /**
      * 32-byte zero vector for the {@code chain_hash} column (AMD-37).
      * The chain hash column is {@code NOT NULL DEFAULT x'00...00'} in V001;
      * actual hash computation is deferred to the crypto milestone.
@@ -120,11 +140,13 @@ final class SqliteEventStore implements EventPublisher, EventStore {
      * is not listed — SQLite assigns it via AUTOINCREMENT and we retrieve the
      * generated rowid via {@link Statement#getGeneratedKeys()}.
      *
-     * <p>Binds all 24 data columns in the V001 schema column order (AMD-34
-     * through AMD-37, Tier 2 addendum). Reservation columns ({@code batch_id},
-     * {@code external_ref}, {@code intent_kind}, {@code logical_time},
-     * {@code node_id}) are bound to their default values until behavioral
-     * wiring in M3.</p>
+     * <p>Binds all 26 data columns in schema column order (AMD-34 through
+     * AMD-37, Tier 2 addendum, and the V005 at-rest-encryption columns
+     * {@code payload_iv} / {@code dek_ref} appended last). Reservation columns
+     * ({@code batch_id}, {@code external_ref}, {@code intent_kind},
+     * {@code logical_time}, {@code node_id}) are bound to their default
+     * values until behavioral wiring in M3. {@code payload_iv} / {@code dek_ref}
+     * are bound non-null only for encrypted sensitive-PII scopes (M6.3).</p>
      */
     private static final String INSERT_SQL = """
             INSERT INTO events (
@@ -133,8 +155,9 @@ final class SqliteEventStore implements EventPublisher, EventStore {
                 subject_sequence, priority, origin, actor_ref,
                 idempotency_key, correlation_id, causation_id, event_category,
                 payload_size, batch_id, external_ref, intent_kind,
-                logical_time, node_id, payload, chain_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                logical_time, node_id, payload, chain_hash,
+                payload_iv, dek_ref
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
 
     /**
@@ -149,7 +172,8 @@ final class SqliteEventStore implements EventPublisher, EventStore {
             "SELECT global_position, event_id, event_type, schema_version, "
                     + "ingest_time, event_time, subject_ref, subject_type, "
                     + "subject_sequence, priority, origin, actor_ref, "
-                    + "correlation_id, causation_id, event_category, payload "
+                    + "correlation_id, causation_id, event_category, payload, "
+                    + "payload_iv, dek_ref "
                     + "FROM events";
 
     private static final String SELECT_FROM_SQL =
@@ -187,6 +211,25 @@ final class SqliteEventStore implements EventPublisher, EventStore {
     private final EventPayloadCodec codec;
     private final Clock clock;
     private final HomeId homeId;
+
+    /**
+     * At-rest payload cipher (Doc 15 §3.8 / M6.3). Nullable: {@code null} is
+     * the M6.2 production state (no crypto wired) and every test that does not
+     * exercise encryption — the store then writes plaintext for all scopes,
+     * and {@link #encryptedScopes} is empty so no event is treated as
+     * encryptable. Injected through {@link PersistenceFactory#start}.
+     */
+    private final PayloadCipher payloadCipher;
+
+    /**
+     * The enabled at-rest encryption scope-ids. Empty ⇒ at-rest encryption is
+     * disabled (the M6.2 state / no-crypto tests). Non-empty ⇒ events whose
+     * resolved scope-id is a member are encrypted before the INSERT. The
+     * production wiring populates this iff a cipher is present
+     * (cipher-presence is the M6.3 master switch for {@code at_rest_enabled},
+     * since live {@code ConfigModel} wiring is app-bootstrap scope).
+     */
+    private final Set<String> encryptedScopes;
 
     /**
      * Round-robin index used to assign a read {@link Connection} to each
@@ -232,11 +275,46 @@ final class SqliteEventStore implements EventPublisher, EventStore {
             EventTypeRegistry registry,
             Clock clock,
             HomeId homeId) {
+        this(dbExecutor, codec, registry, clock, homeId, null, Set.of());
+    }
+
+    /**
+     * Constructs a SQLite-backed event store with the M6.3 at-rest
+     * payload-encryption gate wired (Doc 15 §3.4 / §3.8).
+     *
+     * @param dbExecutor      the database executor; never {@code null}, must
+     *                        be started
+     * @param codec           the payload codec; never {@code null}
+     * @param registry        the event type registry; never {@code null}
+     * @param clock           the clock for {@code ingestTime}; never {@code null}
+     * @param homeId          the home identity (AMD-34); never {@code null}
+     * @param payloadCipher   the at-rest cipher (Doc 15 §3.8 seam), or
+     *                        {@code null} when at-rest payload encryption is
+     *                        unavailable (the M6.2 state). When {@code null},
+     *                        {@code encryptedScopes} MUST be empty in the
+     *                        production wiring; a non-empty set with a
+     *                        {@code null} cipher is the fail-closed
+     *                        misconfiguration that throws at write time.
+     * @param encryptedScopes the enabled encryption scope-ids; never
+     *                        {@code null}, may be empty (⇒ at-rest disabled)
+     * @throws NullPointerException if any non-cipher argument is {@code null}
+     */
+    SqliteEventStore(
+            DatabaseExecutor dbExecutor,
+            EventPayloadCodec codec,
+            EventTypeRegistry registry,
+            Clock clock,
+            HomeId homeId,
+            PayloadCipher payloadCipher,
+            Set<String> encryptedScopes) {
         this.dbExecutor = Objects.requireNonNull(dbExecutor, "dbExecutor must not be null");
         this.codec = Objects.requireNonNull(codec, "codec must not be null");
         Objects.requireNonNull(registry, "registry must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         this.homeId = Objects.requireNonNull(homeId, "homeId must not be null");
+        this.payloadCipher = payloadCipher; // nullable by design (M6.2 state)
+        this.encryptedScopes = Set.copyOf(
+                Objects.requireNonNull(encryptedScopes, "encryptedScopes must not be null"));
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -307,9 +385,41 @@ final class SqliteEventStore implements EventPublisher, EventStore {
         List<EventCategory> categories = EventCategoryMapping.categoriesFor(draft.eventType());
         byte[] payloadBytes = codec.encode(draft.payload());
 
+        // At-rest encryption gate (Doc 15 §3.4, M6.3). Resolve the event's
+        // encryption scope from its categories; if that scope is enabled, the
+        // sensitive-PII payload is encrypted here — on the single write thread,
+        // before the INSERT. Doc 15 §3.2 prefers the publishing virtual thread,
+        // but the sensitive-PII scopes are low-volume and the cleanest seam is
+        // at this serialize point; the OR-M6-NONCE counter durability (the
+        // correctness gate) is owned inside the injected cipher and is
+        // independent of thread placement. Non-sensitive events stay
+        // plaintext-at-rest (NULL payload_iv/dek_ref) — today's behavior.
+        String scopeId = encryptionScopeId(categories);
+        byte[] storedBytes;
+        byte[] payloadIv;
+        String dekRef;
+        if (scopeId != null && encryptedScopes.contains(scopeId)) {
+            if (payloadCipher == null) {
+                // Fail-closed: no silent plaintext write of a sensitive-PII
+                // scope when at-rest encryption is enabled (Doc 15 §6 / LTD-14).
+                throw new IllegalStateException(
+                        "at-rest encryption enabled for scope " + scopeId
+                                + " but no PayloadCipher is wired");
+            }
+            EncryptedPayload encrypted = payloadCipher.encrypt(scopeId, payloadBytes);
+            storedBytes = encrypted.ciphertext();
+            payloadIv = encrypted.iv();
+            dekRef = scopeId + DEK_REF_DELIMITER + encrypted.keyVersion();
+        } else {
+            storedBytes = payloadBytes;
+            payloadIv = null;
+            dekRef = null;
+        }
+
         try (PreparedStatement ps = conn.prepareStatement(
                 INSERT_SQL, Statement.RETURN_GENERATED_KEYS)) {
-            // Bind positions 1–24 match the V001 column order (minus global_position).
+            // Bind positions 1–26 match the schema column order (minus
+            // global_position): 1–24 V001/Tier-2, 25–26 the V005 encryption columns.
             ps.setBytes(1, eventId.value().toBytes());                  // event_id
             ps.setBytes(2, homeId.value().toBytes());                   // home_id (AMD-34)
             ps.setString(3, draft.eventType());                         // event_type
@@ -343,14 +453,24 @@ final class SqliteEventStore implements EventPublisher, EventStore {
                 ps.setBytes(15, causalContext.causationId().toBytes());
             }
             ps.setString(16, encodeCategories(categories));             // event_category
-            ps.setInt(17, payloadBytes.length);                         // payload_size (Tier 2)
+            ps.setInt(17, storedBytes.length);                          // payload_size (Tier 2 — size of the stored BLOB: ciphertext when encrypted)
             ps.setNull(18, Types.BLOB);                                 // batch_id (reserved)
             ps.setNull(19, Types.VARCHAR);                              // external_ref (reserved)
             ps.setString(20, "UNSPECIFIED");                            // intent_kind (reserved)
             ps.setLong(21, 0L);                                         // logical_time (reserved)
             ps.setInt(22, 0);                                           // node_id (reserved)
-            ps.setBytes(23, payloadBytes);                              // payload
+            ps.setBytes(23, storedBytes);                               // payload (ciphertext for encrypted scopes, else plaintext JSON)
             ps.setBytes(24, ZERO_HASH);                                 // chain_hash (AMD-37)
+            if (payloadIv == null) {
+                ps.setNull(25, Types.BLOB);                             // payload_iv (V005) — NULL when unencrypted
+            } else {
+                ps.setBytes(25, payloadIv);
+            }
+            if (dekRef == null) {
+                ps.setNull(26, Types.VARCHAR);                          // dek_ref (V005) — NULL when unencrypted
+            } else {
+                ps.setString(26, dekRef);
+            }
 
             try {
                 ps.executeUpdate();
@@ -681,7 +801,12 @@ final class SqliteEventStore implements EventPublisher, EventStore {
 
         List<EventCategory> categories = decodeCategories(rs.getString("event_category"));
 
-        byte[] payloadBytes = rs.getBytes("payload");
+        byte[] storedBytes = rs.getBytes("payload");
+        String dekRef = rs.getString("dek_ref");
+        byte[] payloadBytes = (dekRef == null)
+                ? storedBytes                       // plaintext-at-rest (today's path)
+                : decryptStoredPayload(globalPosition, dekRef,
+                        rs.getBytes("payload_iv"), storedBytes);
         DomainEvent payload = codec.decode(eventType, schemaVersion, payloadBytes);
 
         return new EventEnvelope(
@@ -730,6 +855,61 @@ final class SqliteEventStore implements EventPublisher, EventStore {
             out.add(EventCategory.fromWireValue(part));
         }
         return out.isEmpty() ? List.of(EventCategory.SYSTEM) : out;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // At-rest encryption scope resolution + read-path decryption (M6.3)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Resolves an event's at-rest encryption scope-id from its consent-scope
+     * categories. Persistence-side mirror of the canonical mapping owned by
+     * config's {@code EncryptionScope} (Doc 15 §3.4): at MVP only the
+     * {@link EventCategory#PRESENCE} category resolves, to
+     * {@code "presence_personal"}; the {@code "identity"} scope has no core
+     * event type yet (reserved for future person-linked identity records).
+     *
+     * <p>Mirrored as a {@code String} rather than imported from {@code config}
+     * so persistence gains no {@code config} module edge (Doc 15 §3.8) — the
+     * same boundary discipline that keeps {@link EncryptedPayload} distinct
+     * from config's {@code ScopeCipherResult}. The mirror is pinned by
+     * {@code AtRestEncryptionWritePathTest}.</p>
+     *
+     * @return the scope-id to encrypt under, or {@code null} for a
+     *         plaintext-at-rest event
+     */
+    private static String encryptionScopeId(List<EventCategory> categories) {
+        return categories.contains(EventCategory.PRESENCE)
+                ? PRESENCE_PERSONAL_SCOPE_ID
+                : null;
+    }
+
+    /**
+     * Decrypts a stored ciphertext payload using the injected cipher,
+     * parsing {@code scope_id:key_version} from {@code dek_ref} with a
+     * last-colon split (Doc 15 §4.1).
+     *
+     * @throws IllegalStateException if no cipher is wired to read an encrypted
+     *         row (fail-closed — never feed ciphertext to the codec) or the
+     *         {@code dek_ref} is malformed
+     */
+    private byte[] decryptStoredPayload(
+            long globalPosition, String dekRef, byte[] payloadIv, byte[] ciphertext) {
+        if (payloadCipher == null) {
+            throw new IllegalStateException(
+                    "event at global_position " + globalPosition
+                            + " is encrypted (dek_ref=" + dekRef + ") but no"
+                            + " PayloadCipher is wired to decrypt it");
+        }
+        int split = dekRef.lastIndexOf(DEK_REF_DELIMITER);
+        if (split <= 0 || split == dekRef.length() - 1) {
+            throw new IllegalStateException(
+                    "malformed dek_ref '" + dekRef + "' at global_position "
+                            + globalPosition + "; expected scope_id:key_version");
+        }
+        String scopeId = dekRef.substring(0, split);
+        int keyVersion = Integer.parseInt(dekRef.substring(split + 1));
+        return payloadCipher.decrypt(scopeId, keyVersion, ciphertext, payloadIv);
     }
 
     // ──────────────────────────────────────────────────────────────────

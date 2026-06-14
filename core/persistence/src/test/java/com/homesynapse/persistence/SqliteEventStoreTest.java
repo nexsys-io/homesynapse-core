@@ -43,7 +43,7 @@ import java.util.List;
  * performing <em>all</em> per-test initialization inside {@link #resetStore()}
  * itself — the method opens a fresh database under the per-test {@link TempDir}
  * (which JUnit 5 injects before any {@code @BeforeEach} runs), starts the
- * {@link DatabaseExecutor}, runs the V001 migration, and constructs the
+ * {@link DatabaseExecutor}, runs the V001–V005 migrations, and constructs the
  * {@link SqliteEventStore}. The {@code @AfterEach} tear-down shuts the
  * executor down cleanly between tests. This avoids the alternative of a
  * lazy-accessor pattern that would race with the parent's setup ordering.</p>
@@ -75,9 +75,18 @@ final class SqliteEventStoreTest extends EventStoreContractTest {
     /** Classpath directory holding the events-database migration scripts. */
     private static final String EVENTS_MIGRATION_PATH = "db/migration/events";
 
-    /** The ordered list of migration files the executor should apply. */
+    /**
+     * The ordered list of migration files the executor should apply. The full
+     * V001–V005 set is run (not V001 alone) because the store's INSERT/SELECT
+     * now reference the V005 {@code payload_iv} / {@code dek_ref} columns, and
+     * the MigrationRunner requires a gap-free version range (M6.3).
+     */
     private static final List<String> EVENTS_MIGRATION_FILES = List.of(
-            "V001__initial_event_store_schema.sql");
+            "V001__initial_event_store_schema.sql",
+            "V002__subscriber_dead_letter_queue.sql",
+            "V003__add_snapshots_and_drop_redundant_index.sql",
+            "V004__dlq_operational_indices.sql",
+            "V005__at_rest_payload_encryption_columns.sql");
 
     /** Deployment profile (HOME — 2 read threads, enough to exercise round-robin). */
     private static final DeploymentProfile PROFILE = DeploymentProfile.HOME;

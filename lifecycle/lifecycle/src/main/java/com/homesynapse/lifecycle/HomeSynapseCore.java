@@ -248,8 +248,14 @@ public final class HomeSynapseCore implements ReadinessSource {
                         IntegrationEvents.CAPABILITY_EVENT_CLASSES)
                 .flatMap(List::stream)
                 .toList();
+        // M6.3 (Doc 15 §3.8): forward the held at-rest cipher into the
+        // persistence write/read path — the R-2 wiring step the M6.2 closeout
+        // named. Null when constructed via the four-arg ctor (the at-rest
+        // encryption is then unavailable and the factory runs plaintext-for-all);
+        // non-null wires encrypt-on-write for the sensitive-PII scopes.
         this.persistenceFactory = PersistenceFactory.start(
-                dbPath, config.persistence(), clock, homeId, eventClasses);
+                dbPath, config.persistence(), clock, homeId, eventClasses,
+                payloadCipher);
 
         // Step 2 — Bus metrics.
         BusMetrics jfrMetrics = BusMetrics.jfr();

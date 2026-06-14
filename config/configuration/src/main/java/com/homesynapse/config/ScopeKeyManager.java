@@ -95,8 +95,43 @@ public interface ScopeKeyManager {
     ScopeCipherResult encrypt(String scopeId, byte[] plaintext);
 
     /**
-     * Decrypts ciphertext produced by {@link #encrypt} under the named
-     * scope and DEK version.
+     * Encrypts an event payload under the scope's current DEK with
+     * AES-256-GCM and a per-scope <strong>COUNTER</strong> nonce (Doc 15
+     * §3.4, M6.3) — never a random IV (the GCM birthday bound is reached at
+     * event volume).
+     *
+     * <p>The per-scope 96-bit nonce is derived from a strictly monotonic
+     * counter that is DURABLE and re-initialized from the persisted
+     * high-water mark on boot, never from memory (OR-M6-NONCE). The counter
+     * high-water mark is persisted (fsync) <em>ahead of</em> returning the
+     * nonce, so a crash after this call but before the persistence INSERT can
+     * only leave a gap, never a reuse.</p>
+     *
+     * <p>This is the M6.3 payload path, deliberately distinct from
+     * {@link #encrypt} — see the {@code <h2>IV discipline</h2>} note above:
+     * the random-IV {@code encrypt} is the M6.2 secrets path and must NOT be
+     * generalized here, and this counter path must NOT be cargo-culted onto
+     * secrets. {@link #decrypt} round-trips either path's ciphertext
+     * unchanged.</p>
+     *
+     * <p>Lazily creates the root key and the scope's version-1 DEK on the
+     * scope's first encryption, exactly like {@link #encrypt} (INV-CE-02).
+     * The argument and result arrays are NOT defensively copied.</p>
+     *
+     * @param scopeId   an encrypted scope (e.g. {@code "identity"},
+     *                  {@code "presence_personal"}); never {@code null}
+     *                  or blank
+     * @param plaintext the serialized payload bytes; never {@code null}
+     * @return ciphertext (GCM tag appended), the counter nonce as the
+     *         {@code iv}, and the DEK version; never {@code null}
+     * @throws IllegalStateException if a key file is corrupt or the
+     *         cryptographic operation fails
+     */
+    ScopeCipherResult encryptPayload(String scopeId, byte[] plaintext);
+
+    /**
+     * Decrypts ciphertext produced by {@link #encrypt} or
+     * {@link #encryptPayload} under the named scope and DEK version.
      *
      * <p>The argument and result arrays are NOT defensively copied.</p>
      *

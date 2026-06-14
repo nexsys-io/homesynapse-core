@@ -81,6 +81,14 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
     /** [R6]/DP-3 — the config-side scope-key store file. */
     static final String SCOPE_KEYS_FILE_NAME = "scope_keys.json";
 
+    /**
+     * OR-M6-NONCE / DP-A — the durable per-{@code (scopeId, keyVersion)}
+     * nonce-counter high-water store, written alongside the DEK (Doc 15 §3.4
+     * "stored alongside the DEK"). A sibling file rather than a new
+     * {@link ScopeKey} field so the M6.2 store row stays frozen.
+     */
+    static final String SCOPE_NONCE_COUNTERS_FILE_NAME = "scope_nonce_counters.json";
+
     private static final int KEY_LENGTH_BYTES = 32;
     private static final int GCM_IV_LENGTH_BYTES = 12;
     private static final int GCM_TAG_LENGTH_BITS = 128;
@@ -111,6 +119,17 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
 
     /** Unwrapped DEKs keyed by scope, then version. */
     private final Map<String, Map<Integer, byte[]>> dekCache = new HashMap<>();
+
+    /**
+     * OR-M6-NONCE — per-{@code (scopeId, keyVersion)} nonce high-water marks,
+     * lazily loaded from {@link #SCOPE_NONCE_COUNTERS_FILE_NAME} and
+     * write-through on every allocation. The in-memory map is always a
+     * reflection of the persisted file (the file is fsynced before any
+     * allocated nonce is returned), so re-init after a restart is automatic:
+     * a fresh manager loads the persisted maxima and resumes at max + 1,
+     * never from memory.
+     */
+    private Map<String, Map<Integer, Long>> nonceHighWater;
 
     /**
      * Creates the manager. Touches no files — all key material is created
@@ -144,6 +163,36 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
         byte[] ciphertext = runGcm(Cipher.ENCRYPT_MODE, dek.key(), iv,
                 plaintext, scopeId);
         return new ScopeCipherResult(ciphertext, iv, dek.keyVersion());
+    }
+
+    @Override
+    public ScopeCipherResult encryptPayload(String scopeId, byte[] plaintext) {
+        requireScopeId(scopeId);
+        Objects.requireNonNull(plaintext, "plaintext must not be null");
+
+        DekHandle dek;
+        byte[] nonce;
+        lock.lock();
+        try {
+            dek = activeDekLocked(scopeId);
+            // Allocate the next counter value AND fsync the new high-water
+            // mark before the nonce leaves this method (OR-M6-NONCE
+            // durable-ahead-of-return): a crash after this point but before
+            // the persistence INSERT can only burn a counter value (a gap),
+            // never reuse one. The increment serializes on the existing
+            // ReentrantLock (LTD-11) — concurrent publishers can never draw
+            // the same nonce.
+            long counter = nextNonceLocked(scopeId, dek.keyVersion());
+            nonce = nonceBytes(counter);
+        } finally {
+            lock.unlock();
+        }
+        // GCM runs outside the lock on the caller's (publishing virtual)
+        // thread with a per-call Cipher, mirroring encrypt(): the counter
+        // allocation is the only serialized step.
+        byte[] ciphertext = runGcm(Cipher.ENCRYPT_MODE, dek.key(), nonce,
+                plaintext, scopeId);
+        return new ScopeCipherResult(ciphertext, nonce, dek.keyVersion());
     }
 
     @Override
@@ -431,6 +480,107 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
         if (value == null || value.isNull()) {
             throw new IllegalStateException(
                     SCOPE_KEYS_FILE_NAME + " is corrupt: row is missing '"
+                            + field + "'");
+        }
+        return value;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Durable nonce counters (OR-M6-NONCE; caller holds the lock)
+    // ──────────────────────────────────────────────────────────────────
+
+    /**
+     * Allocates the next strictly-monotonic counter value for
+     * {@code (scopeId, keyVersion)} and persists the new high-water mark
+     * durably before returning it (OR-M6-NONCE durable-ahead-of-return). On
+     * the first allocation after a restart the value resumes from the
+     * persisted maximum + 1 (re-init from durable state, never from memory),
+     * because {@link #loadNonceCountersLocked()} reloads the file maxima.
+     */
+    private long nextNonceLocked(String scopeId, int keyVersion) {
+        loadNonceCountersLocked();
+        Map<Integer, Long> byVersion =
+                nonceHighWater.computeIfAbsent(scopeId, key -> new HashMap<>());
+        long next = byVersion.getOrDefault(keyVersion, 0L) + 1L;
+        byVersion.put(keyVersion, next);
+        persistNonceCountersLocked();
+        return next;
+    }
+
+    /**
+     * Encodes a counter value as a 96-bit GCM nonce: big-endian in the
+     * trailing 8 bytes of the 12-byte field, leading 4 bytes zero (DP-C).
+     * Distinct counter values yield distinct nonces, so no two stored
+     * ciphertexts under one DEK can share a nonce.
+     */
+    private static byte[] nonceBytes(long counter) {
+        byte[] nonce = new byte[GCM_IV_LENGTH_BYTES];
+        ByteBuffer.wrap(nonce).putLong(GCM_IV_LENGTH_BYTES - Long.BYTES, counter);
+        return nonce;
+    }
+
+    private void loadNonceCountersLocked() {
+        if (nonceHighWater != null) {
+            return;
+        }
+        Path file = configDir.resolve(SCOPE_NONCE_COUNTERS_FILE_NAME);
+        if (!Files.exists(file)) {
+            nonceHighWater = new HashMap<>();
+            return;
+        }
+        JsonNode root;
+        try {
+            root = MAPPER.readTree(Files.readString(file));
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                    SCOPE_NONCE_COUNTERS_FILE_NAME + " cannot be read: " + file, e);
+        }
+        if (!root.isArray()) {
+            throw new IllegalStateException(
+                    SCOPE_NONCE_COUNTERS_FILE_NAME + " is corrupt: expected a JSON"
+                            + " array of nonce-counter rows");
+        }
+        Map<String, Map<Integer, Long>> counters = new HashMap<>();
+        for (JsonNode node : root) {
+            counters.computeIfAbsent(
+                            requireCounterField(node, "scopeId").asText(),
+                            key -> new HashMap<>())
+                    .put(requireCounterField(node, "keyVersion").asInt(),
+                            requireCounterField(node, "highWater").asLong());
+        }
+        nonceHighWater = counters;
+    }
+
+    private void persistNonceCountersLocked() {
+        ArrayNode array = MAPPER.createArrayNode();
+        for (Map.Entry<String, Map<Integer, Long>> scope
+                : nonceHighWater.entrySet()) {
+            for (Map.Entry<Integer, Long> version : scope.getValue().entrySet()) {
+                ObjectNode node = array.addObject();
+                node.put("scopeId", scope.getKey());
+                node.put("keyVersion", version.getKey());
+                node.put("highWater", version.getValue());
+            }
+        }
+        Path file = configDir.resolve(SCOPE_NONCE_COUNTERS_FILE_NAME);
+        try {
+            // writeAtomically fsyncs the temp file (channel.force) before the
+            // atomic rename — the high-water mark is durable when this returns
+            // (OR-M6-NONCE).
+            AtomicYamlWriter.writeAtomically(file,
+                    MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(array));
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                    SCOPE_NONCE_COUNTERS_FILE_NAME + " cannot be written; the prior"
+                            + " counter state is intact: " + file, e);
+        }
+    }
+
+    private static JsonNode requireCounterField(JsonNode node, String field) {
+        JsonNode value = node.get(field);
+        if (value == null || value.isNull()) {
+            throw new IllegalStateException(
+                    SCOPE_NONCE_COUNTERS_FILE_NAME + " is corrupt: row is missing '"
                             + field + "'");
         }
         return value;

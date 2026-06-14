@@ -49,7 +49,7 @@ final class PersistenceFactoryTest {
         Path dbPath = tempDir.resolve("homesynapse-events.db");
         try (PersistenceFactory factory = PersistenceFactory.start(
                 dbPath, PersistenceConfig.HOME_DEFAULT, FIXED_CLOCK, TEST_HOME_ID,
-                AllEventClasses.ALL_EVENTS)) {
+                AllEventClasses.ALL_EVENTS, null)) {
 
             assertThat(factory.eventPublisher()).isNotNull();
             assertThat(factory.eventStore()).isNotNull();
@@ -77,7 +77,7 @@ final class PersistenceFactoryTest {
         PersistenceFactory factory = PersistenceFactory.start(
                 tempDir.resolve("homesynapse-events.db"),
                 PersistenceConfig.HOME_DEFAULT, FIXED_CLOCK, TEST_HOME_ID,
-                AllEventClasses.ALL_EVENTS);
+                AllEventClasses.ALL_EVENTS, null);
         factory.close();
         assertThatCode(factory::close).doesNotThrowAnyException();
     }
@@ -88,7 +88,7 @@ final class PersistenceFactoryTest {
         try (PersistenceFactory factory = PersistenceFactory.start(
                 tempDir.resolve("homesynapse-events.db"),
                 PersistenceConfig.HOME_DEFAULT, FIXED_CLOCK, TEST_HOME_ID,
-                AllEventClasses.ALL_EVENTS)) {
+                AllEventClasses.ALL_EVENTS, null)) {
 
             PersistentDlqWriter writer = factory.deadLetterWriter();
             DeadLetter sample = new DeadLetter(
@@ -116,7 +116,7 @@ final class PersistenceFactoryTest {
         try (PersistenceFactory factory = PersistenceFactory.start(
                 tempDir.resolve("homesynapse-events.db"),
                 PersistenceConfig.HOME_DEFAULT, FIXED_CLOCK, TEST_HOME_ID,
-                AllEventClasses.ALL_EVENTS)) {
+                AllEventClasses.ALL_EVENTS, null)) {
 
             SubscriberReadConnectionFactory readFactory =
                     factory.subscriberReadConnectionFactory();

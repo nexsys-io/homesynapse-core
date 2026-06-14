@@ -51,7 +51,7 @@ final class PersistenceFactoryAbandonTest {
 
         PersistenceFactory factory = PersistenceFactory.start(
                 dbPath, PersistenceConfig.HOME_DEFAULT, FIXED_CLOCK,
-                TEST_HOME_ID, AllEventClasses.ALL_EVENTS);
+                TEST_HOME_ID, AllEventClasses.ALL_EVENTS, null);
         factory.abandon();
 
         // After abandon, opening a fresh JDBC connection to the same file
@@ -75,7 +75,7 @@ final class PersistenceFactoryAbandonTest {
 
         PersistenceFactory factory = PersistenceFactory.start(
                 dbPath, PersistenceConfig.HOME_DEFAULT, FIXED_CLOCK,
-                TEST_HOME_ID, AllEventClasses.ALL_EVENTS);
+                TEST_HOME_ID, AllEventClasses.ALL_EVENTS, null);
         factory.abandon();
 
         assertThatCode(factory::close).doesNotThrowAnyException();
@@ -88,7 +88,7 @@ final class PersistenceFactoryAbandonTest {
 
         PersistenceFactory factory = PersistenceFactory.start(
                 dbPath, PersistenceConfig.HOME_DEFAULT, FIXED_CLOCK,
-                TEST_HOME_ID, AllEventClasses.ALL_EVENTS);
+                TEST_HOME_ID, AllEventClasses.ALL_EVENTS, null);
         factory.close();
 
         assertThatCode(factory::abandon).doesNotThrowAnyException();
@@ -101,7 +101,7 @@ final class PersistenceFactoryAbandonTest {
 
         PersistenceFactory factory = PersistenceFactory.start(
                 dbPath, PersistenceConfig.HOME_DEFAULT, FIXED_CLOCK,
-                TEST_HOME_ID, AllEventClasses.ALL_EVENTS);
+                TEST_HOME_ID, AllEventClasses.ALL_EVENTS, null);
         factory.abandon();
 
         assertThatCode(factory::abandon).doesNotThrowAnyException();

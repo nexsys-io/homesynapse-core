@@ -40,6 +40,13 @@ public final class Main {
      * discipline). The adapter is a field-for-field copy — the two result
      * records are deliberately shape-identical.</p>
      *
+     * <p><strong>M6.3 re-point.</strong> The adapter's {@code encrypt} now
+     * delegates to the counter-nonce {@link ScopeKeyManager#encryptPayload}
+     * (Doc 15 §3.4 — durable per-scope counter nonces, OR-M6-NONCE), NOT the
+     * random-IV {@link ScopeKeyManager#encrypt} (which stays the M6.2 secrets
+     * path). This is the at-rest event-payload path the persistence write path
+     * consumes; the {@code PayloadCipher.encrypt} seam name is unchanged.</p>
+     *
      * <p>The full bootstrap wiring — passing this cipher into the
      * five-argument {@code HomeSynapseCore} constructor from
      * {@link #main(String[])} — lands with the app-bootstrap milestone;
@@ -58,7 +65,9 @@ public final class Main {
         return new PayloadCipher() {
             @Override
             public EncryptedPayload encrypt(String scopeId, byte[] plaintext) {
-                ScopeCipherResult result = keyManager.encrypt(scopeId, plaintext);
+                // M6.3: counter-nonce payload path (Doc 15 §3.4), NOT the
+                // random-IV encrypt() (that stays the M6.2 secrets path).
+                ScopeCipherResult result = keyManager.encryptPayload(scopeId, plaintext);
                 return new EncryptedPayload(
                         result.ciphertext(), result.iv(), result.keyVersion());
             }

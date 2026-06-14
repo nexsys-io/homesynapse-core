@@ -11,6 +11,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -32,6 +33,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * property intact. Only {@code com.homesynapse.app} can host this test:
  * it is the single module that reads both {@code config} and
  * {@code persistence} (zero-new-edge property).</p>
+ *
+ * <p><strong>M6.3.</strong> The adapter now delegates to the counter-nonce
+ * {@code ScopeKeyManager.encryptPayload} (not the random-IV {@code encrypt}).
+ * The round-trip tests below still hold verbatim — {@code decrypt} is
+ * nonce-agnostic — and a dedicated test asserts the new property: the per-scope
+ * nonce is a durable, monotonic counter that never repeats across adapter
+ * instances over the same config dir (OR-M6-NONCE at the bridge level).</p>
  */
 @DisplayName("PayloadCipher bridge (app composition root, Doc 15 §3.8)")
 class PayloadCipherBridgeTest {
@@ -94,5 +102,30 @@ class PayloadCipherBridgeTest {
         assertThatThrownBy(() -> cipher.decrypt("presence_personal",
                 payload.keyVersion(), payload.ciphertext(), payload.iv()))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @DisplayName("M6.3: the payload nonce is a durable, monotonic counter that never"
+            + " repeats across adapter instances (OR-M6-NONCE)")
+    void counterNonceIsDurableAndMonotonicAcrossAdapters() {
+        // Two encrypts under one scope on one adapter: counter nonces, monotonic.
+        PayloadCipher first = Main.payloadCipher(configDir, FIXED_CLOCK);
+        byte[] n1 = first.encrypt("identity",
+                "one".getBytes(StandardCharsets.UTF_8)).iv();
+        byte[] n2 = first.encrypt("identity",
+                "two".getBytes(StandardCharsets.UTF_8)).iv();
+        assertThat(n2).isNotEqualTo(n1);
+        assertThat(counterOf(n2)).isGreaterThan(counterOf(n1));
+
+        // A fresh adapter over the same config dir resumes strictly above the
+        // persisted high-water mark — never reissuing a used nonce.
+        byte[] n3 = Main.payloadCipher(configDir, FIXED_CLOCK)
+                .encrypt("identity", "three".getBytes(StandardCharsets.UTF_8)).iv();
+        assertThat(counterOf(n3)).isGreaterThan(counterOf(n2));
+    }
+
+    /** Decodes the counter from a 96-bit nonce (big-endian trailing 8 bytes). */
+    private static long counterOf(byte[] nonce) {
+        return ByteBuffer.wrap(nonce).getLong(nonce.length - Long.BYTES);
     }
 }

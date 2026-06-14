@@ -51,7 +51,7 @@ final class SqliteSubscriberReadConnectionFactoryTest {
         factory = PersistenceFactory.start(
                 tempDir.resolve("homesynapse-events.db"),
                 PersistenceConfig.HOME_DEFAULT, FIXED_CLOCK, TEST_HOME_ID,
-                AllEventClasses.ALL_EVENTS);
+                AllEventClasses.ALL_EVENTS, null);
     }
 
     @AfterEach

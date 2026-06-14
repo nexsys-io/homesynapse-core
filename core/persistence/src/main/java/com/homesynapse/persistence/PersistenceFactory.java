@@ -83,8 +83,16 @@ public final class PersistenceFactory implements AutoCloseable {
      * @param eventClasses domain-event record classes to register for
      *                     polymorphic serialization; must not be empty
      *                     (no classpath scanning per LTD-07)
+     * @param payloadCipher the at-rest payload cipher (Doc 15 §3.8 seam,
+     *                     M6.3), threaded to the write/read path; <strong>may
+     *                     be {@code null}</strong> when at-rest payload
+     *                     encryption is unavailable — the M6.2 production
+     *                     state and every no-crypto caller. When non-null, the
+     *                     sensitive-PII scopes ({@code [identity,
+     *                     presence_personal]}) are encrypted-on-write.
      * @return a started factory exposing all persistence stores
-     * @throws NullPointerException if any argument is {@code null}
+     * @throws NullPointerException if any argument other than
+     *                              {@code payloadCipher} is {@code null}
      * @throws RuntimeException     if the persistence layer fails to start
      */
     public static PersistenceFactory start(
@@ -92,15 +100,17 @@ public final class PersistenceFactory implements AutoCloseable {
             PersistenceConfig config,
             Clock clock,
             HomeId homeId,
-            List<Class<? extends DomainEvent>> eventClasses) {
+            List<Class<? extends DomainEvent>> eventClasses,
+            PayloadCipher payloadCipher) {
         Objects.requireNonNull(dbPath, "dbPath");
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(clock, "clock");
         Objects.requireNonNull(homeId, "homeId");
         Objects.requireNonNull(eventClasses, "eventClasses");
+        // payloadCipher is intentionally nullable (M6.2 state / no-crypto callers).
 
         SqlitePersistenceLifecycle lifecycle = new SqlitePersistenceLifecycle(
-                dbPath, config, clock, homeId, eventClasses);
+                dbPath, config, clock, homeId, eventClasses, payloadCipher);
         try {
             lifecycle.start().join();
         } catch (CompletionException ce) {

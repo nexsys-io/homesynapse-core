@@ -56,6 +56,11 @@ final class MigrationRunnerTest {
     private static final String V001_BAD = "V001__bad_migration.sql";
     private static final String V001_EVENTS = "V001__initial_event_store_schema.sql";
     private static final String V002_DLQ = "V002__subscriber_dead_letter_queue.sql";
+    private static final String V003_SNAPSHOTS =
+        "V003__add_snapshots_and_drop_redundant_index.sql";
+    private static final String V004_DLQ_INDICES = "V004__dlq_operational_indices.sql";
+    private static final String V005_ENCRYPTION =
+        "V005__at_rest_payload_encryption_columns.sql";
 
     private static final Clock TEST_CLOCK =
         Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
@@ -528,6 +533,69 @@ final class MigrationRunnerTest {
         assertThat(rows.get(0).success).isEqualTo(1);
         assertThat(rows.get(1).version).isEqualTo(2);
         assertThat(rows.get(1).success).isEqualTo(1);
+    }
+
+    // ------------------------------------------------------------------
+    // Tier 5d — V005 at-rest payload encryption columns (Doc 15 §4.1, M6.3)
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("V005 adds payload_iv + dek_ref to events, preserving V001 columns")
+    void migrate_eventsV005_addsEncryptionColumns() throws SQLException {
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
+
+        runner.migrate(EVENTS_PATH,
+            List.of(V001_EVENTS, V002_DLQ, V003_SNAPSHOTS, V004_DLQ_INDICES,
+                V005_ENCRYPTION),
+            MigrationConfig.freshInstall());
+
+        // The two new nullable columns exist...
+        assertThat(columnNames(connection, "events"))
+            .contains("payload_iv", "dek_ref");
+        // ...and the additive ALTER preserved the pre-V005 columns.
+        assertThat(columnNames(connection, "events"))
+            .contains("payload", "payload_size", "chain_hash", "event_id");
+
+        var rows = queryAllSchemaVersions(connection);
+        assertThat(rows).hasSize(5);
+        assertThat(rows.get(4).version).isEqualTo(5);
+        assertThat(rows.get(4).success).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("V005 — payload_iv/dek_ref default to NULL for a row inserted without them")
+    void migrate_eventsV005_columnsDefaultNull() throws SQLException {
+        var runner = new MigrationRunner(connection, TEST_CLOCK);
+        runner.migrate(EVENTS_PATH,
+            List.of(V001_EVENTS, V002_DLQ, V003_SNAPSHOTS, V004_DLQ_INDICES,
+                V005_ENCRYPTION),
+            MigrationConfig.freshInstall());
+
+        try (Statement stmt = connection.createStatement()) {
+            stmt.executeUpdate("""
+                INSERT INTO events (
+                    event_id, home_id, event_type, ingest_time,
+                    subject_ref, subject_type, subject_sequence,
+                    correlation_id, event_category, payload_size, payload
+                ) VALUES (
+                    x'0180000000000000000000000000AAAA',
+                    x'0180000000000000000000000000BBBB',
+                    'test.event', 1700000000000000,
+                    x'0180000000000000000000000000CCCC',
+                    'DEVICE', 1,
+                    x'0180000000000000000000000000DDDD',
+                    'device_state', 5, x'7B7D'
+                )
+                """);
+        }
+
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT payload_iv, dek_ref FROM events WHERE global_position = 1");
+             ResultSet rs = ps.executeQuery()) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getBytes("payload_iv")).isNull();
+            assertThat(rs.getString("dek_ref")).isNull();
+        }
     }
 
     // ------------------------------------------------------------------

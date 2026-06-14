@@ -18,6 +18,7 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 
@@ -78,13 +79,27 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
      * defined in AMD-36. V003 added the {@code snapshots} table for State
      * Projection rebuild performance and dropped the redundant
      * {@code idx_events_subject} index. V004 (M3.5b) adds operational
-     * indices on {@code subscriber_dead_letters} for admin query paths.</p>
+     * indices on {@code subscriber_dead_letters} for admin query paths.
+     * V005 (M6.3) adds the {@code payload_iv} / {@code dek_ref} at-rest
+     * encryption columns (Doc 15 §4.1).</p>
      */
     private static final List<String> EVENTS_MIGRATION_FILES = List.of(
             "V001__initial_event_store_schema.sql",
             "V002__subscriber_dead_letter_queue.sql",
             "V003__add_snapshots_and_drop_redundant_index.sql",
-            "V004__dlq_operational_indices.sql");
+            "V004__dlq_operational_indices.sql",
+            "V005__at_rest_payload_encryption_columns.sql");
+
+    /**
+     * The MVP default {@code crypto.encryption.encrypted_scopes} set (Doc 15
+     * §9 / OQ-15-2). Mirrors config's {@code EncryptionScope}
+     * {@code DEFAULT_ENCRYPTED_SCOPE_IDS} as a {@code java.base} {@code Set}
+     * (persistence must not name a {@code config} type — Doc 15 §3.8). Wired
+     * into the event store iff a {@link PayloadCipher} is present (M6.3); a
+     * null cipher leaves the enabled set empty (the M6.2 plaintext state).
+     */
+    private static final Set<String> DEFAULT_ENCRYPTED_SCOPES =
+            Set.of("identity", "presence_personal");
 
     private final Path databasePath;
     private final PersistenceConfig config;
@@ -92,6 +107,15 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
     private final HomeId homeId;
     private final List<Class<? extends DomainEvent>> eventClasses;
     private final Function<WriteCoordinator, WriteCoordinator> writeCoordinatorDecorator;
+
+    /**
+     * At-rest payload cipher (Doc 15 §3.8 / M6.3). Nullable — {@code null} is
+     * the M6.2 state (no crypto) and the path every existing test/harness
+     * takes; the event store is then wired with an empty enabled-scope set
+     * (plaintext for all). {@link PersistenceFactory#start} forwards the
+     * composition-root cipher here.
+     */
+    private final PayloadCipher payloadCipher;
 
     // Constructed during start()
     private DatabaseExecutor databaseExecutor;
@@ -135,7 +159,30 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
             HomeId homeId,
             List<Class<? extends DomainEvent>> eventClasses) {
         this(databasePath, config, clock, homeId, eventClasses,
-                Function.identity());
+                Function.identity(), null);
+    }
+
+    /**
+     * Production constructor with the M6.3 at-rest payload cipher (Doc 15
+     * §3.8). Used by {@link PersistenceFactory#start}.
+     *
+     * @param databasePath  full path to the SQLite database file
+     * @param config        persistence configuration
+     * @param clock         injected clock
+     * @param homeId        home identity for this installation (AMD-34)
+     * @param eventClasses  domain-event record classes
+     * @param payloadCipher the at-rest cipher, or {@code null} when at-rest
+     *                      payload encryption is unavailable (the M6.2 state)
+     */
+    public SqlitePersistenceLifecycle(
+            Path databasePath,
+            PersistenceConfig config,
+            Clock clock,
+            HomeId homeId,
+            List<Class<? extends DomainEvent>> eventClasses,
+            PayloadCipher payloadCipher) {
+        this(databasePath, config, clock, homeId, eventClasses,
+                Function.identity(), payloadCipher);
     }
 
     /**
@@ -144,10 +191,11 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
      * {@code PlatformThreadWriteCoordinator}. Lives in the same package as
      * {@link PersistenceTestHarness}, which calls this overload from
      * {@code startWithWriteCoordinator(...)} to install a
-     * {@code ThrottledWriteCoordinator} (M3.4b).
+     * {@code ThrottledWriteCoordinator} (M3.4b). No at-rest cipher (M6.2
+     * plaintext state).
      *
      * <p>Pass {@link Function#identity()} for production-equivalent behavior.
-     * Production composition (M3.6) MUST use the public 5-arg constructor.</p>
+     * Production composition (M3.6) MUST use a public constructor.</p>
      *
      * @param databasePath              full path to the SQLite database file
      * @param config                    persistence configuration
@@ -165,6 +213,32 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
             HomeId homeId,
             List<Class<? extends DomainEvent>> eventClasses,
             Function<WriteCoordinator, WriteCoordinator> writeCoordinatorDecorator) {
+        this(databasePath, config, clock, homeId, eventClasses,
+                writeCoordinatorDecorator, null);
+    }
+
+    /**
+     * Canonical constructor — combines the write-coordinator decorator and
+     * the at-rest cipher. Every other constructor delegates here.
+     *
+     * @param databasePath              full path to the SQLite database file
+     * @param config                    persistence configuration
+     * @param clock                     injected clock
+     * @param homeId                    home identity for this installation
+     * @param eventClasses              domain-event record classes
+     * @param writeCoordinatorDecorator decorator applied to the
+     *                                  {@code WriteCoordinator}; never
+     *                                  {@code null}
+     * @param payloadCipher             the at-rest cipher, or {@code null}
+     */
+    SqlitePersistenceLifecycle(
+            Path databasePath,
+            PersistenceConfig config,
+            Clock clock,
+            HomeId homeId,
+            List<Class<? extends DomainEvent>> eventClasses,
+            Function<WriteCoordinator, WriteCoordinator> writeCoordinatorDecorator,
+            PayloadCipher payloadCipher) {
         this.databasePath = Objects.requireNonNull(databasePath, "databasePath");
         this.config = Objects.requireNonNull(config, "config");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -173,6 +247,7 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
                 Objects.requireNonNull(eventClasses, "eventClasses"));
         this.writeCoordinatorDecorator = Objects.requireNonNull(
                 writeCoordinatorDecorator, "writeCoordinatorDecorator");
+        this.payloadCipher = payloadCipher; // nullable by design (M6.2 state)
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -240,8 +315,21 @@ final class SqlitePersistenceLifecycle implements PersistenceLifecycle {
             EventPayloadCodec codec = new EventPayloadCodec(registry, warmup);
 
             // 4. Construct stores on top of the initialized executor.
+            //    M6.3 (Doc 15 §3.4): enable the at-rest encrypted-scope set iff
+            //    a cipher is wired. Cipher-presence is the at_rest_enabled
+            //    master switch for this WU — live ConfigModel wiring of the
+            //    crypto.encryption knobs is app-bootstrap scope. A null cipher
+            //    (the M6.2 state, and every no-crypto test/harness) leaves the
+            //    set empty → plaintext for all scopes. A sensitive-scope event
+            //    with an enabled set but a null cipher fails closed at the
+            //    write path (it cannot occur through this wiring, which gates
+            //    the set on cipher-presence).
+            Set<String> encryptedScopes = payloadCipher != null
+                    ? DEFAULT_ENCRYPTED_SCOPES
+                    : Set.of();
             eventStore = new SqliteEventStore(
-                    databaseExecutor, codec, registry, clock, homeId);
+                    databaseExecutor, codec, registry, clock, homeId,
+                    payloadCipher, encryptedScopes);
             checkpointStore = new SqliteCheckpointStore(
                     databaseExecutor, clock);
             viewCheckpointStore = new SqliteViewCheckpointStore(
