@@ -26,5 +26,19 @@ module com.homesynapse.automation {
     // is declared explicitly at its use site per the relocation design note.
     requires com.homesynapse.value;
 
+    // M7.1: the engine's automation_engine bus subscriber imports event-bus
+    // (a legal core->core edge). The config edge that FIX-07 proposed re-adding
+    // is NOT taken: core->config is forbidden by assertAllowedModuleDependencies
+    // at EVERY scope (a stricter gate than the exported-API §authoring check).
+    // The automations.yaml schema registration + definition-document load ride
+    // the composition root (lifecycle/app), which may depend on both core and
+    // config; the loader itself consumes an already-parsed Map (no config edge).
+    requires com.homesynapse.event.bus;
+
+    // M7.1: the Phase-3 implementations (registry, evaluators, loader,
+    // duration timers) log via SLF4J. Non-transitive — no SLF4J type appears
+    // on the exported API (LTD-15 / DECIDE-01), mirroring state-store/persistence.
+    requires org.slf4j;
+
     exports com.homesynapse.automation;
 }

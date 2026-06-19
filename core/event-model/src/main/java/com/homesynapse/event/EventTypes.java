@@ -12,7 +12,7 @@ import java.util.List;
  *
  * <p>This class defines all core event type string constants referenced by
  * {@link EventEnvelope#eventType()} and the {@link EventType} annotation values on
- * the 24 core payload records. Each constant uses UPPER_SNAKE_CASE names with
+ * the 32 core payload records. Each constant uses UPPER_SNAKE_CASE names with
  * lower_snake_case string values for consistency with the taxonomy defined in
  * Doc 01 §4.3.
  *
@@ -27,7 +27,7 @@ import java.util.List;
  * shared across all HomeSynapse deployments.
  *
  * <p><strong>Core production event class manifest (M3.6c):</strong>
- * {@link #CORE_PRODUCTION_EVENT_CLASSES} is the canonical, ordered list of the 24 core
+ * {@link #CORE_PRODUCTION_EVENT_CLASSES} is the canonical, ordered list of the 32 core
  * {@link DomainEvent} payload record classes that ship with HomeSynapse Core. The composition
  * root aggregates this list with the per-module manifests contributed by other modules
  * (currently {@code IntegrationEvents.LIFECYCLE_EVENT_CLASSES} in
@@ -119,6 +119,29 @@ public final class EventTypes {
 
 	/** Event issued when an automation rule completes execution. */
 	public static final String AUTOMATION_COMPLETED = "automation_completed";
+
+	// ========== Automation Run-Initiation Vocabulary (M7.1, AMD-92) ==========
+
+	/** Event issued when an automation is explicitly invoked (the ManualTrigger source). */
+	public static final String AUTOMATION_INVOKED = "automation_invoked";
+
+	/** Diagnostic: a selector followed a slug tombstone chain to a current entity. */
+	public static final String AUTOMATION_SLUG_REDIRECT = "automation_slug_redirect";
+
+	/** Diagnostic: a {@code for_duration} timer (AMD-25) was started. */
+	public static final String TRIGGER_DURATION_STARTED = "trigger_duration_started";
+
+	/** Diagnostic: a {@code for_duration} timer was cancelled before expiry. */
+	public static final String TRIGGER_DURATION_CANCELLED = "trigger_duration_cancelled";
+
+	/** Diagnostic: a {@code for_duration} timer expired and fired its trigger. */
+	public static final String TRIGGER_DURATION_EXPIRED = "trigger_duration_expired";
+
+	/** Diagnostic: a {@code for_duration} expiry state-validation read diverged from expectation. */
+	public static final String TRIGGER_DURATION_STATE_VALIDATED = "trigger_duration_state_validated";
+
+	/** Diagnostic: a {@code for_duration} timer was rejected for exceeding the concurrent-timer ceiling. */
+	public static final String TRIGGER_DURATION_LIMIT_EXCEEDED = "trigger_duration_limit_exceeded";
 
 	// ========== Presence ==========
 
@@ -248,7 +271,7 @@ public final class EventTypes {
 	// ========== Core Production Event Class Manifest (M3.6c, DECIDE-04) ==========
 
 	/**
-	 * Canonical, ordered list of the 24 core {@link DomainEvent} payload record classes
+	 * Canonical, ordered list of the 32 core {@link DomainEvent} payload record classes
 	 * that ship with HomeSynapse Core. Every entry carries an {@link EventType} annotation
 	 * whose value is one of the string constants above and which is registered with the
 	 * {@code EventTypeRegistry} at startup.
@@ -299,5 +322,14 @@ public final class EventTypes {
 					ConfigErrorEvent.class,
 					ConfigValidationCompletedEvent.class,
 					ConfigSectionReloadedEvent.class,
-					TelemetrySummaryEvent.class);
+					TelemetrySummaryEvent.class,
+					// M7.1 automation run-initiation slice (AMD-92 rows 3, 11-16, 19)
+					AutomationInvokedEvent.class,
+					AutomationSlugRedirectEvent.class,
+					TriggerDurationStartedEvent.class,
+					TriggerDurationCancelledEvent.class,
+					TriggerDurationExpiredEvent.class,
+					TriggerDurationStateValidatedEvent.class,
+					TriggerDurationLimitExceededEvent.class,
+					AutomationCapabilityMismatchEvent.class);
 }

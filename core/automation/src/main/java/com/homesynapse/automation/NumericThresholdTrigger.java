@@ -19,7 +19,7 @@ import java.util.Objects;
  * {@code PT1S}, maximum per {@code automation.trigger.max_for_duration_ms} config.
  * ISO 8601 {@code PT} format only (no {@code P1D}).</p>
  *
- * <p>Defined in Doc 07 §3.4, §8.2.</p>
+ * <p>Defined in Doc 07 §3.4, §8.2; {@code triggerId} added by AMD-88 §2.5.</p>
  *
  * @param selector    the entity selector for this trigger, never {@code null}
  * @param attribute   the numeric attribute name to watch, never {@code null}
@@ -27,6 +27,7 @@ import java.util.Objects;
  * @param below       the lower threshold; {@code null} if only upper bound is checked
  * @param forDuration the duration the threshold must be sustained before firing (AMD-25);
  *                    {@code null} means fire immediately on crossing
+ * @param triggerId   the stable, user-facing trigger identity (AMD-88 §2.5), never {@code null}
  * @see TriggerDefinition
  * @see TriggerEvaluator
  * @see DurationTimer
@@ -36,16 +37,19 @@ public record NumericThresholdTrigger(
         String attribute,
         Double above,
         Double below,
-        Duration forDuration
+        Duration forDuration,
+        String triggerId
 ) implements TriggerDefinition {
 
     /**
      * Validates non-null fields.
      *
-     * @throws NullPointerException if {@code selector} or {@code attribute} is {@code null}
+     * @throws NullPointerException if {@code selector}, {@code attribute}, or
+     *                              {@code triggerId} is {@code null}
      */
     public NumericThresholdTrigger {
         Objects.requireNonNull(selector, "selector must not be null");
         Objects.requireNonNull(attribute, "attribute must not be null");
+        Objects.requireNonNull(triggerId, "triggerId must not be null");
     }
 }

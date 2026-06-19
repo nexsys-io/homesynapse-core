@@ -37,7 +37,7 @@ class EventTypeAnnotationTest {
 
     /**
      * The authoritative list of core {@link DomainEvent} payload record classes
-     * that must carry {@link EventType}. Must contain exactly 24 entries.
+     * that must carry {@link EventType}. Must contain exactly 32 entries.
      * {@link DegradedEvent} is deliberately absent — it is the fallback wrapper
      * and is never serialized under its own type discriminator.
      */
@@ -65,7 +65,16 @@ class EventTypeAnnotationTest {
             ConfigErrorEvent.class,
             ConfigValidationCompletedEvent.class,
             ConfigSectionReloadedEvent.class,
-            TelemetrySummaryEvent.class);
+            TelemetrySummaryEvent.class,
+            // M7.1 automation run-initiation slice (AMD-92 rows 3, 11-16, 19)
+            AutomationInvokedEvent.class,
+            AutomationSlugRedirectEvent.class,
+            TriggerDurationStartedEvent.class,
+            TriggerDurationCancelledEvent.class,
+            TriggerDurationExpiredEvent.class,
+            TriggerDurationStateValidatedEvent.class,
+            TriggerDurationLimitExceededEvent.class,
+            AutomationCapabilityMismatchEvent.class);
 
     @Test
     @DisplayName("every DomainEvent record (except DegradedEvent) has @EventType")
@@ -143,9 +152,9 @@ class EventTypeAnnotationTest {
     }
 
     @Test
-    @DisplayName("exactly 24 core event records carry @EventType")
-    void exactlyTwentyFourAnnotatedRecords() {
-        assertThat(EXPECTED_EVENT_RECORDS).hasSize(24);
+    @DisplayName("exactly 32 core event records carry @EventType")
+    void exactlyThirtyTwoAnnotatedRecords() {
+        assertThat(EXPECTED_EVENT_RECORDS).hasSize(32);
 
         long annotatedCount = EXPECTED_EVENT_RECORDS.stream()
                 .filter(cls -> cls.isRecord())
@@ -153,7 +162,7 @@ class EventTypeAnnotationTest {
                 .filter(cls -> cls.getAnnotation(EventType.class) != null)
                 .count();
 
-        assertThat(annotatedCount).isEqualTo(24L);
+        assertThat(annotatedCount).isEqualTo(32L);
     }
 
     @Test

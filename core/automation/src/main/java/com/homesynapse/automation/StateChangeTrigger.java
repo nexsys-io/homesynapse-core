@@ -20,7 +20,7 @@ import java.util.Objects;
  * {@code PT1S}, maximum per {@code automation.trigger.max_for_duration_ms} config.
  * ISO 8601 {@code PT} format only (no {@code P1D}).</p>
  *
- * <p>Defined in Doc 07 §3.4, §8.2.</p>
+ * <p>Defined in Doc 07 §3.4, §8.2; {@code triggerId} added by AMD-88 §2.5.</p>
  *
  * @param selector    the entity selector for this trigger, never {@code null}
  * @param attribute   the attribute name to watch for transitions, never {@code null}
@@ -28,6 +28,7 @@ import java.util.Objects;
  * @param to          the new attribute value to match; {@code null} means any new value
  * @param forDuration the duration the state must be sustained before firing (AMD-25);
  *                    {@code null} means fire immediately on transition
+ * @param triggerId   the stable, user-facing trigger identity (AMD-88 §2.5), never {@code null}
  * @see TriggerDefinition
  * @see TriggerEvaluator
  * @see DurationTimer
@@ -37,16 +38,19 @@ public record StateChangeTrigger(
         String attribute,
         String from,
         String to,
-        Duration forDuration
+        Duration forDuration,
+        String triggerId
 ) implements TriggerDefinition {
 
     /**
      * Validates non-null fields.
      *
-     * @throws NullPointerException if {@code selector} or {@code attribute} is {@code null}
+     * @throws NullPointerException if {@code selector}, {@code attribute}, or
+     *                              {@code triggerId} is {@code null}
      */
     public StateChangeTrigger {
         Objects.requireNonNull(selector, "selector must not be null");
         Objects.requireNonNull(attribute, "attribute must not be null");
+        Objects.requireNonNull(triggerId, "triggerId must not be null");
     }
 }

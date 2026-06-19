@@ -93,7 +93,7 @@ final class JacksonWarmup {
      * handles for each type.
      *
      * <p>Execution time scales linearly with the number of registered classes;
-     * on a Raspberry Pi 5, the full 27-type warmup completes in under 150 ms.</p>
+     * on a Raspberry Pi 5, the full event-class warmup completes in under 150 ms.</p>
      *
      * @param mapper   the configured persistence {@link ObjectMapper}; never {@code null}
      * @param registry the event type registry; never {@code null}

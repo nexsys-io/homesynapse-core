@@ -1,4 +1,6 @@
-# automation — `com.homesynapse.automation` — ~53 types — Trigger→Condition→Action rule engine, 4 sealed hierarchies, cascade governance
+# automation — `com.homesynapse.automation` — ~68 public types (+4 package-private impl helpers) — Trigger→Condition→Action rule engine, 4 sealed hierarchies, cascade governance
+
+> **M7.1 status (trigger/condition path — DONE; M7.2/M7.3 pending).** The first production code landed: the four M7.1 service impls (`StandardAutomationRegistry`, `StandardTriggerEvaluator` incl. AMD-25 duration timers, `StandardConditionEvaluator`, `StandardSelectorResolver`), the `AutomationDefinitionLoader` (+`LoadResult`/`LoadFailure`) with §6.1 fail-closed validation (SD-9), the `AutomationIdentityStore`/`InMemoryAutomationIdentityStore` identity seam, and the package-private wiring seams `AutomationEngineSubscriber` + `AutomationConfigBridge`. AMD-88 took `TriggerDefinition` 9→12 permits (+`CalendarTrigger`/`ReachabilityTrigger`/`ManualTrigger`, `WebhookTrigger` promoted, `triggerId` on every Tier-1) and AMD-89 took `Selector` 6→7 (+`SemanticTagSelector`, `includedRoles` on the group permits) + new enums `MatchMode`/`CalendarEventTransition`. **Composition-root wiring of the `automation_engine` subscriber is BLOCKED on app-bootstrap** (the runtime assembles no `ConfigurationService` and no production Entity/Device/Area registries at this baseline) — the engine + its seams are built and tested with injected/stubbed deps; the seams plug in when app-bootstrap lands. `RunContext` is UNTOUCHED (the AMD-91 swap is M7.2).
 
 ## Purpose
 
@@ -37,9 +39,17 @@ module com.homesynapse.automation {
     requires transitive com.homesynapse.state;
     requires com.homesynapse.value;
 
+    // M7.1: the automation_engine bus subscriber imports event-bus (a legal
+    // core->core edge); org.slf4j for engine-internal logging. Plain requires /
+    // Gradle implementation scope (no such type on the exported API).
+    requires com.homesynapse.event.bus;
+    requires org.slf4j;
+
     exports com.homesynapse.automation;
 }
 ```
+
+**M7.1 update — FIX-07 PARTIALLY REVERSED (`event.bus` re-added; `config` NOT):** `requires com.homesynapse.event.bus` + `requires org.slf4j` were re-added when the Phase-3 implementations landed. **`requires com.homesynapse.config` was NOT re-added** — the gate's `assertAllowedModuleDependencies` task bans the `core:automation -> config:configuration` edge at EVERY scope (the "Core depends only on platform + other core" layer rule), which is a STRICTER gate than the exported-API `requires transitive`↔`api` §authoring check. So the FIX-07 config half is wrong (an instruction defect). The `automations.yaml` schema registration + definition-document load ride the composition root (`lifecycle`/`app`, allowed to depend on both core and config) at app-bootstrap; the config-free schema fragment lives in `AutomationSchema` (a plain-`String` constant holder near the automation module). The `AutomationDefinitionLoader` is config-agnostic (`load(Map<String,Object>)`). The `event.bus` half of FIX-07 was fine (`core->core`, used by `AutomationEngineSubscriber`).
 
 **Rationale for each `requires transitive`:**
 - `com.homesynapse.platform` — `AutomationId`, `EntityId`, `EventId`, `Ulid` from `com.homesynapse.platform.identity` appear in record components and method signatures throughout (AutomationDefinition, RunContext, PendingCommand, DurationTimer, DirectRefSelector, RunManager, CommandDispatchService, SelectorResolver, PendingCommandLedger, ConflictDetector, TriggerEvaluator, AutomationRegistry).
@@ -78,11 +88,11 @@ module com.homesynapse.automation {
 
 ### Sealed Hierarchies
 
-#### Selector Hierarchy (6 permits, all Tier 1)
+#### Selector Hierarchy (7 permits, all Tier 1 — AMD-89)
 
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
-| `Selector` | sealed interface | Root of selector type hierarchy (§3.12) | Permits: DirectRefSelector, SlugSelector, AreaSelector, LabelSelector, TypeSelector, CompoundSelector. Resolved to `Set<EntityId>` at trigger evaluation time. |
+| `Selector` | sealed interface | Root of selector type hierarchy (§3.12) | Permits: DirectRefSelector, SlugSelector, AreaSelector, LabelSelector, TypeSelector, **SemanticTagSelector (AMD-89)**, CompoundSelector. Resolved to `Set<EntityId>` at trigger evaluation time. The group-resolving permits (Area/Label/Type/SemanticTag) carry a non-null `Set<EntityRole> includedRoles` (PRIMARY-only default at YAML load); Direct/Slug are never role-filtered (AMD-89-INV-01). New enum `MatchMode { EXACT, NAMESPACE_PREFIX }`. |
 | `DirectRefSelector` | record (1 field) | Entity reference by ULID | Fields: `entityId` (EntityId, non-null). Resolves to exactly one entity. |
 | `SlugSelector` | record (1 field) | Human-readable slug reference | Fields: `slug` (String, non-null). Resolves to exactly one entity. |
 | `AreaSelector` | record (1 field) | All entities in a named area | Fields: `areaSlug` (String, non-null). |
@@ -90,11 +100,11 @@ module com.homesynapse.automation {
 | `TypeSelector` | record (1 field) | All entities of a given type | Fields: `entityType` (String, non-null). |
 | `CompoundSelector` | record (1 field) | Intersection of multiple selectors (all_of) | Fields: `selectors` (List<Selector>, unmodifiable via List.copyOf()). Resolved sets are intersected per §7.3 deduplication. |
 
-#### TriggerDefinition Hierarchy (5 Tier 1 + 4 Tier 2 reserved)
+#### TriggerDefinition Hierarchy (9 Tier 1 + 3 Tier 2 reserved — AMD-88)
 
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
-| `TriggerDefinition` | sealed interface | Root of trigger type hierarchy (§3.4) | Permits 9 subtypes. 4 subtypes support `forDuration` (AMD-25). |
+| `TriggerDefinition` | sealed interface | Root of trigger type hierarchy (§3.4) | Permits 12 subtypes (AMD-88: +`CalendarTrigger`/`ReachabilityTrigger`/`ManualTrigger`; `WebhookTrigger` promoted Tier-2→Tier-1 with fields; `PresenceTrigger` stays empty = M8.1). 5 subtypes support `forDuration` (AMD-25): StateChange/State/NumericThreshold/Availability/**Reachability**. Every Tier-1 permit carries a `String triggerId` (AMD-88 §2.5) — user-supplied or load-time ULID, stable across reloads; engine keying stays positional `(automationId, triggerIndex)`. New enum `CalendarEventTransition { EVENT_START, EVENT_END }`. |
 | `StateChangeTrigger` | record (5 fields) | Edge-triggered on state transitions | Fields: `selector` (Selector, non-null), `attribute` (String, non-null), `from` (String, nullable — any), `to` (String, nullable — any), `forDuration` (Duration, nullable — AMD-25). At least one of from/to must be non-null (validated at YAML load, not compact constructor). |
 | `StateTrigger` | record (4 fields) | Level-triggered on state predicate | Fields: `selector` (Selector, non-null), `attribute` (String, non-null), `value` (String, non-null), `forDuration` (Duration, nullable — AMD-25). |
 | `EventTrigger` | record (2 fields) | Fires on specific event type | Fields: `eventType` (String, non-null), `payloadFilters` (Map<String, Object>, unmodifiable via Map.copyOf()). NO forDuration — event triggers are inherently instantaneous (AMD-25 deliberate design decision). |
@@ -226,8 +236,8 @@ The four `api`-scoped upstream modules surface their types on this module's publ
 
 This module contains four sealed hierarchies — the largest concentration of sealed types in any HomeSynapse module:
 
-1. **Selector** — 6 permits (all Tier 1): DirectRefSelector, SlugSelector, AreaSelector, LabelSelector, TypeSelector, CompoundSelector
-2. **TriggerDefinition** — 9 permits (5 Tier 1 + 4 Tier 2): StateChangeTrigger, StateTrigger, EventTrigger, AvailabilityTrigger, NumericThresholdTrigger, TimeTrigger, SunTrigger, PresenceTrigger, WebhookTrigger
+1. **Selector** — 7 permits (all Tier 1, AMD-89): DirectRefSelector, SlugSelector, AreaSelector, LabelSelector, TypeSelector, SemanticTagSelector, CompoundSelector
+2. **TriggerDefinition** — 12 permits (9 Tier 1 + 3 Tier 2, AMD-88): StateChangeTrigger, StateTrigger, EventTrigger, AvailabilityTrigger, NumericThresholdTrigger, CalendarTrigger, ReachabilityTrigger, ManualTrigger, WebhookTrigger, TimeTrigger, SunTrigger, PresenceTrigger
 3. **ConditionDefinition** — 7 permits (6 Tier 1 + 1 Tier 2): StateCondition, NumericCondition, TimeCondition, AndCondition, OrCondition, NotCondition, ZoneCondition
 4. **ActionDefinition** — 8 permits (5 Tier 1 + 3 Tier 2): CommandAction, DelayAction, WaitForAction, ConditionBranchAction, EmitEventAction, ActivateSceneAction, InvokeIntegrationAction, ParallelAction
 
@@ -284,6 +294,19 @@ This module contains four sealed hierarchies — the largest concentration of se
 **GOTCHA: `CommandIdempotency` is in event-model, NOT in device-model.** Despite being command-related, it lives in `com.homesynapse.event`. Used in PendingCommand.idempotency.
 
 **GOTCHA: `package-info.java` was repurposed, not deleted.** The original scaffold was a bare placeholder. It was rewritten with full package-level Javadoc describing the module's purpose and key types.
+
+**GOTCHA (M7.1): event-payload type residency is a hard JPMS compile cycle, not a lint (SD-1 / AMD-92-INV-01).** No `com.homesynapse.automation`-resident type (`RunId`/`RunStatus`/`MatchMode`/selectors/triggers/`RunContext`) may appear in any `com.homesynapse.event` record — that inverts the edge to `event→automation` and the build fails with a cycle. The M7.1 event records flatten everything: `runId`=bare `Ulid`, `cascadeDepth`=`int`, statuses=`String`. The reshaped `AutomationTriggeredEvent.matchedTriggers` carries trigger IDs (`List<String>`), not indices.
+
+**GOTCHA (M7.1): `EntityRole`, NOT `EntityCategory` (AMD-89 §1.2).** `EntityCategory` does not exist in source; `EntityRole {PRIMARY, DIAGNOSTIC, CONFIG}` (`com.homesynapse.device`, AMD-44) is the role-filter substrate. Distinct from `EventCategory` in event-model — do not conflate.
+
+**GOTCHA (M7.1): the C1-interim publish hold (SD-3).** The evaluator does NOT publish `automation_triggered` in M7.1 — it returns the matched automation IDs (the decision to run) but a triggered event must not be published before M7.2's completing side exists (every triggered needs a completed). The `automation_triggered` record + registration land (vocabulary completeness); zero production publish sites. The `trigger_duration_*` diagnostics DO publish from M7.1.
+
+**GOTCHA (M7.1) — three substrate gaps flagged for follow-up (not collapsed):**
+- **Slug-tombstone (Identity Model §7.5):** no slug-tombstone substrate exists at this baseline, so `SlugSelector` resolves current slugs only and `automation_slug_redirect` (row 11) is minted/registered but has no production publish site (dormant, like the Calendar/Webhook permits). Tombstone-following + the redirect publish await the identity substrate.
+- **Area addressing (AMD-44 Stage-1 minimal `Area`):** `Area` carries no first-class slug, so `AreaSelector` keys on the area's display name (case-insensitive + space→underscore slugify); entity area inherits the owning device's area via `DeviceRegistry`. A first-class area slug is the robust fix.
+- **`Availability` granularity (R-δ AX-8):** the enum is `AVAILABLE/UNAVAILABLE/UNKNOWN` only — it cannot distinguish a battery device legitimately asleep from a mains device that is dead, so `ReachabilityTrigger` evaluation can false-alarm. An integration/state-store gap, flagged, not collapsed in M7.1.
+
+**GOTCHA (M7.1): the duration-timer expiry seam is clock-gated, not wall-sleep-gated (REC-156).** A timer's `expiresAt` is computed from the injected `Clock` at start; expiry is decided by `pollExpirations()` comparing the clock to `expiresAt`. The per-timer virtual thread (LTD-01) wakes after a wall estimate and delegates the decision to `pollExpirations()`, so tests step a `MutableClock` and call `pollExpirations()` deterministically. `Instant + Duration` is DST-agnostic (REC-167). Always call `StandardTriggerEvaluator.close()` to interrupt lingering timer VTs.
 
 ## Phase 3 Notes
 

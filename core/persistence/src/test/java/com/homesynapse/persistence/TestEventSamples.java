@@ -137,7 +137,15 @@ final class TestEventSamples {
     }
 
     static AutomationTriggeredEvent automationTriggered() {
-        return new AutomationTriggeredEvent("state_change", "power changed to on");
+        // AMD-92 reshape (M7.1): flattened run-initiation payload — runId is a bare
+        // Ulid, matched_triggers carries trigger IDs, resolved_targets is keyed by label.
+        return new AutomationTriggeredEvent(
+                ULID_1,
+                EVENT_ID_1,
+                java.util.List.of("t-morning"),
+                java.util.Map.of("target", java.util.Set.of(ENTITY_ID_1)),
+                "9f86d081884c7d659a2feaa0c55ad015",
+                0);
     }
 
     static AutomationCompletedEvent automationCompleted() {

@@ -105,6 +105,24 @@ final class EventCategoryMapping {
                 Map.entry(EventTypes.AUTOMATION_COMPLETED,
                         List.of(EventCategory.AUTOMATION)),
 
+                // ─── Automation run-initiation slice (M7.1, AMD-92 rows 3,11-16,19) ──
+                Map.entry(EventTypes.AUTOMATION_INVOKED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.AUTOMATION_SLUG_REDIRECT,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.TRIGGER_DURATION_STARTED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.TRIGGER_DURATION_CANCELLED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.TRIGGER_DURATION_EXPIRED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.TRIGGER_DURATION_STATE_VALIDATED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.TRIGGER_DURATION_LIMIT_EXCEEDED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.AUTOMATION_CAPABILITY_MISMATCH,
+                        List.of(EventCategory.AUTOMATION)),
+
                 // ─── Presence ─────────────────────────────────────────────────
                 Map.entry(EventTypes.PRESENCE_SIGNAL,
                         List.of(EventCategory.PRESENCE)),
