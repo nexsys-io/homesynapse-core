@@ -123,7 +123,7 @@ final class CrashRecoveryHttpIT {
             // no-checkpoint replay-from-zero path.)
 
             HttpResponse<String> response = executeGet(
-                    postCrash.baseUri().resolve("/api/v1/entities"));
+                    postCrash.baseUri().resolve("/api/v1/entities"), postCrash.authToken());
 
             assertThat(response.statusCode()).isEqualTo(200);
             assertThatJson(response.body()).inPath("$.data").isArray().hasSize(2);
@@ -174,8 +174,9 @@ final class CrashRecoveryHttpIT {
         HomeSynapseConfig homeDefaultPolicy = new HomeSynapseConfig(
                 new PersistenceConfig(DeploymentProfile.TESTING, RetentionPolicy.SOURCE_DEFAULT),
                 EventBusConfig.HOME_DEFAULT,
-                0,                                  // ephemeral port
-                FixedCheckpointPolicy.HOME_DEFAULT); // 200 events / 2 s
+                0,                                   // ephemeral port
+                FixedCheckpointPolicy.HOME_DEFAULT,  // 200 events / 2 s
+                HomeSynapseConfig.LOOPBACK_HOST);    // AB-1 loopback bind
 
         // N < 200 distinct entities, each with one state_reported.
         List<EntityId> entities = new ArrayList<>();
@@ -201,7 +202,7 @@ final class CrashRecoveryHttpIT {
                     .until(() -> preCrash.stateQueryService().getViewPosition() >= 5L);
 
             HttpResponse<String> preResponse = executeGet(
-                    preCrash.baseUri().resolve("/api/v1/entities"));
+                    preCrash.baseUri().resolve("/api/v1/entities"), preCrash.authToken());
             assertThat(preResponse.statusCode()).isEqualTo(200);
             assertThatJson(preResponse.body()).inPath("$.data").isArray().hasSize(5);
         } finally {
@@ -222,7 +223,7 @@ final class CrashRecoveryHttpIT {
                     .until(() -> postCrash.stateQueryService().getViewPosition() >= 5L);
 
             HttpResponse<String> response = executeGet(
-                    postCrash.baseUri().resolve("/api/v1/entities"));
+                    postCrash.baseUri().resolve("/api/v1/entities"), postCrash.authToken());
 
             assertThat(response.statusCode()).isEqualTo(200);
             assertThatJson(response.body()).inPath("$.data").isArray().hasSize(5);
@@ -235,10 +236,14 @@ final class CrashRecoveryHttpIT {
         return new EntityId(Ulid.parse(encoded));
     }
 
-    private static HttpResponse<String> executeGet(URI uri)
+    private static HttpResponse<String> executeGet(URI uri, String bearerToken)
             throws IOException, InterruptedException {
+        // AB-1: authenticate with the harness's first-run pairing token. It is
+        // stable across the abandon → restart on the same config dir, so the
+        // pre-crash and post-crash harnesses present the same token.
         HttpRequest request = HttpRequest.newBuilder(uri)
                 .GET()
+                .header("Authorization", "Bearer " + bearerToken)
                 .timeout(Duration.ofSeconds(5))
                 .build();
         return HTTP.send(request, HttpResponse.BodyHandlers.ofString());

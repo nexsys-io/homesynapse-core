@@ -25,15 +25,27 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.net.Socket;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Integration tests for {@link HomeSynapseCore} (M3.6d-b, updated for AB-3).
@@ -74,7 +86,7 @@ final class HomeSynapseCoreTest {
     void startAndStop(@TempDir Path tempDir) {
         Path dbPath = tempDir.resolve("homesynapse-events.db");
         core = new HomeSynapseCore(
-                dbPath, tempDir.resolve("config"), HomeSynapseConfig.HOME_DEFAULT,
+                dbPath, tempDir.resolve("config"), HomeSynapseConfig.testing(),
                 Clock.systemUTC(), TEST_HOME_ID);
 
         assertThatCode(() -> core.start()).doesNotThrowAnyException();
@@ -91,7 +103,7 @@ final class HomeSynapseCoreTest {
     void accessorsThrowBeforeStart(@TempDir Path tempDir) {
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
-                HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+                HomeSynapseConfig.testing(), Clock.systemUTC(), TEST_HOME_ID);
 
         assertThatThrownBy(core::eventPublisher)
                 .isInstanceOf(IllegalStateException.class);
@@ -108,7 +120,7 @@ final class HomeSynapseCoreTest {
     void stopIsIdempotent(@TempDir Path tempDir) throws Exception {
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
-                HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+                HomeSynapseConfig.testing(), Clock.systemUTC(), TEST_HOME_ID);
         core.start();
         core.stop();
 
@@ -120,7 +132,7 @@ final class HomeSynapseCoreTest {
     void modeReturnsColdBeforeStart(@TempDir Path tempDir) {
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
-                HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+                HomeSynapseConfig.testing(), Clock.systemUTC(), TEST_HOME_ID);
 
         assertThat(core.mode()).isEqualTo(SubscriberMode.COLD);
     }
@@ -130,7 +142,7 @@ final class HomeSynapseCoreTest {
     void startPublishAndQuery(@TempDir Path tempDir) throws Exception {
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
-                HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+                HomeSynapseConfig.testing(), Clock.systemUTC(), TEST_HOME_ID);
         core.start();
 
         EntityId entityId = new EntityId(Ulid.parse("01JBBBBBBBBBBBBBBBBBBBBBBB"));
@@ -159,7 +171,7 @@ final class HomeSynapseCoreTest {
     void stateQueryServiceReturnsMaterializedAfterM3_6e_1(@TempDir Path tempDir) throws Exception {
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
-                HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+                HomeSynapseConfig.testing(), Clock.systemUTC(), TEST_HOME_ID);
         core.start();
 
         // The real query service no longer throws; an unknown entity returns
@@ -173,27 +185,98 @@ final class HomeSynapseCoreTest {
         assertThat(core.stateQueryService()).isSameAs(core.stateQueryService());
     }
 
-    // ── AB-3 — HTTP gated closed by default; exposeHttpSurface() opens it ───
+    // ── AB-1 — start() opens HTTP only behind auth, loopback-bound (C1 close) ──
 
     @Test
-    @DisplayName("start does NOT open an HTTP surface (C1); exposeHttpSurface binds "
-            + "the configured port 7070")
-    void httpSurfaceGatedClosedThenExposed(@TempDir Path tempDir) throws Exception {
+    @DisplayName("start opens HTTP only behind auth: unauth /api/* AND /internal/* are 401, "
+            + "loopback-bound, an authenticated request is admitted (AB-1; C1 closed)")
+    void opensHttpOnlyBehindAuth(@TempDir Path tempDir) throws Exception {
+        Path configDir = tempDir.resolve("config");
         core = new HomeSynapseCore(
-                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
-                HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+                tempDir.resolve("homesynapse-events.db"), configDir,
+                HomeSynapseConfig.testing(), Clock.systemUTC(), TEST_HOME_ID);
         core.start();
 
-        // AB-3 boundary: the production boot binds no port.
-        assertThat(core.isHttpExposed()).isFalse();
-        assertThatThrownBy(core::boundHttpPort)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("not exposed");
-
-        // The AB-1 seam brings up the (HOME_DEFAULT 7070) surface on demand.
-        core.exposeHttpSurface();
+        // C1 closed: production start() now binds the (ephemeral, loopback) port.
         assertThat(core.isHttpExposed()).isTrue();
-        assertThat(core.boundHttpPort()).isEqualTo(7070);
+        int port = core.boundHttpPort();
+        assertThat(port).isGreaterThan(0);
+
+        // exposeHttpSurface() is idempotent — a second call does not rebind.
+        core.exposeHttpSurface();
+        assertThat(core.boundHttpPort()).isEqualTo(port);
+
+        // (a) Unauthenticated /api/* AND /internal/* are rejected 401 — the auth
+        //     filter runs before the readiness gate and before any handler (INV-SE-02).
+        assertThat(get(port, "/api/v1/entities", null).statusCode()).isEqualTo(401);
+        assertThat(get(port, "/internal/dlq", null).statusCode()).isEqualTo(401);
+
+        // (b) An authenticated request (the first-run pairing token) is admitted
+        //     past the auth filter — not 401, not 403.
+        String token = Files.readString(configDir.resolve("initial_api_token")).trim();
+        int authed = get(port, "/api/v1/entities", token).statusCode();
+        assertThat(authed).isNotEqualTo(401);
+        assertThat(authed).isNotEqualTo(403);
+
+        // The production default is loopback:7070 (constant check — no extra bind).
+        assertThat(HomeSynapseConfig.HOME_DEFAULT.httpPort()).isEqualTo(7070);
+        assertThat(HomeSynapseConfig.HOME_DEFAULT.bindHost())
+                .isEqualTo(HomeSynapseConfig.LOOPBACK_HOST);
+    }
+
+    @Test
+    @DisplayName("the bound socket answers only on loopback by default (CC-1) — a non-loopback "
+            + "local address is refused")
+    void httpSurfaceBindsLoopbackOnly(@TempDir Path tempDir) throws Exception {
+        core = new HomeSynapseCore(
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
+                HomeSynapseConfig.testing(), Clock.systemUTC(), TEST_HOME_ID);
+        core.start();
+        int port = core.boundHttpPort();
+
+        // Loopback reaches the server (the auth filter answers 401).
+        assertThat(get(port, "/api/v1/entities", null).statusCode()).isEqualTo(401);
+
+        // A non-loopback local address must be refused for a loopback-bound server.
+        // Skipped when the host has no usable non-loopback interface (e.g. CI).
+        Optional<InetAddress> nonLoopback = firstNonLoopbackSiteLocal();
+        assumeTrue(nonLoopback.isPresent(),
+                "no non-loopback site-local address available to test refusal");
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(nonLoopback.get(), port), 1000);
+            org.junit.jupiter.api.Assertions.fail(
+                    "a non-loopback connection to a loopback-bound server must be refused");
+        } catch (IOException expected) {
+            // Connection refused or timed out — the server is not on this interface.
+        }
+    }
+
+    private static HttpResponse<String> get(int port, String path, String bearerToken)
+            throws IOException, InterruptedException {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + port + path))
+                .GET()
+                .timeout(Duration.ofSeconds(5));
+        if (bearerToken != null) {
+            builder.header("Authorization", "Bearer " + bearerToken);
+        }
+        return HttpClient.newHttpClient()
+                .send(builder.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static Optional<InetAddress> firstNonLoopbackSiteLocal() throws Exception {
+        for (NetworkInterface nic : java.util.Collections.list(
+                NetworkInterface.getNetworkInterfaces())) {
+            if (!nic.isUp() || nic.isLoopback()) {
+                continue;
+            }
+            for (InetAddress address : java.util.Collections.list(nic.getInetAddresses())) {
+                if (!address.isLoopbackAddress() && address.isSiteLocalAddress()) {
+                    return Optional.of(address);
+                }
+            }
+        }
+        return Optional.empty();
     }
 
     @Test
@@ -201,7 +284,7 @@ final class HomeSynapseCoreTest {
     void boundHttpPort_throwsBeforeStart(@TempDir Path tempDir) {
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
-                HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+                HomeSynapseConfig.testing(), Clock.systemUTC(), TEST_HOME_ID);
 
         assertThatThrownBy(core::boundHttpPort)
                 .isInstanceOf(IllegalStateException.class)
@@ -213,7 +296,7 @@ final class HomeSynapseCoreTest {
     void mode_returnsLiveAfterProjectionCompletesReplay(@TempDir Path tempDir) throws Exception {
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
-                HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+                HomeSynapseConfig.testing(), Clock.systemUTC(), TEST_HOME_ID);
         core.start();
 
         // start() already gates on the projection reaching LIVE (the automation
@@ -253,7 +336,7 @@ final class HomeSynapseCoreTest {
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"),
                 tempDir.resolve("config"),
-                HomeSynapseConfig.HOME_DEFAULT,
+                HomeSynapseConfig.testing(),
                 Clock.fixed(Instant.parse("2026-06-11T00:00:00Z"), ZoneOffset.UTC),
                 TEST_HOME_ID,
                 cipher);

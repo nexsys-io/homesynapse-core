@@ -24,7 +24,6 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The M7.1 deferred lifecycle wiring test (AB-3 dep c) — it exercises the
@@ -144,15 +143,16 @@ final class LifecycleWiringTest {
     }
 
     @Test
-    @DisplayName("start does NOT open an HTTP surface (C1 boundary)")
-    void start_doesNotOpenHttpSurface(@TempDir Path tempDir) throws Exception {
+    @DisplayName("start opens the HTTP surface behind auth, loopback-bound (AB-1; C1 closed)")
+    void start_opensHttpSurfaceBehindAuth(@TempDir Path tempDir) throws Exception {
         core = newCore(tempDir);
         core.start();
 
-        assertThat(core.isHttpExposed()).isFalse();
-        assertThatThrownBy(core::boundHttpPort)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("not exposed");
+        // AB-1: production start() now binds the (ephemeral, loopback) HTTP port
+        // with the auth filter installed — the C1 close. The auth-before-exposure
+        // invariant is asserted at the HTTP level in HomeSynapseCoreTest.
+        assertThat(core.isHttpExposed()).isTrue();
+        assertThat(core.boundHttpPort()).isGreaterThan(0);
     }
 
     @Test

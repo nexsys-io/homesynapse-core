@@ -33,9 +33,20 @@ import java.util.Objects;
  * {@code AutomationConfig}, {@code IntegrationRuntimeConfig}) will be added
  * as new record components. Adding a component is a source-incompatible
  * change to direct constructor callers but stays binary-compatible for
- * callers that go through {@link #HOME_DEFAULT}. As of M3.7 the record has
- * four components: {@code persistence}, {@code eventBus}, {@code httpPort},
- * and {@code checkpointPolicy}.</p>
+ * callers that go through {@link #HOME_DEFAULT}. As of AB-1 the record has
+ * five components: {@code persistence}, {@code eventBus}, {@code httpPort},
+ * {@code checkpointPolicy}, and {@code bindHost}.</p>
+ *
+ * <h2>Bind posture (AB-1, A1)</h2>
+ *
+ * <p>{@code bindHost} is the interface the embedded HTTP/WS surface binds to.
+ * It defaults to loopback ({@code 127.0.0.1}) so the surface answers only the
+ * local host out of the box; LAN exposure is an explicit, authenticated opt-in
+ * that sets {@code bindHost} to a non-loopback address (e.g. a specific LAN IP
+ * or {@code 0.0.0.0}). The default is <strong>never</strong> all-interfaces —
+ * Javalin/Jetty bind {@code 0.0.0.0} when the host is unset, which is exactly
+ * the hole this component closes (no interface is treated as "internal";
+ * authentication is mandatory on every interface regardless — INV-SE-02).</p>
  *
  * @param persistence      persistence-layer configuration (deployment profile,
  *                         retention policy); never {@code null}
@@ -49,6 +60,10 @@ import java.util.Objects;
  *                         {@link FixedCheckpointPolicy#HOME_DEFAULT} for
  *                         production and {@link FixedCheckpointPolicy#TESTING}
  *                         for tests.
+ * @param bindHost         the network interface the HTTP/WS surface binds to;
+ *                         never {@code null} or blank. {@link #LOOPBACK_HOST}
+ *                         (the default) restricts it to the local host; a
+ *                         non-loopback value is the explicit LAN opt-in.
  * @see PersistenceConfig
  * @see EventBusConfig
  */
@@ -56,7 +71,14 @@ public record HomeSynapseConfig(
         PersistenceConfig persistence,
         EventBusConfig eventBus,
         int httpPort,
-        CheckpointPolicy checkpointPolicy) {
+        CheckpointPolicy checkpointPolicy,
+        String bindHost) {
+
+    /** Loopback bind host — the secure default (the surface answers only localhost). */
+    public static final String LOOPBACK_HOST = "127.0.0.1";
+
+    /** All-interfaces bind host — the explicit LAN opt-in (authenticated). */
+    public static final String ALL_INTERFACES_HOST = "0.0.0.0";
 
     /**
      * Default configuration for the HOME deployment profile — pairs
@@ -68,24 +90,30 @@ public record HomeSynapseConfig(
             PersistenceConfig.HOME_DEFAULT,
             EventBusConfig.HOME_DEFAULT,
             7070,
-            FixedCheckpointPolicy.HOME_DEFAULT);
+            FixedCheckpointPolicy.HOME_DEFAULT,
+            LOOPBACK_HOST);
 
     /**
-     * Compact constructor validating non-null components and non-negative
-     * {@code httpPort}.
+     * Compact constructor validating non-null components, non-negative
+     * {@code httpPort}, and a non-blank {@code bindHost}.
      *
      * @throws NullPointerException     if {@code persistence}, {@code eventBus},
-     *                                  or {@code checkpointPolicy} is
-     *                                  {@code null}
-     * @throws IllegalArgumentException if {@code httpPort} is negative
+     *                                  {@code checkpointPolicy}, or
+     *                                  {@code bindHost} is {@code null}
+     * @throws IllegalArgumentException if {@code httpPort} is negative or
+     *                                  {@code bindHost} is blank
      */
     public HomeSynapseConfig {
         Objects.requireNonNull(persistence, "persistence config must not be null");
         Objects.requireNonNull(eventBus, "eventBus config must not be null");
         Objects.requireNonNull(checkpointPolicy, "checkpointPolicy must not be null");
+        Objects.requireNonNull(bindHost, "bindHost must not be null");
         if (httpPort < 0) {
             throw new IllegalArgumentException(
                     "httpPort must be >= 0 (0 = ephemeral), got " + httpPort);
+        }
+        if (bindHost.isBlank()) {
+            throw new IllegalArgumentException("bindHost must not be blank");
         }
     }
 
@@ -108,6 +136,7 @@ public record HomeSynapseConfig(
                         RetentionPolicy.SOURCE_DEFAULT),
                 EventBusConfig.HOME_DEFAULT,
                 0,
-                FixedCheckpointPolicy.TESTING);
+                FixedCheckpointPolicy.TESTING,
+                LOOPBACK_HOST);
     }
 }

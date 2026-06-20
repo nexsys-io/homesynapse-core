@@ -70,6 +70,8 @@ final class InFlightRequestShutdownIT {
             LiveModeAwaiter.awaitLive(harness);
 
             URI listEntities = harness.baseUri().resolve("/api/v1/entities");
+            // AB-1: capture the bearer token before the request thread starts.
+            String authToken = harness.authToken();
 
             // Fire a request on a separate thread. The CompletableFuture
             // surfaces either the HttpResponse or the exception that arose
@@ -82,6 +84,7 @@ final class InFlightRequestShutdownIT {
                     HttpResponse<String> response = HTTP.send(
                             HttpRequest.newBuilder(listEntities)
                                     .GET()
+                                    .header("Authorization", "Bearer " + authToken)
                                     .timeout(Duration.ofSeconds(10))
                                     .build(),
                             HttpResponse.BodyHandlers.ofString());

@@ -889,27 +889,96 @@ final class SqliteEventStore implements EventPublisher, EventStore {
      * parsing {@code scope_id:key_version} from {@code dek_ref} with a
      * last-colon split (Doc 15 §4.1).
      *
-     * @throws IllegalStateException if no cipher is wired to read an encrypted
-     *         row (fail-closed — never feed ciphertext to the codec) or the
-     *         {@code dek_ref} is malformed
+     * <p><strong>Fail-closed read contract (AB-2 / OR-RF-DECRYPT).</strong> Any
+     * decrypt failure throws a typed {@link PayloadDecryptionException} carrying
+     * the {@code globalPosition} (and the {@code scopeId}/{@code keyVersion} when
+     * parseable) and a {@link PayloadDecryptionException.FailureKind}. Because
+     * {@link #readRows} has no per-row catch, the exception aborts the
+     * <em>entire read batch / replay segment</em> loudly — this is the intended
+     * MVP failure domain (A3): a lost or corrupt root key making the store
+     * unreadable is a visible failure, never a silent plaintext fallback
+     * (Doc 15 §6) and never a quiet skip. The {@code IllegalArgumentException}
+     * (CASE-a, key absent/destroyed) and {@code IllegalStateException} (CASE-b,
+     * GCM authentication failure) raised by {@link PayloadCipher#decrypt} are
+     * classified here so callers can distinguish an intended crypto-shred from
+     * possible tampering.</p>
+     *
+     * <p><strong>Future degrade seam (design-only — NOT wired; F4-gated).</strong>
+     * A later milestone may map a CASE-a failure ({@code KEY_ABSENT_OR_DESTROYED})
+     * to a {@link com.homesynapse.event.DegradedEvent} when the row's
+     * {@code chain_hash} validates — i.e. an intended crypto-shred whose tombstone
+     * the chain proves — via a {@code (scope, key_version)}-keyed cause lookup plus
+     * a chain-validity check, surfaced through a new additive {@code failureReason}
+     * on {@code DegradedEvent}. That degrade behaviour and the chain-validity check
+     * MUST stay disabled until {@code chain_hash} computation and mandatory
+     * startup verification are live ({@code chain_hash} is the 32-byte ZERO vector
+     * today). CASE-b ({@code GCM_AUTH_FAILED}) never degrades — masking it would
+     * hide tampering. The MVP fail-closed half below needs no chain. A companion
+     * boot invariant (R-α REC-235) rides AB-4 + the backup/restore WU: refuse to
+     * encrypt in a scope until a fresh DEK is installed or the persisted counter
+     * is proven ≥ all prior nonces. {@code DegradedEvent} is unchanged here.</p>
+     *
+     * @throws PayloadDecryptionException always, on any decrypt failure — see the
+     *         contract above; the failure domain is the whole read batch
      */
     private byte[] decryptStoredPayload(
             long globalPosition, String dekRef, byte[] payloadIv, byte[] ciphertext) {
         if (payloadCipher == null) {
-            throw new IllegalStateException(
+            throw new PayloadDecryptionException(
+                    PayloadDecryptionException.FailureKind.NO_CIPHER_WIRED,
+                    globalPosition, null, null,
                     "event at global_position " + globalPosition
                             + " is encrypted (dek_ref=" + dekRef + ") but no"
-                            + " PayloadCipher is wired to decrypt it");
+                            + " PayloadCipher is wired to decrypt it; restore the"
+                            + " at-rest root key before reading this store — no silent"
+                            + " plaintext fallback (Doc 15 §6)");
         }
         int split = dekRef.lastIndexOf(DEK_REF_DELIMITER);
         if (split <= 0 || split == dekRef.length() - 1) {
-            throw new IllegalStateException(
+            throw new PayloadDecryptionException(
+                    PayloadDecryptionException.FailureKind.MALFORMED_DEK_REF,
+                    globalPosition, null, null,
                     "malformed dek_ref '" + dekRef + "' at global_position "
                             + globalPosition + "; expected scope_id:key_version");
         }
         String scopeId = dekRef.substring(0, split);
-        int keyVersion = Integer.parseInt(dekRef.substring(split + 1));
-        return payloadCipher.decrypt(scopeId, keyVersion, ciphertext, payloadIv);
+        int keyVersion;
+        try {
+            keyVersion = Integer.parseInt(dekRef.substring(split + 1));
+        } catch (NumberFormatException e) {
+            throw new PayloadDecryptionException(
+                    PayloadDecryptionException.FailureKind.MALFORMED_DEK_REF,
+                    globalPosition, scopeId, null,
+                    "malformed dek_ref '" + dekRef + "' at global_position "
+                            + globalPosition + "; key_version is not an integer", e);
+        }
+        try {
+            return payloadCipher.decrypt(scopeId, keyVersion, ciphertext, payloadIv);
+        } catch (IllegalArgumentException e) {
+            // CASE-a — the (scope, key_version) key is absent or destroyed
+            // (crypto-shred, Doc 15 §3.6): the ciphertext is permanently
+            // unreadable. The concrete scope-key store path + required read
+            // perms live config-side (the key manager logs them, INV-HO-04);
+            // persistence names the scope/version/position it could not read.
+            throw new PayloadDecryptionException(
+                    PayloadDecryptionException.FailureKind.KEY_ABSENT_OR_DESTROYED,
+                    globalPosition, scopeId, keyVersion,
+                    "decryption key (scope=" + scopeId + ", key_version=" + keyVersion
+                            + ") for the event at global_position " + globalPosition
+                            + " is absent or destroyed; the at-rest root key is"
+                            + " unavailable — restore it and ensure read access to the"
+                            + " scope-key store in the config directory to read this"
+                            + " store (INV-HO-04, Doc 15 §6)", e);
+        } catch (IllegalStateException e) {
+            // CASE-b — GCM authentication failed: corrupt or tampered ciphertext.
+            throw new PayloadDecryptionException(
+                    PayloadDecryptionException.FailureKind.GCM_AUTH_FAILED,
+                    globalPosition, scopeId, keyVersion,
+                    "GCM authentication failed decrypting the event at global_position "
+                            + globalPosition + " (scope=" + scopeId + ", key_version="
+                            + keyVersion + "); the ciphertext or its key may be corrupt"
+                            + " or tampered — no silent plaintext fallback (Doc 15 §6)", e);
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────

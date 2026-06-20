@@ -9,9 +9,14 @@ import com.homesynapse.state.ReadinessSource;
 import com.homesynapse.state.StateQueryService;
 
 import io.javalin.Javalin;
+import io.javalin.http.Context;
 
 import java.time.Clock;
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.function.LongSupplier;
 
 /**
@@ -183,5 +188,145 @@ public final class RestFilters {
         app.get("/internal/projection",
                 new ProjectionStatusEndpoint(
                         readinessSource, queryService, viewPositionSupplier));
+    }
+
+    /** Request attribute key carrying the authenticated identity to downstream handlers. */
+    static final String IDENTITY_ATTRIBUTE = "hs.api.identity";
+
+    /**
+     * Installs the catch-all authentication + rate-limiting filter (the C1 close,
+     * AB-1). The filter runs as a Javalin {@code before(*)} handler — before
+     * <em>any</em> route resolves, covering {@code /api/*}, {@code /internal/*},
+     * and every other path (INV-SE-02; the {@code /internal/*} admin routes sit
+     * outside the readiness gate but MUST still be authenticated). It is registered
+     * <em>before</em> {@link #installReadinessGate(Object, ReadinessSource)} so it
+     * precedes the {@code /api/*} readiness gate.
+     *
+     * <p>Per request, in order:</p>
+     * <ol>
+     *   <li><strong>Canonicalize the path</strong> and reject {@code ..} /
+     *       encoded-traversal / control sequences <em>before</em> the auth decision
+     *       (R-δ AX-1 / CVE-2023-27482) → 400.</li>
+     *   <li><strong>Authenticate</strong> via {@link AuthMiddleware} → 401 (missing/
+     *       malformed header) or 403 (invalid/expired/revoked token).</li>
+     *   <li><strong>Rate-limit</strong> the authenticated key via {@link RateLimiter}
+     *       → 429 + {@code Retry-After} when exhausted.</li>
+     * </ol>
+     *
+     * <p>On any of these the filter throws an {@link ApiException}; the registered
+     * exception handler serializes it as an RFC 9457 {@code application/problem+json}
+     * body (with a {@code correlation_id}) and the matched endpoint never runs.
+     * Throwing — not merely setting a status — is what halts the pipeline, so an
+     * unauthenticated request can never reach a handler.</p>
+     *
+     * @param javalinApp     the Javalin application instance (must be a
+     *                       {@link io.javalin.Javalin}); never {@code null}
+     * @param authMiddleware the bearer-token auth middleware; never {@code null}
+     * @param rateLimiter    the per-key rate limiter; never {@code null}
+     * @throws ClassCastException if {@code javalinApp} is not a
+     *         {@link io.javalin.Javalin} instance
+     */
+    public static void installAuth(Object javalinApp,
+                                   AuthMiddleware authMiddleware,
+                                   RateLimiter rateLimiter) {
+        Objects.requireNonNull(javalinApp, "javalinApp");
+        Objects.requireNonNull(authMiddleware, "authMiddleware");
+        Objects.requireNonNull(rateLimiter, "rateLimiter");
+        Javalin app = (Javalin) javalinApp;
+        app.exception(ApiException.class, RestFilters::writeProblem);
+        app.before(ctx -> authorize(ctx, authMiddleware, rateLimiter));
+    }
+
+    private static void authorize(Context ctx,
+                                  AuthMiddleware authMiddleware,
+                                  RateLimiter rateLimiter) {
+        if (!isPathSafe(ctx.path())) {
+            throw problem(ProblemType.INVALID_PARAMETERS,
+                    "request path contains an illegal traversal or control sequence");
+        }
+        ApiKeyIdentity identity = authMiddleware.authenticate(ctx.header("Authorization"));
+        RateLimitResult limit = rateLimiter.check(identity.keyId());
+        if (!limit.allowed()) {
+            ctx.header("Retry-After", Long.toString(limit.retryAfterSeconds()));
+            throw problem(ProblemType.RATE_LIMITED,
+                    "rate limit exceeded; retry after " + limit.retryAfterSeconds() + " seconds");
+        }
+        ctx.attribute(IDENTITY_ATTRIBUTE, identity);
+    }
+
+    /**
+     * Canonicalization gate: rejects path traversal and control characters before
+     * the auth decision. {@code ctx.path()} is already URL-decoded by Javalin/Jetty,
+     * so a {@code ..} segment surfaces here whether sent raw or single-encoded; the
+     * residual {@code %2e}/{@code %2f}/{@code %5c} checks defend against ambiguous
+     * double-decoding (defense-in-depth on top of Jetty's own normalization).
+     *
+     * @param path the decoded request path
+     * @return {@code true} if the path is safe to resolve
+     */
+    static boolean isPathSafe(String path) {
+        if (path == null) {
+            return false;
+        }
+        for (int i = 0; i < path.length(); i++) {
+            char c = path.charAt(i);
+            if (c <= 0x20 || c == '\\') {
+                return false;   // control chars (incl. NUL), raw whitespace, backslash
+            }
+        }
+        for (String segment : path.split("/")) {
+            if (segment.equals("..")) {
+                return false;
+            }
+        }
+        String lower = path.toLowerCase(Locale.ROOT);
+        return !(lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c"));
+    }
+
+    /**
+     * Builds an {@link ApiException} for the given problem type (used by the auth
+     * filter and {@link StandardAuthMiddleware}). The {@code correlation_id} is a
+     * placeholder here; {@link #writeProblem} replaces it with the request's
+     * {@code X-Correlation-ID} when one is present.
+     *
+     * @param type   the problem type (drives status, title, type URI)
+     * @param detail the Register-C, human-readable detail
+     * @return the structured exception; never {@code null}
+     */
+    static ApiException problem(ProblemType type, String detail) {
+        return new ApiException(new ProblemDetail(
+                type, type.title(), type.defaultStatus(), detail,
+                null, UUID.randomUUID().toString(), null));
+    }
+
+    /** Serializes an {@link ApiException} as an RFC 9457 {@code application/problem+json} response. */
+    private static void writeProblem(ApiException exception, Context ctx) {
+        ProblemDetail detail = exception.problemDetail();
+        String correlationId = resolveCorrelationId(ctx, detail);
+        ctx.status(detail.status());
+        if (detail.type() == ProblemType.AUTHENTICATION_REQUIRED) {
+            ctx.header("WWW-Authenticate", "Bearer");
+        }
+        ctx.header("X-Correlation-ID", correlationId);
+        ctx.json(problemBody(detail, correlationId, ctx.path()));
+        // Override the application/json content type set by ctx.json(...).
+        ctx.contentType("application/problem+json");
+    }
+
+    private static String resolveCorrelationId(Context ctx, ProblemDetail detail) {
+        String header = ctx.header("X-Correlation-ID");
+        return (header != null && !header.isBlank()) ? header : detail.correlationId();
+    }
+
+    private static Map<String, Object> problemBody(
+            ProblemDetail detail, String correlationId, String instance) {
+        LinkedHashMap<String, Object> body = new LinkedHashMap<>(6);
+        body.put("type", detail.type().typeUri());
+        body.put("title", detail.title());
+        body.put("status", detail.status());
+        body.put("detail", detail.detail());
+        body.put("instance", instance);
+        body.put("correlation_id", correlationId);
+        return body;
     }
 }

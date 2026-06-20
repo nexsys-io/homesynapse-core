@@ -82,7 +82,7 @@ final class EndpointE2eIT {
         LiveModeAwaiter.awaitLive(harness);
 
         HttpResponse<String> response = executeGet(
-                harness.baseUri().resolve("/api/v1/entities"));
+                harness.baseUri().resolve("/api/v1/entities"), harness.authToken());
 
         assertThat(response.statusCode()).isEqualTo(200);
         // ListEntitiesEndpoint returns { data: [], meta: { ... } } with a
@@ -117,7 +117,7 @@ final class EndpointE2eIT {
                 .until(() -> harness.stateQueryService().getViewPosition() >= 3L);
 
         HttpResponse<String> response = executeGet(
-                harness.baseUri().resolve("/api/v1/entities"));
+                harness.baseUri().resolve("/api/v1/entities"), harness.authToken());
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThatJson(response.body()).inPath("$.data").isArray().hasSize(3);
@@ -140,7 +140,8 @@ final class EndpointE2eIT {
                 .until(() -> harness.stateQueryService().getState(entityId).isPresent());
 
         HttpResponse<String> response = executeGet(
-                harness.baseUri().resolve("/api/v1/entities/" + entityId));
+                harness.baseUri().resolve("/api/v1/entities/" + entityId),
+                harness.authToken());
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThatJson(response.body()).isObject();
@@ -158,7 +159,8 @@ final class EndpointE2eIT {
         String unknownId = "01JZZZZZZZZZZZZZZZZZZZZZZZ";
 
         HttpResponse<String> response = executeGet(
-                harness.baseUri().resolve("/api/v1/entities/" + unknownId + "/state"));
+                harness.baseUri().resolve("/api/v1/entities/" + unknownId + "/state"),
+                harness.authToken());
 
         assertThat(response.statusCode()).isEqualTo(404);
         // RFC 9457 problem-detail shape — type/status/title at minimum.
@@ -184,7 +186,7 @@ final class EndpointE2eIT {
         LiveModeAwaiter.awaitLive(harness);
 
         HttpResponse<String> response = executeGet(
-                harness.baseUri().resolve("/internal/dlq"));
+                harness.baseUri().resolve("/internal/dlq"), harness.authToken());
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThatJson(response.body()).inPath("$.subscribers").isArray();
@@ -198,10 +200,13 @@ final class EndpointE2eIT {
         return new EntityId(Ulid.parse(encoded));
     }
 
-    private static HttpResponse<String> executeGet(URI uri)
+    private static HttpResponse<String> executeGet(URI uri, String bearerToken)
             throws IOException, InterruptedException {
+        // AB-1: every external route is authenticated — present the harness's
+        // first-run pairing token as Authorization: Bearer.
         HttpRequest request = HttpRequest.newBuilder(uri)
                 .GET()
+                .header("Authorization", "Bearer " + bearerToken)
                 .timeout(Duration.ofSeconds(5))
                 .build();
         return HTTP.send(request, HttpResponse.BodyHandlers.ofString());

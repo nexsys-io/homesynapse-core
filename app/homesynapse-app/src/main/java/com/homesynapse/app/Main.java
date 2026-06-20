@@ -30,11 +30,11 @@ import java.util.concurrent.CountDownLatch;
  * calls {@link SystemLifecycleManager#shutdown(String)}, and calls
  * {@link SystemLifecycleManager#start()} on the platform main thread (LTD-19).</p>
  *
- * <p><strong>AB-3 boundary.</strong> The boot opens <em>no</em> HTTP surface
- * (core-review C1 — {@code HomeSynapseCore.exposeHttpSurface()} is the AB-1 seam,
- * not called here) and leaves the at-rest payload cipher <em>inert</em> (the
- * {@link #payloadCipher(Path, Clock)} adapter is built only when AB-4 activates
- * encryption; AB-3 passes no cipher).</p>
+ * <p><strong>AB-1 boundary.</strong> {@code start()} now opens the HTTP surface
+ * behind bearer-token authentication, loopback-bound by default (core-review C1
+ * closed inside {@code HomeSynapseCore}). The at-rest payload cipher remains
+ * <em>inert</em> — the {@link #payloadCipher(Path, Clock)} adapter is built only
+ * when AB-4 activates encryption; this entry point still passes no cipher.</p>
  */
 public final class Main {
 
@@ -75,10 +75,12 @@ public final class Main {
             }
         }, "hs-shutdown"));
 
-        // Synchronous, blocks until the engine reaches RUNNING; HTTP not exposed.
+        // Synchronous, blocks until the engine reaches RUNNING; AB-1 opens the
+        // HTTP surface behind auth (loopback-bound) during start() Phase 5.
         manager.start();
         System.out.println("HomeSynapse Core is RUNNING (phase=" + manager.currentPhase()
-                + "); HTTP surface not exposed (AB-3 C1 boundary). Send SIGTERM to stop.");
+                + "); HTTP surface exposed behind bearer-token auth, loopback-bound (AB-1)."
+                + " Send SIGTERM to stop.");
 
         // Park the non-daemon main thread until SIGTERM fires the shutdown hook —
         // the health loop and bus delivery run on virtual threads, which do not

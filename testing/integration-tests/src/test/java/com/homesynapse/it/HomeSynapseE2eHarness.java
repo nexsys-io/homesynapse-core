@@ -13,7 +13,10 @@ import com.homesynapse.lifecycle.HomeSynapseCore;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.state.StateQueryService;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.Objects;
@@ -54,9 +57,11 @@ import java.util.Objects;
 final class HomeSynapseE2eHarness implements AutoCloseable {
 
     private final HomeSynapseCore core;
+    private final Path configDir;
 
-    private HomeSynapseE2eHarness(HomeSynapseCore core) {
+    private HomeSynapseE2eHarness(HomeSynapseCore core, Path configDir) {
         this.core = core;
+        this.configDir = configDir;
     }
 
     /**
@@ -109,19 +114,20 @@ final class HomeSynapseE2eHarness implements AutoCloseable {
         Objects.requireNonNull(homeId, "homeId");
         Objects.requireNonNull(config, "config");
 
+        Path configDir = dbPath.resolveSibling("config");
         HomeSynapseCore core = new HomeSynapseCore(
-                dbPath, dbPath.resolveSibling("config"), config, clock, homeId);
+                dbPath, configDir, config, clock, homeId);
         try {
             core.start();
         } catch (Exception e) {
             throw new IllegalStateException(
                     "E2E harness failed to start HomeSynapseCore", e);
         }
-        // AB-3: HomeSynapseCore.start() gates the HTTP surface CLOSED (C1). The
-        // HTTP-aware E2E harness opens it explicitly (the AB-1 seam) so the REST
-        // E2E tests keep exercising the entity/admin endpoints.
-        core.exposeHttpSurface();
-        return new HomeSynapseE2eHarness(core);
+        // AB-1: HomeSynapseCore.start() now opens the HTTP surface behind
+        // bearer-token auth, loopback-bound, in Phase 5 (the C1 close). E2E tests
+        // authenticate with authToken() (the first-run pairing token). No explicit
+        // exposeHttpSurface() call is needed — start() already brought it up.
+        return new HomeSynapseE2eHarness(core, configDir);
     }
 
     // ── Accessors ───────────────────────────────────────────────────────
@@ -135,10 +141,29 @@ final class HomeSynapseE2eHarness implements AutoCloseable {
 
     /**
      * @return the base URI of the embedded HTTP server, e.g.
-     *         {@code http://localhost:54321}
+     *         {@code http://127.0.0.1:54321}. Uses the IPv4 loopback literal
+     *         (not {@code localhost}) so it matches the AB-1 loopback bind
+     *         ({@code 127.0.0.1}) even where {@code localhost} resolves to IPv6.
      */
     URI baseUri() {
-        return URI.create("http://localhost:" + core.boundHttpPort());
+        return URI.create("http://127.0.0.1:" + core.boundHttpPort());
+    }
+
+    /**
+     * @return the first-run pairing bearer token minted by the auth surface on
+     *         {@link HomeSynapseCore#start()} (AB-1), read from the
+     *         {@code initial_api_token} artifact in the config dir. E2E tests
+     *         present it as {@code Authorization: Bearer {token}}. Stable across
+     *         an abandon → restart on the same config dir (the store is not
+     *         re-minted when the hash file already exists).
+     */
+    String authToken() {
+        try {
+            return Files.readString(configDir.resolve("initial_api_token")).trim();
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                    "E2E harness could not read the initial API token artifact", e);
+        }
     }
 
     /**

@@ -4,7 +4,12 @@
  */
 package com.homesynapse.lifecycle;
 
+import com.homesynapse.api.rest.AuthMiddleware;
+import com.homesynapse.api.rest.OpaqueTokenStore;
+import com.homesynapse.api.rest.RateLimiter;
 import com.homesynapse.api.rest.RestFilters;
+import com.homesynapse.api.rest.StandardAuthMiddleware;
+import com.homesynapse.api.rest.StandardRateLimiter;
 import com.homesynapse.automation.AutomationDefinitionLoader;
 import com.homesynapse.automation.AutomationEngineAssembly;
 import com.homesynapse.automation.AutomationSchema;
@@ -111,22 +116,26 @@ import org.slf4j.LoggerFactory;
  *       projection reaches LIVE (the catch-up ordering invariant).</li>
  *   <li><b>OBSERVABILITY</b> — health aggregation (structural in AB-3: no
  *       {@code HealthContributor}/{@code HealthAggregator} impls exist yet).</li>
- *   <li><b>EXTERNAL_INTERFACES</b> — <em>gated CLOSED in AB-3</em>. No HTTP is
- *       bound and no endpoints are registered (core-review C1). AB-1 wires auth
- *       and opens the surface via {@link #exposeHttpSurface()}.</li>
+ *   <li><b>EXTERNAL_INTERFACES</b> — opens the HTTP surface behind bearer-token
+ *       auth, loopback-bound by default (AB-1; core-review C1 closed). Auth is
+ *       installed before the port binds; {@link #exposeHttpSurface()} is the
+ *       idempotent bring-up the test/harness path also uses.</li>
  *   <li><b>INTEGRATIONS</b> — out of scope for AB-3 (adapters connect later).</li>
  * </ol>
  *
  * <p>The engine then enters {@link LifecyclePhase#RUNNING} and the §3.10 health
  * loop pets the watchdog every {@code WatchdogSec / 2} seconds.</p>
  *
- * <h2>Boundaries (AB-3)</h2>
+ * <h2>Boundaries (AB-1)</h2>
  *
- * <p>AB-3 opens <strong>no</strong> HTTP surface from the production boot and
- * activates <strong>no</strong> at-rest cipher (the injected
- * {@link PayloadCipher} stays {@code null}/inert; AB-4 activates it). The Seam-1
- * go-live (AB-1 HTTP + auth, AB-4 cipher) wires into the phase gates this class
- * establishes.</p>
+ * <p>AB-1 opens the production HTTP surface behind bearer-token authentication,
+ * loopback-bound by default (the C1 close). The at-rest cipher remains
+ * <strong>inert</strong> (the injected {@link PayloadCipher} stays {@code null};
+ * AB-4 activates it). WebSocket first-message auth is <strong>held</strong> — the
+ * {@code com.homesynapse.api.ws} runtime is unbuilt at HEAD (Phase-2 scaffold
+ * only), so there is no WS upgrade handler to harden (see the AB-1 handoff). The
+ * shared {@link OpaqueTokenStore} is ready for the WS path to consume when that
+ * runtime lands.</p>
  *
  * <h2>Threading</h2>
  *
@@ -460,10 +469,18 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         setPhase(LifecyclePhase.OBSERVABILITY);
         recordSubsystem("observability", LifecyclePhase.OBSERVABILITY, clock.instant());
 
-        // ── Phase 5 EXTERNAL_INTERFACES — GATED CLOSED (C1) ──────────────────
-        // AB-3 binds no port and registers no endpoints. exposeHttpSurface() is
-        // the AB-1 seam (auth-gated); production main() never calls it.
+        // ── Phase 5 EXTERNAL_INTERFACES — open HTTP behind auth (AB-1) ───────
+        // AB-1 closes core-review C1: production start() now binds the HTTP port
+        // WITH the auth filter installed and loopback-bound by default. The
+        // auth-before-network-exposure invariant holds — bringUpHttpSurface()
+        // installs AuthMiddleware/RateLimiter before app.start(...), so no port
+        // binds before auth is registered. The projection is already LIVE here
+        // (gated in Phase 3), so the readiness gate passes. The production path
+        // and the test/harness exposeHttpSurface() path converge on this method
+        // (idempotent). The cipher stays inert (AB-4); WS auth is HELD (the WS
+        // runtime is unbuilt — see the AB-1 handoff).
         setPhase(LifecyclePhase.EXTERNAL_INTERFACES);
+        bringUpHttpSurface();
 
         // ── Phase 6 INTEGRATIONS — out of scope for AB-3 ─────────────────────
         setPhase(LifecyclePhase.INTEGRATIONS);
@@ -479,9 +496,10 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 healthReporter, clock, watchdogPeriod(System::getenv), this::buildHealthStatusLine);
         this.healthLoop.start();
         LOG.info("HomeSynapseCore RUNNING: db={}, configDir={}, homeId={}, automations={}; "
-                        + "HTTP NOT exposed (AB-3 C1 boundary), cipher inert={}",
+                        + "HTTP exposed behind bearer-token auth on {}:{} (AB-1), cipher inert={}",
                 dbPath, configDir, homeId.value(),
-                automationRegistry.getAll().size(), payloadCipher == null);
+                automationRegistry.getAll().size(),
+                config.bindHost(), httpServer.port(), payloadCipher == null);
     }
 
     /**
@@ -533,29 +551,56 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // External-interfaces seam (AB-1 / test-only — NOT called by production main)
+    // External-interfaces bring-up (AB-1 — auth-gated, loopback-bound)
     // ════════════════════════════════════════════════════════════════════════
 
     /**
      * Brings up the embedded Javalin HTTP surface (the M3.6e REST entity + admin
-     * endpoints) — the Phase-5 step AB-3 leaves gated CLOSED.
+     * endpoints) behind bearer-token authentication, loopback-bound by default
+     * (AB-1 — the Phase-5 step that closes core-review C1).
      *
-     * <p><strong>Not invoked by production {@code main()}.</strong> The surface
-     * is currently UNAUTHENTICATED (core-review C1); AB-1 wires authentication
-     * and makes {@code main()} call this. It exists now so the HTTP-aware E2E
-     * harness can keep exercising the REST layer that AB-1 will harden.</p>
-     *
-     * <p>Idempotent; must be called after {@link #start()}.</p>
+     * <p>Production {@code start()} now invokes the bring-up in Phase 5
+     * (EXTERNAL_INTERFACES) so the surface comes up automatically behind auth;
+     * the HTTP-aware E2E harness may also call this. It is idempotent — the
+     * {@code httpServer != null} early-return makes a second call a no-op — so the
+     * production path and the test/harness path converge on the same auth-gated,
+     * loopback-bound bring-up.</p>
      *
      * @throws IllegalStateException if {@link #start()} has not completed
      */
     public void exposeHttpSurface() {
         requireStarted();
+        bringUpHttpSurface();
+    }
+
+    /**
+     * The actual auth-gated, loopback-bound HTTP bring-up. Reached from both the
+     * public {@link #exposeHttpSurface()} (post-start) and the in-{@code start()}
+     * Phase-5 invocation (where {@code started} is not yet set), so it does NOT
+     * call {@link #requireStarted()}. Idempotent under the lifecycle lock.
+     *
+     * <p><strong>Auth-before-network-exposure invariant.</strong> The auth filter
+     * ({@link AuthMiddleware} + {@link RateLimiter}) is installed BEFORE
+     * {@code app.start(...)} binds the port — registered first so it precedes the
+     * {@code /api/*} readiness gate and covers {@code /api/*}, {@code /internal/*},
+     * and every path (INV-SE-02). The opaque-token store is config-resident; on a
+     * fresh install it mints one full-access pairing token and surfaces it once
+     * (boot log + {@code initial_api_token} artifact). Loopback bind is explicit
+     * via {@code config.bindHost()} (default {@link HomeSynapseConfig#LOOPBACK_HOST}) —
+     * never all-interfaces unless the LAN opt-in is configured (A1 / CC-1).</p>
+     */
+    private void bringUpHttpSurface() {
         lifecycleLock.lock();
         try {
             if (httpServer != null) {
                 return;
             }
+            // AB-1: build the local auth surface BEFORE binding any socket.
+            OpaqueTokenStore tokenStore = new OpaqueTokenStore(configDir, clock);
+            tokenStore.ensureInitialToken();
+            AuthMiddleware authMiddleware = new StandardAuthMiddleware(tokenStore);
+            RateLimiter rateLimiter = new StandardRateLimiter(clock);
+
             DeploymentProfile profile = config.persistence().profile();
             QueuedThreadPool threadPool = new QueuedThreadPool(
                     profile.javalinMaxThreads(), profile.javalinMinThreads());
@@ -564,15 +609,22 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 cfg.jetty.threadPool = threadPool;
                 cfg.showJavalinBanner = false;
             });
+            // Auth MUST be registered before any other route/gate and before the
+            // port binds (the C1 close). installAuth registers its before(*)
+            // handler first, so it runs ahead of the /api/* readiness gate.
+            RestFilters.installAuth(app, authMiddleware, rateLimiter);
             RestFilters.installReadinessGate(app, this);
             RestFilters.installEntityQueryEndpoints(
                     app, stateQueryService, stateProjection::cursorPosition, clock);
             RestFilters.installAdminEndpoints(
                     app, eventBus, this, stateQueryService, stateProjection::cursorPosition);
-            app.start(config.httpPort());
+            // AB-1: loopback bind by default; LAN exposure is the explicit
+            // config.bindHost() opt-in. Never bind all-interfaces by default.
+            app.start(config.bindHost(), config.httpPort());
             this.httpServer = app;
-            LOG.warn("HTTP surface exposed on :{} — UNAUTHENTICATED (AB-1 wires auth); "
-                    + "not invoked by production main()", app.port());
+            LOG.info("HTTP surface exposed on {}:{} behind bearer-token auth (AB-1, C1 closed); "
+                    + "loopback-default bindHost={}",
+                    config.bindHost(), app.port(), config.bindHost());
         } finally {
             lifecycleLock.unlock();
         }
