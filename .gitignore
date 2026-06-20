@@ -5,6 +5,7 @@
 # it **DOES NOT** belong in the repo. The build.gradle.kts and gradle wrapper are
 # the single source of truth while everything else is reproducible.
 # ============================================================================
+.homesynapse/
 
 # ----------------------------------------------------------------------------
 # Gradle
