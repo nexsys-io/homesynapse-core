@@ -10,6 +10,15 @@ dependencies {
     api(project(":platform:platform-api"))
     implementation(project(":config:configuration"))
 
+    // AB-3: the composition root assembles the device registries (InMemory*),
+    // the automation_engine subscriber chain, and selects the platform
+    // HealthReporter impl. `implementation` scope — none of these modules' types
+    // appear on the lifecycle module's exported API (composition internals only),
+    // matching the non-transitive `requires` directives in module-info.java.
+    implementation(project(":core:device-model"))
+    implementation(project(":core:automation"))
+    implementation(project(":platform:platform-systemd"))
+
     // M3.6d-a: composition-root prerequisites. `api` scope matches the
     // `requires transitive` directives in module-info.java — these modules'
     // public types appear in the lifecycle module's public API surface

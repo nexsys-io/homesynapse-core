@@ -1,4 +1,6 @@
-# device-model — `com.homesynapse.device` — 57 types — Entity/Device/Capability model, spatial Floor/Area aggregates, EntityRole UX-role axis, sealed hierarchies, registries, discovery pipeline
+# device-model — `com.homesynapse.device` — 57 types (+3 AB-3 InMemory registry impls) — Entity/Device/Capability model, spatial Floor/Area aggregates, EntityRole UX-role axis, sealed hierarchies, registries, discovery pipeline
+
+> **AB-3 (2026-06-19): minimal production registry impls landed.** `InMemoryEntityRegistry` (9 methods), `InMemoryDeviceRegistry` (7), and `InMemoryAreaRegistry` (4, read-only) are the **MVP substrate** the composition root instantiates at app-bootstrap so the runtime boots zero-configuration (INV-CE-02). They are Map-backed and **start-empty**; Entity/Device use copy-on-write under a `ReentrantLock` (LTD-11, lock-free reads), Area is immutable-after-construction (read-only; a seed ctor exists for tests/future synthetic areas). They are deliberately minimal — **no AMD-44 capability-composition validation on `createEntity`, no Floor/EntityRole breadth, no cross-registry cascade** (`removeDevice` removes only the device record); the integration-backed SQLite registries (M9/M14, in `core:persistence`) supersede them. `FloorRegistry`/`CapabilityRegistry` were NOT implemented (verified: nothing in the automation chain references them — PD-2 contained-fold holds).
 
 ## Purpose
 

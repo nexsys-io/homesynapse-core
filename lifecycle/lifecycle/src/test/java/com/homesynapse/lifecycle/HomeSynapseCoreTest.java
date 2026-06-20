@@ -10,7 +10,6 @@ import com.homesynapse.event.EventOrigin;
 import com.homesynapse.event.EventPage;
 import com.homesynapse.event.EventPriority;
 import com.homesynapse.event.EventTypes;
-import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.bus.SubscriberMode;
@@ -37,15 +36,19 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Integration tests for {@link HomeSynapseCore} (M3.6d-b).
+ * Integration tests for {@link HomeSynapseCore} (M3.6d-b, updated for AB-3).
  *
- * <p>Exercises the composition root from boot through shutdown: persistence
- * + bus + projection + scheduler must all stand up together, the
- * accessors must guard against use-before-start, and the projection must
- * persist a published event.</p>
+ * <p>Exercises the composition root from boot through shutdown: configuration +
+ * persistence + bus + device registries + projection + automation engine must
+ * all stand up together; the accessors must guard against use-before-start; and
+ * the projection must persist a published event.</p>
  *
- * <p>Uses {@link Clock#systemUTC()} because these are lifecycle tests that
- * need real time for the bus's per-subscriber VTs to park and unpark.</p>
+ * <p>AB-3: {@link HomeSynapseCore#start()} returns {@code void} (implements
+ * {@link SystemLifecycleManager}) and gates the HTTP surface CLOSED — the HTTP
+ * tests below call {@link HomeSynapseCore#exposeHttpSurface()} explicitly.</p>
+ *
+ * <p>Uses {@link Clock#systemUTC()} because these are lifecycle tests that need
+ * real time for the bus's per-subscriber VTs to park and unpark.</p>
  */
 @DisplayName("HomeSynapseCore -- composition root")
 final class HomeSynapseCoreTest {
@@ -71,9 +74,10 @@ final class HomeSynapseCoreTest {
     void startAndStop(@TempDir Path tempDir) {
         Path dbPath = tempDir.resolve("homesynapse-events.db");
         core = new HomeSynapseCore(
-                dbPath, HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
+                dbPath, tempDir.resolve("config"), HomeSynapseConfig.HOME_DEFAULT,
+                Clock.systemUTC(), TEST_HOME_ID);
 
-        assertThatCode(() -> core.start().join()).doesNotThrowAnyException();
+        assertThatCode(() -> core.start()).doesNotThrowAnyException();
 
         assertThat(core.eventPublisher()).isNotNull();
         assertThat(core.eventStore()).isNotNull();
@@ -86,7 +90,7 @@ final class HomeSynapseCoreTest {
     @DisplayName("accessors throw IllegalStateException before start")
     void accessorsThrowBeforeStart(@TempDir Path tempDir) {
         core = new HomeSynapseCore(
-                tempDir.resolve("homesynapse-events.db"),
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
                 HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
 
         assertThatThrownBy(core::eventPublisher)
@@ -101,11 +105,11 @@ final class HomeSynapseCoreTest {
 
     @Test
     @DisplayName("stop is idempotent")
-    void stopIsIdempotent(@TempDir Path tempDir) {
+    void stopIsIdempotent(@TempDir Path tempDir) throws Exception {
         core = new HomeSynapseCore(
-                tempDir.resolve("homesynapse-events.db"),
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
                 HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
-        core.start().join();
+        core.start();
         core.stop();
 
         assertThatCode(core::stop).doesNotThrowAnyException();
@@ -115,7 +119,7 @@ final class HomeSynapseCoreTest {
     @DisplayName("mode returns COLD before start")
     void modeReturnsColdBeforeStart(@TempDir Path tempDir) {
         core = new HomeSynapseCore(
-                tempDir.resolve("homesynapse-events.db"),
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
                 HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
 
         assertThat(core.mode()).isEqualTo(SubscriberMode.COLD);
@@ -123,11 +127,11 @@ final class HomeSynapseCoreTest {
 
     @Test
     @DisplayName("publish flows through the event store after start")
-    void startPublishAndQuery(@TempDir Path tempDir) throws SequenceConflictException {
+    void startPublishAndQuery(@TempDir Path tempDir) throws Exception {
         core = new HomeSynapseCore(
-                tempDir.resolve("homesynapse-events.db"),
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
                 HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
-        core.start().join();
+        core.start();
 
         EntityId entityId = new EntityId(Ulid.parse("01JBBBBBBBBBBBBBBBBBBBBBBB"));
         EventDraft draft = new EventDraft(
@@ -152,11 +156,11 @@ final class HomeSynapseCoreTest {
 
     @Test
     @DisplayName("stateQueryService returns the MaterializedStateQueryService after M3.6e.1")
-    void stateQueryServiceReturnsMaterializedAfterM3_6e_1(@TempDir Path tempDir) {
+    void stateQueryServiceReturnsMaterializedAfterM3_6e_1(@TempDir Path tempDir) throws Exception {
         core = new HomeSynapseCore(
-                tempDir.resolve("homesynapse-events.db"),
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
                 HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
-        core.start().join();
+        core.start();
 
         // The real query service no longer throws; an unknown entity returns
         // Optional.empty(), and isReady() reflects the projection's lifecycle
@@ -169,19 +173,26 @@ final class HomeSynapseCoreTest {
         assertThat(core.stateQueryService()).isSameAs(core.stateQueryService());
     }
 
-    // ── M3.7 — boundHttpPort + ephemeral binding ────────────────────────
+    // ── AB-3 — HTTP gated closed by default; exposeHttpSurface() opens it ───
 
     @Test
-    @DisplayName("boundHttpPort returns a positive non-zero port after start "
-            + "with HOME_DEFAULT (port 7070)")
-    void boundHttpPort_returnsPositiveNonZeroAfterStart(@TempDir Path tempDir) {
+    @DisplayName("start does NOT open an HTTP surface (C1); exposeHttpSurface binds "
+            + "the configured port 7070")
+    void httpSurfaceGatedClosedThenExposed(@TempDir Path tempDir) throws Exception {
         core = new HomeSynapseCore(
-                tempDir.resolve("homesynapse-events.db"),
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
                 HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
-        core.start().join();
+        core.start();
 
-        assertThat(core.boundHttpPort()).isPositive();
-        // HOME_DEFAULT uses port 7070 — the bound port matches exactly.
+        // AB-3 boundary: the production boot binds no port.
+        assertThat(core.isHttpExposed()).isFalse();
+        assertThatThrownBy(core::boundHttpPort)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not exposed");
+
+        // The AB-1 seam brings up the (HOME_DEFAULT 7070) surface on demand.
+        core.exposeHttpSurface();
+        assertThat(core.isHttpExposed()).isTrue();
         assertThat(core.boundHttpPort()).isEqualTo(7070);
     }
 
@@ -189,7 +200,7 @@ final class HomeSynapseCoreTest {
     @DisplayName("boundHttpPort throws IllegalStateException before start")
     void boundHttpPort_throwsBeforeStart(@TempDir Path tempDir) {
         core = new HomeSynapseCore(
-                tempDir.resolve("homesynapse-events.db"),
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
                 HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
 
         assertThatThrownBy(core::boundHttpPort)
@@ -199,23 +210,16 @@ final class HomeSynapseCoreTest {
 
     @Test
     @DisplayName("mode returns LIVE once the projection completes replay")
-    void mode_returnsLiveAfterProjectionCompletesReplay(@TempDir Path tempDir) {
+    void mode_returnsLiveAfterProjectionCompletesReplay(@TempDir Path tempDir) throws Exception {
         core = new HomeSynapseCore(
-                tempDir.resolve("homesynapse-events.db"),
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
                 HomeSynapseConfig.HOME_DEFAULT, Clock.systemUTC(), TEST_HOME_ID);
-        core.start().join();
+        core.start();
 
-        // The bus drives the projection subscriber through
-        // COLD → REPLAY → TRANSITION → LIVE on a dedicated virtual thread; on
-        // a fresh database the trip completes in microseconds. Awaitility's
-        // polling pattern is the established M3.7 idiom (Research 3 REC-13)
-        // and respects D-04 / NO_DIRECT_TIME_ACCESS — it does not call
-        // System.nanoTime() / Instant.now() from the test source.
-        //
-        // core.mode() reads the bus's authoritative per-subscriber FSM via
-        // EventBus.subscribers() (see HomeSynapseCore.mode() — M3.7 fix
-        // round 1). The projection's own currentMode field is not the source
-        // of truth here.
+        // start() already gates on the projection reaching LIVE (the automation
+        // catch-up ordering invariant), so mode() is LIVE immediately on return;
+        // Awaitility's polling keeps the established M3.7 idiom and stays
+        // NO_DIRECT_TIME_ACCESS-safe.
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
                 .pollInterval(Duration.ofMillis(50))
@@ -226,14 +230,12 @@ final class HomeSynapseCoreTest {
     // ── M6.2 — PayloadCipher seam (Doc 15 §3.8 / CARRY 1) ───────────────
 
     @Test
-    @DisplayName("the five-arg constructor accepts and holds the M6.2"
-            + " PayloadCipher seam; the runtime boots and stops with it")
+    @DisplayName("the six-arg constructor accepts and holds the PayloadCipher seam;"
+            + " the runtime boots and stops with it")
     void constructorAcceptsPayloadCipherSeam(@TempDir Path tempDir) {
-        // A trivial stand-in is enough here: the lifecycle module holds the
-        // cipher for the M6.3 write path and consumes nothing in M6.2. The
-        // real adapter round-trip lives in the app module's
-        // PayloadCipherBridgeTest (only app reads both config and
-        // persistence — the zero-new-edge property).
+        // A trivial stand-in is enough here: the lifecycle module forwards the
+        // cipher to the persistence write path. The real adapter round-trip lives
+        // in the app module's PayloadCipherBridgeTest.
         PayloadCipher cipher = new PayloadCipher() {
             @Override
             public EncryptedPayload encrypt(String scopeId, byte[] plaintext) {
@@ -246,18 +248,17 @@ final class HomeSynapseCoreTest {
                 return ciphertext.clone();
             }
         };
-        // Clock.fixed per the M6.2 §4c rule — the runtime boots and stops
-        // under a fixed clock (the CrashRecoveryHttpIT precedent); this
-        // file's systemUTC convention is only needed by tests that await
-        // mode transitions in real time.
+        // Clock.fixed per the §4c rule — the runtime boots and stops under a
+        // fixed clock (the CrashRecoveryHttpIT precedent).
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"),
+                tempDir.resolve("config"),
                 HomeSynapseConfig.HOME_DEFAULT,
                 Clock.fixed(Instant.parse("2026-06-11T00:00:00Z"), ZoneOffset.UTC),
                 TEST_HOME_ID,
                 cipher);
 
-        assertThatCode(() -> core.start().join()).doesNotThrowAnyException();
+        assertThatCode(() -> core.start()).doesNotThrowAnyException();
         assertThatCode(core::stop).doesNotThrowAnyException();
     }
 }

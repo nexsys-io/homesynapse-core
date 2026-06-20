@@ -19,7 +19,12 @@ dependencies {
     // core->core edge). The config dependency that FIX-07 proposed is NOT added —
     // core->config is banned by assertAllowedModuleDependencies at every scope; the
     // schema-registration + definition-document load ride the composition root.
-    implementation(project(":core:event-bus"))
+    //
+    // AB-3: bumped implementation -> api to lockstep with module-info's
+    // `requires transitive com.homesynapse.event.bus`. The public
+    // AutomationEngineAssembly seam returns the event-bus Subscriber interface on
+    // the exported API, so event-bus must be a transitive/api dependency.
+    api(project(":core:event-bus"))
 
     // M7.1: SLF4J for engine-internal logging (no SLF4J type on the public API).
     implementation(libs.slf4j.api)

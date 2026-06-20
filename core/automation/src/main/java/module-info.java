@@ -33,7 +33,16 @@ module com.homesynapse.automation {
     // The automations.yaml schema registration + definition-document load ride
     // the composition root (lifecycle/app), which may depend on both core and
     // config; the loader itself consumes an already-parsed Map (no config edge).
-    requires com.homesynapse.event.bus;
+    //
+    // AB-3: bumped plain -> transitive. The public AutomationEngineAssembly seam
+    // (composition-root access to the automation_engine subscriber) returns the
+    // event-bus Subscriber interface, putting it on this module's exported API.
+    // The -Xlint:exports authoring rule (api <-> requires transitive) then
+    // requires transitive here (lockstep: build.gradle.kts uses api(...)). The
+    // concrete AutomationEngineSubscriber stays package-private; only the
+    // Subscriber interface is exposed (same pattern as lifecycle's HomeSynapseCore
+    // accessors returning event-bus/event/state types via requires transitive).
+    requires transitive com.homesynapse.event.bus;
 
     // M7.1: the Phase-3 implementations (registry, evaluators, loader,
     // duration timers) log via SLF4J. Non-transitive — no SLF4J type appears

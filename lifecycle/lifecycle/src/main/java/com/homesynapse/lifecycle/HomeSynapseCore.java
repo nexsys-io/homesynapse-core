@@ -5,25 +5,56 @@
 package com.homesynapse.lifecycle;
 
 import com.homesynapse.api.rest.RestFilters;
+import com.homesynapse.automation.AutomationDefinitionLoader;
+import com.homesynapse.automation.AutomationEngineAssembly;
+import com.homesynapse.automation.AutomationSchema;
+import com.homesynapse.automation.InMemoryAutomationIdentityStore;
+import com.homesynapse.automation.LoadFailure;
+import com.homesynapse.automation.LoadResult;
+import com.homesynapse.automation.StandardAutomationRegistry;
+import com.homesynapse.automation.StandardSelectorResolver;
+import com.homesynapse.automation.StandardTriggerEvaluator;
+import com.homesynapse.config.ConfigurationService;
+import com.homesynapse.config.ConfigurationServiceFactory;
+import com.homesynapse.config.SchemaRegistry;
+import com.homesynapse.device.AreaRegistry;
+import com.homesynapse.device.DeviceRegistry;
+import com.homesynapse.device.EntityRegistry;
+import com.homesynapse.device.InMemoryAreaRegistry;
+import com.homesynapse.device.InMemoryDeviceRegistry;
+import com.homesynapse.device.InMemoryEntityRegistry;
 import com.homesynapse.device.StandardCapabilities;
+import com.homesynapse.event.ConfigErrorEvent;
 import com.homesynapse.event.DomainEvent;
+import com.homesynapse.event.EventDraft;
+import com.homesynapse.event.EventOrigin;
+import com.homesynapse.event.EventPriority;
 import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.EventStore;
 import com.homesynapse.event.EventTypes;
+import com.homesynapse.event.SequenceConflictException;
+import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.bus.BusMetrics;
 import com.homesynapse.event.bus.DerivedWriteRateLimit;
 import com.homesynapse.event.bus.EventBus;
 import com.homesynapse.event.bus.HealthSignal;
 import com.homesynapse.event.bus.InProcessEventBus;
 import com.homesynapse.event.bus.QueueSaturationHealthCheck;
+import com.homesynapse.event.bus.Subscriber;
 import com.homesynapse.event.bus.SubscriberInfo;
 import com.homesynapse.event.bus.SubscriberMode;
+import com.homesynapse.event.bus.SubscriberSnapshot;
 import com.homesynapse.event.bus.SubscriptionFilter;
 import com.homesynapse.integration.IntegrationEvents;
+import com.homesynapse.observability.HealthStatus;
 import com.homesynapse.persistence.DeploymentProfile;
 import com.homesynapse.persistence.PayloadCipher;
 import com.homesynapse.persistence.PersistenceFactory;
+import com.homesynapse.platform.HealthReporter;
 import com.homesynapse.platform.identity.HomeId;
+import com.homesynapse.platform.identity.SystemId;
+import com.homesynapse.platform.systemd.NoOpHealthReporter;
+import com.homesynapse.platform.systemd.SystemdHealthReporter;
 import com.homesynapse.state.AttributeSchemaResolver;
 import com.homesynapse.state.AttributeValueComparator;
 import com.homesynapse.state.ComparisonPolicy;
@@ -37,12 +68,19 @@ import com.homesynapse.state.StateQueryService;
 
 import io.javalin.Javalin;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
@@ -50,217 +88,252 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Composition root for the HomeSynapse Core runtime (M3.6d-b).
+ * Composition root and top-level lifecycle orchestrator for the HomeSynapse
+ * Core runtime (AB-3).
  *
- * <p>{@code HomeSynapseCore} is the single owner of every long-lived
- * subsystem: persistence, event bus, state projection, scheduler, rate
- * limit, health check, query service, and the embedded HTTP server. It
- * constructs these in a fixed sequence on {@link #start()} and tears them
- * down in reverse order on {@link #stop()}.</p>
+ * <p>{@code HomeSynapseCore} implements {@link SystemLifecycleManager} (PD-1):
+ * {@code main()} constructs it, holds it as a {@code SystemLifecycleManager},
+ * calls {@link #start()}, and registers a JVM shutdown hook that calls
+ * {@link #shutdown(String)}. It owns every long-lived subsystem — configuration,
+ * persistence, event bus, device registries, state projection, the automation
+ * engine, the scheduler, the rate limit, the health loop — constructing them in
+ * Doc 12 phase order on {@link #start()} and tearing them down in reverse order
+ * on {@link #shutdown(String)}.</p>
  *
- * <h2>Bootstrap sequence</h2>
- * <ol>
- *   <li>{@link PersistenceFactory#start} — opens the database, registers
- *       event types, brings up stores, runs migrations.</li>
- *   <li>{@link BusMetrics#jfr()} — JFR-native bus metrics emitter.</li>
- *   <li>{@link InProcessEventBus} — wired to the persistence stores and the
- *       writer-queue-depth supplier.</li>
- *   <li>State store + checkpoint source.</li>
- *   <li>{@link DerivedWriteRateLimit} — bounds the projection's derived
- *       publishes (AMD-43 §3.6.4).</li>
- *   <li>{@link StateProjection} — materialized view subscriber.</li>
- *   <li>Bus subscription via
- *       {@link EventBus#subscribeRuntime(SubscriberInfo, com.homesynapse.event.bus.Subscriber)}.</li>
- *   <li>Health-signal handler — SLF4J bridge (real observability bridge is
- *       a future WU).</li>
- *   <li>{@link QueueSaturationHealthCheck} — hysteresis state machine over
- *       the writer-queue depth.</li>
- *   <li>{@link SharedScheduler} — drives the rate-limit refill cadence
- *       (50 ms) and the saturation tick cadence (1 s).</li>
- *   <li>{@code MaterializedStateQueryService} (M3.6e.1) — production
- *       {@link StateQueryService} backed by the projection's
- *       {@code StateStore} and this instance as {@link ReadinessSource}.</li>
- *   <li>{@link Javalin} HTTP server (M3.6e.1) — embedded Jetty pool sized
- *       by {@link DeploymentProfile#javalinMinThreads} /
- *       {@link DeploymentProfile#javalinMaxThreads}, with the readiness
- *       gate installed via
- *       {@link RestFilters#installReadinessGate(Object, com.homesynapse.state.ReadinessSource)}
- *       and bound on {@link HomeSynapseConfig#httpPort()} (M3.7 — {@code 0}
- *       requests an ephemeral port for parallel test execution).</li>
- *   <li>Entity query endpoints (M3.6e.2) — {@code GET /api/v1/entities},
- *       {@code GET /api/v1/entities/{entityId}}, and
- *       {@code GET /api/v1/entities/{entityId}/state} registered via
- *       {@link RestFilters#installEntityQueryEndpoints(Object,
- *       StateQueryService, java.util.function.LongSupplier, Clock)}.
- *       All three are gated by the readiness filter.</li>
- *   <li>Admin endpoints (M3.6e.2) — {@code GET /internal/dlq} and
- *       {@code GET /internal/projection} registered via
- *       {@link RestFilters#installAdminEndpoints(Object, Object,
- *       com.homesynapse.state.ReadinessSource, StateQueryService,
- *       java.util.function.LongSupplier)}. Intentionally outside the
- *       readiness gate per SD-5 — operators need them during REPLAY.</li>
- *   <li>Set {@code started = true}.</li>
- *   <li>Return a completed {@link CompletableFuture}.</li>
+ * <h2>Phase model (Doc 12 §3.2–§3.10, openHAB startlevel ordering)</h2>
+ *
+ * <ol start="0">
+ *   <li><b>BOOTSTRAP</b> — platform dirs, {@link HealthReporter} selection.</li>
+ *   <li><b>FOUNDATION</b> — {@link ConfigurationService#load()} (first init step).</li>
+ *   <li><b>DATA_INFRASTRUCTURE</b> — persistence, event bus, publisher.</li>
+ *   <li><b>CORE_DOMAIN</b> — device registries, state projection (REPLAY→LIVE),
+ *       then the {@code automation_engine} subscriber <em>after</em> the
+ *       projection reaches LIVE (the catch-up ordering invariant).</li>
+ *   <li><b>OBSERVABILITY</b> — health aggregation (structural in AB-3: no
+ *       {@code HealthContributor}/{@code HealthAggregator} impls exist yet).</li>
+ *   <li><b>EXTERNAL_INTERFACES</b> — <em>gated CLOSED in AB-3</em>. No HTTP is
+ *       bound and no endpoints are registered (core-review C1). AB-1 wires auth
+ *       and opens the surface via {@link #exposeHttpSurface()}.</li>
+ *   <li><b>INTEGRATIONS</b> — out of scope for AB-3 (adapters connect later).</li>
  * </ol>
  *
- * <p>Shutdown ({@link #stop()}) reverses that order: stop the HTTP server
- * first (refuse new queries before tearing down the state they would
- * query), then stop the scheduler, unsubscribe the projection (which closes
- * its dedicated read connection), then close persistence (flushing WAL).</p>
+ * <p>The engine then enters {@link LifecyclePhase#RUNNING} and the §3.10 health
+ * loop pets the watchdog every {@code WatchdogSec / 2} seconds.</p>
+ *
+ * <h2>Boundaries (AB-3)</h2>
+ *
+ * <p>AB-3 opens <strong>no</strong> HTTP surface from the production boot and
+ * activates <strong>no</strong> at-rest cipher (the injected
+ * {@link PayloadCipher} stays {@code null}/inert; AB-4 activates it). The Seam-1
+ * go-live (AB-1 HTTP + auth, AB-4 cipher) wires into the phase gates this class
+ * establishes.</p>
  *
  * <h2>Threading</h2>
  *
- * <p>{@link #start()} MUST be invoked from a platform thread — Jackson
- * warmup inside {@link PersistenceFactory#start} parks on
- * {@code Class.forName} cache miss paths that pin virtual thread carriers
- * (LTD-19 / DECIDE-M2-05). The production entry point is {@code main()},
- * which satisfies this.</p>
+ * <p>{@link #start()} MUST be invoked from a platform thread — Jackson warmup
+ * inside {@link PersistenceFactory#start} pins virtual-thread carriers (LTD-19 /
+ * DECIDE-M2-05). The production entry point is {@code main()}, which satisfies
+ * this. The health loop and bus delivery run on virtual threads.</p>
  *
- * <h2>Readiness</h2>
- *
- * <p>Implements {@link ReadinessSource}. Before {@link #start()},
- * {@link #mode()} returns {@link SubscriberMode#COLD}; once started, it
- * reads the projection subscriber's mode from {@link EventBus#subscribers()}
- * (M3.7 fix round 1).</p>
- *
+ * @see SystemLifecycleManager
  * @see PersistenceFactory
- * @see InProcessEventBus
  * @see StateProjection
- * @see SharedScheduler
+ * @see HealthLoop
  */
-public final class HomeSynapseCore implements ReadinessSource {
+public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessSource {
 
     private static final Logger LOG = LoggerFactory.getLogger(HomeSynapseCore.class);
 
     /** Subscriber identifier used for the materialized state projection. */
     private static final String PROJECTION_SUBSCRIBER_ID = "state_projection";
 
+    /** Subscriber identifier used for the automation_engine (trigger) subscriber. */
+    private static final String AUTOMATION_SUBSCRIBER_ID = "automation_engine";
+
+    /** Default systemd watchdog interval when {@code $WATCHDOG_USEC} is unset (LTD-13). */
+    private static final long DEFAULT_WATCHDOG_SECONDS = 60L;
+
     private final Path dbPath;
+    private final Path configDir;
     private final HomeSynapseConfig config;
     private final Clock clock;
     private final HomeId homeId;
 
     /**
-     * M6.2 (Doc 15 §3.8 / CARRY 1) — the config-supplied payload-encryption
-     * adapter, injected by the composition root and HELD here for the M6.3
-     * at-rest write path's consumption. Nullable by design (the DP-6
-     * smallest-honest-seam pin): nothing consumes it in M6.2, existing
-     * harnesses construct without it, and M6.3 makes it required when the
-     * write path lands. No persistence code receives it yet — forwarding
-     * into the persistence factory is the M6.3 wiring step.
+     * The config-supplied at-rest payload-encryption adapter (Doc 15 §3.8).
+     * Nullable by design: AB-3 leaves it {@code null} (inert) — the cipher
+     * phase-gate is established but not activated until AB-4. When non-null, it
+     * is forwarded into the persistence write path (the M6.3 wiring).
      */
     private final PayloadCipher payloadCipher;
 
-    // Constructed during start()
-    private PersistenceFactory persistenceFactory;
-    private InProcessEventBus eventBus;
-    private StateProjection stateProjection;
-    private SharedScheduler scheduler;
-    private DerivedWriteRateLimit rateLimit;
-    private QueueSaturationHealthCheck healthCheck;
-    private StateQueryService stateQueryService;
-    private Javalin httpServer;
-    /** M4.0b-1 — dispatching {@link ProjectionAdvancer} (REC-28) over the live event store. */
-    private ProjectionAdvancer projectionAdvancer;
-    /** M3.7 — decorator that bridges persist → bus notify (Finding 2). */
-    private EventPublisher eventPublisher;
+    // ── Phase / health state (callable from any thread at any time) ─────────
+    private volatile LifecyclePhase phase = LifecyclePhase.BOOTSTRAP;
+    private final Map<String, SubsystemState> subsystems = new ConcurrentHashMap<>();
+    private volatile Instant runningSince;
+
+    // ── Lifecycle guard ─────────────────────────────────────────────────────
+    private final ReentrantLock lifecycleLock = new ReentrantLock();
     private volatile boolean started = false;
     private volatile boolean abandoned = false;
+    private volatile boolean shutdownComplete = false;
+
+    // ── Subsystems (constructed during start()) ─────────────────────────────
+    private HealthReporter healthReporter;
+    private DeferredEventPublisher deferredConfigPublisher;
+    private ConfigurationService configurationService;
+    private SchemaRegistry schemaRegistry;
+    private SystemId systemId;
+    private PersistenceFactory persistenceFactory;
+    private InProcessEventBus eventBus;
+    private EventPublisher eventPublisher;
+    private DerivedWriteRateLimit rateLimit;
+    private ProjectionAdvancer projectionAdvancer;
+    private StateProjection stateProjection;
+    private QueueSaturationHealthCheck healthCheck;
+    private SharedScheduler scheduler;
+    private StateQueryService stateQueryService;
+    private EntityRegistry entityRegistry;
+    private DeviceRegistry deviceRegistry;
+    private AreaRegistry areaRegistry;
+    private StandardAutomationRegistry automationRegistry;
+    private StandardTriggerEvaluator triggerEvaluator;
+    private HealthLoop healthLoop;
+    private Javalin httpServer;
 
     /**
-     * Constructs a new composition root without a payload cipher — the
-     * M6.2 nullable seam (DP-6). Equivalent to passing {@code null} to the
-     * five-argument constructor; existing harnesses and tests use this
-     * form unchanged. M6.3 makes the cipher required.
+     * Constructs a composition root without an at-rest payload cipher — the
+     * AB-3 production form (cipher inert until AB-4).
      *
-     * @param dbPath full path to the SQLite database file; never {@code null}
-     * @param config consolidated runtime configuration; never {@code null}.
-     *               Use {@link HomeSynapseConfig#HOME_DEFAULT} for the MVP
-     *               default.
-     * @param clock  injected clock; never {@code null}
-     * @param homeId home identity for this installation (AMD-34); never
-     *               {@code null}
+     * @param dbPath    full path to the SQLite database file; never {@code null}
+     * @param configDir the configuration directory ({@code homesynapse.yaml} +
+     *                  key files); never {@code null}. Created if absent.
+     * @param config    consolidated runtime configuration; never {@code null}
+     * @param clock     injected clock; never {@code null}
+     * @param homeId    home identity for this installation (AMD-34); never
+     *                  {@code null}
      */
     public HomeSynapseCore(Path dbPath,
+                           Path configDir,
                            HomeSynapseConfig config,
                            Clock clock,
                            HomeId homeId) {
-        this(dbPath, config, clock, homeId, null);
+        this(dbPath, configDir, config, clock, homeId, null);
     }
 
     /**
-     * Constructs a new composition root with the M6.2 payload-encryption
-     * seam (Doc 15 §3.8 / CARRY 1).
+     * Constructs a composition root with the at-rest payload-encryption seam
+     * (Doc 15 §3.8). AB-3 passes {@code null} here (cipher inert); AB-4 passes
+     * the real adapter.
      *
-     * @param dbPath        full path to the SQLite database file; never
-     *                      {@code null}
-     * @param config        consolidated runtime configuration; never
-     *                      {@code null}. Use
-     *                      {@link HomeSynapseConfig#HOME_DEFAULT} for the
-     *                      MVP default.
+     * @param dbPath        full path to the SQLite database file; never {@code null}
+     * @param configDir     the configuration directory; never {@code null}
+     * @param config        consolidated runtime configuration; never {@code null}
      * @param clock         injected clock; never {@code null}
-     * @param homeId        home identity for this installation (AMD-34);
-     *                      never {@code null}
-     * @param payloadCipher the config-supplied {@link PayloadCipher}
-     *                      adapter constructed by {@code Main} over the
-     *                      {@code ScopeKeyManager}; held for the M6.3
-     *                      at-rest write path. Nullable until M6.3 — a
-     *                      {@code null} cipher means at-rest payload
-     *                      encryption is unavailable, which is the M6.2
-     *                      production state.
+     * @param homeId        home identity for this installation; never {@code null}
+     * @param payloadCipher the at-rest cipher adapter, or {@code null} to leave
+     *                      at-rest payload encryption inert (the AB-3 state)
      */
     public HomeSynapseCore(Path dbPath,
+                           Path configDir,
                            HomeSynapseConfig config,
                            Clock clock,
                            HomeId homeId,
                            PayloadCipher payloadCipher) {
         this.dbPath = Objects.requireNonNull(dbPath, "dbPath");
+        this.configDir = Objects.requireNonNull(configDir, "configDir");
         this.config = Objects.requireNonNull(config, "config");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.homeId = Objects.requireNonNull(homeId, "homeId");
         this.payloadCipher = payloadCipher;
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // SystemLifecycleManager
+    // ════════════════════════════════════════════════════════════════════════
+
     /**
-     * Brings up the runtime. Constructs every subsystem in dependency order,
-     * subscribes the state projection, and starts the shared scheduler.
+     * Executes the full startup sequence (Phases 0–6) synchronously, blocking
+     * until the engine reaches {@link LifecyclePhase#RUNNING}. On a fatal
+     * failure, tears down any already-initialized subsystems and rethrows.
      *
-     * <p>Returns an already-completed {@link CompletableFuture} so callers
-     * may chain shutdown logic uniformly with future async-start variants.
-     * Failures throw on the calling thread.</p>
+     * <p>MUST be called from a platform thread (LTD-19).</p>
      *
-     * @return a completed future when start succeeds
      * @throws IllegalStateException if already started
-     * @throws RuntimeException      if any subsystem fails to initialize
+     * @throws Exception             on a fatal initialization failure
      */
-    public CompletableFuture<Void> start() {
+    @Override
+    public void start() throws Exception {
         if (started) {
             throw new IllegalStateException("HomeSynapseCore already started");
         }
+        try {
+            bootstrap();
+        } catch (Exception fatal) {
+            LOG.error("Fatal error during startup; tearing down initialized subsystems", fatal);
+            try {
+                shutdown("startup failure: " + fatal.getMessage());
+            } catch (RuntimeException teardownFailure) {
+                LOG.error("teardown during startup-failure handling also failed", teardownFailure);
+            }
+            throw fatal;
+        }
+    }
 
-        // Step 1 — Persistence subsystem.
-        // Aggregate the per-module event-class manifests (M3.6c / DECIDE-04): core +
-        // integration lifecycle + capability (AMD-59). All three feed the production
-        // EventTypeRegistry so every shipped DomainEvent record can be (de)serialized.
+    private void bootstrap() throws Exception {
+        // ── Phase 0 BOOTSTRAP ───────────────────────────────────────────────
+        setPhase(LifecyclePhase.BOOTSTRAP);
+        Files.createDirectories(configDir);
+        Path dbParent = dbPath.toAbsolutePath().getParent();
+        if (dbParent != null) {
+            Files.createDirectories(dbParent);
+        }
+        this.healthReporter = selectHealthReporter(System::getenv);
+        healthReporter.reportStatus("BOOTSTRAP: platform initialized");
+
+        // ── Phase 1 FOUNDATION — config.load() is the FIRST subsystem init step ──
+        setPhase(LifecyclePhase.FOUNDATION);
+        Instant configStart = clock.instant();
+        this.systemId = SystemId.of(homeId.value());
+        // Config (Phase 1) needs an EventPublisher, but the bus (Phase 2) is not
+        // up yet — config's boot events are inherently un-persistable. The
+        // deferred publisher drops them until Phase 2 wires the real one.
+        this.deferredConfigPublisher = new DeferredEventPublisher();
+        // §1e generalized pre-migration rollback hook (additive — no destructive
+        // forced migration). Config performs its own §3.3 timestamped backup
+        // inside load(); the chain-migration snapshot path lands in AB-4.
+        snapshotBeforeMigration();
+        ConfigurationServiceFactory.Assembly cfg = ConfigurationServiceFactory.create(
+                configDir, clock, systemId, deferredConfigPublisher);
+        this.configurationService = cfg.service();
+        this.schemaRegistry = cfg.schemaRegistry();
+        // Doc 12 Phase 1 is "core-only schema composition": the automation schema
+        // is a CORE schema, so it must be registered BEFORE config.load() so the
+        // config's `automation:` section validates against it (only INTEGRATION
+        // schemas are deferred, to after Phase 6). The schema text is the
+        // config-free constant the automation module owns (FIX-07).
+        schemaRegistry.registerCoreSchema(
+                AutomationSchema.SCHEMA_SECTION, AutomationSchema.SCHEMA_JSON);
+        // FATAL on failure — Configuration is a FATAL subsystem (Doc 12 §4).
+        this.configurationService.load();
+        recordSubsystem("configuration", LifecyclePhase.FOUNDATION, configStart);
+
+        // ── Phase 2 DATA_INFRASTRUCTURE — persistence + event bus ────────────
+        setPhase(LifecyclePhase.DATA_INFRASTRUCTURE);
+        Instant dataStart = clock.instant();
+        // Aggregate the per-module event-class manifests (M3.6c / DECIDE-04).
         List<Class<? extends DomainEvent>> eventClasses = Stream.of(
                         EventTypes.CORE_PRODUCTION_EVENT_CLASSES,
                         IntegrationEvents.LIFECYCLE_EVENT_CLASSES,
                         IntegrationEvents.CAPABILITY_EVENT_CLASSES)
                 .flatMap(List::stream)
                 .toList();
-        // M6.3 (Doc 15 §3.8): forward the held at-rest cipher into the
-        // persistence write/read path — the R-2 wiring step the M6.2 closeout
-        // named. Null when constructed via the four-arg ctor (the at-rest
-        // encryption is then unavailable and the factory runs plaintext-for-all);
-        // non-null wires encrypt-on-write for the sensitive-PII scopes.
+        // AB-3: payloadCipher is null (inert) — the factory then runs
+        // plaintext-for-all (the cipher activation is AB-4).
         this.persistenceFactory = PersistenceFactory.start(
-                dbPath, config.persistence(), clock, homeId, eventClasses,
-                payloadCipher);
+                dbPath, config.persistence(), clock, homeId, eventClasses, payloadCipher);
 
-        // Step 2 — Bus metrics.
         BusMetrics jfrMetrics = BusMetrics.jfr();
-
-        // Step 3 — Event bus.
         this.eventBus = new InProcessEventBus(
                 persistenceFactory.eventStore(),
                 persistenceFactory.checkpointStore(),
@@ -270,62 +343,28 @@ public final class HomeSynapseCore implements ReadinessSource {
                 persistenceFactory.writeQueueDepthSupplier(),
                 config.eventBus());
 
-        // Step 4 — State store + checkpoint source (same instance, two roles).
-        // Both flow through the persistence factory's public-interface accessors.
-
-        // Step 5 — Derived write rate limit + projection advancer.
-        // The DispatchingProjectionAdvancer (M4.0b-1, Research 8 REC-28, closes
-        // OR-M3-18) wraps the live event store and is what
-        // StateProjection.processBatch() invokes during REPLAY/TRANSITION. It
-        // dispatches the read/forward concern by event type (forwarding all
-        // types — same cursor accounting as the M3.7 MinimalProjectionAdvancer
-        // it replaces); derivation/publication stays in the production
-        // DerivationRule (plan §4.2), wired at step 6.
-        this.rateLimit = new DerivedWriteRateLimit(
-                clock, jfrMetrics, PROJECTION_SUBSCRIBER_ID);
-        this.projectionAdvancer = ProjectionAdvancer.dispatching(
-                persistenceFactory.eventStore());
-
-        // Step 5b — NotifyingEventPublisher decorator (M3.7 Finding 2).
-        // Bridges the publish/notify gap: every successful persist is
-        // immediately visible to bus subscribers.
+        this.rateLimit = new DerivedWriteRateLimit(clock, jfrMetrics, PROJECTION_SUBSCRIBER_ID);
+        this.projectionAdvancer = ProjectionAdvancer.dispatching(persistenceFactory.eventStore());
         this.eventPublisher = new NotifyingEventPublisher(
                 persistenceFactory.eventPublisher(), eventBus);
+        // Now that the real publisher exists, route config's observability to it.
+        this.deferredConfigPublisher.setDelegate(eventPublisher);
+        recordSubsystem("persistence", LifecyclePhase.DATA_INFRASTRUCTURE, dataStart);
+        recordSubsystem("event-bus", LifecyclePhase.DATA_INFRASTRUCTURE, dataStart);
 
-        // Step 6 — State projection.
-        // projectionVersion is literal 5 (M4.0b-5, AMD-53). The bump from 4 is the
-        // trigger: first boot on a version-4 checkpoint now mismatches, so the
-        // AMD-41 §3.2.4 reconciliation fires (clear state, replay from 0) and the
-        // AMD-50 one-shot backfill — reused UNCHANGED for the 4->5 transition
-        // (AMD-50 §2.5, no new §3.2.4 refinement) — re-derives historical attributes
-        // from the state_reported log during that replay (gated by StateProjection's
-        // backfillActive provenance gate). Subsequent boots find persisted version 5
-        // -> no reconciliation -> backfill dormant (AMD-50-INV-02).
-        //
-        // M4.0b-5 (AMD-53): event-time activity-timestamp materialization. The three
-        // EntityState activity timestamps (lastChanged/lastUpdated/lastReported) now
-        // source from the causing envelope's eventTime ?? ingestTime in EVERY
-        // applyToState branch and in entity-adoption seeding (AMD-53-INV-01), so the
-        // materialized EntityState is a pure function of the event log for those
-        // fields — extends AMD-50-INV-03 from the DerivationRule to the projection's
-        // materialization. The 4->5 reconciliation HEALS legacy wall-clock
-        // lastChanged/lastUpdated/lastReported written by the pre-AMD-53 LIVE
-        // projection: the replay re-derives all three from event-time (the
-        // state_reported branch + adoption seed make this complete, not just
-        // lastChanged), so checkpoint == replay output for every entity. staleAfter/
-        // stale stay wall-clock (real-time freshness, AMD-53-INV-02). No event/
-        // checkpoint-shape, attribute-value, or stateVersion-semantics change.
-        //
-        // M4.0b-4 (AMD-52) remains in force as steady state: the typed
-        // change-detection comparator + schema-driven reconstruction (M4.0b-3) feed
-        // the rule, which emits the TYPED AttributeValue payload at schema_version = 2
-        // (DP-4); applyToState/backfill materialize the typed value (S2); the
-        // AttributeValue codec (de)serializes both the event payload and the
-        // checkpoint envelope. The schema resolver is an immutable snapshot of the
-        // standard capability schemas (StandardCapabilities — DP-K), so the rule
-        // reads injected immutable config, NOT a live registry (AMD-50-INV-03
-        // determinism preserved — the reconciliation backfill re-executes
-        // reconstruction+compare+materialize identically to LIVE).
+        // ── Phase 3 CORE_DOMAIN — registries, state store, automation ────────
+        setPhase(LifecyclePhase.CORE_DOMAIN);
+
+        // Step 3.1 — device registries (populated before the projection processes
+        // device-subject events; AB-3 starts them empty, INV-CE-02).
+        Instant deviceStart = clock.instant();
+        this.entityRegistry = new InMemoryEntityRegistry();
+        this.deviceRegistry = new InMemoryDeviceRegistry();
+        this.areaRegistry = new InMemoryAreaRegistry();
+        recordSubsystem("device-model", LifecyclePhase.CORE_DOMAIN, deviceStart);
+
+        // Step 3.2 — state store + projection (REPLAY → LIVE) + query service.
+        Instant stateStart = clock.instant();
         DerivedPublishGate publishGate = rateLimit::acquire;
         AttributeValueComparator comparator = AttributeValueComparator.structural();
         ComparisonPolicy comparisonPolicy = ComparisonPolicy.FP_NOISE_DEFAULT;
@@ -333,33 +372,24 @@ public final class HomeSynapseCore implements ReadinessSource {
                 AttributeSchemaResolver.of(StandardCapabilities.attributeSchemas());
         this.stateProjection = StateProjection.create(
                 new ProjectionId(PROJECTION_SUBSCRIBER_ID),
-                5,                                          // M4.0b-5 (AMD-53): 4 -> 5 event-time activity-timestamp heal
+                5,                                          // M4.0b-5 (AMD-53) projection version
                 persistenceFactory.viewCheckpointStore(),
                 persistenceFactory.stateCheckpointSource(),
-                persistenceFactory.atomicCheckpointSink(), // AMD-45 §2.1 (coupled checkpoint)
+                persistenceFactory.atomicCheckpointSink(), // AMD-45 §2.1
                 persistenceFactory.stateStore(),
-                DerivationRule.production(                  // M4.0b-3 (AMD-51 typed comparator)
-                        comparator, comparisonPolicy, schemaResolver),
-                eventPublisher,                            // M3.7 (decorated — Finding 2)
-                projectionAdvancer,                        // M4.0b-1 (closes OR-M3-18; REC-28)
-                config.checkpointPolicy(),                 // AMD-38 (HOME_DEFAULT or TESTING)
+                DerivationRule.production(comparator, comparisonPolicy, schemaResolver),
+                eventPublisher,
+                projectionAdvancer,
+                config.checkpointPolicy(),
                 clock,
                 publishGate);
-
-        // Step 7 — Subscribe the projection. coalesceExempt=true (Doc 01 §3.6 —
-        // skipping intermediate events would lose state transitions);
-        // atomicCheckpoint=true (AMD-45 §2.2 Option A — the bus must NOT write
-        // the per-delivery subscriber checkpoint, because the projection writes
-        // the coupled subscriber+view checkpoint atomically on policy cadence).
         SubscriberInfo projectionInfo = new SubscriberInfo(
                 PROJECTION_SUBSCRIBER_ID,
                 SubscriptionFilter.all(),
-                true,   // coalesceExempt
-                true);  // atomicCheckpoint (AMD-45)
+                true,   // coalesceExempt (Doc 01 §3.6)
+                true);  // atomicCheckpoint (AMD-45 §2.2)
         eventBus.subscribeRuntime(projectionInfo, stateProjection);
 
-        // Step 8 — Health signal handler. SLF4J bridge for now; the real
-        // observability bridge (HealthAggregator wiring) lands in a future WU.
         Consumer<HealthSignal> healthSignalHandler = signal -> {
             switch (signal.level()) {
                 case INFO -> LOG.info("Health {}: depth={} at {}",
@@ -370,195 +400,214 @@ public final class HomeSynapseCore implements ReadinessSource {
                         signal.channel(), signal.depth(), signal.timestamp());
             }
         };
-
-        // Step 9 — Queue saturation health check (AMD-43 §3.6.3).
         this.healthCheck = new QueueSaturationHealthCheck(
                 persistenceFactory.writeQueueDepthSupplier(),
-                clock,
-                5_000,
-                10_000,
-                5,
-                healthSignalHandler);
-
-        // Step 10 — Shared scheduler (50ms refill + 1s tick cadence).
+                clock, 5_000, 10_000, 5, healthSignalHandler);
         this.scheduler = new SharedScheduler(rateLimit, healthCheck);
-
-        // Step 11 — Materialized state query service (M3.6e.1, DEC-M3-16).
-        // Wired via the StateStore + this ReadinessSource + the projection's
-        // cursor for view position + the injected clock for staleness
-        // recomputation at read time (Doc 03 §3.8, AMD-11). The
-        // implementation lives package-private in com.homesynapse.state and
-        // is reached via the static factory on StateQueryService.
         this.stateQueryService = StateQueryService.materialized(
-                persistenceFactory.stateStore(),
-                this,
-                stateProjection::cursorPosition,
-                clock);
+                persistenceFactory.stateStore(), this, stateProjection::cursorPosition, clock);
+        recordSubsystem("state-store", LifecyclePhase.CORE_DOMAIN, stateStart);
 
-        // Step 12 — Embedded Javalin HTTP server (M3.6e.1). Jetty pool sized
-        // by the deployment profile so Pi-class hardware doesn't spend half
-        // its carrier budget on HTTP. ReadinessFilter gates /api/* until the
-        // projection reaches LIVE. Banner suppressed (we are a headless
-        // embedded system, not a web app).
-        DeploymentProfile profile = config.persistence().profile();
-        QueuedThreadPool threadPool = new QueuedThreadPool(
-                profile.javalinMaxThreads(),
-                profile.javalinMinThreads());
-        threadPool.setName("hs-http");
-        Javalin app = Javalin.create(cfg -> {
-            cfg.jetty.threadPool = threadPool;       // @JvmField var on JettyConfig
-            cfg.showJavalinBanner = false;           // @JvmField var on JavalinConfig
-        });
-        RestFilters.installReadinessGate(app, this);
+        // The catch-up ordering invariant: the automation engine must not
+        // evaluate against partially-replayed state. Gate the automation_engine
+        // subscribe on the state projection reaching LIVE.
+        awaitProjectionLive();
 
-        // Step 13 — Entity query endpoints (M3.6e.2). All three live under
-        // /api/* and are therefore gated by the readiness filter installed
-        // at step 12. View position is the projection's cursor; the clock
-        // supplies response timestamps (DEC-M3-09).
-        RestFilters.installEntityQueryEndpoints(
-                app,
-                stateQueryService,
-                stateProjection::cursorPosition,
-                clock);
+        // Step 3.4 — automation engine (trigger subscriber). The definition-load
+        // glue rides the composition root (FIX-07: the core:automation -> config
+        // edge is banned at every scope). The automation schema was registered in
+        // Phase 1 (core-only schema composition) so the `automation:` section
+        // validated during config.load().
+        Instant automationStart = clock.instant();
+        InMemoryAutomationIdentityStore identityStore =
+                new InMemoryAutomationIdentityStore(clock);
+        AutomationDefinitionLoader loader = new AutomationDefinitionLoader(
+                identityStore, entityRegistry, areaRegistry);
+        // The loader reads top-level "automations"/"schema_version", but those
+        // live UNDER the "automation" config section (AutomationSchema.SCHEMA_SECTION)
+        // and rawMap() is the whole document keyed by section — so the loader must
+        // receive the SECTION content, not the whole document, or every automation
+        // is silently ignored. [REVIEW] this corrects the instruction's literal
+        // loader.load(rawMap()).
+        LoadResult loadResult = loader.load(
+                automationSection(configurationService.getCurrentModel().rawMap()));
+        // SD-9 fail-closed is PER-DEFINITION: a malformed definition is rejected
+        // and SURFACED (published as config_error + logged), but valid sibling
+        // definitions still load — the engine is never booted with a silently-
+        // inert ruleset, and a single bad entry does not brick the boot. Doc 12
+        // §4 "Automation = FATAL" governs subsystem INIT failure, not a per-entry
+        // config error (the AutomationDefinitionLoader's ratified contract).
+        surfaceAutomationLoadFailures(loadResult);
+        this.automationRegistry = new StandardAutomationRegistry();
+        this.automationRegistry.load(loadResult.loaded());
+        StandardSelectorResolver selectorResolver = new StandardSelectorResolver(
+                entityRegistry, areaRegistry, deviceRegistry);
+        this.triggerEvaluator = new StandardTriggerEvaluator(
+                automationRegistry, selectorResolver, stateQueryService, eventPublisher, clock);
+        Subscriber automationSubscriber =
+                AutomationEngineAssembly.automationEngineSubscriber(triggerEvaluator);
+        // coalesceExempt=false: the automation engine evaluates against current
+        // state (StateQueryService), so it does not require every intermediate
+        // event individually the way the coalesce-exempt projection does.
+        eventBus.subscribeRuntime(
+                new SubscriberInfo(AUTOMATION_SUBSCRIBER_ID, SubscriptionFilter.all(), false),
+                automationSubscriber);
+        recordSubsystem("automation", LifecyclePhase.CORE_DOMAIN, automationStart);
 
-        // Step 14 — Admin/operational endpoints (M3.6e.2). /internal/* is
-        // intentionally outside the readiness filter — operators need DLQ
-        // and projection visibility during REPLAY/COLD/TRANSITION (SD-5).
-        RestFilters.installAdminEndpoints(
-                app,
-                eventBus,
-                this,
-                stateQueryService,
-                stateProjection::cursorPosition);
+        // ── Phase 4 OBSERVABILITY ────────────────────────────────────────────
+        // No HealthContributor/HealthAggregator production impls exist yet; AB-3
+        // reports aggregated HEALTHY and the loop pets the watchdog (structural).
+        setPhase(LifecyclePhase.OBSERVABILITY);
+        recordSubsystem("observability", LifecyclePhase.OBSERVABILITY, clock.instant());
 
-        app.start(config.httpPort());
-        this.httpServer = app;
+        // ── Phase 5 EXTERNAL_INTERFACES — GATED CLOSED (C1) ──────────────────
+        // AB-3 binds no port and registers no endpoints. exposeHttpSurface() is
+        // the AB-1 seam (auth-gated); production main() never calls it.
+        setPhase(LifecyclePhase.EXTERNAL_INTERFACES);
 
-        // Step 15 — Mark started.
+        // ── Phase 6 INTEGRATIONS — out of scope for AB-3 ─────────────────────
+        setPhase(LifecyclePhase.INTEGRATIONS);
+
+        // ── READY + RUNNING ──────────────────────────────────────────────────
         this.started = true;
-        LOG.info("HomeSynapseCore started: db={}, homeId={}, http=:{}",
-                dbPath, homeId.value(), app.port());
-
-        // Step 16 — Return a completed future.
-        return CompletableFuture.completedFuture(null);
+        this.runningSince = clock.instant();
+        // AB-3 READY semantics = engine running (HTTP is not exposed; AB-1 adds
+        // the API-serving precondition).
+        healthReporter.reportReady();
+        setPhase(LifecyclePhase.RUNNING);
+        this.healthLoop = new HealthLoop(
+                healthReporter, clock, watchdogPeriod(System::getenv), this::buildHealthStatusLine);
+        this.healthLoop.start();
+        LOG.info("HomeSynapseCore RUNNING: db={}, configDir={}, homeId={}, automations={}; "
+                        + "HTTP NOT exposed (AB-3 C1 boundary), cipher inert={}",
+                dbPath, configDir, homeId.value(),
+                automationRegistry.getAll().size(), payloadCipher == null);
     }
 
     /**
-     * Returns the actual HTTP port the embedded Javalin server is bound to.
+     * Executes the shutdown sequence in reverse initialization order. Safe from
+     * the JVM shutdown hook, from {@link #start()} on fatal failure, or from an
+     * admin call. Idempotent; concurrent calls are serialized.
      *
-     * <p>For {@link HomeSynapseConfig#HOME_DEFAULT} this matches the configured
-     * {@code 7070}. For {@link HomeSynapseConfig#testing()} (which requests
-     * port {@code 0}), Jetty selects a free ephemeral port at
-     * {@code app.start(0)}; this accessor returns that bound port so tests
-     * can construct request URIs without conflicting on a fixed port.</p>
+     * @param reason human-readable reason; never {@code null}
+     */
+    @Override
+    public void shutdown(String reason) {
+        Objects.requireNonNull(reason, "reason");
+        doTeardown(reason);
+    }
+
+    @Override
+    public LifecyclePhase currentPhase() {
+        return phase;
+    }
+
+    @Override
+    public SystemHealthSnapshot healthSnapshot() {
+        Duration uptime = (runningSince != null)
+                ? Duration.between(runningSince, clock.instant())
+                : null;
+        long eventStorePosition = (stateQueryService != null)
+                ? stateQueryService.getViewPosition()
+                : 0L;
+        int entityCount = (entityRegistry != null)
+                ? entityRegistry.listAllEntities().size()
+                : 0;
+        int automationCount = (automationRegistry != null)
+                ? automationRegistry.getAll().size()
+                : 0;
+        return new SystemHealthSnapshot(
+                clock.instant(),
+                Map.copyOf(subsystems),
+                HealthStatus.HEALTHY,   // structural: no HealthContributors in AB-3
+                uptime,
+                eventStorePosition,
+                entityCount,
+                0,                       // integrationCount — none in AB-3
+                automationCount);
+    }
+
+    @Override
+    public Map<String, SubsystemState> subsystemStates() {
+        return Map.copyOf(subsystems);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // External-interfaces seam (AB-1 / test-only — NOT called by production main)
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Brings up the embedded Javalin HTTP surface (the M3.6e REST entity + admin
+     * endpoints) — the Phase-5 step AB-3 leaves gated CLOSED.
+     *
+     * <p><strong>Not invoked by production {@code main()}.</strong> The surface
+     * is currently UNAUTHENTICATED (core-review C1); AB-1 wires authentication
+     * and makes {@code main()} call this. It exists now so the HTTP-aware E2E
+     * harness can keep exercising the REST layer that AB-1 will harden.</p>
+     *
+     * <p>Idempotent; must be called after {@link #start()}.</p>
+     *
+     * @throws IllegalStateException if {@link #start()} has not completed
+     */
+    public void exposeHttpSurface() {
+        requireStarted();
+        lifecycleLock.lock();
+        try {
+            if (httpServer != null) {
+                return;
+            }
+            DeploymentProfile profile = config.persistence().profile();
+            QueuedThreadPool threadPool = new QueuedThreadPool(
+                    profile.javalinMaxThreads(), profile.javalinMinThreads());
+            threadPool.setName("hs-http");
+            Javalin app = Javalin.create(cfg -> {
+                cfg.jetty.threadPool = threadPool;
+                cfg.showJavalinBanner = false;
+            });
+            RestFilters.installReadinessGate(app, this);
+            RestFilters.installEntityQueryEndpoints(
+                    app, stateQueryService, stateProjection::cursorPosition, clock);
+            RestFilters.installAdminEndpoints(
+                    app, eventBus, this, stateQueryService, stateProjection::cursorPosition);
+            app.start(config.httpPort());
+            this.httpServer = app;
+            LOG.warn("HTTP surface exposed on :{} — UNAUTHENTICATED (AB-1 wires auth); "
+                    + "not invoked by production main()", app.port());
+        } finally {
+            lifecycleLock.unlock();
+        }
+    }
+
+    /**
+     * @return {@code true} if {@link #exposeHttpSurface()} has bound the HTTP
+     *         server. AB-3's production boot leaves this {@code false} (C1).
+     */
+    public boolean isHttpExposed() {
+        return httpServer != null;
+    }
+
+    /**
+     * Returns the actual bound HTTP port.
      *
      * @return the live bound HTTP port, always {@code > 0}
-     * @throws IllegalStateException if {@link #start()} has not been called or
-     *                               the HTTP server was not constructed
+     * @throws IllegalStateException if not started or the HTTP surface is not
+     *                               exposed (AB-3 does not expose it)
      */
     public int boundHttpPort() {
-        if (!started || httpServer == null) {
+        if (!started) {
             throw new IllegalStateException("HomeSynapseCore not started");
+        }
+        if (httpServer == null) {
+            throw new IllegalStateException("HTTP surface not exposed");
         }
         return httpServer.port();
     }
 
-    /**
-     * Tears down the runtime in reverse order: HTTP server first (refuse new
-     * queries before tearing down the state they would query), then
-     * scheduler (stops the periodic tasks so they cannot touch resources
-     * being torn down), then unsubscribe the projection (closes its
-     * dedicated read connection), then close persistence (flushes WAL,
-     * closes all connections).
-     *
-     * <p>Idempotent — repeated calls after the first are no-ops.</p>
-     */
-    public void stop() {
-        if (!started || abandoned) {
-            return;
-        }
-        started = false;
-
-        if (httpServer != null) {
-            httpServer.stop();
-        }
-        if (scheduler != null) {
-            scheduler.shutdown();
-        }
-        if (eventBus != null) {
-            eventBus.unsubscribe(PROJECTION_SUBSCRIBER_ID);
-        }
-        if (rateLimit != null) {
-            rateLimit.close();
-        }
-        if (persistenceFactory != null) {
-            persistenceFactory.close();
-        }
-        LOG.info("HomeSynapseCore stopped: db={}", dbPath);
-    }
+    // ════════════════════════════════════════════════════════════════════════
+    // Accessors
+    // ════════════════════════════════════════════════════════════════════════
 
     /**
-     * Abandons the runtime, releasing OS-level resources (JDBC connections,
-     * HTTP server socket, bus delivery threads, scheduler threads) without
-     * performing any durability operations.
-     *
-     * <p>Teardown order:</p>
-     * <ol>
-     *   <li>{@link Javalin#stop()} — releases the HTTP server socket.</li>
-     *   <li>{@link SharedScheduler#shutdown()} — interrupts timer tasks
-     *       (rate-limit refill, saturation tick) via the underlying
-     *       {@code ScheduledExecutorService.shutdownNow()} rather than
-     *       letting them complete.</li>
-     *   <li>{@link InProcessEventBus#abandon()} — interrupts all subscriber
-     *       delivery threads, closes per-subscriber read connections, clears
-     *       registries.</li>
-     *   <li>{@link PersistenceFactory#abandon()} — closes JDBC connections,
-     *       shuts down the database executor. WAL is NOT checkpointed.</li>
-     * </ol>
-     *
-     * <p>Use for crash simulation in tests and emergency shutdown in
-     * production (e.g., imminent power loss, OOM). Normal shutdown MUST use
-     * {@link #stop()}.</p>
-     *
-     * <p>Do NOT use for normal shutdown — {@link #stop()} performs WAL
-     * checkpoint, graceful subscriber unsubscription, and orderly executor
-     * shutdown.</p>
-     *
-     * <p>Idempotent. Calling this after {@link #stop()} is a no-op. Calling
-     * {@link #stop()} after this is a no-op.</p>
-     *
-     * @implNote Mutual exclusion with {@link #stop()} is enforced via the
-     *           {@code abandoned} flag. Both methods check it before acting.
-     *           INV-ES-04 is preserved: events already persisted survive
-     *           abandon; the replay mechanism re-processes the gap between
-     *           the last projection checkpoint and the event store head on
-     *           restart.
-     */
-    public void abandon() {
-        if (!started || abandoned) {
-            return;
-        }
-        abandoned = true;
-        started = false;
-
-        if (httpServer != null) {
-            httpServer.stop();
-        }
-        if (scheduler != null) {
-            scheduler.shutdown();
-        }
-        if (eventBus != null) {
-            eventBus.abandon();
-        }
-        if (persistenceFactory != null) {
-            persistenceFactory.abandon();
-        }
-        LOG.warn("HomeSynapseCore abandoned (ungraceful shutdown): db={}", dbPath);
-    }
-
-    /**
-     * Returns the event publisher.
-     *
      * @return the production {@link EventPublisher}
      * @throws IllegalStateException if {@link #start()} has not been called
      */
@@ -568,8 +617,6 @@ public final class HomeSynapseCore implements ReadinessSource {
     }
 
     /**
-     * Returns the event store.
-     *
      * @return the production {@link EventStore}
      * @throws IllegalStateException if {@link #start()} has not been called
      */
@@ -579,9 +626,7 @@ public final class HomeSynapseCore implements ReadinessSource {
     }
 
     /**
-     * Returns the in-process event bus.
-     *
-     * @return the production {@link EventBus}
+     * @return the in-process event bus
      * @throws IllegalStateException if {@link #start()} has not been called
      */
     public EventBus eventBus() {
@@ -590,14 +635,7 @@ public final class HomeSynapseCore implements ReadinessSource {
     }
 
     /**
-     * Returns the production {@link StateQueryService} (M3.6e.1) — a
-     * {@code MaterializedStateQueryService} backed by the State Projection's
-     * live {@code StateStore} with read-time staleness recomputation. Reads
-     * are lock-free; consumers may call this from any thread including
-     * virtual threads. Returns the same instance on every call after
-     * {@link #start()}.
-     *
-     * @return the materialized query service
+     * @return the production {@link StateQueryService}
      * @throws IllegalStateException if {@link #start()} has not been called
      */
     public StateQueryService stateQueryService() {
@@ -610,30 +648,308 @@ public final class HomeSynapseCore implements ReadinessSource {
         if (!started) {
             return SubscriberMode.COLD;
         }
-        // M3.7 fix round 1 — readiness is a property of the bus's per-subscriber
-        // delivery FSM (driven by ReplayDriver + TransitionCoordinator), NOT the
-        // projection's internal mode field. Pre-fix, this delegated to
-        // stateProjection.currentMode() which only advances when the bus calls
-        // subscriber.setMode(). On an empty event log (M3.7 E2E tests) the
-        // projection's currentMode stayed at construction-time COLD even after
-        // the bus FSM reached LIVE, failing the readiness contract.
-        //
-        // Fix round 4 wired setMode() callbacks at all CAS sites in
-        // ReplayDriver, TransitionCoordinator, and SubscriberSupervisor —
-        // so StateProjection.currentMode() now tracks correctly. This method
-        // still reads from bus.subscribers() as the canonical source:
-        // HomeSynapseCore implements ReadinessSource, and the bus snapshot's
-        // mode IS the authoritative delivery FSM state.
+        return projectionMode();
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Ungraceful shutdown
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Graceful shutdown alias retained for existing callers and test harnesses.
+     * Equivalent to {@link #shutdown(String) shutdown("stop()")}.
+     */
+    public void stop() {
+        doTeardown("stop()");
+    }
+
+    /**
+     * Abandons the runtime, releasing OS-level resources without durability
+     * operations (crash simulation / emergency shutdown). Normal shutdown MUST
+     * use {@link #shutdown(String)} / {@link #stop()}.
+     *
+     * <p>Idempotent and mutually exclusive with graceful teardown.</p>
+     */
+    public void abandon() {
+        lifecycleLock.lock();
+        try {
+            if (!started || abandoned) {
+                return;
+            }
+            abandoned = true;
+            started = false;
+            setPhase(LifecyclePhase.SHUTTING_DOWN);
+            if (healthLoop != null) {
+                healthLoop.stop();
+            }
+            if (httpServer != null) {
+                httpServer.stop();
+            }
+            if (scheduler != null) {
+                scheduler.shutdown();
+            }
+            if (triggerEvaluator != null) {
+                triggerEvaluator.close();
+            }
+            if (eventBus != null) {
+                eventBus.abandon();
+            }
+            if (persistenceFactory != null) {
+                persistenceFactory.abandon();
+            }
+            setPhase(LifecyclePhase.STOPPED);
+            LOG.warn("HomeSynapseCore abandoned (ungraceful shutdown): db={}", dbPath);
+        } finally {
+            lifecycleLock.unlock();
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Internal
+    // ════════════════════════════════════════════════════════════════════════
+
+    private void doTeardown(String reason) {
+        lifecycleLock.lock();
+        try {
+            if (abandoned || shutdownComplete) {
+                return;
+            }
+            setPhase(LifecyclePhase.SHUTTING_DOWN);
+            safelyReportStopping();
+            started = false;
+
+            // Reverse initialization order. Null-guarded so a partial teardown
+            // after a fatal mid-boot failure (subsystems built but `started` not
+            // yet set) still releases everything that came up.
+            if (healthLoop != null) {
+                healthLoop.stop();
+            }
+            if (httpServer != null) {
+                httpServer.stop();
+                httpServer = null;
+            }
+            if (scheduler != null) {
+                scheduler.shutdown();
+            }
+            if (eventBus != null) {
+                eventBus.unsubscribe(AUTOMATION_SUBSCRIBER_ID);
+                eventBus.unsubscribe(PROJECTION_SUBSCRIBER_ID);
+            }
+            if (triggerEvaluator != null) {
+                triggerEvaluator.close();
+            }
+            if (rateLimit != null) {
+                rateLimit.close();
+            }
+            if (persistenceFactory != null) {
+                persistenceFactory.close();
+            }
+            shutdownComplete = true;
+            setPhase(LifecyclePhase.STOPPED);
+            LOG.info("HomeSynapseCore stopped: db={} ({})", dbPath, reason);
+        } finally {
+            lifecycleLock.unlock();
+        }
+    }
+
+    private void safelyReportStopping() {
+        if (healthReporter == null) {
+            return;
+        }
+        try {
+            healthReporter.reportStopping();
+        } catch (RuntimeException e) {
+            LOG.warn("reportStopping failed during shutdown", e);
+        }
+    }
+
+    /**
+     * Generalized pre-migration rollback hook (R-δ AX-2). Additive — AB-3 runs
+     * no destructive forced migration: {@code ConfigurationService.load()}
+     * performs its own §3.3 timestamped config backup internally, and the
+     * chain-migration snapshot path lands in AB-4. This hook is the wired
+     * extension point for that future path.
+     */
+    private void snapshotBeforeMigration() {
+        LOG.debug("pre-migration snapshot checkpoint: config self-backs-up on migrate; "
+                + "chain-migration snapshot wires in AB-4");
+    }
+
+    /**
+     * Blocks until the state projection subscriber reaches {@code LIVE} (the
+     * bus drives COLD → REPLAY → TRANSITION → LIVE on its own VT). On a fresh or
+     * small log this completes in milliseconds. The poll uses real-time sleeps
+     * and an iteration cap (clock-independent, so a {@code Clock.fixed} test
+     * still terminates).
+     */
+    private void awaitProjectionLive() {
+        final int maxPolls = 1_500; // ~30s at 20ms
+        for (int i = 0; i < maxPolls; i++) {
+            if (projectionMode() == SubscriberMode.LIVE) {
+                return;
+            }
+            try {
+                Thread.sleep(20L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                        "interrupted while awaiting state-projection LIVE", e);
+            }
+        }
+        throw new IllegalStateException(
+                "state projection did not reach LIVE within ~30s during startup");
+    }
+
+    private SubscriberMode projectionMode() {
+        if (eventBus == null) {
+            return SubscriberMode.COLD;
+        }
         return eventBus.subscribers().stream()
                 .filter(s -> PROJECTION_SUBSCRIBER_ID.equals(s.subscriberId()))
                 .findFirst()
-                .map(com.homesynapse.event.bus.SubscriberSnapshot::mode)
+                .map(SubscriberSnapshot::mode)
                 .orElse(SubscriberMode.COLD);
+    }
+
+    private String buildHealthStatusLine() {
+        int entities = (entityRegistry != null) ? entityRegistry.listAllEntities().size() : 0;
+        int automations = (automationRegistry != null) ? automationRegistry.getAll().size() : 0;
+        return "RUNNING: " + entities + " entities, " + automations
+                + " automations, 0 integrations";
+    }
+
+    /**
+     * Surfaces each rejected automation definition (SD-9): logs it and publishes
+     * a {@code config_error} event, exactly as the {@link AutomationDefinitionLoader}
+     * contract specifies ("a LoadFailure the caller publishes as config_error").
+     * Best-effort — a publish failure is logged and never fails the boot
+     * (AMD-70-INV-01), and valid sibling definitions have already loaded.
+     */
+    private void surfaceAutomationLoadFailures(LoadResult loadResult) {
+        for (LoadFailure failure : loadResult.failures()) {
+            LOG.error("automation definition '{}' rejected (SD-9 — valid siblings still "
+                    + "load): {}", failure.automationName(), failure.detail());
+            try {
+                eventPublisher.publishRoot(new EventDraft(
+                        EventTypes.CONFIG_ERROR,
+                        1,
+                        null,
+                        SubjectRef.system(systemId),
+                        EventPriority.DIAGNOSTIC,
+                        EventOrigin.SYSTEM,
+                        new ConfigErrorEvent(
+                                AutomationSchema.SCHEMA_SECTION + "." + failure.automationName(),
+                                "ERROR",
+                                failure.detail(),
+                                "(none)"),
+                        null,
+                        null));
+            } catch (SequenceConflictException | RuntimeException e) {
+                LOG.error("config_error publication for rejected automation '{}' failed; "
+                        + "the rejection is still logged above", failure.automationName(), e);
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> automationSection(Map<String, Object> rawConfig) {
+        Object section = rawConfig.get(AutomationSchema.SCHEMA_SECTION);
+        return (section instanceof Map<?, ?> map) ? (Map<String, Object>) map : Map.of();
+    }
+
+    private void setPhase(LifecyclePhase next) {
+        this.phase = next;
+    }
+
+    // ── Package-private accessors for the lifecycle wiring test (NOT exported API,
+    //    so config/device/automation stay non-transitive requires) ─────────────
+
+    /** @return the assembled configuration service (or {@code null} before start). */
+    ConfigurationService configurationService() {
+        return configurationService;
+    }
+
+    /** @return the assembled entity registry (or {@code null} before start). */
+    EntityRegistry entityRegistry() {
+        return entityRegistry;
+    }
+
+    /** @return the assembled device registry (or {@code null} before start). */
+    DeviceRegistry deviceRegistry() {
+        return deviceRegistry;
+    }
+
+    /** @return the assembled area registry (or {@code null} before start). */
+    AreaRegistry areaRegistry() {
+        return areaRegistry;
+    }
+
+    /** @return the loaded automation registry (or {@code null} before start). */
+    StandardAutomationRegistry automationRegistry() {
+        return automationRegistry;
+    }
+
+    private void recordSubsystem(String name, LifecyclePhase subsystemPhase, Instant startInstant) {
+        Duration initDuration = Duration.between(startInstant, clock.instant());
+        subsystems.put(name, new SubsystemState(
+                name, subsystemPhase, SubsystemStatus.RUNNING, null, initDuration, null));
     }
 
     private void requireStarted() {
         if (!started) {
             throw new IllegalStateException("HomeSynapseCore not started");
         }
+    }
+
+    /**
+     * Selects the platform {@link HealthReporter}: {@link SystemdHealthReporter}
+     * when {@code $NOTIFY_SOCKET} is set, else {@link NoOpHealthReporter}.
+     *
+     * <p>{@link SystemdHealthReporter}'s production transport is unavailable on
+     * stock JDK 21 (AF_UNIX SOCK_DGRAM, deferred to M13) and throws at
+     * construction; this falls back to {@link NoOpHealthReporter} on any
+     * construction failure so a systemd host does not crash the boot.</p>
+     *
+     * @param env environment lookup ({@code System::getenv} in production)
+     * @return the selected reporter; never {@code null}
+     */
+    static HealthReporter selectHealthReporter(Function<String, String> env) {
+        String notifySocket = env.apply("NOTIFY_SOCKET");
+        if (notifySocket == null || notifySocket.isBlank()) {
+            return new NoOpHealthReporter();
+        }
+        try {
+            return new SystemdHealthReporter(notifySocket);
+        } catch (IOException | RuntimeException e) {
+            LOG.warn("$NOTIFY_SOCKET is set but SystemdHealthReporter is unavailable on this "
+                    + "JVM ({}); falling back to NoOpHealthReporter (systemd watchdog disabled)",
+                    e.toString());
+            return new NoOpHealthReporter();
+        }
+    }
+
+    /**
+     * Computes the health-loop notify period: {@code WatchdogSec / 2}, where
+     * {@code WatchdogSec} derives from {@code $WATCHDOG_USEC} (systemd, LTD-13)
+     * or defaults to {@value #DEFAULT_WATCHDOG_SECONDS} seconds.
+     *
+     * @param env environment lookup ({@code System::getenv} in production)
+     * @return the notify period (≥ 1s)
+     */
+    static Duration watchdogPeriod(Function<String, String> env) {
+        long watchdogSeconds = DEFAULT_WATCHDOG_SECONDS;
+        String watchdogUsec = env.apply("WATCHDOG_USEC");
+        if (watchdogUsec != null && !watchdogUsec.isBlank()) {
+            try {
+                long micros = Long.parseLong(watchdogUsec.trim());
+                if (micros > 0) {
+                    watchdogSeconds = micros / 1_000_000L;
+                }
+            } catch (NumberFormatException e) {
+                LOG.warn("invalid $WATCHDOG_USEC '{}'; using default {}s",
+                        watchdogUsec, DEFAULT_WATCHDOG_SECONDS);
+            }
+        }
+        return Duration.ofSeconds(Math.max(1L, watchdogSeconds / 2L));
     }
 }

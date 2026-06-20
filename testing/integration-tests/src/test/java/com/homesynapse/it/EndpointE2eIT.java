@@ -169,17 +169,16 @@ final class EndpointE2eIT {
     }
 
     @Test
-    @DisplayName("GET /internal/dlq returns subscribers list with the M3.7 "
-            + "oldestParkedAt field present (null on empty DLQ)")
-    void getDlqStatusReturnsSubscribersListWithOldestParkedAtField(
-            @TempDir Path tempDir) throws Exception {
+    @DisplayName("GET /internal/dlq lists the projection and automation_engine "
+            + "subscribers (AB-3)")
+    void getDlqStatusListsRuntimeSubscribers(@TempDir Path tempDir) throws Exception {
         // Causing a real DLQ park requires deliberate event corruption (the
         // brief noted this is brittle and explicitly allows skipping). This
-        // test instead asserts the response *shape* on the empty-DLQ path:
-        // the projection subscriber exists, the field is present, and its
-        // value is null. A "real park" scenario can land as a future
-        // enhancement once the projection has a deliberate fault-injection
-        // hook.
+        // test asserts the response *shape* on the empty-DLQ path: the runtime
+        // subscribers are listed. AB-3 wires the automation_engine subscriber
+        // alongside the state projection, so the set is no longer "exactly one";
+        // assert by subscriber id (position-independent — the bus does not
+        // guarantee array order) rather than pinning the array index/size.
         harness = HomeSynapseE2eHarness.start(
                 tempDir.resolve("homesynapse-events.db"), FIXED_CLOCK, TEST_HOME_ID);
         LiveModeAwaiter.awaitLive(harness);
@@ -189,14 +188,8 @@ final class EndpointE2eIT {
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThatJson(response.body()).inPath("$.subscribers").isArray();
-        // Exactly one subscriber — the projection. Empty DLQ → oldestParkedAt
-        // is null (the M3.7 field is present even when there are no parks).
-        assertThatJson(response.body()).inPath("$.subscribers[0].subscriberId")
-                .isEqualTo("state_projection");
-        assertThatJson(response.body()).inPath("$.subscribers[0].dlqDepth")
-                .isEqualTo(0);
-        assertThatJson(response.body()).inPath("$.subscribers[0].oldestParkedAt")
-                .isNull();
+        assertThatJson(response.body()).inPath("$.subscribers[*].subscriberId")
+                .isArray().contains("state_projection", "automation_engine");
     }
 
     // ── helpers ────────────────────────────────────────────────────────

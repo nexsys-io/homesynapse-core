@@ -46,6 +46,24 @@ module com.homesynapse.lifecycle {
     // only inside the composition root.
     requires com.homesynapse.api.rest;
 
+    // AB-3: the composition root assembles ConfigurationService (config),
+    // the InMemory* device registries (device-model), and the automation_engine
+    // subscriber chain (automation). All three are referenced only INSIDE
+    // HomeSynapseCore/Main composition internals — no config/device/automation
+    // type appears on the lifecycle module's exported API — so each is a plain
+    // (non-transitive) requires ⇔ implementation(...) in build.gradle.kts.
+    // All are gate-allowed (:lifecycle:.* -> :config:.* and -> :core:.*).
+    requires com.homesynapse.config;
+    requires com.homesynapse.device;
+    requires com.homesynapse.automation;
+
+    // AB-3: HomeSynapseCore selects the platform HealthReporter implementation
+    // (SystemdHealthReporter when $NOTIFY_SOCKET is set, else NoOpHealthReporter).
+    // The HealthReporter interface is in platform-api (already required transitive);
+    // the implementations live in platform-systemd. Non-transitive — the impls are
+    // referenced only inside the composition root. Allowed (:lifecycle:.* -> :platform:.*).
+    requires com.homesynapse.platform.systemd;
+
     // M3.6e.1: HomeSynapseCore constructs and owns the embedded Javalin
     // server, tuning the underlying Jetty thread pool. Non-transitive —
     // Javalin and Jetty types do not appear in the lifecycle module's

@@ -109,8 +109,18 @@ final class HomeSynapseE2eHarness implements AutoCloseable {
         Objects.requireNonNull(homeId, "homeId");
         Objects.requireNonNull(config, "config");
 
-        HomeSynapseCore core = new HomeSynapseCore(dbPath, config, clock, homeId);
-        core.start().join();
+        HomeSynapseCore core = new HomeSynapseCore(
+                dbPath, dbPath.resolveSibling("config"), config, clock, homeId);
+        try {
+            core.start();
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "E2E harness failed to start HomeSynapseCore", e);
+        }
+        // AB-3: HomeSynapseCore.start() gates the HTTP surface CLOSED (C1). The
+        // HTTP-aware E2E harness opens it explicitly (the AB-1 seam) so the REST
+        // E2E tests keep exercising the entity/admin endpoints.
+        core.exposeHttpSurface();
         return new HomeSynapseE2eHarness(core);
     }
 
