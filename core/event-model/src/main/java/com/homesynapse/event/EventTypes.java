@@ -12,7 +12,7 @@ import java.util.List;
  *
  * <p>This class defines all core event type string constants referenced by
  * {@link EventEnvelope#eventType()} and the {@link EventType} annotation values on
- * the 32 core payload records. Each constant uses UPPER_SNAKE_CASE names with
+ * the 37 core payload records. Each constant uses UPPER_SNAKE_CASE names with
  * lower_snake_case string values for consistency with the taxonomy defined in
  * Doc 01 §4.3.
  *
@@ -27,7 +27,7 @@ import java.util.List;
  * shared across all HomeSynapse deployments.
  *
  * <p><strong>Core production event class manifest (M3.6c):</strong>
- * {@link #CORE_PRODUCTION_EVENT_CLASSES} is the canonical, ordered list of the 32 core
+ * {@link #CORE_PRODUCTION_EVENT_CLASSES} is the canonical, ordered list of the 37 core
  * {@link DomainEvent} payload record classes that ship with HomeSynapse Core. The composition
  * root aggregates this list with the per-module manifests contributed by other modules
  * (currently {@code IntegrationEvents.LIFECYCLE_EVENT_CLASSES} in
@@ -142,6 +142,23 @@ public final class EventTypes {
 
 	/** Diagnostic: a {@code for_duration} timer was rejected for exceeding the concurrent-timer ceiling. */
 	public static final String TRIGGER_DURATION_LIMIT_EXCEEDED = "trigger_duration_limit_exceeded";
+
+	// ========== M7.2 run-lifecycle vocabulary (AMD-92) ==========
+
+	/** Diagnostic: a matched trigger was dropped by concurrency-mode enforcement (no Run created). */
+	public static final String AUTOMATION_RUN_SKIPPED = "automation_run_skipped";
+
+	/** Diagnostic: a RESTART-mode trigger cancelled an in-flight Run before starting its replacement. */
+	public static final String AUTOMATION_RUN_CANCELLED = "automation_run_cancelled";
+
+	/** Event issued when an automation is auto-disabled after repeated Run failures. */
+	public static final String AUTOMATION_DISABLED = "automation_disabled";
+
+	/** Diagnostic: a cascade Run was suppressed for exceeding the causal-chain depth ceiling. */
+	public static final String CASCADE_DEPTH_EXCEEDED = "cascade_depth_exceeded";
+
+	/** Diagnostic: a cascade Run was suppressed because its automation already appears in the chain. */
+	public static final String CASCADE_LOOP_DETECTED = "cascade_loop_detected";
 
 	// ========== Presence ==========
 
@@ -271,7 +288,7 @@ public final class EventTypes {
 	// ========== Core Production Event Class Manifest (M3.6c, DECIDE-04) ==========
 
 	/**
-	 * Canonical, ordered list of the 32 core {@link DomainEvent} payload record classes
+	 * Canonical, ordered list of the 37 core {@link DomainEvent} payload record classes
 	 * that ship with HomeSynapse Core. Every entry carries an {@link EventType} annotation
 	 * whose value is one of the string constants above and which is registered with the
 	 * {@code EventTypeRegistry} at startup.
@@ -331,5 +348,12 @@ public final class EventTypes {
 					TriggerDurationExpiredEvent.class,
 					TriggerDurationStateValidatedEvent.class,
 					TriggerDurationLimitExceededEvent.class,
-					AutomationCapabilityMismatchEvent.class);
+					AutomationCapabilityMismatchEvent.class,
+					// M7.2 run-lifecycle slice (AMD-92 rows 7, 8, 10, 17, 18;
+					// row 2 AutomationCompletedEvent reshaped in place above)
+					AutomationRunSkippedEvent.class,
+					AutomationRunCancelledEvent.class,
+					AutomationDisabledEvent.class,
+					CascadeDepthExceededEvent.class,
+					CascadeLoopDetectedEvent.class);
 }

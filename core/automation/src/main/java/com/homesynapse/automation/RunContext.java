@@ -29,25 +29,26 @@ import com.homesynapse.platform.identity.EntityId;
  *
  * <h2>Cascade Governance</h2>
  *
- * <p>The {@link #cascadeDepth()} is 0 for user/device-initiated Runs. For cascade Runs
- * (triggered by events emitted from other automations), the depth equals
- * {@code parent_run.cascadeDepth + 1}. Maximum depth is governed by
- * {@code automation.max_cascade_depth} (default 8, range 1&ndash;32). Exceeding the
- * maximum produces a {@code cascade_depth_exceeded} DIAGNOSTIC event.</p>
+ * <p>The {@link #causalChain()} is the Run's immutable causal lineage (AMD-91). It is
+ * {@link RunCausalChain#root()} (empty, depth 0) for user/device/time-initiated Runs; a
+ * cascade Run inherits its parent's chain extended by the parent link, so
+ * {@code causalChain().depth()} equals {@code parent.causalChain().depth() + 1}. Maximum
+ * depth is governed by {@code automation.max_cascade_depth} (default 8, range 1&ndash;32);
+ * exceeding it suppresses the Run and produces a {@code cascade_depth_exceeded} DIAGNOSTIC
+ * event.</p>
  *
  * <p><b>Governing model: AMD-91 (supersedes AMD-04).</b> AMD-91 keeps the depth-limiting
  * semantics above <em>unchanged</em> (same {@code automation.max_cascade_depth} key, same
  * default 8 / range 1&ndash;32, same {@code cascade_depth_exceeded} diagnostic), but
- * <em>upgrades</em> cycle detection: the governing lineage is a {@code RunCausalChain} (an
- * ordered list of {@code (RunId, AutomationId)} chain links) and loop detection is
- * deterministic <em>chain-membership</em> ({@code containsAutomation}) emitting a distinct
- * {@code cascade_loop_detected} DIAGNOSTIC &mdash; replacing AMD-04's windowed, evictable
- * {@code (correlation_id, automation_id)} suppression set (AMD-91-INV-01: suppression is a
- * pure function of the Run's causal chain plus config, with no window/eviction/restart-sensitive
- * state). The field reshape itself &mdash; {@code cascadeDepth (int)} &rarr;
- * {@code causalChain (RunCausalChain)} &mdash; is M7.2 work (AMD-91 §2.2/§8) and is
- * intentionally <em>not yet</em> applied to this record; the {@code int cascadeDepth} field
- * below is the AMD-04-era shape retained until then.</p>
+ * <em>upgrades</em> cycle detection: the governing lineage is this {@link RunCausalChain}
+ * (an ordered list of {@code (RunId, AutomationId)} chain links) and loop detection is the
+ * deterministic <em>chain-membership</em> test
+ * ({@link RunCausalChain#containsAutomation(com.homesynapse.platform.identity.AutomationId)})
+ * emitting a distinct {@code cascade_loop_detected} DIAGNOSTIC &mdash; replacing AMD-04's
+ * windowed, evictable {@code (correlation_id, automation_id)} suppression set
+ * (AMD-91-INV-01: suppression is a pure function of the Run's causal chain plus config,
+ * with no window/eviction/restart-sensitive state). The chain is automation-resident and
+ * crosses the event boundary only flattened (AMD-91-INV-02 / AMD-92-INV-01).</p>
  *
  * <p>Defined in Doc 07 §8.2; cascade model AMD-91 (RATIFIED 2026-06-12, supersedes AMD-04).</p>
  *
@@ -59,8 +60,10 @@ import com.homesynapse.platform.identity.EntityId;
  * @param resolvedTargets        resolved entity sets keyed by selector label or position,
  *                               unmodifiable, never {@code null}
  * @param definitionHash         SHA-256 hex of the automation definition, never {@code null}
- * @param cascadeDepth           cascade depth (0 for root Runs); the AMD-04-era field
- *                               retained until the AMD-91/M7.2 reshape to {@code causalChain}
+ * @param causalChain            the Run's immutable causal lineage (AMD-91); the authority
+ *                               for cascade depth ({@code causalChain.depth()}) and cycle
+ *                               suppression. {@link RunCausalChain#root()} for root Runs;
+ *                               never {@code null}
  * @param stateSnapshotPosition  the {@code viewPosition} from the
  *                               {@link com.homesynapse.state.StateSnapshot} captured at
  *                               trigger time
@@ -74,7 +77,7 @@ public record RunContext(
         List<Integer> matchedTriggers,
         Map<String, Set<EntityId>> resolvedTargets,
         String definitionHash,
-        int cascadeDepth,
+        RunCausalChain causalChain,
         long stateSnapshotPosition
 ) {
 
@@ -90,6 +93,7 @@ public record RunContext(
         Objects.requireNonNull(matchedTriggers, "matchedTriggers must not be null");
         Objects.requireNonNull(resolvedTargets, "resolvedTargets must not be null");
         Objects.requireNonNull(definitionHash, "definitionHash must not be null");
+        Objects.requireNonNull(causalChain, "causalChain must not be null");
         matchedTriggers = List.copyOf(matchedTriggers);
         resolvedTargets = Map.copyOf(resolvedTargets);
     }

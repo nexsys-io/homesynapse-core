@@ -149,11 +149,13 @@ final class TestEventSamples {
     }
 
     static AutomationCompletedEvent automationCompleted() {
-        return new AutomationCompletedEvent("success", null, 1234L);
+        // AMD-92 row-2 reshape: runId is a bare Ulid; finalStatus is RunStatus.name();
+        // failureReason/abortReason are null for a clean COMPLETED Run.
+        return new AutomationCompletedEvent(ULID_1, "COMPLETED", 1234L, 2, 3, null, null);
     }
 
     static AutomationCompletedEvent automationCompletedWithFailure() {
-        return new AutomationCompletedEvent("failed", "device unreachable", 500L);
+        return new AutomationCompletedEvent(ULID_2, "FAILED", 500L, 1, 0, "device unreachable", null);
     }
 
     static PresenceSignalEvent presenceSignal() {

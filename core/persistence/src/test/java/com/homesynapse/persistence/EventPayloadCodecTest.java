@@ -33,8 +33,8 @@ import org.junit.jupiter.api.Test;
 /**
  * Full round-trip tests for {@link EventPayloadCodec} across the original 36
  * registered event types (24 core + 10 integration lifecycle + 2 capability) — the
- * registry now holds 44 after the M7.1 automation slice (AMD-92), whose 8 new records
- * round-trip in {@code AutomationEventSerdeTest} — plus DegradedEvent fallback
+ * registry now holds 49 after the M7.1 + M7.2 automation slices (AMD-92), whose 13 new
+ * records round-trip in {@code AutomationEventSerdeTest} — plus DegradedEvent fallback
  * verification (DECIDE-M2-06, DECIDE-M2-07) and SNAKE_CASE property naming verification.
  */
 @DisplayName("EventPayloadCodec")

@@ -26,11 +26,11 @@ import org.junit.jupiter.api.Test;
 class EventTypeRegistryTest {
 
     @Test
-    @DisplayName("constructor registers all 32 core event classes")
+    @DisplayName("constructor registers all 37 core event classes")
     void construct_withValidClasses_registersAll() {
         EventTypeRegistry registry = new EventTypeRegistry(AllEventClasses.CORE_EVENTS);
 
-        assertThat(registry.size()).isEqualTo(32);
+        assertThat(registry.size()).isEqualTo(37);
         for (Class<? extends DomainEvent> cls : AllEventClasses.CORE_EVENTS) {
             assertThat(registry.typeFor(cls)).isPresent();
             String typeString = registry.typeFor(cls).orElseThrow();
@@ -39,11 +39,11 @@ class EventTypeRegistryTest {
     }
 
     @Test
-    @DisplayName("constructor registers all 44 core + integration classes")
+    @DisplayName("constructor registers all 49 core + integration classes")
     void construct_withCoreAndIntegration_registersAll() {
         EventTypeRegistry registry = new EventTypeRegistry(AllEventClasses.ALL_EVENTS);
 
-        assertThat(registry.size()).isEqualTo(44);
+        assertThat(registry.size()).isEqualTo(49);
     }
 
     @Test
@@ -128,7 +128,7 @@ class EventTypeRegistryTest {
 
         Set<String> types = registry.registeredTypes();
 
-        assertThat(types).hasSize(32);
+        assertThat(types).hasSize(37);
         assertThatThrownBy(() -> types.add("new_type"))
                 .isInstanceOf(UnsupportedOperationException.class);
     }

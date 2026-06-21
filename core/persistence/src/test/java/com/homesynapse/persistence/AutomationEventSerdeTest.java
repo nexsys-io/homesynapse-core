@@ -12,9 +12,14 @@ import java.util.Set;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.homesynapse.event.AutomationCapabilityMismatchEvent;
+import com.homesynapse.event.AutomationDisabledEvent;
 import com.homesynapse.event.AutomationInvokedEvent;
+import com.homesynapse.event.AutomationRunCancelledEvent;
+import com.homesynapse.event.AutomationRunSkippedEvent;
 import com.homesynapse.event.AutomationSlugRedirectEvent;
 import com.homesynapse.event.AutomationTriggeredEvent;
+import com.homesynapse.event.CascadeDepthExceededEvent;
+import com.homesynapse.event.CascadeLoopDetectedEvent;
 import com.homesynapse.event.EventId;
 import com.homesynapse.event.TriggerDurationCancelledEvent;
 import com.homesynapse.event.TriggerDurationExpiredEvent;
@@ -30,19 +35,22 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Persistence-codec round-trip tests for the AMD-92 M7.1 automation event slice (rows 1,
- * 3, 11–16, 19) — the FLATTEN residency precedent (AMD-52). Each record round-trips
- * through the {@link PersistenceObjectMapper} (typed ULID wrappers serialize as Crockford
- * strings) including nullable fields.
+ * Persistence-codec round-trip tests for the AMD-92 automation event slices — the M7.1
+ * run-initiation rows (1, 3, 11–16, 19) and the M7.2 run-lifecycle rows (2 reshape, 7, 8,
+ * 10, 17, 18) — the FLATTEN residency precedent (AMD-52). Each record round-trips through
+ * the {@link PersistenceObjectMapper} (typed ULID wrappers serialize as Crockford strings)
+ * including nullable fields.
  */
-@DisplayName("Automation event serde (AMD-92 M7.1 slice)")
+@DisplayName("Automation event serde (AMD-92 M7.1 + M7.2 slices)")
 class AutomationEventSerdeTest {
 
     private static final Ulid U1 = Ulid.parse("01ARZ3NDEKTSV4RRFFQ69G5FAV");
     private static final Ulid U2 = Ulid.parse("01BX5ZZKBKACTAV9WEVGEMMVRZ");
     private static final AutomationId AUTO = AutomationId.of(U1);
+    private static final AutomationId AUTO_2 = AutomationId.of(U2);
     private static final EntityId ENTITY = EntityId.of(U2);
     private static final EventId EVENT = EventId.of(U2);
+    private static final EventId EVENT_2 = EventId.of(U1);
 
     private ObjectMapper mapper;
 
@@ -98,5 +106,57 @@ class AutomationEventSerdeTest {
     void capabilityMismatch() throws Exception {
         roundTrip(new AutomationCapabilityMismatchEvent(AUTO, List.of(ENTITY),
                 List.of("cap.dimming", "cap.color")), AutomationCapabilityMismatchEvent.class);
+    }
+
+    // ===== M7.2 run-lifecycle slice (AMD-92 rows 2 reshape + 7, 8, 10, 17, 18) =====
+
+    @Test
+    @DisplayName("automation_completed (row 2 reshape) round-trips, including null reasons")
+    void completed() throws Exception {
+        roundTrip(new com.homesynapse.event.AutomationCompletedEvent(
+                U1, "COMPLETED", 1234L, 2, 3, null, null),
+                com.homesynapse.event.AutomationCompletedEvent.class);
+        roundTrip(new com.homesynapse.event.AutomationCompletedEvent(
+                U2, "FAILED", 500L, 1, 0, "device unreachable", null),
+                com.homesynapse.event.AutomationCompletedEvent.class);
+    }
+
+    @Test
+    @DisplayName("automation_run_skipped (row 7) round-trips, including a null activeRunId")
+    void runSkipped() throws Exception {
+        roundTrip(new AutomationRunSkippedEvent(AUTO, EVENT, "mode_busy", "SINGLE", U2, "INFO"),
+                AutomationRunSkippedEvent.class);
+        roundTrip(new AutomationRunSkippedEvent(AUTO, EVENT, "queue_full", "QUEUED", null, "WARNING"),
+                AutomationRunSkippedEvent.class);
+    }
+
+    @Test
+    @DisplayName("automation_run_cancelled (row 8) round-trips with two distinct event ids")
+    void runCancelled() throws Exception {
+        roundTrip(new AutomationRunCancelledEvent(AUTO, U2, EVENT_2, EVENT),
+                AutomationRunCancelledEvent.class);
+    }
+
+    @Test
+    @DisplayName("automation_disabled (row 10) round-trips, including null lastError/lastRunId")
+    void disabled() throws Exception {
+        roundTrip(new AutomationDisabledEvent(AUTO, "repeated_failure", 5, 10, "timeout", U2),
+                AutomationDisabledEvent.class);
+        roundTrip(new AutomationDisabledEvent(AUTO, "repeated_failure", 5, 10, null, null),
+                AutomationDisabledEvent.class);
+    }
+
+    @Test
+    @DisplayName("cascade_depth_exceeded (row 17) round-trips")
+    void cascadeDepthExceeded() throws Exception {
+        roundTrip(new CascadeDepthExceededEvent(AUTO, EVENT, 8, 8, U1),
+                CascadeDepthExceededEvent.class);
+    }
+
+    @Test
+    @DisplayName("cascade_loop_detected (row 18) round-trips with the AutomationId cycle path")
+    void cascadeLoopDetected() throws Exception {
+        roundTrip(new CascadeLoopDetectedEvent(AUTO, EVENT, U1, U2, List.of(AUTO, AUTO_2, AUTO)),
+                CascadeLoopDetectedEvent.class);
     }
 }

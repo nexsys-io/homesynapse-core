@@ -123,6 +123,18 @@ final class EventCategoryMapping {
                 Map.entry(EventTypes.AUTOMATION_CAPABILITY_MISMATCH,
                         List.of(EventCategory.AUTOMATION)),
 
+                // ─── Automation run-lifecycle slice (M7.2, AMD-92 rows 7,8,10,17,18) ──
+                Map.entry(EventTypes.AUTOMATION_RUN_SKIPPED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.AUTOMATION_RUN_CANCELLED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.AUTOMATION_DISABLED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.CASCADE_DEPTH_EXCEEDED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.CASCADE_LOOP_DETECTED,
+                        List.of(EventCategory.AUTOMATION)),
+
                 // ─── Presence ─────────────────────────────────────────────────
                 Map.entry(EventTypes.PRESENCE_SIGNAL,
                         List.of(EventCategory.PRESENCE)),
