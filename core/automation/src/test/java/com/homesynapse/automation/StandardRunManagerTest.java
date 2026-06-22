@@ -14,8 +14,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import com.homesynapse.automation.RunCausalChain.ChainLink;
@@ -54,6 +56,7 @@ class StandardRunManagerTest {
     private final EntityId entity = AutomationTestSupport.entityId();
 
     private AutomationTestSupport.RecordingEventPublisher publisher;
+    private AutomationTestSupport.StubStateQueryService stateQuery;
     private FakeGate gate;
     private FakeExecutor executor;
     private StandardRunManager manager;
@@ -61,9 +64,11 @@ class StandardRunManagerTest {
     @BeforeEach
     void setUp() {
         publisher = new AutomationTestSupport.RecordingEventPublisher();
+        stateQuery = new AutomationTestSupport.StubStateQueryService(
+                AutomationTestSupport.snapshot(Map.of()));
         gate = new FakeGate();
         executor = new FakeExecutor();
-        manager = new StandardRunManager(publisher, executor, gate,
+        manager = new StandardRunManager(publisher, executor, gate, stateQuery,
                 AutomationTestSupport.FIXED_CLOCK, RunManagerConfig.defaults());
     }
 
@@ -162,10 +167,10 @@ class StandardRunManagerTest {
     }
 
     @Test
-    @DisplayName("QUEUED at maxConcurrent drops with reason queue_full")
-    void queued_overMaxConcurrent_skipsQueueFull() throws Exception {
+    @DisplayName("PARALLEL at maxConcurrent drops with reason queue_full (still drops, unlike QUEUED)")
+    void parallel_overMaxConcurrent_skipsQueueFull() throws Exception {
         executor.block();
-        AutomationDefinition auto = automation(automationId(), ConcurrencyMode.QUEUED, 1, 0);
+        AutomationDefinition auto = automation(automationId(), ConcurrencyMode.PARALLEL, 1, 0);
 
         Optional<RunId> first = initiate(auto, triggerEvent(), RunCausalChain.root());
         Optional<RunId> second = initiate(auto, triggerEvent(), RunCausalChain.root());
@@ -176,6 +181,35 @@ class StandardRunManagerTest {
         assertThat(skipped).hasSize(1);
         assertThat(((AutomationRunSkippedEvent) skipped.get(0).payload()).reason())
                 .isEqualTo("queue_full");
+    }
+
+    @Test
+    @DisplayName("QUEUED (maxConcurrent 1) drains single-flight: queued Runs run one-at-a-time in order")
+    void queued_sequentialSingleFlightDrain() throws Exception {
+        executor.block();                                    // hold the active Run RUNNING
+        AutomationDefinition auto = automation(automationId(), ConcurrencyMode.QUEUED, 1, 0);
+
+        Optional<RunId> r1 = initiate(auto, triggerEvent(), RunCausalChain.root());
+        Optional<RunId> r2 = initiate(auto, triggerEvent(), RunCausalChain.root());
+        Optional<RunId> r3 = initiate(auto, triggerEvent(), RunCausalChain.root());
+
+        // All three are initiated (QUEUED enqueues rather than dropping) — no queue_full.
+        assertThat(r1).isPresent();
+        assertThat(r2).isPresent();
+        assertThat(r3).isPresent();
+        assertThat(publisher.ofType(EventTypes.AUTOMATION_RUN_SKIPPED)).isEmpty();
+        // Only one Run is active (single-flight); only its triggered has published.
+        assertThat(manager.activeRunCount(auto.automationId())).isEqualTo(1);
+        assertThat(publisher.countOfType(EventTypes.AUTOMATION_TRIGGERED)).isEqualTo(1);
+
+        executor.release();                                  // drain: R1 -> R2 -> R3 one-at-a-time
+        manager.awaitQuiescence(AWAIT_MS);
+
+        assertThat(publisher.countOfType(EventTypes.AUTOMATION_TRIGGERED)).isEqualTo(3);
+        assertThat(publisher.countOfType(EventTypes.AUTOMATION_COMPLETED)).isEqualTo(3);
+        // The drain order is the FIFO enqueue order (single-flight sequencing).
+        assertThat(executor.executedOrder()).containsExactly(
+                r1.orElseThrow().value(), r2.orElseThrow().value(), r3.orElseThrow().value());
     }
 
     // ---- EVALUATING / CONDITION_NOT_MET ------------------------------------
@@ -236,6 +270,66 @@ class StandardRunManagerTest {
         AutomationCompletedEvent c = onlyCompleted();
         assertThat(c.finalStatus()).isEqualTo("FAILED");
         assertThat(c.failureReason()).isEqualTo("device unreachable");
+    }
+
+    // ---- M7.2a-2 DP-A carries ----------------------------------------------
+
+    @Test
+    @DisplayName("DP-A.4: RunContext carries the real trigger-time snapshot viewPosition (not 0)")
+    void runContext_carriesRealSnapshotPosition() throws Exception {
+        stateQuery.setSnapshot(AutomationTestSupport.snapshotAt(42L));
+        executor.block();                                    // keep the Run active to read its context
+        AutomationDefinition auto = automation(automationId(), ConcurrencyMode.SINGLE, 1, 0);
+
+        Optional<RunId> run = initiate(auto, triggerEvent(), RunCausalChain.root());
+
+        assertThat(run).isPresent();
+        RunContext context = manager.getActiveRun(run.orElseThrow()).orElseThrow();
+        assertThat(context.stateSnapshotPosition()).isEqualTo(42L);
+
+        executor.release();
+        manager.awaitQuiescence(AWAIT_MS);
+    }
+
+    @Test
+    @DisplayName("DP-A.4: automation_completed carries the executor's real action/command tally")
+    void completed_carriesRealActionAndCommandTally() throws Exception {
+        executor.tally(2, 3);
+        AutomationDefinition auto = automation(automationId(), ConcurrencyMode.SINGLE, 1, 0);
+
+        Optional<RunId> run = initiate(auto, triggerEvent(), RunCausalChain.root());
+        manager.awaitQuiescence(AWAIT_MS);
+
+        AutomationCompletedEvent c = onlyCompleted();
+        assertThat(c.finalStatus()).isEqualTo("COMPLETED");
+        assertThat(c.actionCount()).isEqualTo(2);
+        assertThat(c.commandCount()).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("DP-A.3: the dedup claim precedes the gate — a duplicate raced during the gate is deduped")
+    void dedupClaimedBeforeGate_reentrantDuplicateIsDeduped() throws Exception {
+        AutomationDefinition auto = automation(automationId(), ConcurrencyMode.SINGLE, 1, 0);
+        EventEnvelope event = triggerEvent();
+        // A gate that, on its first call, races a duplicate initiate of the same (automation,
+        // event). Because the dedup key is claimed BEFORE the gate runs, the re-entrant call is
+        // deduped immediately (it never reaches the gate again) — proving claim-before-gate.
+        AtomicReference<Optional<RunId>> reentrant = new AtomicReference<>();
+        RunConditionGate racingGate = (a, ctx, te, snap) -> {
+            reentrant.compareAndSet(null,
+                    manager.initiateRun(auto, event, TRIGGER_0, NO_TARGETS, RunCausalChain.root()));
+            return true;
+        };
+        manager = new StandardRunManager(publisher, executor, racingGate, stateQuery,
+                AutomationTestSupport.FIXED_CLOCK, RunManagerConfig.defaults());
+
+        Optional<RunId> first = manager.initiateRun(auto, event, TRIGGER_0, NO_TARGETS,
+                RunCausalChain.root());
+        manager.awaitQuiescence(AWAIT_MS);
+
+        assertThat(first).isPresent();
+        assertThat(reentrant.get()).isEmpty();               // the raced duplicate was deduped
+        assertThat(publisher.countOfType(EventTypes.AUTOMATION_TRIGGERED)).isEqualTo(1);
     }
 
     // ---- Cascade governance -------------------------------------------------
@@ -447,30 +541,35 @@ class StandardRunManagerTest {
 
     // ---- Fakes --------------------------------------------------------------
 
-    /** A configurable {@link RunConditionGate}; returns {@link #result}. */
+    /** A configurable {@link RunConditionGate}; returns {@link #result}, ignoring the snapshot. */
     private static final class FakeGate implements RunConditionGate {
         private volatile boolean result = true;
         private final AtomicInteger calls = new AtomicInteger();
 
         @Override
-        public boolean conditionsHold(AutomationDefinition automation, RunContext context) {
+        public boolean conditionsHold(AutomationDefinition automation, RunContext context,
+                                      EventEnvelope triggeringEvent,
+                                      com.homesynapse.state.StateSnapshot snapshot) {
             calls.incrementAndGet();
             return result;
         }
     }
 
     /**
-     * A configurable {@link ActionExecutor}: completes immediately, throws, or blocks on a
-     * latch until released or interrupted (restoring the interrupt flag so the FSM
-     * finalizes ABORTED).
+     * A configurable {@link ActionExecutor}: completes (with a configurable tally), throws, or
+     * blocks on a latch until released or interrupted (restoring the interrupt flag so the FSM
+     * finalizes ABORTED). Records the order in which Runs execute (for QUEUED sequencing).
      */
     private static final class FakeExecutor implements ActionExecutor {
 
         private enum Mode { COMPLETE, THROW, BLOCK }
 
         private final AtomicInteger invocations = new AtomicInteger();
+        private final List<Ulid> executedOrder = new CopyOnWriteArrayList<>();
         private volatile Mode mode = Mode.COMPLETE;
         private volatile String error = "action failed";
+        private volatile int actionCount = 0;
+        private volatile int commandCount = 0;
         private volatile CountDownLatch latch = new CountDownLatch(0);
 
         void block() {
@@ -487,9 +586,20 @@ class StandardRunManagerTest {
             this.mode = Mode.THROW;
         }
 
+        void tally(int actions, int commands) {
+            this.actionCount = actions;
+            this.commandCount = commands;
+        }
+
+        List<Ulid> executedOrder() {
+            return List.copyOf(executedOrder);
+        }
+
         @Override
-        public void execute(List<ActionDefinition> actions, RunContext context) {
+        public ActionExecutionResult execute(List<ActionDefinition> actions, RunContext context,
+                                             EventEnvelope triggeringEvent) {
             invocations.incrementAndGet();
+            executedOrder.add(context.runId().value());
             switch (mode) {
                 case COMPLETE -> { /* return immediately */ }
                 case THROW -> throw new IllegalStateException(error);
@@ -501,6 +611,7 @@ class StandardRunManagerTest {
                     }
                 }
             }
+            return ActionExecutionResult.succeeded(actionCount, commandCount);
         }
     }
 }

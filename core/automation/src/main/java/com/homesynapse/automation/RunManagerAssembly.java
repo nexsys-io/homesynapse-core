@@ -8,6 +8,7 @@ import java.time.Clock;
 import java.util.Objects;
 
 import com.homesynapse.event.EventPublisher;
+import com.homesynapse.state.StateQueryService;
 
 /**
  * Public assembly seam that builds the {@link RunManager} FSM for the composition root
@@ -17,10 +18,11 @@ import com.homesynapse.event.EventPublisher;
  * {@link RunConditionGate}/{@link ActionExecutor} seams and the automation event vocabulary
  * and must live in this module. The composition root constructs the FSM's plain-value
  * dependencies — an {@link EventPublisher}, the injected {@link ActionExecutor} and
- * {@link RunConditionGate} seams, an injected {@link Clock} (§4c), and a
+ * {@link RunConditionGate} seams, a {@link StateQueryService} (the trigger-time snapshot
+ * source, §3.8 / AMD-03), an injected {@link Clock} (§4c), and a
  * {@link RunManagerConfig} read from {@code homesynapse.yaml} ({@code core -> config} is
  * banned, so the FSM never sees a {@code ConfigurationService}) — and calls
- * {@link #runManager(EventPublisher, ActionExecutor, RunConditionGate, Clock, RunManagerConfig)}
+ * {@link #runManager(EventPublisher, ActionExecutor, RunConditionGate, StateQueryService, Clock, RunManagerConfig)}
  * to obtain a {@link RunManager}.</p>
  *
  * <p>Mirrors {@link AutomationEngineAssembly}: only the interface type crosses the module
@@ -38,19 +40,22 @@ public final class RunManagerAssembly {
      * @param publisher      the durable event publish surface, never {@code null}
      * @param actionExecutor the RUNNING-state action executor, never {@code null}
      * @param conditionGate  the EVALUATING-state condition gate, never {@code null}
+     * @param stateQuery     the trigger-time snapshot source (§3.8 / AMD-03), never {@code null}
      * @param clock          the injected clock (§4c), never {@code null}
      * @param config         the cascade + auto-disable parameters, never {@code null}
      * @return the run-lifecycle {@link RunManager}; never {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public static RunManager runManager(EventPublisher publisher, ActionExecutor actionExecutor,
-                                        RunConditionGate conditionGate, Clock clock,
-                                        RunManagerConfig config) {
+                                        RunConditionGate conditionGate, StateQueryService stateQuery,
+                                        Clock clock, RunManagerConfig config) {
         Objects.requireNonNull(publisher, "publisher");
         Objects.requireNonNull(actionExecutor, "actionExecutor");
         Objects.requireNonNull(conditionGate, "conditionGate");
+        Objects.requireNonNull(stateQuery, "stateQuery");
         Objects.requireNonNull(clock, "clock");
         Objects.requireNonNull(config, "config");
-        return new StandardRunManager(publisher, actionExecutor, conditionGate, clock, config);
+        return new StandardRunManager(publisher, actionExecutor, conditionGate, stateQuery, clock,
+                config);
     }
 }

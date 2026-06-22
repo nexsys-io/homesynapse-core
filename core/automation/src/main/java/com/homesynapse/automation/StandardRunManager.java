@@ -42,6 +42,8 @@ import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.platform.identity.UlidFactory;
+import com.homesynapse.state.StateQueryService;
+import com.homesynapse.state.StateSnapshot;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,43 +55,50 @@ import org.slf4j.LoggerFactory;
  * publishes the run-lifecycle events that make a Run observable (Doc 07 §3.7).
  *
  * <p>Package-private; exposed to the composition root only through
- * {@link RunManagerAssembly}. Drives an injected {@link ActionExecutor} (the real impl is
- * M7.2a-2) and an injected {@link RunConditionGate} (the real condition evaluator + the
- * {@code automation_condition_evaluated} diagnostic are M7.2a-2).</p>
+ * {@link RunManagerAssembly}. Drives an injected {@link ActionExecutor} (M7.2a-2
+ * {@link StandardActionExecutor}) and an injected {@link RunConditionGate} (M7.2a-2
+ * {@link StandardRunConditionGate}, which publishes the {@code automation_condition_evaluated}
+ * row-4 diagnostic). A {@link StateQueryService} supplies the trigger-time snapshot.</p>
  *
  * <h2>Admission order (Doc 07 §3.4, §3.6; the cross-module condition-before-mode contract)</h2>
  *
  * <ol>
  *   <li><b>Dedup (C2)</b> — key {@code (automationId, triggeringEventId)}; a repeat returns
  *       empty with no event.</li>
- *   <li><b>Cascade cycle</b> — {@code parentChain.containsAutomation(...)} suppresses and
- *       publishes {@code cascade_loop_detected} (AMD-91 chain membership).</li>
- *   <li><b>Cascade depth</b> — {@code parentChain.depth() >= max} suppresses and publishes
- *       {@code cascade_depth_exceeded}.</li>
- *   <li><b>Auto-disable</b> — a disabled automation is suppressed silently (it published
- *       {@code automation_disabled} when it was disabled).</li>
+ *   <li><b>Cascade cycle / depth</b> — chain membership / depth (AMD-91) suppress with a
+ *       {@code cascade_loop_detected} / {@code cascade_depth_exceeded} diagnostic.</li>
+ *   <li><b>Auto-disable</b> — a disabled automation is suppressed silently.</li>
+ *   <li><b>Snapshot capture (DP-A.4)</b> — the trigger-time {@link StateSnapshot} is captured
+ *       once; its {@code viewPosition} fills {@link RunContext#stateSnapshotPosition()} and the
+ *       same snapshot drives condition evaluation (AMD-03).</li>
+ *   <li><b>Dedup claim (DP-A.3)</b> — the C2 key is claimed <em>before</em> the gate, so a
+ *       raced duplicate cannot double-publish the row-4 diagnostic.</li>
  *   <li><b>EVALUATING</b> — the condition gate runs <em>before</em> mode enforcement; a Run
  *       whose conditions are false terminates {@code CONDITION_NOT_MET} immediately and
- *       <em>never consumes a mode slot</em> (prevents a {@code SINGLE} automation from
- *       blocking itself on failed conditions).</li>
- *   <li><b>Concurrency-mode admission (§3.6)</b> — drop ({@code automation_run_skipped}) or,
- *       for {@code RESTART}, cancel the active Run ({@code automation_run_cancelled}).</li>
- *   <li><b>Admit</b> — register active, publish {@code automation_triggered} (closing the
- *       M7.1 C1-interim hold), spawn the Run's virtual thread.</li>
+ *       <em>never consumes a mode slot</em>.</li>
+ *   <li><b>Concurrency-mode admission (§3.6)</b> — admit; or for {@code SINGLE}/{@code PARALLEL}
+ *       at capacity drop ({@code automation_run_skipped}); or for {@code RESTART} cancel the
+ *       active Run ({@code automation_run_cancelled}); or for {@code QUEUED} at capacity
+ *       <b>enqueue</b> (DP-A.1) for single-flight sequential draining.</li>
+ *   <li><b>Admit</b> — register active, publish {@code automation_triggered}, spawn the Run's
+ *       virtual thread.</li>
  * </ol>
  *
- * <p><strong>Concurrency (LTD-11 / LTD-01).</strong> Compound admission/terminal updates
- * are serialized by a {@link ReentrantLock} — never {@code synchronized} (virtual threads
- * pin on {@code synchronized}). Event publication always happens <em>outside</em> the lock
- * (no I/O under a lock). Each Run executes on its own virtual thread; {@code RESTART}
- * cancellation and shutdown use {@link Thread#interrupt()}.</p>
+ * <h2>QUEUED sequential drain (DP-A.1)</h2>
  *
- * <p><strong>Determinism (AMD-91-INV-01).</strong> Cascade suppression is a pure function
- * of {@code parentChain} plus config — no windowed or evictable state participates.</p>
+ * <p>{@code QUEUED} no longer ships as {@code PARALLEL}: at {@code maxConcurrent} a Run
+ * enqueues (per-automation FIFO) instead of dropping, and as each active Run terminates a
+ * single queued Run is drained and admitted (one-at-a-time as slots free). With
+ * {@code maxConcurrent == 1} this is strict single-flight sequencing. Conditions are evaluated
+ * at trigger time (AMD-03) before enqueue, so a queued Run is already condition-passed; only
+ * {@code automation_triggered} and execution are deferred to drain time.</p>
  *
- * <p><strong>Time (§4c).</strong> All timing derives from the injected {@link Clock};
- * never {@code Instant.now()}/{@code System.*}. New {@link RunId}s are generated from the
- * clock via {@link UlidFactory#generate(Clock)}.</p>
+ * <p><strong>Concurrency (LTD-11 / LTD-01).</strong> Compound admission/terminal/drain updates
+ * are serialized by a {@link ReentrantLock} — never {@code synchronized}. Event publication
+ * always happens <em>outside</em> the lock. Each Run executes on its own virtual thread.</p>
+ *
+ * <p><strong>Time (§4c).</strong> All timing derives from the injected {@link Clock}; new
+ * {@link RunId}s are generated via {@link UlidFactory#generate(Clock)}.</p>
  */
 final class StandardRunManager implements RunManager, AutoCloseable {
 
@@ -104,16 +113,17 @@ final class StandardRunManager implements RunManager, AutoCloseable {
     private final EventPublisher publisher;
     private final ActionExecutor actionExecutor;
     private final RunConditionGate conditionGate;
+    private final StateQueryService stateQuery;
     private final Clock clock;
     private final RunManagerConfig config;
 
     /**
-     * Serializes compound admission/terminal state mutations (active-run set, dedup claim,
-     * auto-disable window). Never {@code synchronized} (LTD-11).
+     * Serializes compound admission/terminal/drain state mutations (active-run set, dedup
+     * claim, pending queues, auto-disable window). Never {@code synchronized} (LTD-11).
      */
     private final ReentrantLock stateLock = new ReentrantLock();
 
-    /** Active Runs (admitted, not yet terminal), keyed by {@link RunId}. */
+    /** Active Runs (admitted, RUNNING, not yet terminal), keyed by {@link RunId}. */
     private final Map<RunId, ActiveRun> activeRuns = new ConcurrentHashMap<>();
 
     /** Run status including terminal states; retained for status queries (no eviction here). */
@@ -122,6 +132,9 @@ final class StandardRunManager implements RunManager, AutoCloseable {
     /** C2 dedup: {@code (automationId, triggeringEventId)} pairs that became Runs. */
     private final Set<DedupKey> dedup = ConcurrentHashMap.newKeySet();
 
+    /** Per-automation FIFO of condition-passed Runs awaiting a free slot (QUEUED); guarded by {@link #stateLock}. */
+    private final Map<AutomationId, Deque<ActiveRun>> pendingQueues = new HashMap<>();
+
     /** Per-automation failure timestamps within the auto-disable window; guarded by {@link #stateLock}. */
     private final Map<AutomationId, Deque<Instant>> failureWindows = new HashMap<>();
 
@@ -129,10 +142,8 @@ final class StandardRunManager implements RunManager, AutoCloseable {
     private final Set<AutomationId> disabled = ConcurrentHashMap.newKeySet();
 
     /**
-     * Every live Run VT (including {@code RESTART} victims that have been removed from
-     * {@link #activeRuns} to free their slot but are still finalizing). Used by
-     * {@link #close()} for a complete shutdown and by {@link #awaitQuiescence(long)} so a
-     * cancelled Run's terminal publish is observed deterministically.
+     * Every live Run VT (including {@code RESTART} victims removed from {@link #activeRuns} but
+     * still finalizing). Used by {@link #close()} and {@link #awaitQuiescence(long)}.
      */
     private final Set<Thread> liveRunThreads = ConcurrentHashMap.newKeySet();
 
@@ -140,25 +151,27 @@ final class StandardRunManager implements RunManager, AutoCloseable {
      * Constructs the FSM against its injected seams.
      *
      * @param publisher      the durable event publish surface, never {@code null}
-     * @param actionExecutor the RUNNING-state executor (M7.2a-2 impl), never {@code null}
-     * @param conditionGate  the EVALUATING-state gate (M7.2a-2 impl), never {@code null}
+     * @param actionExecutor the RUNNING-state executor, never {@code null}
+     * @param conditionGate  the EVALUATING-state gate, never {@code null}
+     * @param stateQuery     the trigger-time snapshot source (§3.8 / AMD-03), never {@code null}
      * @param clock          the injected clock (§4c), never {@code null}
      * @param config         cascade + auto-disable parameters, never {@code null}
      */
     StandardRunManager(EventPublisher publisher, ActionExecutor actionExecutor,
-                       RunConditionGate conditionGate, Clock clock, RunManagerConfig config) {
+                       RunConditionGate conditionGate, StateQueryService stateQuery, Clock clock,
+                       RunManagerConfig config) {
         this.publisher = Objects.requireNonNull(publisher, "publisher");
         this.actionExecutor = Objects.requireNonNull(actionExecutor, "actionExecutor");
         this.conditionGate = Objects.requireNonNull(conditionGate, "conditionGate");
+        this.stateQuery = Objects.requireNonNull(stateQuery, "stateQuery");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.config = Objects.requireNonNull(config, "config");
     }
 
     /**
      * The C3 execution-order comparator: priority descending, then {@code automationId}
-     * ascending. The subscriber (M7.2a-2 / wiring) orders a batch of matched automations
-     * with this before issuing {@code initiateRun} calls; the FSM itself processes calls in
-     * the order received.
+     * ascending. The subscriber orders a batch of matched automations with this before issuing
+     * {@code initiateRun} calls; the FSM itself processes calls in the order received.
      *
      * @return the deterministic execution-order comparator, never {@code null}
      */
@@ -187,7 +200,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         Instant eventTime = triggeringEvent.eventTime();            // inherited or null (DP-G)
         DedupKey key = new DedupKey(automationId, triggeringEventId);
 
-        // (1) C2 dedup — separate mechanism from cascade suppression (AMD-91 §4).
+        // (1) C2 dedup read — separate mechanism from cascade suppression (AMD-91 §4).
         if (dedup.contains(key)) {
             return Optional.empty();
         }
@@ -208,60 +221,60 @@ final class StandardRunManager implements RunManager, AutoCloseable {
             return Optional.empty();
         }
 
-        // Build the (tentative) Run; the gate needs a RunContext.
+        // (5) Capture the trigger-time snapshot once (DP-A.4 / AMD-03): its viewPosition is the
+        // RunContext position and the same snapshot drives the gate's condition evaluation.
+        StateSnapshot snapshot = stateQuery.getSnapshot();
         RunId runId = new RunId(UlidFactory.generate(clock));
         RunContext context = new RunContext(
                 runId, automationId, triggeringEventId,
                 List.copyOf(matchedTriggers), resolvedTargets,
                 DefinitionHashes.forDefinition(automation), parentChain,
-                0L);                                                // snapshot position: M7.2a-2 wires the real value
-        ActiveRun run = new ActiveRun(runId, context, automation, triggeringEventId,
-                correlationId, causationId, actorRef, eventTime, clock.instant());
+                snapshot.viewPosition());
+        ActiveRun run = new ActiveRun(runId, context, automation, triggeringEvent,
+                triggeringEventId, correlationId, causationId, actorRef, eventTime, clock.instant());
         statuses.put(runId, RunStatus.EVALUATING);
 
-        // (5) EVALUATING — conditions BEFORE mode (condition-before-mode contract). The gate
-        // runs outside the lock (it may perform I/O in M7.2a-2).
-        if (!conditionGate.conditionsHold(automation, context)) {
-            if (!dedup.add(key)) {                                  // lost a concurrent dedup race
-                statuses.remove(runId);
-                return Optional.empty();
-            }
+        // (6) Dedup CLAIM before the gate (DP-A.3) — a raced duplicate cannot double-publish
+        // row 4. Atomic via the concurrent key set; the loser returns empty before the gate.
+        if (!dedup.add(key)) {
+            statuses.remove(runId);
+            return Optional.empty();
+        }
+
+        // (7) EVALUATING — conditions BEFORE mode (condition-before-mode contract). The gate
+        // runs outside the lock (it performs I/O — the row-4 publish) and publishes row 4.
+        if (!conditionGate.conditionsHold(automation, context, triggeringEvent, snapshot)) {
             statuses.put(runId, RunStatus.CONDITION_NOT_MET);
             publishTriggered(run);
-            publishCompleted(run, RunStatus.CONDITION_NOT_MET, null, null);
+            publishCompleted(run, RunStatus.CONDITION_NOT_MET, null, null, 0, 0);
             return Optional.of(runId);                              // a Run, but it consumed no slot
         }
 
-        // (6) Concurrency-mode admission.
+        // (8) Concurrency-mode admission.
         List<ActiveRun> toCancel = new ArrayList<>();
         boolean admitted = false;
+        boolean enqueued = false;
         String skipReason = null;
         Ulid skipActiveRunId = null;
         stateLock.lock();
         try {
-            if (dedup.contains(key) || disabled.contains(automationId)) {
-                return Optional.empty();                            // raced with a concurrent admit/disable
+            if (disabled.contains(automationId)) {
+                return Optional.empty();                            // auto-disabled after our claim
             }
             int activeCount = countActive(automationId);
             ModeDecision decision = decide(automation, activeCount);
             if (decision.admit()) {
-                if (dedup.add(key)) {                              // claim before mutating any state
-                    if (decision.restartCancel()) {
-                        for (ActiveRun victim : activeFor(automationId)) {
-                            activeRuns.remove(victim.runId);       // free the slot; victim VT confirms ABORTED
-                            toCancel.add(victim);
-                        }
+                if (decision.restartCancel()) {
+                    for (ActiveRun victim : activeFor(automationId)) {
+                        activeRuns.remove(victim.runId);           // free the slot; victim VT confirms ABORTED
+                        toCancel.add(victim);
                     }
-                    Thread vt = Thread.ofVirtual()
-                            .name("automation-run-" + automationId + "-" + runId)
-                            .unstarted(() -> runBody(run));
-                    run.vt = vt;
-                    activeRuns.put(runId, run);
-                    liveRunThreads.add(vt);
-                    statuses.put(runId, RunStatus.RUNNING);
-                    admitted = true;
                 }
-                // else: lost the dedup race — nothing mutated; handled as a silent empty below
+                startRun(run);
+                admitted = true;
+            } else if (decision.enqueue()) {
+                pendingQueues.computeIfAbsent(automationId, k -> new ArrayDeque<>()).addLast(run);
+                enqueued = true;                                   // status stays EVALUATING (pending)
             } else {
                 skipReason = decision.skipReason();
                 skipActiveRunId = "mode_busy".equals(skipReason) ? anyActiveRunId(automationId) : null;
@@ -270,27 +283,26 @@ final class StandardRunManager implements RunManager, AutoCloseable {
             stateLock.unlock();
         }
 
-        if (!admitted) {
-            statuses.remove(runId);
-            if (skipReason != null) {
-                publishRunSkipped(run, skipReason, skipActiveRunId);
+        if (admitted) {
+            for (ActiveRun victim : toCancel) {
+                Thread vt = victim.vt;
+                if (vt != null) {
+                    vt.interrupt();
+                }
+                publishRunCancelled(victim, triggeringEventId);
             }
-            return Optional.empty();
+            publishTriggered(run);                                  // before the VT — triggered precedes completed
+            run.vt.start();
+            return Optional.of(runId);
         }
-
-        // Cancel RESTART victims outside the lock: interrupt + publish (their VTs finalize ABORTED).
-        for (ActiveRun victim : toCancel) {
-            Thread vt = victim.vt;
-            if (vt != null) {
-                vt.interrupt();
-            }
-            publishRunCancelled(victim, triggeringEventId);
+        if (enqueued) {
+            return Optional.of(runId);                              // pending; triggered published on drain
         }
-
-        // Publish automation_triggered before starting the VT — guarantees triggered precedes completed.
-        publishTriggered(run);
-        run.vt.start();
-        return Optional.of(runId);
+        statuses.remove(runId);
+        if (skipReason != null) {
+            publishRunSkipped(run, skipReason, skipActiveRunId);
+        }
+        return Optional.empty();
     }
 
     @Override
@@ -350,16 +362,19 @@ final class StandardRunManager implements RunManager, AutoCloseable {
     }
 
     /**
-     * Waits until no Run is active or the timeout elapses, by joining the active Runs' VTs.
-     * Test seam for deterministic observation of asynchronous terminal transitions —
+     * Waits until no Run is active or the timeout elapses, joining live Run VTs one at a time
+     * so that queued Runs drained by a completing Run are also observed (DP-A.1). Test seam —
      * {@link Thread#join(long)} is not a banned time access (§4c).
      *
      * @param timeoutMillis the per-Run join budget in milliseconds
      * @throws InterruptedException if the calling thread is interrupted while joining
      */
     void awaitQuiescence(long timeoutMillis) throws InterruptedException {
-        for (Thread vt : List.copyOf(liveRunThreads)) {
+        for (Thread vt = anyLiveThread(); vt != null; vt = anyLiveThread()) {
             vt.join(timeoutMillis);
+            if (liveRunThreads.contains(vt)) {
+                return;                                             // join timed out — avoid spinning
+            }
         }
     }
 
@@ -381,16 +396,24 @@ final class StandardRunManager implements RunManager, AutoCloseable {
             RunStatus terminal;
             String failureReason = null;
             String abortReason = null;
+            int actionCount = 0;
+            int commandCount = 0;
             try {
                 if (Thread.currentThread().isInterrupted() || !activeRuns.containsKey(run.runId)) {
                     // Cancelled during the admission window before any action ran.
                     terminal = RunStatus.ABORTED;
                     abortReason = "restart_mode";
                 } else {
-                    actionExecutor.execute(run.automation.actions(), run.context);
+                    ActionExecutionResult result = actionExecutor.execute(
+                            run.automation.actions(), run.context, run.triggeringEvent);
+                    actionCount = result.actionCount();
+                    commandCount = result.commandCount();
                     if (Thread.currentThread().isInterrupted()) {
                         terminal = RunStatus.ABORTED;
                         abortReason = "restart_mode";
+                    } else if (result.failed()) {
+                        terminal = RunStatus.FAILED;
+                        failureReason = result.failureReason();
                     } else {
                         terminal = RunStatus.COMPLETED;
                     }
@@ -404,7 +427,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
                     failureReason = describe(ex);
                 }
             }
-            finalizeRun(run, terminal, failureReason, abortReason);
+            finalizeRun(run, terminal, failureReason, abortReason, actionCount, commandCount);
         } finally {
             // Remove only after the terminal publish so awaitQuiescence observes it.
             liveRunThreads.remove(Thread.currentThread());
@@ -412,12 +435,13 @@ final class StandardRunManager implements RunManager, AutoCloseable {
     }
 
     private void finalizeRun(ActiveRun run, RunStatus terminal, String failureReason,
-                             String abortReason) {
+                             String abortReason, int actionCount, int commandCount) {
         AutomationId automationId = run.automation.automationId();
         boolean publishDisabled = false;
         int disableFailureCount = 0;
         String disableLastError = null;
         Ulid disableLastRunId = null;
+        ActiveRun drained = null;
         stateLock.lock();
         try {
             activeRuns.remove(run.runId);                           // free the mode slot
@@ -437,15 +461,54 @@ final class StandardRunManager implements RunManager, AutoCloseable {
                     disableLastRunId = run.runId.value();
                 }
             }
+            drained = drainNext(automationId);                     // QUEUED single-flight drain (DP-A.1)
         } finally {
             stateLock.unlock();
         }
-        // actionCount/commandCount are 0 in M7.2a-1: the stub ActionExecutor reports no
-        // tallies (the interface returns void). M7.2a-2 carries the real tallies.
-        publishCompleted(run, terminal, failureReason, abortReason);
+        publishCompleted(run, terminal, failureReason, abortReason, actionCount, commandCount);
         if (publishDisabled) {
             publishDisabledEvent(run, disableFailureCount, disableLastError, disableLastRunId);
         }
+        if (drained != null) {
+            publishTriggered(drained);                             // outside the lock
+            drained.vt.start();
+        }
+    }
+
+    /**
+     * Drains and admits the next queued Run for {@code automationId} if a slot is now free and
+     * the automation is not disabled (caller holds {@link #stateLock}). Returns the admitted
+     * Run (whose VT the caller starts outside the lock), or {@code null}.
+     */
+    private ActiveRun drainNext(AutomationId automationId) {
+        if (disabled.contains(automationId)) {
+            return null;
+        }
+        Deque<ActiveRun> queue = pendingQueues.get(automationId);
+        if (queue == null || queue.isEmpty()) {
+            return null;
+        }
+        ActiveRun next = queue.peekFirst();
+        if (countActive(automationId) >= next.automation.maxConcurrent()) {
+            return null;
+        }
+        queue.pollFirst();
+        if (queue.isEmpty()) {
+            pendingQueues.remove(automationId);
+        }
+        startRun(next);
+        return next;
+    }
+
+    /** Creates the Run's VT (unstarted), registers it active and RUNNING (caller holds the lock). */
+    private void startRun(ActiveRun run) {
+        Thread vt = Thread.ofVirtual()
+                .name("automation-run-" + run.automation.automationId() + "-" + run.runId)
+                .unstarted(() -> runBody(run));
+        run.vt = vt;
+        activeRuns.put(run.runId, run);
+        liveRunThreads.add(vt);
+        statuses.put(run.runId, RunStatus.RUNNING);
     }
 
     private void pruneWindow(Deque<Instant> window, Instant now) {
@@ -460,14 +523,17 @@ final class StandardRunManager implements RunManager, AutoCloseable {
     private ModeDecision decide(AutomationDefinition automation, int activeCount) {
         return switch (automation.mode()) {
             case SINGLE -> activeCount >= 1
-                    ? new ModeDecision(false, "mode_busy", false)
-                    : new ModeDecision(true, null, false);
+                    ? ModeDecision.skip("mode_busy")
+                    : new ModeDecision(true, null, false, false);
             case RESTART -> activeCount >= 1
-                    ? new ModeDecision(true, null, true)
-                    : new ModeDecision(true, null, false);
-            case QUEUED, PARALLEL -> activeCount >= automation.maxConcurrent()
-                    ? new ModeDecision(false, "queue_full", false)
-                    : new ModeDecision(true, null, false);
+                    ? new ModeDecision(true, null, true, false)
+                    : new ModeDecision(true, null, false, false);
+            case QUEUED -> activeCount >= automation.maxConcurrent()
+                    ? new ModeDecision(false, null, false, true)
+                    : new ModeDecision(true, null, false, false);
+            case PARALLEL -> activeCount >= automation.maxConcurrent()
+                    ? ModeDecision.skip("queue_full")
+                    : new ModeDecision(true, null, false, false);
         };
     }
 
@@ -500,6 +566,13 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         return null;
     }
 
+    private Thread anyLiveThread() {
+        for (Thread vt : liveRunThreads) {
+            return vt;
+        }
+        return null;
+    }
+
     // ---- Publish helpers (always outside the lock) -------------------------
 
     private void publishTriggered(ActiveRun run) {
@@ -516,11 +589,12 @@ final class StandardRunManager implements RunManager, AutoCloseable {
     }
 
     private void publishCompleted(ActiveRun run, RunStatus terminal, String failureReason,
-                                  String abortReason) {
+                                  String abortReason, int actionCount, int commandCount) {
         long durationMs = Math.max(0L,
                 Duration.between(run.startedAt, clock.instant()).toMillis());
         AutomationCompletedEvent payload = new AutomationCompletedEvent(
-                run.runId.value(), terminal.name(), durationMs, 0, 0, failureReason, abortReason);
+                run.runId.value(), terminal.name(), durationMs, actionCount, commandCount,
+                failureReason, abortReason);
         publish(EventTypes.AUTOMATION_COMPLETED, payload, run.automation.automationId(),
                 EventPriority.NORMAL, run.correlationId, run.causationId, run.actorRef,
                 run.eventTime);
@@ -641,15 +715,26 @@ final class StandardRunManager implements RunManager, AutoCloseable {
     private record DedupKey(AutomationId automationId, EventId triggeringEventId) {
     }
 
-    /** The outcome of concurrency-mode admission for one trigger. */
-    private record ModeDecision(boolean admit, String skipReason, boolean restartCancel) {
+    /**
+     * The outcome of concurrency-mode admission for one trigger. The {@code admit},
+     * {@code restartCancel}, and {@code enqueue} components already define their own
+     * accessors, so this record carries only the {@link #skip(String)} factory (no
+     * {@code skip} component) and is otherwise built via the canonical constructor.
+     */
+    private record ModeDecision(boolean admit, String skipReason, boolean restartCancel,
+                                boolean enqueue) {
+
+        static ModeDecision skip(String reason) {
+            return new ModeDecision(false, reason, false, false);
+        }
     }
 
-    /** Mutable per-Run handle held in {@link #activeRuns} and on the Run's VT. */
+    /** Mutable per-Run handle held in {@link #activeRuns}/{@link #pendingQueues} and on the Run's VT. */
     private static final class ActiveRun {
         private final RunId runId;
         private final RunContext context;
         private final AutomationDefinition automation;
+        private final EventEnvelope triggeringEvent;
         private final EventId triggeringEventId;
         private final Ulid correlationId;
         private final Ulid causationId;
@@ -659,11 +744,13 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         private volatile Thread vt;
 
         private ActiveRun(RunId runId, RunContext context, AutomationDefinition automation,
-                          EventId triggeringEventId, Ulid correlationId, Ulid causationId,
-                          Ulid actorRef, Instant eventTime, Instant startedAt) {
+                          EventEnvelope triggeringEvent, EventId triggeringEventId,
+                          Ulid correlationId, Ulid causationId, Ulid actorRef, Instant eventTime,
+                          Instant startedAt) {
             this.runId = runId;
             this.context = context;
             this.automation = automation;
+            this.triggeringEvent = triggeringEvent;
             this.triggeringEventId = triggeringEventId;
             this.correlationId = correlationId;
             this.causationId = causationId;

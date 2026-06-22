@@ -12,7 +12,7 @@ import java.util.List;
  *
  * <p>This class defines all core event type string constants referenced by
  * {@link EventEnvelope#eventType()} and the {@link EventType} annotation values on
- * the 37 core payload records. Each constant uses UPPER_SNAKE_CASE names with
+ * the 41 core payload records. Each constant uses UPPER_SNAKE_CASE names with
  * lower_snake_case string values for consistency with the taxonomy defined in
  * Doc 01 §4.3.
  *
@@ -27,7 +27,7 @@ import java.util.List;
  * shared across all HomeSynapse deployments.
  *
  * <p><strong>Core production event class manifest (M3.6c):</strong>
- * {@link #CORE_PRODUCTION_EVENT_CLASSES} is the canonical, ordered list of the 37 core
+ * {@link #CORE_PRODUCTION_EVENT_CLASSES} is the canonical, ordered list of the 41 core
  * {@link DomainEvent} payload record classes that ship with HomeSynapse Core. The composition
  * root aggregates this list with the per-module manifests contributed by other modules
  * (currently {@code IntegrationEvents.LIFECYCLE_EVENT_CLASSES} in
@@ -160,6 +160,20 @@ public final class EventTypes {
 	/** Diagnostic: a cascade Run was suppressed because its automation already appears in the chain. */
 	public static final String CASCADE_LOOP_DETECTED = "cascade_loop_detected";
 
+	// ========== M7.2a-2 execution/dispatch vocabulary (AMD-92 rows 4/5/6/9) ==========
+
+	/** Diagnostic: a Run's top-level condition was evaluated against the trigger-time snapshot. */
+	public static final String AUTOMATION_CONDITION_EVALUATED = "automation_condition_evaluated";
+
+	/** Diagnostic: an action step began executing within a Run. */
+	public static final String AUTOMATION_ACTION_STARTED = "automation_action_started";
+
+	/** Diagnostic: an action step finished executing within a Run (success/skipped/error). */
+	public static final String AUTOMATION_ACTION_COMPLETED = "automation_action_completed";
+
+	/** Diagnostic: contradictory commands targeting the same entity were detected across Runs. */
+	public static final String AUTOMATION_CONFLICT_DETECTED = "automation_conflict_detected";
+
 	// ========== Presence ==========
 
 	/** Event issued when a presence signal is received from a sensor or detector. */
@@ -288,7 +302,7 @@ public final class EventTypes {
 	// ========== Core Production Event Class Manifest (M3.6c, DECIDE-04) ==========
 
 	/**
-	 * Canonical, ordered list of the 37 core {@link DomainEvent} payload record classes
+	 * Canonical, ordered list of the 41 core {@link DomainEvent} payload record classes
 	 * that ship with HomeSynapse Core. Every entry carries an {@link EventType} annotation
 	 * whose value is one of the string constants above and which is registered with the
 	 * {@code EventTypeRegistry} at startup.
@@ -355,5 +369,10 @@ public final class EventTypes {
 					AutomationRunCancelledEvent.class,
 					AutomationDisabledEvent.class,
 					CascadeDepthExceededEvent.class,
-					CascadeLoopDetectedEvent.class);
+					CascadeLoopDetectedEvent.class,
+					// M7.2a-2 execution/dispatch slice (AMD-92 rows 4, 5, 6, 9)
+					AutomationConditionEvaluatedEvent.class,
+					AutomationActionStartedEvent.class,
+					AutomationActionCompletedEvent.class,
+					AutomationConflictDetectedEvent.class);
 }

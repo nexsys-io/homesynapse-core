@@ -34,7 +34,7 @@ final class AllEventClasses {
         // Utility class — non-instantiable
     }
 
-    /** 37 core domain event records from event-model, all carrying {@code @EventType}. */
+    /** 41 core domain event records from event-model, all carrying {@code @EventType}. */
     static final List<Class<? extends DomainEvent>> CORE_EVENTS =
             EventTypes.CORE_PRODUCTION_EVENT_CLASSES;
 
@@ -46,7 +46,7 @@ final class AllEventClasses {
     static final List<Class<? extends DomainEvent>> CAPABILITY_EVENTS =
             IntegrationEvents.CAPABILITY_EVENT_CLASSES;
 
-    /** All 49 registered event record classes — core + integration lifecycle + capability. */
+    /** All 53 registered event record classes — core + integration lifecycle + capability. */
     static final List<Class<? extends DomainEvent>> ALL_EVENTS =
             Stream.of(CORE_EVENTS, INTEGRATION_EVENTS, CAPABILITY_EVENTS)
                     .flatMap(List::stream)

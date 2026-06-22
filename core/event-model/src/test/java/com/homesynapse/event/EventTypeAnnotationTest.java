@@ -80,7 +80,12 @@ class EventTypeAnnotationTest {
             AutomationRunCancelledEvent.class,
             AutomationDisabledEvent.class,
             CascadeDepthExceededEvent.class,
-            CascadeLoopDetectedEvent.class);
+            CascadeLoopDetectedEvent.class,
+            // M7.2a-2 execution/dispatch slice (AMD-92 rows 4, 5, 6, 9)
+            AutomationConditionEvaluatedEvent.class,
+            AutomationActionStartedEvent.class,
+            AutomationActionCompletedEvent.class,
+            AutomationConflictDetectedEvent.class);
 
     @Test
     @DisplayName("every DomainEvent record (except DegradedEvent) has @EventType")
@@ -158,9 +163,9 @@ class EventTypeAnnotationTest {
     }
 
     @Test
-    @DisplayName("exactly 37 core event records carry @EventType")
-    void exactlyThirtySevenAnnotatedRecords() {
-        assertThat(EXPECTED_EVENT_RECORDS).hasSize(37);
+    @DisplayName("exactly 41 core event records carry @EventType")
+    void exactlyFortyOneAnnotatedRecords() {
+        assertThat(EXPECTED_EVENT_RECORDS).hasSize(41);
 
         long annotatedCount = EXPECTED_EVENT_RECORDS.stream()
                 .filter(cls -> cls.isRecord())
@@ -168,7 +173,7 @@ class EventTypeAnnotationTest {
                 .filter(cls -> cls.getAnnotation(EventType.class) != null)
                 .count();
 
-        assertThat(annotatedCount).isEqualTo(37L);
+        assertThat(annotatedCount).isEqualTo(41L);
     }
 
     @Test

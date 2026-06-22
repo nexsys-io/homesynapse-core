@@ -6,12 +6,19 @@ package com.homesynapse.persistence;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.homesynapse.event.AutomationActionCompletedEvent;
+import com.homesynapse.event.AutomationActionStartedEvent;
 import com.homesynapse.event.AutomationCapabilityMismatchEvent;
+import com.homesynapse.event.AutomationConditionEvaluatedEvent;
+import com.homesynapse.event.AutomationConditionEvaluatedEvent.EvaluatedEntityState;
+import com.homesynapse.event.AutomationConflictDetectedEvent;
+import com.homesynapse.event.AutomationConflictDetectedEvent.ConflictEntry;
 import com.homesynapse.event.AutomationDisabledEvent;
 import com.homesynapse.event.AutomationInvokedEvent;
 import com.homesynapse.event.AutomationRunCancelledEvent;
@@ -158,5 +165,50 @@ class AutomationEventSerdeTest {
     void cascadeLoopDetected() throws Exception {
         roundTrip(new CascadeLoopDetectedEvent(AUTO, EVENT, U1, U2, List.of(AUTO, AUTO_2, AUTO)),
                 CascadeLoopDetectedEvent.class);
+    }
+
+    // ===== M7.2a-2 execution/dispatch slice (AMD-92 rows 4, 5, 6, 9 + nested records) =====
+
+    @Test
+    @DisplayName("automation_condition_evaluated (row 4) round-trips with the nested EvaluatedEntityState")
+    void conditionEvaluated() throws Exception {
+        Instant lastChanged = Instant.parse("2026-01-01T00:00:00Z");
+        roundTrip(new AutomationConditionEvaluatedEvent(U1, 0, "StateCondition", true,
+                        List.of(new EvaluatedEntityState(ENTITY, "on_off", "on", lastChanged, EVENT))),
+                AutomationConditionEvaluatedEvent.class);
+        // Null-safe: a nullable value (unreported attribute) and a nullable lastChangedByEventId.
+        roundTrip(new AutomationConditionEvaluatedEvent(U2, 1, "NumericCondition", false,
+                        List.of(new EvaluatedEntityState(ENTITY, "temperature", null, lastChanged, null))),
+                AutomationConditionEvaluatedEvent.class);
+        // Empty evaluated-state list (e.g. a time condition).
+        roundTrip(new AutomationConditionEvaluatedEvent(U1, 0, "TimeCondition", true, List.of()),
+                AutomationConditionEvaluatedEvent.class);
+    }
+
+    @Test
+    @DisplayName("automation_action_started (row 5) round-trips with the target list")
+    void actionStarted() throws Exception {
+        roundTrip(new AutomationActionStartedEvent(U1, 0, "CommandAction", List.of(ENTITY)),
+                AutomationActionStartedEvent.class);
+        roundTrip(new AutomationActionStartedEvent(U1, 1, "DelayAction", List.of()),
+                AutomationActionStartedEvent.class);
+    }
+
+    @Test
+    @DisplayName("automation_action_completed (row 6) round-trips, including a null errorDetail")
+    void actionCompleted() throws Exception {
+        roundTrip(new AutomationActionCompletedEvent(U1, 0, "success", null),
+                AutomationActionCompletedEvent.class);
+        roundTrip(new AutomationActionCompletedEvent(U1, 1, "error", "device unreachable"),
+                AutomationActionCompletedEvent.class);
+    }
+
+    @Test
+    @DisplayName("automation_conflict_detected (row 9) round-trips with the nested ConflictEntry list")
+    void conflictDetected() throws Exception {
+        roundTrip(new AutomationConflictDetectedEvent(EVENT, ENTITY,
+                        List.of(new ConflictEntry(AUTO, EVENT, "turn_on", "{}"),
+                                new ConflictEntry(AUTO_2, EVENT_2, "turn_off", "{}")), true),
+                AutomationConflictDetectedEvent.class);
     }
 }

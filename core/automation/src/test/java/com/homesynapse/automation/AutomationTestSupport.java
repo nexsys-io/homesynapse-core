@@ -20,6 +20,8 @@ import java.util.Set;
 
 import com.homesynapse.device.Area;
 import com.homesynapse.device.AreaRegistry;
+import com.homesynapse.device.Capability;
+import com.homesynapse.device.CapabilityInstance;
 import com.homesynapse.device.Device;
 import com.homesynapse.device.DeviceRegistry;
 import com.homesynapse.device.Entity;
@@ -44,6 +46,7 @@ import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.FloorId;
+import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.platform.identity.UlidFactory;
 import com.homesynapse.state.Availability;
@@ -151,6 +154,152 @@ final class AutomationTestSupport {
 
     static StateSnapshot snapshot(Map<EntityId, EntityState> states) {
         return new StateSnapshot(states, 1L, FIXED_INSTANT, false, Set.of());
+    }
+
+    static StateSnapshot snapshotAt(long viewPosition) {
+        return new StateSnapshot(Map.of(), viewPosition, FIXED_INSTANT, false, Set.of());
+    }
+
+    // ---- Execution / dispatch fixtures -------------------------------------
+
+    static DeviceId deviceId() {
+        return DeviceId.of(ulid());
+    }
+
+    static IntegrationId integrationId() {
+        return IntegrationId.of(ulid());
+    }
+
+    /** An entity bound to {@code deviceId} carrying {@code capability} as a feature-0 instance. */
+    static Entity entityWith(EntityId id, DeviceId deviceId, Capability capability) {
+        CapabilityInstance instance = new CapabilityInstance(
+                capability.capabilityId(), capability.version(), capability.namespace(), 0,
+                capability.attributeSchemas(), capability.commandDefinitions(),
+                capability.confirmationPolicy());
+        return new Entity(id, "ent-" + id, EntityType.LIGHT, "Entity", deviceId, 0, null, true,
+                List.of(), List.of(instance), EntityRole.PRIMARY, FIXED_INSTANT);
+    }
+
+    static Device device(DeviceId id, IntegrationId integrationId) {
+        return new Device(id, "dev-" + id, "Device", "Acme", "Model", null, null, null,
+                integrationId, null, null, List.of(), Set.of(), FIXED_INSTANT);
+    }
+
+    /** {@link DeviceRegistry} stub resolving {@code findDevice} against a fixed device set. */
+    static final class MapDeviceRegistry implements DeviceRegistry {
+        private final List<Device> devices;
+
+        MapDeviceRegistry(List<Device> devices) {
+            this.devices = List.copyOf(devices);
+        }
+
+        @Override
+        public Device getDevice(DeviceId deviceId) {
+            return findDevice(deviceId).orElseThrow(
+                    () -> new IllegalArgumentException("no device: " + deviceId));
+        }
+
+        @Override
+        public Optional<Device> findDevice(DeviceId deviceId) {
+            return devices.stream().filter(d -> d.deviceId().equals(deviceId)).findFirst();
+        }
+
+        @Override
+        public List<Device> listAllDevices() {
+            return devices;
+        }
+
+        @Override
+        public Device createDevice(Device device) {
+            throw new UnsupportedOperationException("not used in tests");
+        }
+
+        @Override
+        public Device updateDevice(Device device) {
+            throw new UnsupportedOperationException("not used in tests");
+        }
+
+        @Override
+        public void removeDevice(DeviceId deviceId) {
+            throw new UnsupportedOperationException("not used in tests");
+        }
+
+        @Override
+        public Optional<Device> findByHardwareIdentifier(String namespace, String value) {
+            throw new UnsupportedOperationException("not used in tests");
+        }
+    }
+
+    /** A {@link SelectorResolver} backed by an explicit {@code selector -> entities} map. */
+    static final class FakeSelectorResolver implements SelectorResolver {
+        private final Map<Selector, Set<EntityId>> resolutions = new java.util.HashMap<>();
+
+        FakeSelectorResolver bind(Selector selector, Set<EntityId> entities) {
+            resolutions.put(selector, Set.copyOf(entities));
+            return this;
+        }
+
+        @Override
+        public Set<EntityId> resolve(Selector selector) {
+            return resolutions.getOrDefault(selector, Set.of());
+        }
+    }
+
+    /** An {@link AutomationRegistry} backed by an explicit definition set ({@code get} only). */
+    static final class MapAutomationRegistry implements AutomationRegistry {
+        private final Map<AutomationId, AutomationDefinition> byId = new java.util.HashMap<>();
+
+        MapAutomationRegistry add(AutomationDefinition definition) {
+            byId.put(definition.automationId(), definition);
+            return this;
+        }
+
+        @Override
+        public void load(List<AutomationDefinition> definitions) {
+            byId.clear();
+            for (AutomationDefinition definition : definitions) {
+                byId.put(definition.automationId(), definition);
+            }
+        }
+
+        @Override
+        public Optional<AutomationDefinition> get(AutomationId id) {
+            return Optional.ofNullable(byId.get(id));
+        }
+
+        @Override
+        public Optional<AutomationDefinition> getBySlug(String slug) {
+            return byId.values().stream().filter(d -> d.slug().equals(slug)).findFirst();
+        }
+
+        @Override
+        public List<AutomationDefinition> getAll() {
+            return List.copyOf(byId.values());
+        }
+
+        @Override
+        public void reload(List<AutomationDefinition> definitions) {
+            load(definitions);
+        }
+    }
+
+    /** A {@link CommandDispatchService} recording every dispatch call (lock-free). */
+    static final class RecordingDispatchService implements CommandDispatchService {
+        record Call(EventId commandEventId, EntityId targetRef, String commandName,
+                    Map<String, Object> parameters) {
+        }
+
+        private final List<Call> calls = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        @Override
+        public void dispatch(EventId commandEventId, EntityId targetRef, String commandName,
+                             Map<String, Object> parameters) {
+            calls.add(new Call(commandEventId, targetRef, commandName, parameters));
+        }
+
+        List<Call> calls() {
+            return List.copyOf(calls);
+        }
     }
 
     // ---- Event envelopes ----------------------------------------------------

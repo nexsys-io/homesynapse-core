@@ -135,6 +135,16 @@ final class EventCategoryMapping {
                 Map.entry(EventTypes.CASCADE_LOOP_DETECTED,
                         List.of(EventCategory.AUTOMATION)),
 
+                // ─── Automation execution/dispatch slice (M7.2a-2, AMD-92 rows 4,5,6,9) ──
+                Map.entry(EventTypes.AUTOMATION_CONDITION_EVALUATED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.AUTOMATION_ACTION_STARTED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.AUTOMATION_ACTION_COMPLETED,
+                        List.of(EventCategory.AUTOMATION)),
+                Map.entry(EventTypes.AUTOMATION_CONFLICT_DETECTED,
+                        List.of(EventCategory.AUTOMATION)),
+
                 // ─── Presence ─────────────────────────────────────────────────
                 Map.entry(EventTypes.PRESENCE_SIGNAL,
                         List.of(EventCategory.PRESENCE)),

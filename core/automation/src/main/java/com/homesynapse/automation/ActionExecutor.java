@@ -6,6 +6,8 @@ package com.homesynapse.automation;
 
 import java.util.List;
 
+import com.homesynapse.event.EventEnvelope;
+
 /**
  * Executes action steps sequentially within a Run's virtual thread.
  *
@@ -29,8 +31,22 @@ public interface ActionExecutor {
     /**
      * Executes the action sequence within the Run's virtual thread.
      *
-     * @param actions the ordered list of actions to execute, never {@code null}
-     * @param context the Run execution context, never {@code null}
+     * <p>Returns an {@link ActionExecutionResult} tally (DP-D) — the real
+     * {@code actionCount}/{@code commandCount} the FSM stamps onto
+     * {@code automation_completed}, plus the §6.2 fail-fast reason (non-{@code null} ⇒ the
+     * sequence stopped at a failing action and the Run terminates {@code FAILED}). The
+     * triggering {@link EventEnvelope} is supplied so the per-action
+     * {@code automation_action_started}/{@code automation_action_completed} diagnostics
+     * publish on the triggering event's {@code CausalContext} (AMD-92 §2.4) — the
+     * {@link RunContext} carries the triggering event id and automation id but not the
+     * chain's correlation id or event time.</p>
+     *
+     * @param actions         the ordered list of actions to execute, never {@code null}
+     * @param context         the Run execution context, never {@code null}
+     * @param triggeringEvent the event that triggered the Run, for causal stamping of the
+     *                        action diagnostics, never {@code null}
+     * @return the action/command tally and §6.2 outcome, never {@code null}
      */
-    void execute(List<ActionDefinition> actions, RunContext context);
+    ActionExecutionResult execute(List<ActionDefinition> actions, RunContext context,
+                                  EventEnvelope triggeringEvent);
 }
