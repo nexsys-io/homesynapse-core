@@ -32,6 +32,11 @@ import com.homesynapse.event.EventTypes;
 import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
+import com.homesynapse.state.Availability;
+import com.homesynapse.state.EntityState;
+import com.homesynapse.state.StateQueryService;
+import com.homesynapse.state.StateSnapshot;
+import com.homesynapse.value.IntValue;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -332,6 +337,88 @@ class StandardRunManagerTest {
         assertThat(publisher.countOfType(EventTypes.AUTOMATION_TRIGGERED)).isEqualTo(1);
     }
 
+    // ---- M7.2b computed-param resolution (Doc 16 §3.2) ---------------------
+
+    @Test
+    @DisplayName("computed-param: a CommandAction ComputedValue parameter is resolved to a concrete value before the executor runs")
+    void computedParam_resolvedToConcreteValueBeforeExecutor() throws Exception {
+        AutomationDefinition auto = automationWithCommand(
+                Map.of("level", new LiteralValue(new IntValue(75))));
+
+        Optional<RunId> run = initiate(auto, triggerEvent(), RunCausalChain.root());
+        manager.awaitQuiescence(AWAIT_MS);
+
+        assertThat(run).isPresent();
+        CommandAction executed = onlyCommandAction(executor.lastActions);
+        assertThat(executed.parameters().get("level")).isEqualTo(new IntValue(75));
+        assertThat(executed.parameters().get("level")).isNotInstanceOf(ComputedValue.class);
+    }
+
+    @Test
+    @DisplayName("computed-param: an AttributeRef resolves against the captured trigger-time snapshot (single read, AMD-03)")
+    void computedParam_resolvesAgainstCapturedSnapshot() throws Exception {
+        EntityState lamp = AutomationTestSupport.state(entity, Availability.AVAILABLE,
+                Map.of("level", new IntValue(55)));
+        CountingStateQuery counting = new CountingStateQuery(
+                AutomationTestSupport.snapshot(Map.of(entity, lamp)));
+        manager = new StandardRunManager(publisher, executor, gate, counting,
+                AutomationTestSupport.FIXED_CLOCK, RunManagerConfig.defaults());
+        AutomationDefinition auto = automationWithCommand(
+                Map.of("level", new AttributeRef(entity, "level")));
+
+        Optional<RunId> run = initiate(auto, triggerEvent(), RunCausalChain.root());
+        manager.awaitQuiescence(AWAIT_MS);
+
+        assertThat(run).isPresent();
+        CommandAction executed = onlyCommandAction(executor.lastActions);
+        assertThat(executed.parameters().get("level")).isEqualTo(new IntValue(55));
+        assertThat(counting.reads.get()).isEqualTo(1);   // one captured snapshot drove resolution + gate
+    }
+
+    // ---- M7.2b terminal contract: fail-closed read + no retry --------------
+
+    @Test
+    @DisplayName("fail-closed read: a degraded trigger-time snapshot read → FAILED with the degraded-read reason, no execution, no retry")
+    void failClosedRead_snapshotReadThrows_runFailedWithReason() throws Exception {
+        StandardRunManager failing = new StandardRunManager(publisher, executor, gate,
+                new ThrowingStateQuery(), AutomationTestSupport.FIXED_CLOCK,
+                RunManagerConfig.defaults());
+        AutomationDefinition auto = automation(automationId(), ConcurrencyMode.SINGLE, 1, 0);
+        EventEnvelope event = triggerEvent();
+
+        Optional<RunId> first = failing.initiateRun(auto, event, TRIGGER_0, NO_TARGETS,
+                RunCausalChain.root());
+        Optional<RunId> retry = failing.initiateRun(auto, event, TRIGGER_0, NO_TARGETS,
+                RunCausalChain.root());
+
+        assertThat(first).isPresent();
+        assertThat(failing.getStatus(first.orElseThrow())).isEqualTo(RunStatus.FAILED);
+        assertThat(executor.invocations.get()).isZero();          // never proceeded to action execution
+        AutomationCompletedEvent c = onlyCompleted();
+        assertThat(c.finalStatus()).isEqualTo("FAILED");
+        assertThat(c.failureReason()).contains("snapshot read failed closed");
+        assertThat(c.abortReason()).isNull();
+        // C1 pair preserved; the same degraded trigger is deduped (no autonomous retry — AMD-90).
+        assertThat(retry).isEmpty();
+        assertThat(publisher.countOfType(EventTypes.AUTOMATION_TRIGGERED)).isEqualTo(1);
+        assertThat(publisher.countOfType(EventTypes.AUTOMATION_COMPLETED)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("AMD-90: a failing action is executed once and never autonomously re-dispatched")
+    void failingAction_noAutonomousRetry() throws Exception {
+        executor.throwWith("device unreachable");
+        AutomationDefinition auto = automation(automationId(), ConcurrencyMode.SINGLE, 1, 0);
+
+        Optional<RunId> run = initiate(auto, triggerEvent(), RunCausalChain.root());
+        manager.awaitQuiescence(AWAIT_MS);
+
+        assertThat(manager.getStatus(run.orElseThrow())).isEqualTo(RunStatus.FAILED);
+        assertThat(executor.invocations.get()).isEqualTo(1);      // one dispatch, never retried
+        assertThat(publisher.countOfType(EventTypes.AUTOMATION_TRIGGERED)).isEqualTo(1);
+        assertThat(publisher.countOfType(EventTypes.AUTOMATION_COMPLETED)).isEqualTo(1);
+    }
+
     // ---- Cascade governance -------------------------------------------------
 
     @Test
@@ -506,6 +593,22 @@ class StandardRunManagerTest {
                 List.of(), List.of());
     }
 
+    /** A SINGLE-mode automation whose single action is a {@link CommandAction} with the given parameters. */
+    private AutomationDefinition automationWithCommand(Map<String, Object> parameters) {
+        CommandAction command = new CommandAction(new DirectRefSelector(entity), "set_level",
+                parameters, UnavailablePolicy.SKIP);
+        return new AutomationDefinition(automationId(), "auto", "auto", null, true,
+                ConcurrencyMode.SINGLE, 1, MaxExceededSeverity.INFO, 0,
+                List.of(new StateTrigger(new DirectRefSelector(entity), "on_off", "on", null, "t1")),
+                List.of(), List.of(command));
+    }
+
+    private static CommandAction onlyCommandAction(List<ActionDefinition> actions) {
+        assertThat(actions).hasSize(1);
+        assertThat(actions.get(0)).isInstanceOf(CommandAction.class);
+        return (CommandAction) actions.get(0);
+    }
+
     private EventEnvelope triggerEvent() {
         return AutomationTestSupport.stateChanged(entity, "on_off",
                 AutomationTestSupport.str("off"), AutomationTestSupport.str("on"));
@@ -566,6 +669,7 @@ class StandardRunManagerTest {
 
         private final AtomicInteger invocations = new AtomicInteger();
         private final List<Ulid> executedOrder = new CopyOnWriteArrayList<>();
+        private volatile List<ActionDefinition> lastActions = List.of();
         private volatile Mode mode = Mode.COMPLETE;
         private volatile String error = "action failed";
         private volatile int actionCount = 0;
@@ -599,6 +703,7 @@ class StandardRunManagerTest {
         public ActionExecutionResult execute(List<ActionDefinition> actions, RunContext context,
                                              EventEnvelope triggeringEvent) {
             invocations.incrementAndGet();
+            lastActions = actions;                        // capture for computed-param resolution assertions
             executedOrder.add(context.runId().value());
             switch (mode) {
                 case COMPLETE -> { /* return immediately */ }
@@ -612,6 +717,70 @@ class StandardRunManagerTest {
                 }
             }
             return ActionExecutionResult.succeeded(actionCount, commandCount);
+        }
+    }
+
+    /** A {@link StateQueryService} returning a fixed snapshot and counting {@code getSnapshot} reads. */
+    private static final class CountingStateQuery implements StateQueryService {
+        private final StateSnapshot snapshot;
+        private final AtomicInteger reads = new AtomicInteger();
+
+        CountingStateQuery(StateSnapshot snapshot) {
+            this.snapshot = snapshot;
+        }
+
+        @Override
+        public Optional<EntityState> getState(EntityId entityId) {
+            return Optional.ofNullable(snapshot.states().get(entityId));
+        }
+
+        @Override
+        public Map<EntityId, EntityState> getStates(Set<EntityId> entityIds) {
+            return Map.of();
+        }
+
+        @Override
+        public StateSnapshot getSnapshot() {
+            reads.incrementAndGet();
+            return snapshot;
+        }
+
+        @Override
+        public long getViewPosition() {
+            return snapshot.viewPosition();
+        }
+
+        @Override
+        public boolean isReady() {
+            return true;
+        }
+    }
+
+    /** A {@link StateQueryService} whose snapshot read fails closed (the post-AB-2 degraded read). */
+    private static final class ThrowingStateQuery implements StateQueryService {
+        @Override
+        public Optional<EntityState> getState(EntityId entityId) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Map<EntityId, EntityState> getStates(Set<EntityId> entityIds) {
+            return Map.of();
+        }
+
+        @Override
+        public StateSnapshot getSnapshot() {
+            throw new IllegalStateException("payload decrypt failed (fail-closed)");
+        }
+
+        @Override
+        public long getViewPosition() {
+            return 0L;
+        }
+
+        @Override
+        public boolean isReady() {
+            return false;
         }
     }
 }

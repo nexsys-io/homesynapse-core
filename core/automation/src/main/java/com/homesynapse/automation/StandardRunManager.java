@@ -110,6 +110,16 @@ final class StandardRunManager implements RunManager, AutoCloseable {
     /** Auto-disable reason carried in {@code automation_disabled} (Doc 07 §3.7 table). */
     private static final String DISABLE_REASON = "repeated_failure";
 
+    /**
+     * Sentinel {@link RunContext#stateSnapshotPosition()} for a Run whose trigger-time snapshot
+     * read failed closed — no snapshot was captured, so there is no view position (Doc 16 §3.4).
+     */
+    private static final long FAILED_READ_SNAPSHOT_POSITION = -1L;
+
+    /** Register-C prefix for the run-coupled fail-closed-read failure reason (Doc 16 §3.4). */
+    private static final String DEGRADED_READ_REASON =
+            "trigger-time state snapshot read failed closed: ";
+
     private final EventPublisher publisher;
     private final ActionExecutor actionExecutor;
     private final RunConditionGate conditionGate;
@@ -222,15 +232,30 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         }
 
         // (5) Capture the trigger-time snapshot once (DP-A.4 / AMD-03): its viewPosition is the
-        // RunContext position and the same snapshot drives the gate's condition evaluation.
-        StateSnapshot snapshot = stateQuery.getSnapshot();
+        // RunContext position and the same snapshot drives both the gate's condition evaluation
+        // and computed-param resolution. A read that fails closed (post-AB-2 the read path can
+        // throw) terminates the Run FAILED with an explainable reason — it never proceeds on
+        // partial/ambiguous state, and there is no retry (Doc 16 §3.4 / C-SA-5; AMD-90-INV-01).
+        StateSnapshot snapshot;
+        try {
+            snapshot = stateQuery.getSnapshot();
+        } catch (RuntimeException ex) {
+            return failClosedRead(automation, triggeringEvent, matchedTriggers, resolvedTargets,
+                    parentChain, correlationId, causationId, actorRef, eventTime, ex);
+        }
         RunId runId = new RunId(UlidFactory.generate(clock));
         RunContext context = new RunContext(
                 runId, automationId, triggeringEventId,
                 List.copyOf(matchedTriggers), resolvedTargets,
                 DefinitionHashes.forDefinition(automation), parentChain,
                 snapshot.viewPosition());
-        ActiveRun run = new ActiveRun(runId, context, automation, triggeringEvent,
+        // (5a) Resolve any computed-value action parameters against the captured trigger-time
+        // snapshot (Doc 16 §3.2), BEFORE the actions reach the frozen ActionExecutor — the
+        // executor never sees a ComputedValue. Uses the SAME captured snapshot (AMD-03), not a
+        // fresh read.
+        List<ActionDefinition> resolvedActions = ComputedValues.resolveActions(
+                automation.actions(), new ComputedValueContext(snapshot, clock.instant()));
+        ActiveRun run = new ActiveRun(runId, context, automation, triggeringEvent, resolvedActions,
                 triggeringEventId, correlationId, causationId, actorRef, eventTime, clock.instant());
         statuses.put(runId, RunStatus.EVALUATING);
 
@@ -389,6 +414,46 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         }
     }
 
+    // ---- Run-coupled fail-closed read (Doc 16 §3.4 / C-SA-5) ---------------
+
+    /**
+     * Terminates a Run whose trigger-time snapshot read failed closed (the run-coupled half of
+     * app-bootstrap A3). The Run reaches {@code FAILED} with a {@code failureReason} identifying
+     * the degraded read and publishes the explainable
+     * {@code automation_triggered}/{@code automation_completed(FAILED)} pair (Contract C1). It
+     * does not proceed on partial state — no condition evaluation, no action execution — and is
+     * never retried (AMD-90-INV-01). The C2 dedup key is claimed so the same degraded trigger is
+     * not re-attempted.
+     */
+    private Optional<RunId> failClosedRead(AutomationDefinition automation,
+                                           EventEnvelope triggeringEvent,
+                                           List<Integer> matchedTriggers,
+                                           Map<String, Set<EntityId>> resolvedTargets,
+                                           RunCausalChain parentChain, Ulid correlationId,
+                                           Ulid causationId, Ulid actorRef, Instant eventTime,
+                                           RuntimeException cause) {
+        AutomationId automationId = automation.automationId();
+        EventId triggeringEventId = triggeringEvent.eventId();
+        if (!dedup.add(new DedupKey(automationId, triggeringEventId))) {
+            return Optional.empty();           // a concurrent initiate already owns this (automation, event)
+        }
+        RunId runId = new RunId(UlidFactory.generate(clock));
+        RunContext context = new RunContext(
+                runId, automationId, triggeringEventId,
+                List.copyOf(matchedTriggers), resolvedTargets,
+                DefinitionHashes.forDefinition(automation), parentChain,
+                FAILED_READ_SNAPSHOT_POSITION);
+        ActiveRun run = new ActiveRun(runId, context, automation, triggeringEvent, List.of(),
+                triggeringEventId, correlationId, causationId, actorRef, eventTime, clock.instant());
+        statuses.put(runId, RunStatus.FAILED);
+        String failureReason = DEGRADED_READ_REASON + describe(cause);
+        LOG.error("Run {} for automation {} failed closed: trigger-time state snapshot read degraded",
+                runId, automationId, cause);
+        publishTriggered(run);                 // before completed — keep the C1 pair
+        publishCompleted(run, RunStatus.FAILED, failureReason, null, 0, 0);
+        return Optional.of(runId);
+    }
+
     // ---- Run body (on the VT) ----------------------------------------------
 
     private void runBody(ActiveRun run) {
@@ -405,7 +470,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
                     abortReason = "restart_mode";
                 } else {
                     ActionExecutionResult result = actionExecutor.execute(
-                            run.automation.actions(), run.context, run.triggeringEvent);
+                            run.resolvedActions, run.context, run.triggeringEvent);
                     actionCount = result.actionCount();
                     commandCount = result.commandCount();
                     if (Thread.currentThread().isInterrupted()) {
@@ -735,6 +800,8 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         private final RunContext context;
         private final AutomationDefinition automation;
         private final EventEnvelope triggeringEvent;
+        /** Actions with computed-value parameters already resolved (Doc 16 §3.2); what the VT executes. */
+        private final List<ActionDefinition> resolvedActions;
         private final EventId triggeringEventId;
         private final Ulid correlationId;
         private final Ulid causationId;
@@ -744,13 +811,14 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         private volatile Thread vt;
 
         private ActiveRun(RunId runId, RunContext context, AutomationDefinition automation,
-                          EventEnvelope triggeringEvent, EventId triggeringEventId,
-                          Ulid correlationId, Ulid causationId, Ulid actorRef, Instant eventTime,
-                          Instant startedAt) {
+                          EventEnvelope triggeringEvent, List<ActionDefinition> resolvedActions,
+                          EventId triggeringEventId, Ulid correlationId, Ulid causationId,
+                          Ulid actorRef, Instant eventTime, Instant startedAt) {
             this.runId = runId;
             this.context = context;
             this.automation = automation;
             this.triggeringEvent = triggeringEvent;
+            this.resolvedActions = resolvedActions;
             this.triggeringEventId = triggeringEventId;
             this.correlationId = correlationId;
             this.causationId = causationId;
