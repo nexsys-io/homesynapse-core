@@ -118,13 +118,14 @@ final class LifecycleWiringTest {
         core = newCore(tempDir);
         core.start();
 
-        // start() gates the automation_engine + command_dispatch_service subscribes on the
-        // projection reaching LIVE, so on return the projection is LIVE and the runtime
-        // subscribers are registered (the catch-up ordering invariant).
+        // start() gates the automation_engine + command_dispatch_service + pending_command_ledger
+        // subscribes on the projection reaching LIVE, so on return the projection is LIVE and the
+        // four runtime subscribers are registered (the catch-up ordering invariant).
         assertThat(core.mode()).isEqualTo(SubscriberMode.LIVE);
         assertThat(core.eventBus().subscribers().stream()
                 .map(SubscriberSnapshot::subscriberId))
-                .contains("state_projection", "automation_engine", "command_dispatch_service");
+                .contains("state_projection", "automation_engine", "command_dispatch_service",
+                        "pending_command_ledger");
     }
 
     @Test

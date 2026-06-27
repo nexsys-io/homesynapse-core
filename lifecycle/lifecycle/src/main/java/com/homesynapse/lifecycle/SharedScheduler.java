@@ -19,9 +19,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Single-threaded scheduler driving the two periodic maintenance tasks shared
+ * Single-threaded scheduler driving the periodic maintenance tasks shared
  * by the composition root: token-bucket replenishment and queue-saturation
- * tick (AMD-43 §3.6.3, §3.6.4).
+ * tick (AMD-43 §3.6.3, §3.6.4), plus any additional periodic task registered
+ * post-construction via {@link #schedulePeriodic(String, Runnable, long)}.
  *
  * <h2>Scheduled tasks</h2>
  *
@@ -32,12 +33,17 @@ import org.slf4j.LoggerFactory;
  *   <li>{@link QueueSaturationHealthCheck#tick()} every {@value #TICK_PERIOD_MILLIS} ms
  *       — advances the hysteresis state machine that emits writer-queue
  *       saturation health signals.</li>
+ *   <li>Any task added post-construction via
+ *       {@link #schedulePeriodic(String, Runnable, long)} — M7.4c registers the
+ *       {@code pending_command_ledger}'s {@code pollExpirations()} deadline sweep
+ *       this way, since the ledger is constructed AFTER this scheduler (the ledger
+ *       registration must follow the state projection reaching {@code LIVE}).</li>
  * </ul>
  *
- * <p>Both tasks are sub-millisecond non-blocking operations under normal
+ * <p>All tasks are sub-millisecond non-blocking operations under normal
  * conditions. They share a single platform thread (named {@code "hs-sched-0"})
- * because allocating two would waste a quarter of the Pi 4's 4-core carrier
- * budget. {@link ScheduledExecutorService} requires platform threads — virtual
+ * because allocating more would waste the Pi 4's 4-core carrier budget.
+ * {@link ScheduledExecutorService} requires platform threads — virtual
  * threads cannot drive its tick generator.</p>
  *
  * <h2>Drift tolerance</h2>
@@ -50,10 +56,12 @@ import org.slf4j.LoggerFactory;
  *
  * <h2>Lifecycle</h2>
  *
- * <p>Construction starts both scheduled tasks immediately. {@link #shutdown()}
- * calls {@link ScheduledExecutorService#shutdownNow()} and waits up to two
- * seconds for the executor thread to terminate. Idempotent — subsequent
- * shutdowns are no-ops.</p>
+ * <p>Construction starts the two built-in scheduled tasks immediately; further
+ * tasks registered via {@link #schedulePeriodic(String, Runnable, long)} begin on
+ * registration. {@link #shutdown()} calls
+ * {@link ScheduledExecutorService#shutdownNow()} and waits up to two seconds for
+ * the executor thread to terminate, cancelling EVERY scheduled task (built-in and
+ * post-construction). Idempotent — subsequent shutdowns are no-ops.</p>
  *
  * <p>Package-private — the composition root constructs and owns the
  * scheduler. No external module touches it.</p>
@@ -124,6 +132,49 @@ final class SharedScheduler {
                 () -> safelyInvoke("tick", tickTask),
                 TICK_PERIOD_MILLIS,
                 TICK_PERIOD_MILLIS,
+                TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Registers an additional periodic task to run on the shared scheduler thread
+     * at a fixed cadence, starting after one full period. Used by the composition
+     * root for tasks whose collaborators are constructed AFTER this scheduler — M7.4c
+     * drives the {@code pending_command_ledger}'s {@code pollExpirations()} deadline
+     * sweep this way (the ledger registers only after the state projection is
+     * {@code LIVE}, well after this scheduler is built).
+     *
+     * <p>The task is wrapped in the same {@code safelyInvoke} guard as the built-in
+     * tasks, so a thrown {@link RuntimeException} is logged but never cancels the
+     * cadence. {@link #shutdown()} cancels this task with the rest; there is no
+     * per-task unschedule (the composition root tears down the whole scheduler).</p>
+     *
+     * <p>Uses {@link ScheduledExecutorService#scheduleAtFixedRate} (not
+     * {@code scheduleWithFixedDelay}), matching the built-in tasks, so a slow tick
+     * does not drift the cadence.</p>
+     *
+     * @param name        a short diagnostic label for the task (used in the failure
+     *                    log); never {@code null}
+     * @param task        the periodic task to run; never {@code null}
+     * @param periodMillis the cadence in milliseconds; must be {@code > 0}
+     * @throws NullPointerException     if {@code name} or {@code task} is {@code null}
+     * @throws IllegalArgumentException if {@code periodMillis <= 0}
+     * @throws IllegalStateException    if the scheduler has already been shut down
+     */
+    void schedulePeriodic(String name, Runnable task, long periodMillis) {
+        Objects.requireNonNull(name, "name must not be null");
+        Objects.requireNonNull(task, "task must not be null");
+        if (periodMillis <= 0) {
+            throw new IllegalArgumentException(
+                    "periodMillis must be positive, got " + periodMillis);
+        }
+        if (closed.get()) {
+            throw new IllegalStateException(
+                    "cannot schedule '" + name + "' on a shut-down scheduler");
+        }
+        executor.scheduleAtFixedRate(
+                () -> safelyInvoke(name, task),
+                periodMillis,
+                periodMillis,
                 TimeUnit.MILLISECONDS);
     }
 

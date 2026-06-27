@@ -18,6 +18,7 @@ import com.homesynapse.automation.CommandDispatchService;
 import com.homesynapse.automation.InMemoryAutomationIdentityStore;
 import com.homesynapse.automation.LoadFailure;
 import com.homesynapse.automation.LoadResult;
+import com.homesynapse.automation.PendingCommandLedger;
 import com.homesynapse.automation.PendingCommandLedgerAssembly;
 import com.homesynapse.automation.RunManager;
 import com.homesynapse.automation.RunManagerAssembly;
@@ -168,6 +169,14 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     /** Subscriber identifier used for the automation_engine (trigger) subscriber. */
     private static final String AUTOMATION_SUBSCRIBER_ID = "automation_engine";
 
+    /**
+     * Cadence of the {@code pending_command_ledger}'s {@code pollExpirations()} deadline sweep
+     * (M7.4c). At ~1 s a 30 000 ms confirmation deadline fires within ~1 s of expiry — well
+     * inside the operator-visible window, with negligible cost (the sweep is a lock + a deadline
+     * comparison over the in-flight set).
+     */
+    private static final long LEDGER_EXPIRY_PERIOD_MILLIS = 1_000L;
+
     /** Default systemd watchdog interval when {@code $WATCHDOG_USEC} is unset (LTD-13). */
     private static final long DEFAULT_WATCHDOG_SECONDS = 60L;
 
@@ -218,6 +227,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     private StandardTriggerEvaluator triggerEvaluator;
     private RunManager runManager;
     private CommandDispatchService commandDispatchService;
+    private PendingCommandLedger pendingCommandLedger;
     private HealthLoop healthLoop;
     private Javalin httpServer;
 
@@ -517,6 +527,36 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 new SubscriberInfo(CommandDispatchAssembly.SUBSCRIBER_ID,
                         CommandDispatchAssembly.subscriptionFilter(), true),
                 commandDispatch.subscriber());
+
+        // Step 3.4c — the pending_command_ledger goes live (M7.4c, OR-M7-WIRING confirmation half).
+        // The ledger correlates each command_issued to the device's reported state and publishes
+        // state_confirmed on a match / command_confirmation_timed_out on deadline expiry (Doc 07
+        // §3.11.2 — the "did it actually confirm?" hero half). Built + unit-tested in M7.3; its LIVE
+        // wiring was deferred until its only live input (command_issued) existed (M7.4b). Registered
+        // AFTER the projection is LIVE — the same catch-up ordering invariant as automation_engine /
+        // command_dispatch_service (§1 D2: the ledger acts only in LIVE; it must NOT publish on the
+        // replay catch-up — the FSM already guards publishes during REPLAY, this ordering is the
+        // composition-root half). coalesceExempt=true: a coalesced command_issued/state_reported
+        // would be a missed confirmation match (correctness-critical, Doc 01 §3.6 — same as the
+        // projection/dispatch). The deadline sweep (pollExpirations) is a periodic tick driven by
+        // the SharedScheduler, cancelled by scheduler.shutdown(). The ledger holds ONLY the bus's
+        // per-subscriber SQLite read connection (no separate close()) — released by
+        // eventBus.unsubscribe(...) in doTeardown (and by eventBus.abandon() in the abandon path);
+        // the paired teardown is the reverted-M7.3 lesson (a runtime subscriber with no matching
+        // teardown leaks its read connection -> @TempDir cleanup fails on Windows).
+        PendingCommandLedgerAssembly.Components pendingLedger =
+                PendingCommandLedgerAssembly.pendingCommandLedger(
+                        eventPublisher, entityRegistry, clock,
+                        PendingCommandLedgerAssembly.DEFAULT_CONFIRMATION_TIMEOUT_MS);
+        this.pendingCommandLedger = pendingLedger.ledger();
+        eventBus.subscribeRuntime(
+                new SubscriberInfo(PendingCommandLedgerAssembly.SUBSCRIBER_ID,
+                        PendingCommandLedgerAssembly.subscriptionFilter(), true),
+                pendingLedger.subscriber());
+        scheduler.schedulePeriodic(
+                PendingCommandLedgerAssembly.SUBSCRIBER_ID + "_expiry",
+                pendingLedger.expirationTick(),
+                LEDGER_EXPIRY_PERIOD_MILLIS);
         recordSubsystem("automation", LifecyclePhase.CORE_DOMAIN, automationStart);
 
         // ── Phase 4 OBSERVABILITY ────────────────────────────────────────────
@@ -809,6 +849,11 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             if (runManager != null) {
                 runManager.close();
             }
+            // The pending_command_ledger (M7.4c) has NO separate close() — its only resource is the
+            // bus's per-subscriber SQLite read connection, which eventBus.abandon() closes for every
+            // active runtime below. So unlike commandDispatchService/runManager (which own their own
+            // resources), the ledger needs no explicit teardown line here; abandon() covers it. This
+            // mirrors how the dispatch subscriber's bus subscription is dropped in this path.
             if (eventBus != null) {
                 eventBus.abandon();
             }
@@ -850,6 +895,11 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 scheduler.shutdown();
             }
             if (eventBus != null) {
+                // Reverse registration order: ledger (3.4c) -> dispatch (3.4b) -> automation (3.4)
+                // -> projection (3.2). unsubscribe(...) closes each runtime's per-subscriber read
+                // connection — the pending_command_ledger's is the M7.3-reverted leak, so its
+                // teardown sits alongside command_dispatch_service's here (symmetry is the check).
+                eventBus.unsubscribe(PendingCommandLedgerAssembly.SUBSCRIBER_ID);
                 eventBus.unsubscribe(CommandDispatchAssembly.SUBSCRIBER_ID);
                 eventBus.unsubscribe(AUTOMATION_SUBSCRIBER_ID);
                 eventBus.unsubscribe(PROJECTION_SUBSCRIBER_ID);
@@ -1018,6 +1068,11 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     /** @return the loaded automation registry (or {@code null} before start). */
     StandardAutomationRegistry automationRegistry() {
         return automationRegistry;
+    }
+
+    /** @return the live pending-command ledger query surface (or {@code null} before start). */
+    PendingCommandLedger pendingCommandLedger() {
+        return pendingCommandLedger;
     }
 
     private void recordSubsystem(String name, LifecyclePhase subsystemPhase, Instant startInstant) {

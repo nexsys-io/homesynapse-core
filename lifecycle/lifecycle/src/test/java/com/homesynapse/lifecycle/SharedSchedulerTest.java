@@ -110,6 +110,49 @@ class SharedSchedulerTest {
     }
 
     @Test
+    @DisplayName("schedulePeriodic drives a registered task on cadence; shutdown stops it")
+    void schedulePeriodicDrivesTaskAndShutdownStops() throws InterruptedException {
+        // M7.4c: the composition root registers the pending_command_ledger's pollExpirations()
+        // deadline sweep via this post-construction hook (the ledger is built after the scheduler).
+        // A 50 ms cadence keeps the test fast; production uses ~1000 ms.
+        AtomicInteger expiryCount = new AtomicInteger();
+        SharedScheduler scheduler = new SharedScheduler(() -> {}, () -> {});
+        scheduler.schedulePeriodic("ledger_expiry", expiryCount::incrementAndGet, 50L);
+        int countAtShutdown;
+        try {
+            // 50 ms period, initial delay 50 ms. After 350 ms expect at least 3 invocations.
+            TimeUnit.MILLISECONDS.sleep(350L);
+
+            assertThat(expiryCount.get())
+                    .as("the registered periodic task should fire at least 3 times within 350 ms "
+                            + "at the 50 ms cadence")
+                    .isGreaterThanOrEqualTo(3);
+        } finally {
+            scheduler.shutdown();
+            countAtShutdown = expiryCount.get();
+        }
+
+        // shutdown() cancels the post-construction task with the rest — no further invocations.
+        TimeUnit.MILLISECONDS.sleep(150L);
+        assertThat(expiryCount.get())
+                .as("no further invocations after shutdown cancels the periodic task")
+                .isEqualTo(countAtShutdown);
+    }
+
+    @Test
+    @DisplayName("schedulePeriodic on a shut-down scheduler throws IllegalStateException")
+    void schedulePeriodicRejectedAfterShutdown() {
+        SharedScheduler scheduler = new SharedScheduler(() -> {}, () -> {});
+        scheduler.shutdown();
+        try {
+            scheduler.schedulePeriodic("late", () -> {}, 50L);
+            throw new AssertionError("expected IllegalStateException scheduling after shutdown");
+        } catch (IllegalStateException expected) {
+            assertThat(expected).hasMessageContaining("late");
+        }
+    }
+
+    @Test
     @DisplayName("task failure does not silence the scheduler")
     void taskFailureDoesNotSilenceCadence() throws InterruptedException {
         // Extra coverage beyond the brief's 4 tests: ScheduledExecutorService

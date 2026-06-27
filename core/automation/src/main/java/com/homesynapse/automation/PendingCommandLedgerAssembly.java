@@ -29,9 +29,10 @@ import com.homesynapse.event.bus.SubscriptionFilter;
  * the ledger's plain-value dependencies — an {@link EventPublisher}, the {@link EntityRegistry}
  * (capability resolution on {@code command_issued}), an injected {@link Clock} (REC-156/167),
  * and the default confirmation window (AMD-90: 30000 ms; REC-161 calibration) — and calls
- * {@link #pendingCommandLedger(EventPublisher, EntityRegistry, Clock, long)} to obtain both
- * views, then subscribes {@link Components#subscriber()} with {@link #subscriptionFilter()}
- * after the state projection has reached {@code LIVE} (the catch-up ordering invariant).</p>
+ * {@link #pendingCommandLedger(EventPublisher, EntityRegistry, Clock, long)} to obtain the
+ * three views, then subscribes {@link Components#subscriber()} with {@link #subscriptionFilter()}
+ * after the state projection has reached {@code LIVE} (the catch-up ordering invariant) and drives
+ * {@link Components#expirationTick()} from a periodic scheduler (M7.4c — the deadline sweep).</p>
  */
 public final class PendingCommandLedgerAssembly {
 
@@ -50,18 +51,27 @@ public final class PendingCommandLedgerAssembly {
     }
 
     /**
-     * The two interface views of the one ledger instance: the {@link PendingCommandLedger} query
-     * surface and the bus {@link Subscriber}.
+     * The three views of the one ledger instance: the {@link PendingCommandLedger} query surface,
+     * the bus {@link Subscriber}, and the deadline-sweep tick.
      *
-     * @param ledger     the query surface (command status lookups), never {@code null}
-     * @param subscriber the bus subscriber to register, never {@code null}
+     * <p>The {@code expirationTick} is the ledger's package-private {@code pollExpirations()}
+     * exposed as a {@link Runnable} (the same package can bind the method reference) so the
+     * composition root can drive it from a periodic scheduler WITHOUT promoting an operational
+     * tick onto the query-only {@link PendingCommandLedger} interface. Each invocation compares the
+     * injected clock to every in-flight deadline and times out the expired ones — deterministic
+     * under a stepped clock, never a wall-clock sleep (REC-156/167).</p>
+     *
+     * @param ledger         the query surface (command status lookups), never {@code null}
+     * @param subscriber     the bus subscriber to register, never {@code null}
+     * @param expirationTick the deadline-sweep tick to schedule periodically, never {@code null}
      */
-    public record Components(PendingCommandLedger ledger, Subscriber subscriber) {
+    public record Components(PendingCommandLedger ledger, Subscriber subscriber,
+                            Runnable expirationTick) {
     }
 
     /**
-     * Builds the ledger and returns its {@link PendingCommandLedger} and {@link Subscriber}
-     * views (the same instance).
+     * Builds the ledger and returns its {@link PendingCommandLedger} query, {@link Subscriber},
+     * and {@link Runnable} deadline-sweep views (all the same instance).
      *
      * @param publisher                    the durable publish surface for {@code state_confirmed}
      *                                     / {@code command_confirmation_timed_out}, never
@@ -71,7 +81,7 @@ public final class PendingCommandLedgerAssembly {
      * @param clock                        the injected clock (REC-156/167), never {@code null}
      * @param defaultConfirmationTimeoutMs the fallback confirmation window in milliseconds,
      *                                     {@code > 0}
-     * @return both interface views of the ledger; never {@code null}
+     * @return the three interface views of the ledger; never {@code null}
      * @throws NullPointerException     if {@code publisher}, {@code entityRegistry}, or
      *                                  {@code clock} is {@code null}
      * @throws IllegalArgumentException if {@code defaultConfirmationTimeoutMs <= 0}
@@ -84,7 +94,7 @@ public final class PendingCommandLedgerAssembly {
         Objects.requireNonNull(clock, "clock");
         StandardPendingCommandLedger ledger = new StandardPendingCommandLedger(
                 publisher, entityRegistry, clock, defaultConfirmationTimeoutMs);
-        return new Components(ledger, ledger);
+        return new Components(ledger, ledger, ledger::pollExpirations);
     }
 
     /**
