@@ -52,7 +52,19 @@ hs_version() {
     if [ -f "${_d}/VERSION" ]; then tr -d ' \n' < "${_d}/VERSION"; return; fi
     if [ -f "${_d}/../VERSION" ]; then tr -d ' \n' < "${_d}/../VERSION"; return; fi
     if command -v git >/dev/null 2>&1 && git -C "${_d}" rev-parse >/dev/null 2>&1; then
-        git -C "${_d}" describe --tags --always --dirty 2>/dev/null && return
+        _v="$(git -C "${_d}" describe --tags --always --dirty 2>/dev/null)"
+        if [ -n "${_v}" ]; then
+            # A Debian Version field MUST start with a digit (dpkg-deb rejects otherwise).
+            # A tag-derived describe (1.2.3, 1.2.3-5-gabc1234) already does; a bare commit
+            # id from an untagged repo (git describe --always -> b85e1ed) does NOT, so wrap
+            # it as a 0.1.0 upstream + the +g<id> git build-metadata convention. This is the
+            # install-smoke gate-4 fix: SHAs starting with a-f assembled an invalid .deb.
+            case "${_v}" in
+                [0-9]*) printf '%s' "${_v}" ;;
+                *)      printf '0.1.0+g%s' "${_v}" ;;
+            esac
+            return
+        fi
     fi
     printf '0.1.0-skeleton'
 }
