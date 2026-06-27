@@ -98,7 +98,10 @@ fi
 log "-- dpkg-deb --info --"
 dpkg-deb --info "${DEB}" >&2
 log "-- dpkg-deb --contents (head) --"
-dpkg-deb --contents "${DEB}" | head -40 >&2
+# `| head` closes the pipe after 40 lines; under `set -euo pipefail` dpkg-deb then
+# errors on the broken pipe (exit 2) and fails the step on a *diagnostic* print
+# (the .deb was already built above). Never let this informational dump fail the build.
+dpkg-deb --contents "${DEB}" 2>/dev/null | head -40 >&2 || true
 if command -v lintian >/dev/null 2>&1; then
     log "-- lintian (informational; failures non-fatal for the skeleton) --"
     lintian "${DEB}" >&2 || true
