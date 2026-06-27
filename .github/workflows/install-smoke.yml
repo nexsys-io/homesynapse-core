@@ -1,0 +1,85 @@
+# HomeSynapse Core — install-smoke CI job (the gate of record).
+#
+# Proves the one-command install path end-to-end on every change:
+#   build image → assemble .deb → install on a clean machine → boot →
+#   loopback health probe → assert RUNNING + token + auth enforced →
+#   stop → uninstall (data preserved) → update-smoke (zero event loss).
+#
+# This IS go/no-go gate #4 ("install path proven") for the mid-August review.
+#
+# ┌─ WIRING SEAM ────────────────────────────────────────────────────────────┐
+# │ GitHub only runs workflows under .github/workflows/. This file lives in   │
+# │ distribution/ci/ to honour the lane's write-isolation (the spine owns     │
+# │ .github/). To activate, the hub copies/symlinks it:                       │
+# │     cp distribution/ci/install-smoke.yml .github/workflows/install-smoke.yml
+# │ (Or add a path-trigger to the existing ci.yml.) Flagged in the lane return.│
+# └───────────────────────────────────────────────────────────────────────────┘
+name: install-smoke
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths: [ 'distribution/**', 'app/**', 'lifecycle/**', 'api/**', 'gradle/**', 'build-logic/**' ]
+  pull_request:
+    branches: [ main ]
+    paths: [ 'distribution/**', 'app/**', 'lifecycle/**', 'api/**' ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  install-smoke:
+    name: Build image + .deb, install-smoke on a clean machine
+    runs-on: ubuntu-latest          # hosted Ubuntu runs systemd → real service install
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'corretto'   # matches ci.yml / LTD-10 pinning
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Static lint (shell scripts parse-clean)
+        run: |
+          set -e
+          for f in $(find distribution -name '*.sh'); do bash -n "$f"; done
+          echo "all shell scripts parsed clean"
+
+      - name: Build runtime image (Gradle installDist → jlink)
+        run: distribution/image/build-image.sh
+
+      - name: Assemble .deb
+        run: distribution/deb/build-deb.sh
+
+      - name: Install-smoke (install → boot → probe → assert → uninstall)
+        run: sudo --preserve-env=JAVA_HOME distribution/smoke/run-smoke.sh
+
+      - name: Update-smoke (version bump preserves the event store)
+        run: |
+          # sqlite3 enables the hard zero-event-loss row-count assertion.
+          sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3
+          sudo --preserve-env=JAVA_HOME distribution/update/update-smoke.sh
+
+      - name: Upload artifacts (image, .deb, logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-artifacts
+          path: |
+            distribution/image/build/homesynapse_*.tar.gz
+            distribution/deb/build/homesynapse_*.deb
+          retention-days: 7
+
+      - name: Capture service journal on failure
+        if: failure()
+        run: |
+          sudo journalctl -u homesynapse.service -b --no-pager || true
+          sudo systemctl --no-pager status homesynapse.service || true

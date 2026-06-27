@@ -1,0 +1,41 @@
+# Frontend CI for the V1 observability dashboard.
+#
+# WIRING NOTE (cross-lane): this lane writes only under web-ui/dashboard/, so this
+# workflow is delivered here ready-to-use. The hub adds it to .github/workflows/
+# (repo-root shared infra) — a one-step spine change the frontend lane must not make
+# unilaterally (dispatch §0/§6). Once placed, it is the frontend gate of record.
+name: Frontend CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['web-ui/dashboard/**']
+  pull_request:
+    branches: [main]
+    paths: ['web-ui/dashboard/**']
+
+permissions:
+  contents: read
+
+jobs:
+  dashboard:
+    name: Lint · Typecheck · Test · Build · Budget · Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web-ui/dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web-ui/dashboard/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Verify (lint + typecheck + test + build + budget + contract)
+        run: npm run verify
