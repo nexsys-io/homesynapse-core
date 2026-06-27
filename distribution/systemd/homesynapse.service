@@ -1,0 +1,109 @@
+[Unit]
+# HomeSynapse Core — Tier-1 systemd service unit.
+#
+# Boots the CURRENT artifact (core 5363347, M7.3) as a least-privilege,
+# loopback-bound, authenticated service. Paths mirror distribution/common.sh and
+# the Locked boot contract (Doc 12 §3.2 / LTD-01 / LTD-13).
+#
+# READINESS TODAY (skeleton): real sd_notify is deferred to M13 — OpenJDK 21 has
+# no AF_UNIX SOCK_DGRAM (JEP 380 is stream-only), so SystemdHealthReporter throws
+# and NoOpHealthReporter is the live path. Therefore this unit is Type=exec and
+# proves readiness with a loopback HTTP probe in ExecStartPost. The Type=notify +
+# WatchdogSec block at the bottom is the M13 flip (OR-M13-SDNOTIFY) — staged and
+# commented so enabling it is a two-line edit, not a redesign.
+Description=HomeSynapse Core — local-first smart-home engine
+Documentation=file:/opt/homesynapse/VERSION
+After=network-online.target
+Wants=network-online.target
+# Bound the crash-loop: at most 5 starts per 5 min, else stop trying (and surface).
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=homesynapse
+Group=homesynapse
+
+# systemd creates + owns these (FHS); StateDirectory=homesynapse → /var/lib/homesynapse.
+# Mode 0700 because the event store and the first-run pairing token live here.
+StateDirectory=homesynapse
+StateDirectoryMode=0700
+LogDirectory=homesynapse
+ConfigurationDirectory=homesynapse
+ConfigurationDirectoryMode=0750
+WorkingDirectory=/var/lib/homesynapse
+
+# CURRENT-ARTIFACT path model: Main resolves every runtime dir from
+# $HOMESYNAPSE_HOME (it does not yet select LinuxSystemPaths — see
+# docs/boot-contract-map.md). Drop this line when the composition root wires
+# LinuxSystemPaths (M13); the FHS split takes over with no other unit change.
+Environment=HOMESYNAPSE_HOME=/var/lib/homesynapse
+# Operator overrides (HOMESYNAPSE_JVM_OPTS, future LAN opt-in). Optional ("-").
+EnvironmentFile=-/etc/homesynapse/homesynapse.env
+
+ExecStart=/opt/homesynapse/bin/homesynapse
+
+# Readiness gate: block `systemctl start` until the loopback API answers RUNNING.
+# The probe authenticates with the first-run token (every path is auth-gated
+# today) and treats HTTP 200 = ready, 503 = up-but-not-ready, conn-refused = not
+# up yet. If readiness never arrives, the unit fails and Restart= kicks in.
+ExecStartPost=/opt/homesynapse/libexec/health-probe.sh --wait --timeout 90
+
+# Graceful stop: Main installs a SIGTERM shutdown hook (Doc 12 §7, 30s internal
+# grace). Give systemd's stop timeout the Doc-12 budget.
+KillSignal=SIGTERM
+TimeoutStartSec=120
+TimeoutStopSec=90
+
+# Restart policy keyed to the ExitCode contract. CONFIGURATION_FAILURE (10) is
+# deterministic — a bad config will fail identically on every restart, so do NOT
+# loop on it; surface it instead. All other non-zero exits are restart-worthy.
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=10
+
+# Resource ceiling (Doc 12 §6.6).
+MemoryMax=2G
+
+# ── Least-privilege hardening ───────────────────────────────────────────────
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+# AF_UNIX is kept for the M13 sd_notify socket; AF_INET/6 for the loopback HTTP surface.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# RAMP (post-M9): the Zigbee coordinator is a serial device. PrivateDevices=yes
+# blocks /dev access, so loosen it then and allowlist the coordinator, e.g.:
+#   PrivateDevices=no
+#   DeviceAllow=/dev/ttyUSB0 rw
+#   SupplementaryGroups=dialout
+PrivateDevices=yes
+
+# Journald capture (Console output is plain text per Doc 12 §0.3).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homesynapse
+
+# ── M13 FLIP (OR-M13-SDNOTIFY) — enable when real sd_notify lands ────────────
+# Replace `Type=exec` above with `Type=notify`, delete the ExecStartPost probe
+# line (READY=1 then gates start), and uncomment:
+#   NotifyAccess=main
+#   WatchdogSec=60          ; C12-03 liveness — health loop pets WATCHDOG=1 at 30s
+#   Restart=on-watchdog
+# The health-probe stays useful for the smoke harness regardless.
+
+[Install]
+WantedBy=multi-user.target

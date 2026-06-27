@@ -1,0 +1,18 @@
+Package: homesynapse
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: NexSys HomeSynapse <homesynapse@nexsys.example>
+Section: misc
+Priority: optional
+Depends: adduser
+Installed-Size: @INSTALLED_SIZE@
+Homepage: https://nexsys.example/homesynapse
+Description: HomeSynapse Core — local-first smart-home engine
+ A local-first, event-sourced smart-home operating system that runs entirely on
+ your own hardware. Installs as a least-privilege systemd service, loopback-bound
+ and authenticated by default.
+ .
+ This package is self-contained: it bundles its own jlinked Java runtime, so no
+ system JDK is required and nothing is fetched from the network at install time.
+ On first start it mints a one-time pairing token; run `homesynapse-token` to see
+ where it landed, then pair a client to reach the dashboard.

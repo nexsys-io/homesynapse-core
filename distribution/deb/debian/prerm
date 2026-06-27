@@ -1,0 +1,23 @@
+#!/bin/sh
+# prerm — HomeSynapse Core. Stop the service before files are removed.
+set -e
+HS_UNIT="homesynapse.service"
+
+case "$1" in
+    remove|deconfigure|upgrade)
+        if [ -d /run/systemd/system ]; then
+            # Graceful: SIGTERM → Main's shutdown hook (Doc 12 §7, ≤30s grace).
+            if command -v deb-systemd-invoke >/dev/null 2>&1; then
+                deb-systemd-invoke stop "${HS_UNIT}" || true
+            elif command -v systemctl >/dev/null 2>&1; then
+                systemctl stop "${HS_UNIT}" || true
+            fi
+        fi
+        ;;
+    failed-upgrade)
+        ;;
+    *)
+        ;;
+esac
+
+exit 0

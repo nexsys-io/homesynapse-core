@@ -1,0 +1,78 @@
+.shell { display: grid; grid-template-columns: var(--hs-sidebar-w) 1fr; min-height: 100%; }
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  background: var(--hs-surface);
+  border-right: 1px solid var(--hs-border);
+  display: flex;
+  flex-direction: column;
+  padding: var(--hs-space-4) var(--hs-space-3);
+  gap: var(--hs-space-4);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--hs-space-2);
+  font-weight: var(--hs-weight-semibold);
+  font-size: var(--hs-text-md);
+  padding: 0 var(--hs-space-2);
+}
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--hs-accent-500); box-shadow: 0 0 0 3px var(--hs-accent-50); }
+
+.nav { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.link {
+  display: flex;
+  align-items: center;
+  gap: var(--hs-space-2);
+  padding: 8px var(--hs-space-2);
+  border-radius: var(--hs-radius-md);
+  color: var(--hs-text-secondary);
+  font-size: var(--hs-text-sm);
+  font-weight: var(--hs-weight-medium);
+}
+.link:hover { background: var(--hs-surface-hover); color: var(--hs-text); text-decoration: none; }
+.active { background: var(--hs-accent-50); color: var(--hs-accent-700); }
+.icon { width: 16px; height: 16px; flex: none; }
+
+/* The differentiator gets a quiet emphasis — not a hype move. */
+.feature { color: var(--hs-text); }
+.feature.active { background: var(--hs-accent-500); color: var(--hs-text-on-accent); }
+.feature:not(.active) { box-shadow: inset 0 0 0 1px var(--hs-border); }
+
+.footer { margin-top: auto; display: flex; flex-direction: column; gap: var(--hs-space-2); padding: 0 var(--hs-space-1); }
+.phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--hs-text-xs);
+  color: var(--hs-text-secondary);
+}
+.phaseDot { width: 8px; height: 8px; border-radius: 50%; background: var(--hs-text-muted); }
+.ok .phaseDot { background: var(--hs-ok-500); }
+.warn .phaseDot { background: var(--hs-warn-500); }
+.error .phaseDot { background: var(--hs-error-500); }
+.unknown .phaseDot { background: var(--hs-unknown-500); }
+
+.signout {
+  align-self: flex-start;
+  border: none;
+  background: transparent;
+  color: var(--hs-text-muted);
+  font-size: var(--hs-text-xs);
+  padding: 2px 0;
+}
+.signout:hover { color: var(--hs-text); text-decoration: underline; }
+
+.main { min-width: 0; }
+
+@media (max-width: 720px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar {
+    position: static; height: auto; flex-direction: row; align-items: center;
+    overflow-x: auto; padding: var(--hs-space-2);
+  }
+  .nav { flex-direction: row; }
+  .footer { margin-top: 0; flex-direction: row; align-items: center; }
+}

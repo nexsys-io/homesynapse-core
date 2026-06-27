@@ -1,0 +1,84 @@
+#!/bin/sh
+# postinst — HomeSynapse Core.
+# Runs as root. Self-contained (the distribution/ tree is NOT present at install
+# time); canonical paths mirror distribution/common.sh — keep them in sync.
+set -e
+
+HS_USER="homesynapse"
+HS_GROUP="homesynapse"
+HS_DATA="/var/lib/homesynapse"
+HS_LOG="/var/log/homesynapse"
+HS_ETC="/etc/homesynapse"
+HS_CONFIG="${HS_DATA}/config"
+HS_TOKEN="${HS_CONFIG}/initial_api_token"
+HS_UNIT="homesynapse.service"
+
+case "$1" in
+    configure)
+        # 1. Dedicated system group + user: no login shell, home = the data dir,
+        #    home not auto-created here (we create + lock down the tree below).
+        if ! getent group "${HS_GROUP}" >/dev/null; then
+            addgroup --system "${HS_GROUP}"
+        fi
+        if ! getent passwd "${HS_USER}" >/dev/null; then
+            adduser --system --ingroup "${HS_GROUP}" --home "${HS_DATA}" \
+                    --no-create-home --gecos "HomeSynapse Core" \
+                    --disabled-login "${HS_USER}"
+        fi
+
+        # 2. State / config / log tree. systemd's StateDirectory= recreates these
+        #    on start too, but creating them now means a fresh box is correct
+        #    before first boot. 0700 because the event store + pairing token live
+        #    under the data dir (least privilege; secrets are 0600-class).
+        install -d -o "${HS_USER}" -g "${HS_GROUP}" -m 0700 \
+            "${HS_DATA}" "${HS_CONFIG}" "${HS_DATA}/data" \
+            "${HS_DATA}/backups" "${HS_DATA}/tmp"
+        install -d -o "${HS_USER}" -g "${HS_GROUP}" -m 0750 "${HS_LOG}"
+        install -d -o root        -g "${HS_GROUP}" -m 0750 "${HS_ETC}"
+
+        # 3. Register + start the unit (Debian helper idioms when available,
+        #    plain systemctl otherwise; tolerant of build chroots with no systemd).
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper enable "${HS_UNIT}" >/dev/null || true
+        elif command -v systemctl >/dev/null 2>&1; then
+            systemctl enable "${HS_UNIT}" >/dev/null 2>&1 || true
+        fi
+
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+            # The unit's ExecStartPost health probe gates this start until the
+            # loopback API answers RUNNING — so a clean return means "serving".
+            started=0
+            if command -v deb-systemd-invoke >/dev/null 2>&1; then
+                deb-systemd-invoke start "${HS_UNIT}" && started=1 || started=0
+            else
+                systemctl start "${HS_UNIT}" && started=1 || started=0
+            fi
+            if [ "${started}" -eq 1 ]; then
+                echo "HomeSynapse Core is running."
+            else
+                echo "HomeSynapse Core was installed but did not start cleanly." >&2
+                echo "Inspect: journalctl -u ${HS_UNIT} -b --no-pager" >&2
+            fi
+        else
+            echo "No running systemd detected; the service is enabled and will start on boot."
+        fi
+
+        # 4. Surface the first-run pairing token PATH (never the value — that
+        #    would leak into apt logs). The operator runs homesynapse-token.
+        echo "----------------------------------------------------------------"
+        echo " HomeSynapse Core installed."
+        echo " First-run pairing token: ${HS_TOKEN}"
+        echo "   View it with:  sudo homesynapse-token"
+        echo "   Pair a client with that bearer token to reach the dashboard,"
+        echo "   then delete the token file."
+        echo "----------------------------------------------------------------"
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        ;;
+esac
+
+exit 0

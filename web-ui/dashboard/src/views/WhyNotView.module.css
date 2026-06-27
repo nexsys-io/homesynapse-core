@@ -1,0 +1,24 @@
+.pick { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--hs-space-2); }
+.pickRow {
+  display: flex;
+  flex-direction: column;
+  padding: var(--hs-space-3) var(--hs-space-4);
+  background: var(--hs-surface);
+  border: 1px solid var(--hs-border);
+  border-radius: var(--hs-radius-md);
+  color: var(--hs-text);
+}
+.pickRow:hover { background: var(--hs-surface-hover); text-decoration: none; }
+.pickName { font-weight: var(--hs-weight-medium); }
+.pickSummary { font-size: var(--hs-text-xs); color: var(--hs-text-muted); }
+
+.detail { display: flex; flex-direction: column; gap: var(--hs-space-3); }
+.verdictRow { display: flex; align-items: center; gap: var(--hs-space-2); flex-wrap: wrap; }
+.autoName { color: var(--hs-text-secondary); font-size: var(--hs-text-sm); }
+.explanation {
+  font-size: var(--hs-text-md);
+  line-height: var(--hs-leading-relaxed);
+  max-width: 56ch;
+}
+.left { text-align: left !important; font-weight: var(--hs-weight-normal) !important; color: var(--hs-text-secondary) !important; }
+.nextStep { font-size: var(--hs-text-sm); color: var(--hs-text-secondary); }

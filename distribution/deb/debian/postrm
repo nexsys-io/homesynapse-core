@@ -1,0 +1,63 @@
+#!/bin/sh
+# postrm — HomeSynapse Core.
+#
+# Data-preservation default: on `purge` we KEEP /var/lib/homesynapse (the
+# append-only event store + config) unless the operator explicitly opts in with
+#   HOMESYNAPSE_PURGE_DATA=yes apt purge homesynapse
+# Losing a household's event history must never be an accidental side effect.
+set -e
+
+HS_USER="homesynapse"
+HS_GROUP="homesynapse"
+HS_DATA="/var/lib/homesynapse"
+HS_LOG="/var/log/homesynapse"
+HS_ETC="/etc/homesynapse"
+HS_UNIT="homesynapse.service"
+
+case "$1" in
+    remove)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+
+    purge)
+        # Deregister unit helper state.
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper purge "${HS_UNIT}" >/dev/null || true
+            deb-systemd-helper unmask "${HS_UNIT}" >/dev/null || true
+        fi
+
+        # Config tree + env drop-in always go on purge.
+        rm -rf "${HS_ETC}"
+        rm -rf "${HS_LOG}"
+
+        # Event store / data: preserved unless explicitly opted out.
+        if [ "${HOMESYNAPSE_PURGE_DATA:-no}" = "yes" ]; then
+            echo "HOMESYNAPSE_PURGE_DATA=yes — removing ${HS_DATA} (event store included)."
+            rm -rf "${HS_DATA}"
+        else
+            echo "Preserving ${HS_DATA} (event store + config)."
+            echo "Remove it manually, or re-purge with HOMESYNAPSE_PURGE_DATA=yes, to erase it."
+        fi
+
+        # Remove the dedicated account last.
+        if getent passwd "${HS_USER}" >/dev/null; then
+            deluser --system "${HS_USER}" >/dev/null 2>&1 || true
+        fi
+        if getent group "${HS_GROUP}" >/dev/null; then
+            delgroup --system "${HS_GROUP}" >/dev/null 2>&1 || true
+        fi
+
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+    *)
+        ;;
+esac
+
+exit 0

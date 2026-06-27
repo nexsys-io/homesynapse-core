@@ -1,0 +1,6 @@
+# Frontend build + deps (the root .gitignore also covers these).
+node_modules/
+dist/
+coverage/
+src/main/resources/dashboard/
+*.local

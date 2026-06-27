@@ -1,0 +1,40 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--hs-z-drawer);
+  background: rgba(13, 16, 20, 0.32);
+  display: flex;
+  justify-content: flex-end;
+  animation: fade var(--hs-dur) var(--hs-ease);
+}
+.panel {
+  width: min(460px, 92vw);
+  height: 100%;
+  background: var(--hs-surface);
+  box-shadow: var(--hs-shadow-drawer);
+  display: flex;
+  flex-direction: column;
+  outline: none;
+  animation: slide var(--hs-dur) var(--hs-ease);
+}
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--hs-space-3) var(--hs-space-4);
+  border-bottom: 1px solid var(--hs-border);
+}
+.title { font-size: var(--hs-text-md); font-weight: var(--hs-weight-semibold); }
+.close {
+  border: none;
+  background: transparent;
+  color: var(--hs-text-muted);
+  font-size: var(--hs-text-base);
+  padding: 4px 8px;
+  border-radius: var(--hs-radius-sm);
+}
+.close:hover { background: var(--hs-surface-hover); color: var(--hs-text); }
+.body { padding: var(--hs-space-4); overflow-y: auto; }
+
+@keyframes slide { from { transform: translateX(16px); opacity: 0.6; } to { transform: none; opacity: 1; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }

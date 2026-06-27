@@ -1,0 +1,64 @@
+.screen {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--hs-space-4);
+  background:
+    radial-gradient(1200px 600px at 50% -10%, var(--hs-accent-50), transparent 60%),
+    var(--hs-bg);
+}
+.card {
+  width: min(420px, 100%);
+  background: var(--hs-surface);
+  border: 1px solid var(--hs-border);
+  border-radius: var(--hs-radius-lg);
+  box-shadow: var(--hs-shadow-md);
+  padding: var(--hs-space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hs-space-2);
+}
+.brand {
+  font-weight: var(--hs-weight-semibold);
+  letter-spacing: 0.02em;
+  color: var(--hs-text-secondary);
+  font-size: var(--hs-text-sm);
+  text-transform: uppercase;
+}
+.title { font-size: var(--hs-text-lg); font-weight: var(--hs-weight-semibold); margin-top: var(--hs-space-1); }
+.lede { color: var(--hs-text-secondary); font-size: var(--hs-text-sm); line-height: var(--hs-leading-normal); }
+.lede code, .note code { font-size: 0.9em; background: var(--hs-surface-sunk); padding: 1px 5px; border-radius: 4px; }
+
+.error {
+  color: var(--hs-error-500);
+  background: var(--hs-error-bg);
+  font-size: var(--hs-text-sm);
+  padding: var(--hs-space-2) var(--hs-space-3);
+  border-radius: var(--hs-radius-sm);
+}
+
+.label { font-size: var(--hs-text-sm); font-weight: var(--hs-weight-medium); margin-top: var(--hs-space-2); }
+.input {
+  font: inherit;
+  padding: 10px 12px;
+  border: 1px solid var(--hs-border-strong);
+  border-radius: var(--hs-radius-md);
+  background: var(--hs-bg);
+  color: var(--hs-text);
+}
+.input:focus-visible { border-color: var(--hs-accent-500); outline: none; box-shadow: 0 0 0 3px var(--hs-accent-50); }
+
+.button {
+  margin-top: var(--hs-space-3);
+  padding: 10px 14px;
+  border: none;
+  border-radius: var(--hs-radius-md);
+  background: var(--hs-accent-500);
+  color: var(--hs-text-on-accent);
+  font-weight: var(--hs-weight-medium);
+}
+.button:hover:not(:disabled) { background: var(--hs-accent-600); }
+.button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.note { margin-top: var(--hs-space-3); color: var(--hs-text-muted); font-size: var(--hs-text-xs); line-height: var(--hs-leading-normal); }

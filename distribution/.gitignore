@@ -1,0 +1,10 @@
+# Build outputs — produced by build-image.sh / build-deb.sh; never committed.
+image/build/
+deb/build/
+**/build/
+*.deb
+*.tar.gz
+
+# Image staging / rollback snapshots
+*.prev
+*.old

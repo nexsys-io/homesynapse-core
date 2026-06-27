@@ -1,0 +1,23 @@
+#!/bin/sh
+# homesynapse-token — print the first-run pairing token (installed to /usr/bin).
+# The post-M9 pairing wizard's CLI handoff point; for now, the operator's way to
+# read the one-time bearer token the engine minted on first start.
+set -eu
+TOKEN_FILE="${HOMESYNAPSE_TOKEN_FILE:-/var/lib/homesynapse/config/initial_api_token}"
+
+if [ ! -e "${TOKEN_FILE}" ]; then
+    echo "No pairing token at ${TOKEN_FILE}."
+    echo "Either the service has not completed its first start yet, or a client"
+    echo "has already paired and the token file was removed."
+    exit 1
+fi
+if [ ! -r "${TOKEN_FILE}" ]; then
+    echo "Pairing token exists at ${TOKEN_FILE} but is not readable by this user." >&2
+    echo "Re-run with sudo." >&2
+    exit 1
+fi
+
+echo "Pairing token file : ${TOKEN_FILE}"
+echo "Bearer token       : $(tr -d ' \r\n' < "${TOKEN_FILE}")"
+echo
+echo "Pair a client with this token, then delete the file:  sudo rm ${TOKEN_FILE}"
