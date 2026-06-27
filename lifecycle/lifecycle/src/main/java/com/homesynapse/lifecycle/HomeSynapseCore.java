@@ -13,6 +13,8 @@ import com.homesynapse.api.rest.StandardRateLimiter;
 import com.homesynapse.automation.AutomationDefinitionLoader;
 import com.homesynapse.automation.AutomationEngineAssembly;
 import com.homesynapse.automation.AutomationSchema;
+import com.homesynapse.automation.CommandDispatchAssembly;
+import com.homesynapse.automation.CommandDispatchService;
 import com.homesynapse.automation.InMemoryAutomationIdentityStore;
 import com.homesynapse.automation.LoadFailure;
 import com.homesynapse.automation.LoadResult;
@@ -207,6 +209,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     private AreaRegistry areaRegistry;
     private StandardAutomationRegistry automationRegistry;
     private StandardTriggerEvaluator triggerEvaluator;
+    private CommandDispatchService commandDispatchService;
     private HealthLoop healthLoop;
     private Javalin httpServer;
 
@@ -461,6 +464,24 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         eventBus.subscribeRuntime(
                 new SubscriberInfo(AUTOMATION_SUBSCRIBER_ID, SubscriptionFilter.all(), false),
                 automationSubscriber);
+
+        // Step 3.4b — command_dispatch_service (the co-located dispatch subscriber, M7.4a /
+        // §1 D1 / AMD-95). The executor emits command_issued; this subscriber consumes it and
+        // routes via the two-hop entity->device->integration resolution, dispatching in LIVE
+        // only (D2 pure-function-replay). Registered AFTER the projection is LIVE — the same
+        // catch-up ordering invariant as automation_engine (a dispatch subscriber must not act
+        // on the replay catch-up) — and torn down in BOTH shutdown branches (the paired
+        // teardown: the reverted-M7.3 lesson that a runtime subscriber with no matching stop
+        // leaks its resources). coalesceExempt=true: a coalesced command_issued would be a
+        // command that never dispatched (correctness-critical, mirroring the ledger).
+        CommandDispatchAssembly.Components commandDispatch =
+                CommandDispatchAssembly.commandDispatchSubscriber(
+                        entityRegistry, deviceRegistry, eventPublisher);
+        this.commandDispatchService = commandDispatch.service();
+        eventBus.subscribeRuntime(
+                new SubscriberInfo(CommandDispatchAssembly.SUBSCRIBER_ID,
+                        CommandDispatchAssembly.subscriptionFilter(), true),
+                commandDispatch.subscriber());
         recordSubsystem("automation", LifecyclePhase.CORE_DOMAIN, automationStart);
 
         // ── Phase 4 OBSERVABILITY ────────────────────────────────────────────
@@ -740,6 +761,11 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             if (scheduler != null) {
                 scheduler.shutdown();
             }
+            // Paired teardown for the command_dispatch_service subscriber (M7.4a), mirroring the
+            // graceful path — eventBus.abandon() drops the subscription itself.
+            if (commandDispatchService != null) {
+                commandDispatchService.close();
+            }
             if (triggerEvaluator != null) {
                 triggerEvaluator.close();
             }
@@ -784,8 +810,14 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 scheduler.shutdown();
             }
             if (eventBus != null) {
+                eventBus.unsubscribe(CommandDispatchAssembly.SUBSCRIBER_ID);
                 eventBus.unsubscribe(AUTOMATION_SUBSCRIBER_ID);
                 eventBus.unsubscribe(PROJECTION_SUBSCRIBER_ID);
+            }
+            // Paired teardown for the command_dispatch_service subscriber (M7.4a): release any
+            // held resource alongside triggerEvaluator.close() (the reverted-M7.3 lesson).
+            if (commandDispatchService != null) {
+                commandDispatchService.close();
             }
             if (triggerEvaluator != null) {
                 triggerEvaluator.close();

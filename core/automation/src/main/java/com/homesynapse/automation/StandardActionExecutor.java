@@ -8,15 +8,24 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.function.Function;
 
+import com.homesynapse.device.CapabilityInstance;
+import com.homesynapse.device.CommandDefinition;
+import com.homesynapse.device.Entity;
+import com.homesynapse.device.EntityRegistry;
+import com.homesynapse.device.IdempotencyClass;
 import com.homesynapse.event.AutomationActionCompletedEvent;
 import com.homesynapse.event.AutomationActionStartedEvent;
 import com.homesynapse.event.CausalContext;
+import com.homesynapse.event.CommandIdempotency;
+import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.DomainEvent;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
-import com.homesynapse.event.EventId;
 import com.homesynapse.event.EventOrigin;
 import com.homesynapse.event.EventPriority;
 import com.homesynapse.event.EventPublisher;
@@ -41,8 +50,11 @@ import org.slf4j.LoggerFactory;
  * <ul>
  *   <li>{@link CommandAction} — resolve the target selector, apply {@link UnavailablePolicy}
  *       per target ({@code SKIP} skips only the unavailable target, {@code ERROR} fails the
- *       Run, {@code WARN} dispatches anyway), dispatch via {@link CommandDispatchService}, and
- *       count each dispatch.</li>
+ *       Run, {@code WARN} emits anyway), and <strong>emit one {@code command_issued} event per
+ *       target</strong> — the substrate-native command hop (§1 D1 / AMD-95): the log is the
+ *       single source of truth for dispatch, and the co-located {@code command_dispatch_service}
+ *       subscriber consumes {@code command_issued} and routes it (M7.4a). The executor no longer
+ *       dispatches in-process. Each emit counts toward the command tally.</li>
  *   <li>{@link DelayAction} — {@code Thread.sleep(Duration)} on the VT (no carrier pinning).</li>
  *   <li>{@link WaitForAction} — poll the condition against a fresh snapshot until it holds or
  *       the timeout elapses (clock-driven, §4c); a timeout completes the action (not an
@@ -53,6 +65,27 @@ import org.slf4j.LoggerFactory;
  *   <li>{@link EmitEventAction} — publish the user-defined event via {@link EmittedDomainEvent}.</li>
  * </ul>
  *
+ * <h2>The {@code command_issued} producer (M7.4a)</h2>
+ * <p>Each command target yields exactly one {@code command_issued} carrying the frozen
+ * 5-component {@link CommandIssuedEvent} (AMD-95 §2.B/§2.C): the target ULID, the command type,
+ * the serialized parameters, the resolved {@code confirmationTimeoutMs}, and the resolved
+ * {@link CommandIdempotency}. The timeout follows the capability precedence — the target's
+ * {@link CommandDefinition#defaultTimeout()} with the injected
+ * {@code automation.command_pipeline.default_confirmation_timeout_ms} fallback (Doc 07 §9) — and
+ * the idempotency is mapped from the same {@link CommandDefinition}; both fall back when no
+ * capability defines the command (the dispatch subscriber then rejects it {@code unroutable} /
+ * {@code invalid}). {@code command_issued} carries <em>no</em> expectation/confirmation/policy —
+ * the ledger (M7.4b) resolves the expectation from the capability. The event publishes on the
+ * triggering event's {@code CausalContext} (correlation = the Run's, causation = the triggering
+ * event — Doc 07 §3.11.2), preserving the per-Run issue order (AMD-31; the subscriber then
+ * dispatches in {@code global_position} order).</p>
+ *
+ * <p>The parameters JSON is produced by an injected serializer: {@code com.homesynapse.automation}
+ * carries no JSON library (Jackson lives in persistence/config/app), so the composition root —
+ * which owns the persistence {@code ObjectMapper} — supplies the serializer, keeping command
+ * parameters round-trip-faithful with the same serialization the persistence layer and the
+ * future integration adapter use, without a new module edge or a hand-rolled JSON writer.</p>
+ *
  * <p>The three Tier-2 permits throw {@link UnsupportedOperationException} (DP-C) via the
  * exhaustive no-{@code default} switch, which propagates so a misconfigured Tier-2 action is
  * loud, not silent. Any other action failure stops the sequence (§6.2 fail-fast): the failing
@@ -61,8 +94,9 @@ import org.slf4j.LoggerFactory;
  * interrupt (RESTART cancellation) restores the interrupt flag and returns, so the FSM
  * finalizes {@code ABORTED}.</p>
  *
- * <p>Thread-safe per-Run; the action diagnostics publish on the triggering event's
- * {@code CausalContext} (AMD-92 §2.4). Stateless apart from its injected collaborators.</p>
+ * <p>Thread-safe per-Run; the action diagnostics and the {@code command_issued} emits publish on
+ * the triggering event's {@code CausalContext} (AMD-92 §2.4). Stateless apart from its injected
+ * collaborators.</p>
  */
 public final class StandardActionExecutor implements ActionExecutor {
 
@@ -70,39 +104,68 @@ public final class StandardActionExecutor implements ActionExecutor {
 
     private static final int SCHEMA_VERSION = 1;
 
+    /** The JSON object literal for a parameterless command (the non-blank floor, AMD-95). */
+    private static final String EMPTY_PARAMETERS_JSON = "{}";
+
     /** Poll cadence for {@link WaitForAction} when the action omits an explicit interval. */
     static final Duration DEFAULT_POLL_INTERVAL = Duration.ofMillis(500);
 
-    private final CommandDispatchService dispatchService;
+    private final EntityRegistry entityRegistry;
     private final SelectorResolver selectorResolver;
     private final ConditionEvaluator conditionEvaluator;
     private final StateQueryService stateQuery;
     private final EventPublisher publisher;
     private final Clock clock;
+    private final long defaultConfirmationTimeoutMs;
+    private final Function<Map<String, Object>, String> parameterSerializer;
 
     /**
      * Constructs the executor against its injected collaborators.
      *
-     * @param dispatchService    routes command actions to integrations, never {@code null}
-     * @param selectorResolver   resolves command/branch target selectors, never {@code null}
-     * @param conditionEvaluator evaluates wait-for / branch conditions, never {@code null}
-     * @param stateQuery         supplies fresh snapshots for wait-for / branch evaluation,
-     *                           never {@code null}
-     * @param publisher          the durable event publish surface, never {@code null}
-     * @param clock              the injected clock for wait-for timeouts (§4c), never
-     *                           {@code null}
+     * @param entityRegistry               resolves a command target to its capability (the
+     *                                     {@link CommandDefinition} that sources the timeout +
+     *                                     idempotency on {@code command_issued}), never
+     *                                     {@code null}
+     * @param selectorResolver             resolves command/branch target selectors, never
+     *                                     {@code null}
+     * @param conditionEvaluator           evaluates wait-for / branch conditions, never
+     *                                     {@code null}
+     * @param stateQuery                   supplies fresh snapshots for wait-for / branch
+     *                                     evaluation and per-target availability, never
+     *                                     {@code null}
+     * @param publisher                    the durable event publish surface, never {@code null}
+     * @param clock                        the injected clock for wait-for timeouts (§4c), never
+     *                                     {@code null}
+     * @param defaultConfirmationTimeoutMs the fallback {@code confirmationTimeoutMs} when the
+     *                                     target capability declares no positive
+     *                                     {@code default_timeout}
+     *                                     ({@code automation.command_pipeline.default_confirmation_timeout_ms},
+     *                                     Doc 07 §9); must be {@code > 0}
+     * @param parameterSerializer          serializes a command's parameter map to its JSON object
+     *                                     string (the composition root supplies the persistence
+     *                                     {@code ObjectMapper}-backed serializer), never
+     *                                     {@code null}
+     * @throws NullPointerException     if any reference argument is {@code null}
+     * @throws IllegalArgumentException if {@code defaultConfirmationTimeoutMs <= 0}
      */
-    public StandardActionExecutor(CommandDispatchService dispatchService,
+    public StandardActionExecutor(EntityRegistry entityRegistry,
                                   SelectorResolver selectorResolver,
                                   ConditionEvaluator conditionEvaluator,
                                   StateQueryService stateQuery, EventPublisher publisher,
-                                  Clock clock) {
-        this.dispatchService = Objects.requireNonNull(dispatchService, "dispatchService");
+                                  Clock clock, long defaultConfirmationTimeoutMs,
+                                  Function<Map<String, Object>, String> parameterSerializer) {
+        this.entityRegistry = Objects.requireNonNull(entityRegistry, "entityRegistry");
         this.selectorResolver = Objects.requireNonNull(selectorResolver, "selectorResolver");
         this.conditionEvaluator = Objects.requireNonNull(conditionEvaluator, "conditionEvaluator");
         this.stateQuery = Objects.requireNonNull(stateQuery, "stateQuery");
         this.publisher = Objects.requireNonNull(publisher, "publisher");
         this.clock = Objects.requireNonNull(clock, "clock");
+        if (defaultConfirmationTimeoutMs <= 0) {
+            throw new IllegalArgumentException(
+                    "defaultConfirmationTimeoutMs must be positive: " + defaultConfirmationTimeoutMs);
+        }
+        this.defaultConfirmationTimeoutMs = defaultConfirmationTimeoutMs;
+        this.parameterSerializer = Objects.requireNonNull(parameterSerializer, "parameterSerializer");
     }
 
     @Override
@@ -138,11 +201,11 @@ public final class StandardActionExecutor implements ActionExecutor {
         return ActionExecutionResult.succeeded(actionCount, commandCount);
     }
 
-    /** Performs one action's effect, returning the commands it dispatched. No row 5/6. */
+    /** Performs one action's effect, returning the commands it issued. No row 5/6. */
     private int applyAction(ActionDefinition action, RunContext context,
                             EventEnvelope triggeringEvent) throws InterruptedException {
         return switch (action) {
-            case CommandAction command -> dispatchCommand(command, context);
+            case CommandAction command -> issueCommands(command, context, triggeringEvent);
             case DelayAction delay -> {
                 Thread.sleep(delay.duration());
                 yield 0;
@@ -165,9 +228,15 @@ public final class StandardActionExecutor implements ActionExecutor {
         };
     }
 
-    private int dispatchCommand(CommandAction action, RunContext context) {
-        EventId commandEventId = context.triggeringEventId();
-        int dispatched = 0;
+    /**
+     * Emits one {@code command_issued} per resolved, dispatchable target (§3.9 / §3.11; §1 D1).
+     * Applies {@link UnavailablePolicy} per target, then publishes the frozen 5-component event;
+     * returns the number of commands issued.
+     */
+    private int issueCommands(CommandAction action, RunContext context,
+                              EventEnvelope triggeringEvent) {
+        AutomationId automationId = context.automationId();
+        int issued = 0;
         for (EntityId target : selectorResolver.resolve(action.target())) {
             if (availabilityOf(target) == Availability.UNAVAILABLE) {
                 switch (action.onUnavailable()) {
@@ -177,15 +246,80 @@ public final class StandardActionExecutor implements ActionExecutor {
                     case ERROR -> throw new IllegalStateException(
                             "Target '" + target + "' is unavailable");
                     case WARN -> {
-                        // dispatch anyway
+                        // emit anyway
                     }
                 }
             }
-            dispatchService.dispatch(commandEventId, target, action.commandName(),
-                    action.parameters());
-            dispatched++;
+            emitCommandIssued(automationId, target, action, triggeringEvent);
+            issued++;
         }
-        return dispatched;
+        return issued;
+    }
+
+    /**
+     * Builds and publishes a single {@code command_issued} for {@code target}. The timeout +
+     * idempotency are resolved from the target's capability {@link CommandDefinition} (with the
+     * config fallback); the parameters are serialized via the injected serializer.
+     */
+    private void emitCommandIssued(AutomationId automationId, EntityId target, CommandAction action,
+                                   EventEnvelope triggeringEvent) {
+        Optional<CommandDefinition> definition =
+                resolveCommandDefinition(target, action.commandName());
+        int timeoutMs = resolveTimeoutMs(definition);
+        CommandIdempotency idempotency = definition
+                .map(d -> mapIdempotency(d.idempotencyClass()))
+                .orElse(CommandIdempotency.NOT_IDEMPOTENT);     // safe default — never silently re-fire
+        CommandIssuedEvent payload = new CommandIssuedEvent(target.value(), action.commandName(),
+                serializeParameters(action.parameters()), timeoutMs, idempotency);
+        EventDraft draft = new EventDraft(EventTypes.COMMAND_ISSUED, SCHEMA_VERSION,
+                triggeringEvent.eventTime(), SubjectRef.entity(target), EventPriority.NORMAL,
+                EventOrigin.AUTOMATION, payload, automationId.value(), null);
+        publishDraft(draft, triggeringEvent);
+    }
+
+    /** The target capability's command definition for {@code commandName}, if any declares it. */
+    private Optional<CommandDefinition> resolveCommandDefinition(EntityId target,
+                                                                String commandName) {
+        Optional<Entity> entity = entityRegistry.findEntity(target);
+        if (entity.isEmpty()) {
+            return Optional.empty();
+        }
+        for (CapabilityInstance instance : entity.get().capabilities()) {
+            CommandDefinition definition = instance.commands().get(commandName);
+            if (definition != null) {
+                return Optional.of(definition);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The {@code confirmationTimeoutMs} for {@code command_issued}: the capability's positive
+     * {@code default_timeout}, else the injected config fallback (Doc 07 §9). Always {@code > 0}.
+     */
+    private int resolveTimeoutMs(Optional<CommandDefinition> definition) {
+        if (definition.isPresent()) {
+            long capabilityMs = definition.get().defaultTimeout().toMillis();
+            if (capabilityMs > 0) {
+                return (int) Math.min(capabilityMs, Integer.MAX_VALUE);
+            }
+        }
+        return (int) Math.min(defaultConfirmationTimeoutMs, Integer.MAX_VALUE);
+    }
+
+    /** Maps the device-model idempotency class onto the event-model {@link CommandIdempotency}. */
+    private static CommandIdempotency mapIdempotency(IdempotencyClass deviceClass) {
+        return switch (deviceClass) {
+            case IDEMPOTENT -> CommandIdempotency.IDEMPOTENT;
+            case NOT_IDEMPOTENT -> CommandIdempotency.NOT_IDEMPOTENT;
+            case CONDITIONAL -> CommandIdempotency.CONDITIONAL;
+        };
+    }
+
+    /** Serializes the parameter map to a non-blank JSON object string (AMD-95 floor "{}"). */
+    private String serializeParameters(Map<String, Object> parameters) {
+        String json = parameterSerializer.apply(parameters);
+        return (json == null || json.isBlank()) ? EMPTY_PARAMETERS_JSON : json;
     }
 
     private int applyBranch(ConditionBranchAction branch, RunContext context,

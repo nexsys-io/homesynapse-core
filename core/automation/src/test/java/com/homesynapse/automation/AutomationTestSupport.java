@@ -30,6 +30,8 @@ import com.homesynapse.device.EntityRole;
 import com.homesynapse.device.EntityType;
 import com.homesynapse.event.AvailabilityChangedEvent;
 import com.homesynapse.event.CausalContext;
+import com.homesynapse.event.CommandIdempotency;
+import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.DomainEvent;
 import com.homesynapse.event.EventCategory;
 import com.homesynapse.event.EventDraft;
@@ -38,6 +40,7 @@ import com.homesynapse.event.EventId;
 import com.homesynapse.event.EventOrigin;
 import com.homesynapse.event.EventPriority;
 import com.homesynapse.event.EventPublisher;
+import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.StateChangedEvent;
 import com.homesynapse.event.SubjectRef;
@@ -283,25 +286,6 @@ final class AutomationTestSupport {
         }
     }
 
-    /** A {@link CommandDispatchService} recording every dispatch call (lock-free). */
-    static final class RecordingDispatchService implements CommandDispatchService {
-        record Call(EventId commandEventId, EntityId targetRef, String commandName,
-                    Map<String, Object> parameters) {
-        }
-
-        private final List<Call> calls = new java.util.concurrent.CopyOnWriteArrayList<>();
-
-        @Override
-        public void dispatch(EventId commandEventId, EntityId targetRef, String commandName,
-                             Map<String, Object> parameters) {
-            calls.add(new Call(commandEventId, targetRef, commandName, parameters));
-        }
-
-        List<Call> calls() {
-            return List.copyOf(calls);
-        }
-    }
-
     // ---- Event envelopes ----------------------------------------------------
 
     static EventEnvelope envelope(String eventType, SubjectRef subject, DomainEvent payload) {
@@ -330,6 +314,22 @@ final class AutomationTestSupport {
     static EventEnvelope automationInvoked(AutomationId automationId, String context) {
         return envelope("automation_invoked", SubjectRef.automation(automationId),
                 new com.homesynapse.event.AutomationInvokedEvent(context));
+    }
+
+    /**
+     * A {@code command_issued} envelope on an entity subject with an explicit causal chain
+     * (correlation = the Run's, causation = the triggering event — Doc 07 §3.11.2), so the
+     * dispatch subscriber's threading can be asserted. Frozen 5-component payload, parameterless.
+     */
+    static EventEnvelope commandIssued(EntityId target, String commandType,
+                                       Ulid correlationId, Ulid causationId) {
+        EventId id = eventId();
+        return new EventEnvelope(id, EventTypes.COMMAND_ISSUED, 1, FIXED_INSTANT, null,
+                SubjectRef.entity(target), 1L, 0L, EventPriority.NORMAL, EventOrigin.AUTOMATION,
+                List.of(EventCategory.AUTOMATION),
+                CausalContext.chain(correlationId, causationId), null,
+                new CommandIssuedEvent(target.value(), commandType, "{}", 5000,
+                        CommandIdempotency.IDEMPOTENT));
     }
 
     // ---- Stub collaborators -------------------------------------------------

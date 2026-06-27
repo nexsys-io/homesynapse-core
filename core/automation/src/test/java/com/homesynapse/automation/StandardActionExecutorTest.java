@@ -10,12 +10,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
 
+import com.homesynapse.device.StandardCapabilities;
 import com.homesynapse.event.AutomationActionCompletedEvent;
 import com.homesynapse.event.AutomationActionStartedEvent;
+import com.homesynapse.event.CommandIdempotency;
+import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.platform.identity.AutomationId;
+import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.state.Availability;
 import com.homesynapse.state.StateSnapshot;
@@ -26,17 +32,26 @@ import org.junit.jupiter.api.Test;
 
 /**
  * {@link StandardActionExecutor} — the five Tier-1 actions with row 5/6 emission, the tally,
- * §6.2 fail-fast, and the Tier-2 reserved throw (DP-C/DP-D/DP-G).
+ * §6.2 fail-fast, the Tier-2 reserved throw (DP-C/DP-D/DP-G), and the M7.4a {@code command_issued}
+ * producer (a command action emits {@code command_issued} per target — no in-process dispatch —
+ * carrying the frozen 5 components with the capability-sourced timeout/idempotency).
  */
-@DisplayName("StandardActionExecutor (M7.2a-2)")
+@DisplayName("StandardActionExecutor (M7.4a)")
 class StandardActionExecutorTest {
 
+    /** Distinct from the onOff capability's 5000 ms default_timeout, so the precedence is visible. */
+    private static final long DEFAULT_CONFIRMATION_TIMEOUT_MS = 30_000L;
+
+    /** Stand-in for the composition root's persistence-mapper-backed serializer (non-blank). */
+    private static final Function<Map<String, Object>, String> PARAM_SERIALIZER =
+            params -> params.isEmpty() ? "{}" : "{\"keys\":" + params.size() + "}";
+
     private final EntityId entity = AutomationTestSupport.entityId();
+    private final DeviceId deviceId = AutomationTestSupport.deviceId();
     private final Selector selector = new DirectRefSelector(entity);
     private final AutomationId automationId = AutomationTestSupport.automationId();
 
     private AutomationTestSupport.RecordingEventPublisher publisher;
-    private AutomationTestSupport.RecordingDispatchService dispatchService;
     private AutomationTestSupport.StubStateQueryService stateQuery;
     private StandardActionExecutor executor;
     private RunContext context;
@@ -45,14 +60,21 @@ class StandardActionExecutorTest {
     @BeforeEach
     void setUp() {
         publisher = new AutomationTestSupport.RecordingEventPublisher();
-        dispatchService = new AutomationTestSupport.RecordingDispatchService();
         AutomationTestSupport.FakeSelectorResolver resolver =
-                new AutomationTestSupport.FakeSelectorResolver().bind(selector, java.util.Set.of(entity));
+                new AutomationTestSupport.FakeSelectorResolver().bind(selector, Set.of(entity));
+        // The target entity carries the standard onOff capability (turn_on/turn_off:
+        // default_timeout 5 s, IDEMPOTENT), so the producer resolves the capability-sourced
+        // timeout + idempotency on command_issued.
+        AutomationTestSupport.StubEntityRegistry entityRegistry =
+                new AutomationTestSupport.StubEntityRegistry(List.of(
+                        AutomationTestSupport.entityWith(entity, deviceId,
+                                StandardCapabilities.onOff())));
         stateQuery = new AutomationTestSupport.StubStateQueryService(
                 AutomationTestSupport.snapshot(Map.of()));
-        executor = new StandardActionExecutor(dispatchService, resolver,
+        executor = new StandardActionExecutor(entityRegistry, resolver,
                 new StandardConditionEvaluator(resolver, AutomationTestSupport.FIXED_CLOCK),
-                stateQuery, publisher, AutomationTestSupport.FIXED_CLOCK);
+                stateQuery, publisher, AutomationTestSupport.FIXED_CLOCK,
+                DEFAULT_CONFIRMATION_TIMEOUT_MS, PARAM_SERIALIZER);
         context = new RunContext(new RunId(AutomationTestSupport.ulid()), automationId,
                 AutomationTestSupport.eventId(), List.of(0), Map.of(), "hash",
                 RunCausalChain.root(), 1L);
@@ -61,8 +83,8 @@ class StandardActionExecutorTest {
     }
 
     @Test
-    @DisplayName("command action dispatches, counts, and emits row 5 + row 6(success)")
-    void commandAction_dispatchesCountsEmits() {
+    @DisplayName("a command action emits exactly one command_issued (no in-process dispatch) + row 5/6")
+    void commandAction_emitsCommandIssued_notInProcessDispatch() {
         var action = new CommandAction(selector, "turn_on", Map.of(), UnavailablePolicy.SKIP);
 
         ActionExecutionResult result = executor.execute(List.of(action), context, trigger);
@@ -70,22 +92,80 @@ class StandardActionExecutorTest {
         assertThat(result.actionCount()).isEqualTo(1);
         assertThat(result.commandCount()).isEqualTo(1);
         assertThat(result.failed()).isFalse();
-        assertThat(dispatchService.calls()).singleElement()
-                .satisfies(call -> {
-                    assertThat(call.targetRef()).isEqualTo(entity);
-                    assertThat(call.commandName()).isEqualTo("turn_on");
-                });
-        List<EventEnvelope> started = publisher.ofType(EventTypes.AUTOMATION_ACTION_STARTED);
-        assertThat(started).hasSize(1);
-        AutomationActionStartedEvent startedPayload =
-                (AutomationActionStartedEvent) started.get(0).payload();
-        assertThat(startedPayload.actionType()).isEqualTo("CommandAction");
-        assertThat(startedPayload.targetRefs()).containsExactly(entity);
-        AutomationActionCompletedEvent completedPayload =
-                (AutomationActionCompletedEvent) publisher
-                        .ofType(EventTypes.AUTOMATION_ACTION_COMPLETED).get(0).payload();
-        assertThat(completedPayload.outcome()).isEqualTo("success");
-        assertThat(completedPayload.errorDetail()).isNull();
+
+        // The substrate-native hop: one command_issued, no command_dispatched/command_result
+        // (those are the dispatch subscriber's, not the executor's).
+        List<EventEnvelope> issued = publisher.ofType(EventTypes.COMMAND_ISSUED);
+        assertThat(issued).hasSize(1);
+        assertThat(publisher.ofType(EventTypes.COMMAND_DISPATCHED)).isEmpty();
+        assertThat(publisher.ofType(EventTypes.COMMAND_RESULT)).isEmpty();
+
+        EventEnvelope envelope = issued.get(0);
+        CommandIssuedEvent payload = (CommandIssuedEvent) envelope.payload();
+        assertThat(payload.targetEntityRef()).isEqualTo(entity.value());
+        assertThat(payload.commandType()).isEqualTo("turn_on");
+        assertThat(payload.parameters()).isEqualTo("{}");
+        // command_issued is on the entity subject and threads the Run's causal chain
+        // (correlation = the Run's, causation = the triggering event — Doc 07 §3.11.2).
+        assertThat(envelope.subjectRef().id()).isEqualTo(entity.value());
+        assertThat(envelope.causalContext().correlationId())
+                .isEqualTo(trigger.causalContext().correlationId());
+        assertThat(envelope.causalContext().causationId()).isEqualTo(trigger.eventId().value());
+
+        // Row 5/6 still bracket the action.
+        AutomationActionStartedEvent started = (AutomationActionStartedEvent) publisher
+                .ofType(EventTypes.AUTOMATION_ACTION_STARTED).get(0).payload();
+        assertThat(started.actionType()).isEqualTo("CommandAction");
+        assertThat(started.targetRefs()).containsExactly(entity);
+        AutomationActionCompletedEvent completed = (AutomationActionCompletedEvent) publisher
+                .ofType(EventTypes.AUTOMATION_ACTION_COMPLETED).get(0).payload();
+        assertThat(completed.outcome()).isEqualTo("success");
+        assertThat(completed.errorDetail()).isNull();
+    }
+
+    @Test
+    @DisplayName("command_issued carries the capability-sourced timeout and idempotency")
+    void commandIssued_carriesResolvedTimeoutAndIdempotency() {
+        var action = new CommandAction(selector, "turn_on", Map.of("level", 50),
+                UnavailablePolicy.SKIP);
+
+        executor.execute(List.of(action), context, trigger);
+
+        CommandIssuedEvent payload = (CommandIssuedEvent) publisher
+                .ofType(EventTypes.COMMAND_ISSUED).get(0).payload();
+        // onOff turn_on: CommandDefinition.default_timeout = 5 s; IdempotencyClass.IDEMPOTENT.
+        assertThat(payload.confirmationTimeoutMs()).isEqualTo(5_000);
+        assertThat(payload.idempotencyClass()).isEqualTo(CommandIdempotency.IDEMPOTENT);
+        // The injected serializer produced the parameters JSON (non-blank).
+        assertThat(payload.parameters()).isEqualTo("{\"keys\":1}");
+    }
+
+    @Test
+    @DisplayName("command_issued falls back to the config timeout + NOT_IDEMPOTENT when no "
+            + "capability defines the command")
+    void commandIssued_fallsBackToConfigTimeout_whenNoCapability() {
+        var action = new CommandAction(selector, "frobnicate", Map.of(), UnavailablePolicy.SKIP);
+
+        executor.execute(List.of(action), context, trigger);
+
+        CommandIssuedEvent payload = (CommandIssuedEvent) publisher
+                .ofType(EventTypes.COMMAND_ISSUED).get(0).payload();
+        assertThat(payload.confirmationTimeoutMs()).isEqualTo((int) DEFAULT_CONFIRMATION_TIMEOUT_MS);
+        assertThat(payload.idempotencyClass()).isEqualTo(CommandIdempotency.NOT_IDEMPOTENT);
+    }
+
+    @Test
+    @DisplayName("N command actions emit N command_issued in issue order (AMD-31)")
+    void multiCommandRun_emitsInActionOrder() {
+        var first = new CommandAction(selector, "turn_on", Map.of(), UnavailablePolicy.SKIP);
+        var second = new CommandAction(selector, "turn_off", Map.of(), UnavailablePolicy.SKIP);
+
+        ActionExecutionResult result = executor.execute(List.of(first, second), context, trigger);
+
+        assertThat(result.commandCount()).isEqualTo(2);
+        assertThat(publisher.ofType(EventTypes.COMMAND_ISSUED))
+                .extracting(e -> ((CommandIssuedEvent) e.payload()).commandType())
+                .containsExactly("turn_on", "turn_off");
     }
 
     @Test
@@ -128,7 +208,7 @@ class StandardActionExecutorTest {
     }
 
     @Test
-    @DisplayName("condition-branch executes the taken branch's nested commands")
+    @DisplayName("condition-branch emits the taken branch's nested command_issued")
     void conditionBranch_takesThenBranch() {
         stateQuery.setSnapshot(snapshotWith("on", Availability.AVAILABLE));
         var branch = new ConditionBranchAction(new StateCondition(selector, "on_off", "on"),
@@ -138,8 +218,8 @@ class StandardActionExecutorTest {
         ActionExecutionResult result = executor.execute(List.of(branch), context, trigger);
 
         assertThat(result.actionCount()).isEqualTo(1);     // the branch is one top-level action
-        assertThat(result.commandCount()).isEqualTo(1);    // its nested command dispatched
-        assertThat(dispatchService.calls()).hasSize(1);
+        assertThat(result.commandCount()).isEqualTo(1);    // its nested command emitted
+        assertThat(publisher.ofType(EventTypes.COMMAND_ISSUED)).hasSize(1);
         assertThat(((AutomationActionStartedEvent) publisher
                 .ofType(EventTypes.AUTOMATION_ACTION_STARTED).get(0).payload()).actionType())
                 .isEqualTo("ConditionBranchAction");
@@ -176,7 +256,7 @@ class StandardActionExecutorTest {
         assertThat(result.failed()).isTrue();
         assertThat(result.failureReason()).contains("unavailable");
         assertThat(result.actionCount()).isEqualTo(1);     // stopped at the first action
-        assertThat(dispatchService.calls()).isEmpty();      // ERROR threw before any dispatch
+        assertThat(publisher.ofType(EventTypes.COMMAND_ISSUED)).isEmpty();  // ERROR threw before emit
         List<EventEnvelope> completed = publisher.ofType(EventTypes.AUTOMATION_ACTION_COMPLETED);
         assertThat(completed).hasSize(1);
         AutomationActionCompletedEvent payload =
