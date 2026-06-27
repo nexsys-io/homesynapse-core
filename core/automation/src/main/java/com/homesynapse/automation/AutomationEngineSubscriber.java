@@ -7,6 +7,7 @@ package com.homesynapse.automation;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -26,6 +27,13 @@ import com.homesynapse.platform.identity.Ulid;
  * stay off the exported automation API (the FIX-07 {@code requires event.bus} edge is
  * used only here).
  *
+ * <p><strong>Run initiation (M7.4b — the producer goes live).</strong> In LIVE only, the matched
+ * triggers drive {@link RunInitiator#initiateRuns} — one root Run per matched automation (§1 D1:
+ * a direct, co-located, in-process call). The run pipeline (condition gate &rarr; M7.4a executor
+ * &rarr; {@code command_issued}) then runs and the co-located {@code command_dispatch_service}
+ * routes the command. Run initiation is suppressed during REPLAY (D2 — the run pipeline must not
+ * re-fire on recovery).</p>
+ *
  * <p><strong>Replay (Doc 07 §3.10).</strong> While the bus delivers REPLAY-mode events,
  * the evaluator suppresses timer starts; this subscriber consumes the historical
  * {@code trigger_duration_*} events to reconstruct which duration timers were active at
@@ -36,22 +44,31 @@ import com.homesynapse.platform.identity.Ulid;
 final class AutomationEngineSubscriber implements Subscriber {
 
     private final StandardTriggerEvaluator evaluator;
+    private final RunInitiator runInitiator;
     private final Map<StandardTriggerEvaluator.TimerKey, ReplayTimer> replayTimers =
             new LinkedHashMap<>();
 
-    AutomationEngineSubscriber(StandardTriggerEvaluator evaluator) {
+    AutomationEngineSubscriber(StandardTriggerEvaluator evaluator, RunInitiator runInitiator) {
         this.evaluator = Objects.requireNonNull(evaluator, "evaluator");
+        this.runInitiator = Objects.requireNonNull(runInitiator, "runInitiator");
     }
 
     @Override
     public void onEvent(EventEnvelope event) {
-        if (evaluator.isReplayMode()) {
+        boolean replay = evaluator.isReplayMode();
+        if (replay) {
             accumulateReplayTimer(event);
         }
-        // Trigger evaluation proceeds in both modes (§3.10): in REPLAY it has no side
-        // effects (timers suppressed, nothing published); in LIVE it drives the timers
-        // and the trigger-duration diagnostics. Run initiation is M7.2.
-        evaluator.evaluate(event);
+        // Trigger evaluation proceeds in both modes (§3.10): in REPLAY it has no side effects
+        // (timers suppressed, nothing published); in LIVE it drives the timers + the
+        // trigger-duration diagnostics and returns the matched triggers.
+        List<StandardTriggerEvaluator.TriggerMatch> matches = evaluator.evaluateMatches(event);
+        // Run initiation is LIVE-only (D2 — the run pipeline must not re-fire on recovery). The
+        // RunManager owns dedup/cascade/mode/auto-disable; the initiator initiates one root Run
+        // per matched automation and lets the FSM decide.
+        if (!replay) {
+            runInitiator.initiateRuns(matches, event);
+        }
     }
 
     @Override

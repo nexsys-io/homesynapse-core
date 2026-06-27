@@ -39,7 +39,7 @@ import com.homesynapse.platform.identity.Ulid;
  * @see RunStatus
  * @see RunContext
  */
-public interface RunManager {
+public interface RunManager extends AutoCloseable {
 
     /**
      * Initiates a Run after concurrency mode enforcement.
@@ -124,6 +124,18 @@ public interface RunManager {
      * @return the number of zombie Runs finalized, always {@code >= 0}
      */
     int finalizeZombieRuns(List<ZombieRun> zombies);
+
+    /**
+     * Releases the FSM's runtime resources at shutdown, interrupting every in-flight Run's virtual
+     * thread so each finalizes promptly ({@code ABORTED}) rather than continuing to publish against
+     * a tearing-down persistence layer. Idempotent; safe to call when no Run is active (a no-op).
+     *
+     * <p>Narrows {@link AutoCloseable#close()} to throw nothing (M7.4b — the composition root calls
+     * this in both shutdown branches, paired with the {@code automation_engine} subscriber teardown,
+     * the same paired-teardown discipline M7.4a established for {@code command_dispatch_service}).</p>
+     */
+    @Override
+    void close();
 
     /**
      * A reconstructed in-flight Run from a prior process, re-derived from the immutable

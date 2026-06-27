@@ -9,12 +9,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 
 import com.homesynapse.event.AvailabilityChangedEvent;
@@ -137,13 +135,42 @@ public final class StandardTriggerEvaluator implements TriggerEvaluator, AutoClo
 
     @Override
     public List<AutomationId> evaluate(EventEnvelope event) {
+        List<TriggerMatch> matches = evaluateMatches(event);
+        List<AutomationId> ids = new ArrayList<>(matches.size());
+        for (TriggerMatch match : matches) {
+            ids.add(match.automationId());
+        }
+        return List.copyOf(ids);
+    }
+
+    /**
+     * The same evaluation as {@link #evaluate(EventEnvelope)} — duration-timer cancellation,
+     * timer starts, and immediate matching — but returns, per matched automation, the indices
+     * of the triggers that produced an <em>immediate</em> match (a {@code for_duration} trigger
+     * starts a timer and is NOT an immediate match; it fires later via timer expiry, not run
+     * initiation). This is the single source of truth for the matched-trigger indices the M7.4b
+     * run-initiation path needs ({@link RunContext#matchedTriggers()} / {@code automation_triggered}):
+     * they come straight from this loop, never from re-checking triggers (which would duplicate
+     * the matching logic and risk silent divergence). {@link #evaluate(EventEnvelope)} is the
+     * thin projection of this to the automation IDs.
+     *
+     * <p>Package-private — consumed by the co-located {@code automation_engine} subscriber's
+     * run initiator (LIVE only; D2). Side-effect parity with {@link #evaluate(EventEnvelope)} is
+     * exact, so the subscriber calls this once and never both methods.</p>
+     *
+     * @param event the incoming event, never {@code null}
+     * @return the matched automations with their immediate-match trigger indices, in execution
+     *         order (the registry's candidate buckets are pre-sorted priority-desc then
+     *         {@code automationId}-asc), never {@code null}
+     */
+    List<TriggerMatch> evaluateMatches(EventEnvelope event) {
         Objects.requireNonNull(event, "event must not be null");
 
         // (1) Re-evaluate active timers affected by this event for cancellation.
         processCancellations(event);
 
-        // (2) Match candidate automations; start timers or record immediate matches.
-        Set<AutomationId> matched = new LinkedHashSet<>();
+        // (2) Match candidate automations; start timers or record immediate-match indices.
+        Map<AutomationId, List<Integer>> matched = new LinkedHashMap<>();
         for (AutomationDefinition automation : registry.candidatesForEventType(event.eventType())) {
             if (!automation.enabled()) {
                 continue;
@@ -158,11 +185,16 @@ public final class StandardTriggerEvaluator implements TriggerEvaluator, AutoClo
                 if (forDuration != null) {
                     maybeStartDurationTimer(automation, index, trigger, forDuration, event);
                 } else {
-                    matched.add(automation.automationId());
+                    matched.computeIfAbsent(automation.automationId(), key -> new ArrayList<>())
+                            .add(index);
                 }
             }
         }
-        return List.copyOf(matched);
+        List<TriggerMatch> result = new ArrayList<>(matched.size());
+        for (Map.Entry<AutomationId, List<Integer>> entry : matched.entrySet()) {
+            result.add(new TriggerMatch(entry.getKey(), List.copyOf(entry.getValue())));
+        }
+        return List.copyOf(result);
     }
 
     @Override
@@ -598,6 +630,19 @@ public final class StandardTriggerEvaluator implements TriggerEvaluator, AutoClo
 
     /** Positional timer key {@code (automationId, triggerIndex)} (Doc 07 §3.4). */
     record TimerKey(AutomationId automationId, int triggerIndex) {
+    }
+
+    /**
+     * A matched automation plus the indices of the triggers that produced an immediate match for
+     * one event (M7.4b run initiation). Carries enough for the run initiator to call
+     * {@code RunManager.initiateRun(...)} with a correct {@code matchedTriggers} without
+     * re-checking triggers. Package-private — the run initiator lives in this package.
+     *
+     * @param automationId          the matched automation, never {@code null}
+     * @param matchedTriggerIndices the immediate-match trigger indices, unmodifiable, non-empty,
+     *                              never {@code null}
+     */
+    record TriggerMatch(AutomationId automationId, List<Integer> matchedTriggerIndices) {
     }
 
     /** Mutable per-timer state held under {@link #timerLock}. */

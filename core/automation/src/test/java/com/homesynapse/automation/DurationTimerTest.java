@@ -202,7 +202,12 @@ class DurationTimerTest {
     @DisplayName("W2: a timer active at REPLAY→LIVE is re-derived from events, not re-executed")
     void replayRebuild() {
         loadDurationAutomation(Duration.ofMinutes(30));
-        AutomationEngineSubscriber subscriber = new AutomationEngineSubscriber(evaluator);
+        // M7.4b: the subscriber ctor now takes a RunInitiator. This REPLAY-mode test never
+        // initiates a run (the LIVE-only guard), so an inert recording initiator suffices.
+        AutomationEngineSubscriber subscriber = new AutomationEngineSubscriber(
+                evaluator,
+                new RunInitiator(new AutomationTestSupport.RecordingRunManager(), registry,
+                        new AutomationTestSupport.FakeSelectorResolver()));
         subscriber.setMode(com.homesynapse.event.bus.SubscriberMode.REPLAY);
 
         // The historical trigger_duration_started event from before the crash.

@@ -19,8 +19,10 @@ import com.homesynapse.state.ViewCheckpointStore;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletionException;
+import java.util.function.Function;
 import java.util.function.IntSupplier;
 
 /**
@@ -55,10 +57,12 @@ import java.util.function.IntSupplier;
 public final class PersistenceFactory implements AutoCloseable {
 
     private final SqlitePersistenceLifecycle lifecycle;
+    private final CommandParameterSerializer commandParameterSerializer;
     private volatile boolean abandoned = false;
 
     private PersistenceFactory(SqlitePersistenceLifecycle lifecycle) {
         this.lifecycle = lifecycle;
+        this.commandParameterSerializer = new CommandParameterSerializer();
     }
 
     /**
@@ -245,6 +249,28 @@ public final class PersistenceFactory implements AutoCloseable {
      */
     public PersistentDlqWriter deadLetterWriter() {
         return lifecycle.deadLetterStore()::park;
+    }
+
+    /**
+     * Returns the command parameter serializer — a function that renders an automation
+     * command's parameter map to its JSON object string using the persistence
+     * {@link com.fasterxml.jackson.databind.ObjectMapper} (M7.4b).
+     *
+     * <p>The composition root sources the {@code StandardActionExecutor}'s
+     * {@code parameterSerializer} from here so {@code command_issued.parameters} are encoded
+     * with exactly the same Jackson configuration the at-rest payload path uses — including
+     * value-model {@code AttributeValue}s (the M7.2b {@code ComputedValue} resolution yields
+     * {@code AttributeValue}/literals), via the AMD-52 codec registered in
+     * {@code PersistenceJacksonModule}. An empty map serializes to {@code "{}"}.</p>
+     *
+     * <p>The return type is {@link Function} (java.base), NOT {@code ObjectMapper}: exposing
+     * Jackson on persistence's exported API would force a {@code requires transitive jackson}
+     * edge ({@code -Xlint:exports} / {@code -Werror}). Jackson stays internal.</p>
+     *
+     * @return the parameter-map &rarr; JSON-object-string serializer, never {@code null}
+     */
+    public Function<Map<String, Object>, String> commandParameterSerializer() {
+        return commandParameterSerializer;
     }
 
     // ─── Lifecycle ───

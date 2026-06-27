@@ -18,7 +18,14 @@ import com.homesynapse.automation.CommandDispatchService;
 import com.homesynapse.automation.InMemoryAutomationIdentityStore;
 import com.homesynapse.automation.LoadFailure;
 import com.homesynapse.automation.LoadResult;
+import com.homesynapse.automation.PendingCommandLedgerAssembly;
+import com.homesynapse.automation.RunManager;
+import com.homesynapse.automation.RunManagerAssembly;
+import com.homesynapse.automation.RunManagerConfig;
+import com.homesynapse.automation.StandardActionExecutor;
 import com.homesynapse.automation.StandardAutomationRegistry;
+import com.homesynapse.automation.StandardConditionEvaluator;
+import com.homesynapse.automation.StandardRunConditionGate;
 import com.homesynapse.automation.StandardSelectorResolver;
 import com.homesynapse.automation.StandardTriggerEvaluator;
 import com.homesynapse.config.ConfigurationService;
@@ -209,6 +216,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     private AreaRegistry areaRegistry;
     private StandardAutomationRegistry automationRegistry;
     private StandardTriggerEvaluator triggerEvaluator;
+    private RunManager runManager;
     private CommandDispatchService commandDispatchService;
     private HealthLoop healthLoop;
     private Javalin httpServer;
@@ -454,10 +462,37 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         this.automationRegistry.load(loadResult.loaded());
         StandardSelectorResolver selectorResolver = new StandardSelectorResolver(
                 entityRegistry, areaRegistry, deviceRegistry);
+
+        // Step 3.4a — the run pipeline goes live (M7.4b, OR-M7-WIRING producer half). The
+        // selector/condition/executor/gate are stateless public collaborators the composition root
+        // constructs directly (no assembly seam needed); the RunManager FSM drives them. A matched
+        // trigger drives RunManager.initiateRun (a direct, co-located, in-process call — §1 D1: the
+        // run lifecycle is the engine's internal orchestration; the event-driven rule governs the
+        // command-dispatch hop, already a subscriber at Step 3.4b). The executor emits
+        // command_issued; the M7.4a command_dispatch_service consumes it. The executor's parameter
+        // serializer is sourced from persistence (the only module owning a JSON ObjectMapper, so
+        // command_issued.parameters round-trip faithfully with the at-rest encoding), and the
+        // single V1 default confirmation timeout is the launch-scope global default.
+        StandardConditionEvaluator conditionEvaluator =
+                new StandardConditionEvaluator(selectorResolver, clock);
+        StandardActionExecutor actionExecutor = new StandardActionExecutor(
+                entityRegistry, selectorResolver, conditionEvaluator, stateQueryService,
+                eventPublisher, clock, PendingCommandLedgerAssembly.DEFAULT_CONFIRMATION_TIMEOUT_MS,
+                persistenceFactory.commandParameterSerializer());
+        StandardRunConditionGate conditionGate = new StandardRunConditionGate(
+                conditionEvaluator, selectorResolver, eventPublisher);
+        this.runManager = RunManagerAssembly.runManager(
+                eventPublisher, actionExecutor, conditionGate, stateQueryService, clock,
+                RunManagerConfig.defaults());
+
         this.triggerEvaluator = new StandardTriggerEvaluator(
                 automationRegistry, selectorResolver, stateQueryService, eventPublisher, clock);
-        Subscriber automationSubscriber =
-                AutomationEngineAssembly.automationEngineSubscriber(triggerEvaluator);
+        // The augmented seam carries the RunManager (+ the registry/resolver the trigger->run
+        // derivation needs) so a LIVE matched trigger initiates one root Run per matched automation
+        // (D2: no run initiation on replay). Wired BEFORE the subscribe so the RunManager is present
+        // at registration.
+        Subscriber automationSubscriber = AutomationEngineAssembly.automationEngineSubscriber(
+                triggerEvaluator, runManager, automationRegistry, selectorResolver);
         // coalesceExempt=false: the automation engine evaluates against current
         // state (StateQueryService), so it does not require every intermediate
         // event individually the way the coalesce-exempt projection does.
@@ -769,6 +804,11 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             if (triggerEvaluator != null) {
                 triggerEvaluator.close();
             }
+            // Paired teardown for the run pipeline (M7.4b), mirroring the graceful path — interrupt
+            // in-flight Run VTs before eventBus.abandon() drops the subscriptions.
+            if (runManager != null) {
+                runManager.close();
+            }
             if (eventBus != null) {
                 eventBus.abandon();
             }
@@ -821,6 +861,13 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             }
             if (triggerEvaluator != null) {
                 triggerEvaluator.close();
+            }
+            // Paired teardown for the run pipeline (M7.4b): interrupt any in-flight Run VT so each
+            // finalizes ABORTED rather than publishing into a tearing-down persistence layer (the
+            // RunManager runs actions on per-Run virtual threads). Completed runs leave no live VT,
+            // so this is a no-op then — the same paired-teardown discipline as triggerEvaluator.
+            if (runManager != null) {
+                runManager.close();
             }
             if (rateLimit != null) {
                 rateLimit.close();

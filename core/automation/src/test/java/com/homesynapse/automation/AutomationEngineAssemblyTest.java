@@ -36,6 +36,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DisplayName("AutomationEngineAssembly — automation_engine subscriber seam")
 final class AutomationEngineAssemblyTest {
 
+    private final StandardAutomationRegistry registry = new StandardAutomationRegistry();
+    private final StandardSelectorResolver resolver = new StandardSelectorResolver(
+            new AutomationTestSupport.StubEntityRegistry(List.of()),
+            new AutomationTestSupport.StubAreaRegistry(List.of()),
+            new AutomationTestSupport.StubDeviceRegistry());
+    private final AutomationTestSupport.RecordingRunManager runManager =
+            new AutomationTestSupport.RecordingRunManager();
     private StandardTriggerEvaluator evaluator;
 
     /** Explicit no-arg constructor for {@code -Xlint:all -Werror} builds. */
@@ -43,17 +50,17 @@ final class AutomationEngineAssemblyTest {
     }
 
     private StandardTriggerEvaluator newEvaluator() {
-        StandardAutomationRegistry registry = new StandardAutomationRegistry();
-        StandardSelectorResolver resolver = new StandardSelectorResolver(
-                new AutomationTestSupport.StubEntityRegistry(List.of()),
-                new AutomationTestSupport.StubAreaRegistry(List.of()),
-                new AutomationTestSupport.StubDeviceRegistry());
         return new StandardTriggerEvaluator(
                 registry,
                 resolver,
                 new AutomationTestSupport.StubStateQueryService(snapshot(Map.of())),
                 new AutomationTestSupport.RecordingEventPublisher(),
                 FIXED_CLOCK);
+    }
+
+    /** Builds the {@code automation_engine} subscriber via the M7.4b 4-arg seam. */
+    private Subscriber subscriber(StandardTriggerEvaluator e) {
+        return AutomationEngineAssembly.automationEngineSubscriber(e, runManager, registry, resolver);
     }
 
     @AfterEach
@@ -67,14 +74,15 @@ final class AutomationEngineAssemblyTest {
     @DisplayName("seam returns a non-null Subscriber")
     void returnsSubscriber() {
         evaluator = newEvaluator();
-        Subscriber subscriber = AutomationEngineAssembly.automationEngineSubscriber(evaluator);
+        Subscriber subscriber = subscriber(evaluator);
         assertThat(subscriber).isNotNull();
     }
 
     @Test
     @DisplayName("seam rejects a null evaluator")
     void rejectsNullEvaluator() {
-        assertThatThrownBy(() -> AutomationEngineAssembly.automationEngineSubscriber(null))
+        assertThatThrownBy(() ->
+                AutomationEngineAssembly.automationEngineSubscriber(null, runManager, registry, resolver))
                 .isInstanceOf(NullPointerException.class);
     }
 
@@ -82,7 +90,7 @@ final class AutomationEngineAssemblyTest {
     @DisplayName("setMode translates the bus lifecycle onto evaluator replay suppression")
     void setModeTogglesReplay() {
         evaluator = newEvaluator();
-        Subscriber subscriber = AutomationEngineAssembly.automationEngineSubscriber(evaluator);
+        Subscriber subscriber = subscriber(evaluator);
 
         subscriber.setMode(SubscriberMode.REPLAY);
         assertThat(evaluator.isReplayMode()).isTrue();
@@ -98,7 +106,7 @@ final class AutomationEngineAssemblyTest {
     @DisplayName("onCaughtUp clears replay mode (REPLAY -> LIVE transition)")
     void onCaughtUpClearsReplay() {
         evaluator = newEvaluator();
-        Subscriber subscriber = AutomationEngineAssembly.automationEngineSubscriber(evaluator);
+        Subscriber subscriber = subscriber(evaluator);
 
         subscriber.setMode(SubscriberMode.REPLAY);
         assertThat(evaluator.isReplayMode()).isTrue();
@@ -111,7 +119,7 @@ final class AutomationEngineAssemblyTest {
     @DisplayName("onEvent delegates to the evaluator without error (LIVE and REPLAY)")
     void onEventDelegates() {
         evaluator = newEvaluator();
-        Subscriber subscriber = AutomationEngineAssembly.automationEngineSubscriber(evaluator);
+        Subscriber subscriber = subscriber(evaluator);
         EntityId entity = entityId();
         EventEnvelope event = stateChanged(entity, "power", str("off"), str("on"));
 

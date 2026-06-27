@@ -286,6 +286,72 @@ final class AutomationTestSupport {
         }
     }
 
+    /**
+     * A {@link RunManager} double that records every {@code initiateRun} call (the M7.4b
+     * trigger&rarr;run handoff assertions) and admits each with a fresh {@link RunId}. The other
+     * FSM methods are inert. {@link #close()} is recorded so a teardown can be asserted.
+     */
+    static final class RecordingRunManager implements RunManager {
+
+        /** One recorded {@code initiateRun} invocation. */
+        record InitiateCall(AutomationDefinition automation, EventEnvelope triggeringEvent,
+                            List<Integer> matchedTriggers, Map<String, Set<EntityId>> resolvedTargets,
+                            RunCausalChain parentChain) {
+        }
+
+        private final List<InitiateCall> calls = new java.util.concurrent.CopyOnWriteArrayList<>();
+        private volatile boolean closed;
+
+        @Override
+        public Optional<RunId> initiateRun(AutomationDefinition automation,
+                                           EventEnvelope triggeringEvent,
+                                           List<Integer> matchedTriggers,
+                                           Map<String, Set<EntityId>> resolvedTargets,
+                                           RunCausalChain parentChain) {
+            calls.add(new InitiateCall(automation, triggeringEvent, List.copyOf(matchedTriggers),
+                    Map.copyOf(resolvedTargets), parentChain));
+            return Optional.of(new RunId(ulid()));
+        }
+
+        List<InitiateCall> calls() {
+            return List.copyOf(calls);
+        }
+
+        boolean closed() {
+            return closed;
+        }
+
+        @Override
+        public Optional<RunContext> getActiveRun(RunId runId) {
+            return Optional.empty();
+        }
+
+        @Override
+        public RunStatus getStatus(RunId runId) {
+            throw new IllegalArgumentException("unknown run: " + runId);
+        }
+
+        @Override
+        public int activeRunCount() {
+            return 0;
+        }
+
+        @Override
+        public int activeRunCount(AutomationId automationId) {
+            return 0;
+        }
+
+        @Override
+        public int finalizeZombieRuns(List<RunManager.ZombieRun> zombies) {
+            return 0;
+        }
+
+        @Override
+        public void close() {
+            closed = true;
+        }
+    }
+
     // ---- Event envelopes ----------------------------------------------------
 
     static EventEnvelope envelope(String eventType, SubjectRef subject, DomainEvent payload) {
