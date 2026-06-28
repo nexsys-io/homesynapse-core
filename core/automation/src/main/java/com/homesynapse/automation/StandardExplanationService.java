@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -182,6 +183,269 @@ final class StandardExplanationService implements ExplanationService {
 
         return Optional.of(new RunExplanation(runId, automationId, automationName,
                 trigger, conditions, actions, outcome, cascade));
+    }
+
+    // ---- non-firing projection (M7.5b) --------------------------------------
+
+    @Override
+    public Optional<NonFiringExplanation> explainNonFiring(AutomationId automationId,
+                                                           long expectedSincePosition) {
+        Objects.requireNonNull(automationId, "automationId");
+
+        Optional<AutomationDefinition> maybe = automationRegistry.get(automationId);
+        if (maybe.isEmpty()) {
+            // Unknown automation → empty → 404 at the boundary.
+            return Optional.empty();
+        }
+        AutomationDefinition definition = maybe.get();
+        String automationName = definition.name();
+        String triggerSummary = triggerSummary(definition.triggers());
+
+        // DISABLED short-circuits: a disabled automation's non-firing reason is that it is off,
+        // regardless of any run history (DP-B2 step 3).
+        if (!definition.enabled()) {
+            return Optional.of(new NonFiringExplanation(automationId, automationName, false,
+                    NonFiringExplanation.NonFiringVerdict.DISABLED, null,
+                    "Automation '" + automationName + "' is currently disabled.",
+                    triggerSummary, null));
+        }
+
+        long sinceInclusive = Math.max(0L, expectedSincePosition);
+        EventEnvelope latest = latestTerminalRun(automationId, sinceInclusive);
+        if (latest == null) {
+            String windowNote = sinceInclusive > 0 ? " in the requested window" : "";
+            return Optional.of(new NonFiringExplanation(automationId, automationName, true,
+                    NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, null,
+                    "Automation '" + automationName + "' has not been triggered" + windowNote
+                            + "; it fires on " + triggerSummary + ".",
+                    triggerSummary, null));
+        }
+
+        AutomationCompletedEvent payload = (AutomationCompletedEvent) latest.payload();
+        // latestTerminalRun only returns runs whose finalStatus parses, so status is non-null.
+        RunStatus status = parseStatus(payload.finalStatus());
+        RunId runId = new RunId(payload.runId());
+        Instant evaluatedAt =
+                terminalInstant(latest).minusMillis(Math.max(0L, payload.durationMs()));
+
+        return Optional.of(deriveNonFiring(automationId, automationName, triggerSummary,
+                latest, status, runId, evaluatedAt));
+    }
+
+    /**
+     * Maps the most-recent in-window terminal run to a verdict. Exhaustive over {@link RunStatus}
+     * with no {@code default}, so a future status is a compile error here, not a silent miswire.
+     */
+    private NonFiringExplanation deriveNonFiring(AutomationId automationId, String automationName,
+                                                 String triggerSummary, EventEnvelope completed,
+                                                 RunStatus status, RunId runId, Instant evaluatedAt) {
+        return switch (status) {
+            case CONDITION_NOT_MET -> new NonFiringExplanation(automationId, automationName, true,
+                    NonFiringExplanation.NonFiringVerdict.CONDITION_NOT_MET, runId,
+                    "Automation '" + automationName
+                            + "' was triggered, but its conditions were not met, so no actions ran.",
+                    triggerSummary,
+                    new NonFiringExplanation.LastEvaluationView(evaluatedAt, "false"));
+            case COMPLETED -> completedVerdict(automationId, automationName, triggerSummary,
+                    completed, runId, evaluatedAt);
+            case FAILED, ABORTED, INTERRUPTED -> new NonFiringExplanation(automationId,
+                    automationName, true,
+                    NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED, runId,
+                    "Automation '" + automationName + "' fired, but the run ended in state "
+                            + status.name().toLowerCase(Locale.ROOT)
+                            + " without a confirmed result.",
+                    triggerSummary,
+                    new NonFiringExplanation.LastEvaluationView(evaluatedAt, null));
+            case EVALUATING, RUNNING -> {
+                // A non-terminal status on a terminal marker is a producer anomaly. Report it
+                // honestly as "ran, outcome not confirmed" rather than fabricate a clean success.
+                LOG.warn("Run {} carries non-terminal finalStatus '{}' on a terminal marker; "
+                        + "reporting ACTED_BUT_UNCONFIRMED", runId, status);
+                yield new NonFiringExplanation(automationId, automationName, true,
+                        NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED, runId,
+                        "Automation '" + automationName
+                                + "' fired recently; its outcome is not yet confirmed.",
+                        triggerSummary,
+                        new NonFiringExplanation.LastEvaluationView(evaluatedAt, null));
+            }
+        };
+    }
+
+    /**
+     * A {@code COMPLETED} run is {@code ACTED_BUT_UNCONFIRMED} when any of its device actions did
+     * not confirm (outcome {@code UNCONFIRMED}/{@code FAILED}); otherwise it is a clean confirmed
+     * success. The frozen 4-value verdict has no "fired fine" value, so per <strong>DP-B2</strong>
+     * the clean-success case reports {@code NEVER_TRIGGERED} with a <em>non-null</em>
+     * {@code lastRelevantRunId} and an explanation that distinguishes "ran fine" from "never ran"
+     * (the UI tells them apart by the non-null run id). A post-V1 additive {@code FIRED_CONFIRMED}
+     * verdict is the recommended growth path. The action-outcome check reuses {@link #buildActions}
+     * (the M7.5a honest-confirmation derivation) — no duplication.
+     */
+    private NonFiringExplanation completedVerdict(AutomationId automationId, String automationName,
+                                                  String triggerSummary, EventEnvelope completed,
+                                                  RunId runId, Instant evaluatedAt) {
+        List<EventEnvelope> chain =
+                eventStore.readByCorrelation(completed.causalContext().correlationId());
+        List<RunExplanation.ActionView> actions = buildActions(chain, runId);
+        boolean unconfirmedOrFailed = actions.stream().anyMatch(a ->
+                a.outcome() == RunExplanation.ActionOutcome.UNCONFIRMED
+                        || a.outcome() == RunExplanation.ActionOutcome.FAILED);
+        if (unconfirmedOrFailed) {
+            return new NonFiringExplanation(automationId, automationName, true,
+                    NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED, runId,
+                    "Automation '" + automationName
+                            + "' fired, but a device did not confirm the requested change.",
+                    triggerSummary,
+                    new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"));
+        }
+        return new NonFiringExplanation(automationId, automationName, true,
+                NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, runId,
+                "Automation '" + automationName + "' last fired and confirmed at "
+                        + evaluatedAt + "; no non-firing was detected in the requested window.",
+                triggerSummary,
+                new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"));
+    }
+
+    @Override
+    public List<AutomationSummary> listAutomations() {
+        Map<AutomationId, RunId> lastRuns = latestRunByAutomation();
+        List<AutomationDefinition> definitions = automationRegistry.getAll();
+        List<AutomationSummary> summaries = new ArrayList<>(definitions.size());
+        for (AutomationDefinition definition : definitions) {
+            summaries.add(new AutomationSummary(definition.automationId(), definition.name(),
+                    definition.enabled(), componentsOf(definition),
+                    lastRuns.get(definition.automationId())));
+        }
+        return summaries;
+    }
+
+    // ---- non-firing / list helpers (M7.5b) ----------------------------------
+
+    /**
+     * The most-recent terminal run for one automation at or after the inclusive lower-bound global
+     * position {@code sinceInclusive}, or {@code null} if none. Reuses {@link #automationOf} and
+     * {@link #parseStatus} over the same forward type-scan idiom as {@code listRuns}, but is a
+     * distinct scan: the bound is a <em>lower</em> bound (the "expected since" window) and the
+     * caller needs the full envelope (to read the run's correlation for the action-outcome check).
+     * Runs with an unrecognized status are logged and skipped, matching {@code toSummary}.
+     */
+    private EventEnvelope latestTerminalRun(AutomationId automationId, long sinceInclusive) {
+        EventEnvelope newest = null;
+        long after = 0;
+        while (true) {
+            EventPage page =
+                    eventStore.readByType(EventTypes.AUTOMATION_COMPLETED, after, SCAN_BATCH);
+            for (EventEnvelope e : page.events()) {
+                if (e.globalPosition() < sinceInclusive) {
+                    continue;
+                }
+                if (!(e.payload() instanceof AutomationCompletedEvent p)) {
+                    continue;
+                }
+                if (!automationOf(e).equals(automationId)) {
+                    continue;
+                }
+                if (parseStatus(p.finalStatus()) == null) {
+                    LOG.warn("Skipping run {} with unrecognized finalStatus '{}'",
+                            p.runId(), p.finalStatus());
+                    continue;
+                }
+                newest = e; // ascending scan — the last match seen is the newest
+            }
+            if (!page.hasMore()) {
+                break;
+            }
+            after = page.nextPosition();
+        }
+        return newest;
+    }
+
+    /**
+     * One forward pass over the {@code automation_completed} stream recording the newest terminal
+     * run id per automation (ascending scan ⇒ last write wins). {@code O(retained terminal runs)}
+     * once, not {@code O(automations × log)} — the bounded best-effort {@code lastRunId} source for
+     * {@link #listAutomations()}.
+     */
+    private Map<AutomationId, RunId> latestRunByAutomation() {
+        Map<AutomationId, RunId> latest = new HashMap<>();
+        long after = 0;
+        while (true) {
+            EventPage page =
+                    eventStore.readByType(EventTypes.AUTOMATION_COMPLETED, after, SCAN_BATCH);
+            for (EventEnvelope e : page.events()) {
+                if (e.payload() instanceof AutomationCompletedEvent p) {
+                    latest.put(automationOf(e), new RunId(p.runId()));
+                }
+            }
+            if (!page.hasMore()) {
+                break;
+            }
+            after = page.nextPosition();
+        }
+        return latest;
+    }
+
+    private static Instant terminalInstant(EventEnvelope completed) {
+        return completed.eventTime() != null ? completed.eventTime() : completed.ingestTime();
+    }
+
+    private static List<AutomationSummary.ComponentView> componentsOf(AutomationDefinition def) {
+        List<AutomationSummary.ComponentView> components = new ArrayList<>(
+                def.triggers().size() + def.conditions().size() + def.actions().size());
+        for (TriggerDefinition t : def.triggers()) {
+            components.add(componentView(t.getClass().getSimpleName()));
+        }
+        for (ConditionDefinition c : def.conditions()) {
+            components.add(componentView(c.getClass().getSimpleName()));
+        }
+        for (ActionDefinition a : def.actions()) {
+            components.add(componentView(a.getClass().getSimpleName()));
+        }
+        return components;
+    }
+
+    private static AutomationSummary.ComponentView componentView(String simpleName) {
+        return new AutomationSummary.ComponentView(simpleName, humanize(simpleName));
+    }
+
+    /**
+     * Renders a plain-words trigger summary from the definition's trigger kinds — the
+     * suffix-stripped, humanized concrete-record names joined readably (e.g. "state change" or
+     * "state change or numeric threshold"). The sealed {@link TriggerDefinition} has no common
+     * accessor and entity refs are ULIDs (not names), so a richer rendering is not derivable here;
+     * this is deterministic and safe across all twelve permits and any future one.
+     */
+    private static String triggerSummary(List<TriggerDefinition> triggers) {
+        if (triggers.isEmpty()) {
+            return "a configured trigger"; // defensive — triggers are guaranteed non-empty
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < triggers.size(); i++) {
+            if (i > 0) {
+                sb.append(i == triggers.size() - 1 ? " or " : ", ");
+            }
+            sb.append(humanize(stripTrailing(triggers.get(i).getClass().getSimpleName(), "Trigger")));
+        }
+        return sb.toString();
+    }
+
+    /** Humanizes a record simple name to lower-cased, space-separated words. Deterministic. */
+    private static String humanize(String simpleName) {
+        StringBuilder sb = new StringBuilder(simpleName.length() + 4);
+        for (int i = 0; i < simpleName.length(); i++) {
+            char ch = simpleName.charAt(i);
+            if (i > 0 && Character.isUpperCase(ch)) {
+                sb.append(' ');
+            }
+            sb.append(Character.toLowerCase(ch));
+        }
+        return sb.toString();
+    }
+
+    private static String stripTrailing(String value, String suffix) {
+        return value.endsWith(suffix) && value.length() > suffix.length()
+                ? value.substring(0, value.length() - suffix.length())
+                : value;
     }
 
     // ---- run summary --------------------------------------------------------

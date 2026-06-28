@@ -4,6 +4,7 @@
  */
 package com.homesynapse.automation;
 
+import java.util.List;
 import java.util.Optional;
 
 import com.homesynapse.event.EventStore;
@@ -55,6 +56,38 @@ public interface ExplanationService {
      * @return the assembled explanation, or {@link Optional#empty()} if not found / not terminal
      */
     Optional<RunExplanation> explainRun(RunId runId);
+
+    /**
+     * The "why did this <em>not</em> fire?" projection for one automation (Doc 16 §3.3; the
+     * frozen v1.1 §B3 verdict surface). Pure projection — no writes, mints no event
+     * (INV-SA-03 / SP2). The verdict is derived from existing run records + config + absence
+     * within the "expected since" window (DP-B2), never from a parallel suppression-diagnostic
+     * store.
+     *
+     * <p>Returns empty if no automation with this id is known to the {@link AutomationRegistry}
+     * (→ 404 at the boundary). When the automation is known, the result always carries a
+     * {@link NonFiringExplanation.NonFiringVerdict} from the frozen 4-value vocabulary; the
+     * Doc-16 §4 {@code SuppressionReason} (7-value, per-triggering-event) deep diagnosis is a
+     * <strong>post-V1</strong> enrichment of this same surface (DP-B1) and is not derived here.</p>
+     *
+     * @param automationId          the automation to diagnose; never {@code null}
+     * @param expectedSincePosition the inclusive lower-bound global log position defining the
+     *                              "expected since" window; {@code <= 0} means the default window
+     *                              (the whole retained log — "have you ever fired?"); rendered as a
+     *                              position bound, never a wall-clock filter, to stay replay-deterministic
+     * @return the assembled non-firing explanation, or empty if the automation is unknown
+     */
+    Optional<NonFiringExplanation> explainNonFiring(AutomationId automationId, long expectedSincePosition);
+
+    /**
+     * Lists all loaded automations as component-based summaries (the frozen v1.1 §B3 list). Pure
+     * projection over the {@link AutomationRegistry} (+ a best-effort most-recent-run lookup per
+     * automation, nullable). Registry order; never {@code null} (empty when none are loaded).
+     * Performs no writes and mints no event (INV-SA-03 / SP2).
+     *
+     * @return the automation summaries in registry order; never {@code null}
+     */
+    List<AutomationSummary> listAutomations();
 
     /**
      * Construction seam (mirrors {@code StateQueryService.materialized(...)}): builds the

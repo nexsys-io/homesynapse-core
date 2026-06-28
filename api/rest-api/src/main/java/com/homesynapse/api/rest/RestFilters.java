@@ -238,6 +238,51 @@ public final class RestFilters {
                 new GetRunCausalChainEndpoint(explanations, viewPositionSupplier, clock));
     }
 
+    /**
+     * Installs the automation read endpoints (M7.5b): {@code GET /api/v1/automations} (the
+     * component-based automation list) and {@code GET /api/v1/automations/{id}/non-firing} (the
+     * "why did this <em>not</em> fire?" verdict). The sibling of
+     * {@link #installRunQueryEndpoints(Object, Object, LongSupplier, Clock)} — both consume the
+     * <em>same</em> {@link ExplanationService} (M7.5b adds {@code explainNonFiring}/
+     * {@code listAutomations} to it) across the same query-service boundary.
+     *
+     * <p>Both endpoints live under {@code /api/*} and therefore inherit the bearer-token auth
+     * filter and the 503 readiness gate — register this AFTER both (the lifecycle composition root
+     * does so).</p>
+     *
+     * <p>The {@code explanationService} parameter is typed as {@link Object} so the exported public
+     * API does not leak {@code com.homesynapse.automation.ExplanationService} from the
+     * non-transitive {@code requires com.homesynapse.automation} edge (DEC-M3-16; the same
+     * {@link Object}-erasure as {@link #installRunQueryEndpoints}). The lifecycle module declares
+     * its own {@code requires com.homesynapse.automation}, so the internal cast is safe at the call
+     * site.</p>
+     *
+     * @param javalinApp           the Javalin application instance (must be a
+     *                             {@link io.javalin.Javalin}); never {@code null}
+     * @param explanationService   the explanation projection (must be an {@code ExplanationService});
+     *                             never {@code null}
+     * @param viewPositionSupplier supplier for the projection's current cursor position
+     *                             (typically {@code stateProjection::cursorPosition}); never {@code null}
+     * @param clock                injected clock for response timestamps; never {@code null}
+     * @throws ClassCastException if {@code javalinApp} is not a {@link io.javalin.Javalin}, or if
+     *         {@code explanationService} is not an {@code ExplanationService}
+     */
+    public static void installAutomationQueryEndpoints(Object javalinApp,
+                                                       Object explanationService,
+                                                       LongSupplier viewPositionSupplier,
+                                                       Clock clock) {
+        Objects.requireNonNull(javalinApp, "javalinApp");
+        Objects.requireNonNull(explanationService, "explanationService");
+        Objects.requireNonNull(viewPositionSupplier, "viewPositionSupplier");
+        Objects.requireNonNull(clock, "clock");
+        Javalin app = (Javalin) javalinApp;
+        ExplanationService explanations = (ExplanationService) explanationService;
+        app.get("/api/v1/automations",
+                new ListAutomationsEndpoint(explanations, viewPositionSupplier, clock));
+        app.get("/api/v1/automations/{id}/non-firing",
+                new GetNonFiringEndpoint(explanations, viewPositionSupplier, clock));
+    }
+
     /** Request attribute key carrying the authenticated identity to downstream handlers. */
     static final String IDENTITY_ATTRIBUTE = "hs.api.identity";
 

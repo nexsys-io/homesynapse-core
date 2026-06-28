@@ -6,7 +6,9 @@ package com.homesynapse.api.rest;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.homesynapse.automation.AutomationSummary;
 import com.homesynapse.automation.ExplanationService;
+import com.homesynapse.automation.NonFiringExplanation;
 import com.homesynapse.automation.RunExplanation;
 import com.homesynapse.automation.RunId;
 import com.homesynapse.automation.RunPage;
@@ -312,6 +314,18 @@ final class RunEndpointsTest {
         @Override
         public Optional<RunExplanation> explainRun(RunId runId) {
             return Optional.ofNullable(explanations.get(runId));
+        }
+
+        // M7.5b methods — unused by the run-endpoint tests; canned empties keep the stub compiling.
+        @Override
+        public Optional<NonFiringExplanation> explainNonFiring(AutomationId automationId,
+                                                               long expectedSincePosition) {
+            return Optional.empty();
+        }
+
+        @Override
+        public List<AutomationSummary> listAutomations() {
+            return List.of();
         }
     }
 }

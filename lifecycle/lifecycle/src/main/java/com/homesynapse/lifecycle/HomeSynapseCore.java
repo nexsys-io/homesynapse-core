@@ -724,6 +724,12 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                     ExplanationService.over(persistenceFactory.eventStore(), automationRegistry);
             RestFilters.installRunQueryEndpoints(
                     app, explanationService, stateProjection::cursorPosition, clock);
+            // M7.5b: the automation read endpoints (GET /api/v1/automations and
+            // /api/v1/automations/{id}/non-firing). Same ExplanationService (now also serving
+            // explainNonFiring/listAutomations), same Object-erased gateway, same inheritance of
+            // bearer auth + the 503 readiness gate.
+            RestFilters.installAutomationQueryEndpoints(
+                    app, explanationService, stateProjection::cursorPosition, clock);
             // AB-1: loopback bind by default; LAN exposure is the explicit
             // config.bindHost() opt-in. Never bind all-interfaces by default.
             app.start(config.bindHost(), config.httpPort());
