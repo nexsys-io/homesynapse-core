@@ -4,6 +4,7 @@
  */
 package com.homesynapse.api.rest;
 
+import com.homesynapse.automation.ExplanationService;
 import com.homesynapse.event.bus.EventBus;
 import com.homesynapse.state.ReadinessSource;
 import com.homesynapse.state.StateQueryService;
@@ -188,6 +189,53 @@ public final class RestFilters {
         app.get("/internal/projection",
                 new ProjectionStatusEndpoint(
                         readinessSource, queryService, viewPositionSupplier));
+    }
+
+    /**
+     * Registers the M7.5a run-query (causal read) endpoints on the given Javalin
+     * application instance:
+     * <ul>
+     *   <li>{@code GET /api/v1/runs} — the "why did this fire?" terminal-run list</li>
+     *   <li>{@code GET /api/v1/runs/{runId}/causal-chain} — the causal-chain detail tree</li>
+     * </ul>
+     *
+     * <p>Both endpoints live under {@code /api/*} and therefore inherit the
+     * {@link #installAuth(Object, AuthMiddleware, RateLimiter) bearer-token auth} filter and
+     * the {@link #installReadinessGate(Object, ReadinessSource) 503 readiness gate} — register
+     * this AFTER both of those (the lifecycle composition root does so).</p>
+     *
+     * <p>The {@code explanationService} parameter is typed as {@link Object} so the exported
+     * public API does not leak {@code com.homesynapse.automation.ExplanationService} from the
+     * non-transitive {@code requires com.homesynapse.automation} edge (DEC-M3-16, the same
+     * {@link Object}-erasure as {@link #installAdminEndpoints}'s {@code bus} param). The
+     * lifecycle module declares its own {@code requires com.homesynapse.automation}, so the
+     * internal cast is safe at the call site.</p>
+     *
+     * @param javalinApp           the Javalin application instance (must be a
+     *                             {@link io.javalin.Javalin}); never {@code null}
+     * @param explanationService   the run explanation projection (must be an
+     *                             {@code ExplanationService}); never {@code null}
+     * @param viewPositionSupplier supplier for the projection's current cursor position
+     *                             (typically {@code stateProjection::cursorPosition}); never
+     *                             {@code null}
+     * @param clock                injected clock for response timestamps; never {@code null}
+     * @throws ClassCastException if {@code javalinApp} is not a {@link io.javalin.Javalin}, or
+     *         if {@code explanationService} is not an {@code ExplanationService}
+     */
+    public static void installRunQueryEndpoints(Object javalinApp,
+                                                Object explanationService,
+                                                LongSupplier viewPositionSupplier,
+                                                Clock clock) {
+        Objects.requireNonNull(javalinApp, "javalinApp");
+        Objects.requireNonNull(explanationService, "explanationService");
+        Objects.requireNonNull(viewPositionSupplier, "viewPositionSupplier");
+        Objects.requireNonNull(clock, "clock");
+        Javalin app = (Javalin) javalinApp;
+        ExplanationService explanations = (ExplanationService) explanationService;
+        app.get("/api/v1/runs",
+                new ListRunsEndpoint(explanations, viewPositionSupplier, clock));
+        app.get("/api/v1/runs/{runId}/causal-chain",
+                new GetRunCausalChainEndpoint(explanations, viewPositionSupplier, clock));
     }
 
     /** Request attribute key carrying the authenticated identity to downstream handlers. */

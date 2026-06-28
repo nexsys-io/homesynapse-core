@@ -1,4 +1,4 @@
-# rest-api — `com.homesynapse.api.rest` — Phase 3 transition (M3.6e.2) — HTTP command interface, RFC 9457 errors, 4-phase command lifecycle, idempotency keys, ReadinessFilter (Javalin before-handler), entity query endpoints + admin endpoints (M3.6e.2)
+# rest-api — `com.homesynapse.api.rest` — Phase 3 transition (M3.6e.2) — HTTP command interface, RFC 9457 errors, 4-phase command lifecycle, idempotency keys, ReadinessFilter (Javalin before-handler), entity query endpoints + admin endpoints (M3.6e.2), run query (causal read) endpoints (M7.5a)
 
 ## Purpose
 
@@ -38,6 +38,14 @@ This Phase 2 specification defines the public API infrastructure types — reque
 module com.homesynapse.api.rest {
     requires transitive com.homesynapse.state;
     requires com.homesynapse.event.bus;
+
+    // M7.5a: ExplanationService + RunSummary/RunPage/RunExplanation consumed INTERNALLY by
+    // the package-private run-query handlers + the Object-erased installRunQueryEndpoints
+    // gateway (PLAIN — not on the exported API). jackson.databind parses the raw
+    // command_issued.parameters JSON into the wire `params` object inside a package-private
+    // handler (PLAIN — rest-api is the JSON boundary, LTD-08; build.gradle already had the dep).
+    requires com.homesynapse.automation;
+    requires com.fasterxml.jackson.databind;
 
     requires io.javalin;
     requires org.slf4j;
@@ -155,6 +163,21 @@ The C1 close: the first production `AuthMiddleware`/`RateLimiter` implementation
 | `ApiKeyClaims` | **public** record (2 fields) | Per-token authorization claims (enterprise per-scope/per-site hook). | `(List<String> scopes, String siteId)`; `SCOPE_ALL="*"`; `fullAccess()`, `grants(scope)`, `fullAccess(siteId)` factory. **Designed now, MVP enforcement BINARY** — a valid token grants every route at Tier 1; claims are resolved + stored but not consulted by the filter. Kept SEPARATE from `ApiKeyIdentity` (which is shared with `api.ws`) to avoid reshaping that cross-module type. `[REVIEW]` new public type. |
 
 **`RestFilters.installAuth(Object javalinApp, AuthMiddleware, RateLimiter)`** (new public gateway method): registers an `app.exception(ApiException.class, …)` handler that serializes any `ApiException` as RFC 9457 `application/problem+json` (with a `correlation_id` from `X-Correlation-ID` or a generated UUID, and `WWW-Authenticate: Bearer` for 401), and a **catch-all `before(*)`** auth handler that (1) **canonicalizes the path** and rejects `..`/encoded-traversal/backslash/whitespace/NUL before the auth decision (`isPathSafe`, R-δ AX-1 / CVE-2023-27482) → 400, (2) authenticates → 401/403, (3) rate-limits the authenticated key → 429 + `Retry-After`. The handler **throws** `ApiException` to halt the pipeline (a status-set-only `before` would not skip the endpoint), so an unauthenticated request never reaches a handler. `installAuth` must be registered FIRST (before `installReadinessGate`) so the catch-all auth runs ahead of the `/api/*` readiness gate and covers `/api/*` + `/internal/*` + every path (INV-SE-02). `javalinApp` is `Object`-erased like the other gateway methods (keeps `io.javalin` off the exported signature); `AuthMiddleware`/`RateLimiter` are the module's own exported types so they appear directly. Package-private helpers: `static ApiException problem(ProblemType, String detail)` (used by the filter AND `StandardAuthMiddleware`), `static boolean isPathSafe(String)`, plus private `authorize`/`writeProblem`/`resolveCorrelationId`/`problemBody`. Constant `IDENTITY_ATTRIBUTE = "hs.api.identity"` (the authenticated identity attached to the request for downstream handlers).
+
+### M7.5a — Run query (causal read) endpoints (2026-06-28)
+
+The read-API hero read (Doc 16 §3.3 / the FROZEN v1.1 dashboard contract §B3): two GET endpoints serving log-derived projections from `com.homesynapse.automation.ExplanationService`.
+
+| Type | Kind | Purpose | Key Details |
+|---|---|---|---|
+| `ListRunsEndpoint` | **package-private** final class implements `io.javalin.http.Handler` | `GET /api/v1/runs` — the "why did this fire?" terminal-run list. | Ctor `(ExplanationService, LongSupplier viewPositionSupplier, Clock)`. `handle(Context)` → `apply(EndpointContext)` (mirrors `ListEntitiesEndpoint`). Query params: `automationId` (optional ULID, malformed→400), `limit` (default 50, clamp [1,100], malformed→default), `cursor`/`since` (opaque Base64, malformed→400); `sort` accepted but not yet honored (newest-first only). **Hand-builds a `LinkedHashMap` body with frozen camelCase keys** (`{data:[…], pagination:{nextCursor,hasMore,limit}, meta:{viewPosition,timestamp}}`) so a `Map` bypasses any Jackson naming strategy and the internal `RunStatus` never leaks. **DP-A1 status mapping** via package-private `static String wireStatus(RunStatus)` — exhaustive switch, NO default (COMPLETED→COMPLETED, FAILED→FAILED, INTERRUPTED→INTERRUPTED, CONDITION_NOT_MET→SKIPPED, ABORTED→CANCELLED; EVALUATING/RUNNING throw — terminal-only). Cursor encode/decode is inline Base64 of the global position (no `PaginationCodec` impl exists). Weak ETag `W/"{viewPosition}"` set inline. Reuses `ListEntitiesEndpoint.VIEW_POSITION_HEADER`. |
+| `GetRunCausalChainEndpoint` | **package-private** final class implements `io.javalin.http.Handler` | `GET /api/v1/runs/{runId}/causal-chain` — the hero causal-chain tree. | Ctor `(ExplanationService, LongSupplier, Clock)`. Path `runId` parsed `new RunId(Ulid.parse(...))`; `IllegalArgumentException`→400 `invalid-parameters`; `Optional.empty()`→404 `not-found` (RFC 9457 via `EndpointResponses.problem`). Hand-builds the full nested camelCase tree (`trigger`/`conditions`/`actions`/`outcome`/`cascade`). **Parses the raw `command_issued.parameters` JSON string into the wire `params` object** with a static `ObjectMapper` (degrades to `{}` on any malformation) — automation owns no JSON lib, so this JSON boundary does the parse. `outcome` is the `ActionOutcome` name; `status` via `ListRunsEndpoint.wireStatus`. Strong ETag `"{runId}"` set inline (a terminal run's chain is immutable, INV-ES-01). |
+
+**`RestFilters.installRunQueryEndpoints(Object javalinApp, Object explanationService, LongSupplier viewPositionSupplier, Clock clock)`** (new public gateway method): registers both routes. `explanationService` is **`Object`-erased and cast internally** (the `installAdminEndpoints` `bus` precedent) so `com.homesynapse.automation` stays OFF rest-api's exported API → the new `requires com.homesynapse.automation` is **plain** (non-transitive), `implementation` scope. Register AFTER `installAuth` + `installReadinessGate` so `/api/v1/runs*` inherit bearer auth + the 503 gate (the lifecycle composition root does so in `bringUpHttpSurface()`).
+
+**Module-info impact (TWO plain requires):** `requires com.homesynapse.automation` (the projection types, used only in package-private handlers + the Object-erased gateway) and `requires com.fasterxml.jackson.databind` (parse `params` JSON in `GetRunCausalChainEndpoint`; the module name matches `core/persistence`/`config`; `build.gradle.kts` already had `implementation(libs.jackson.databind)`). Both stay off the exported API → no `requires transitive`/`-Xlint:exports` bump. **ArchUnit stays GREEN:** the handlers import only `ExplanationService`/projection records + platform identity + `java.base` + jackson — NO `com.homesynapse.event.EventStore`/`EventPublisher`/`persistence` (the read of `EventStore` is the automation-side projection's job, behind the query-service boundary).
+
+**Status-mapping-at-boundary note:** the projection records carry the internal `RunStatus`; the public wire vocabulary `{COMPLETED,FAILED,SKIPPED,CANCELLED,INTERRUPTED}` is produced ONLY here via `wireStatus` (DP-A1). The per-action `outcome` enum `{DISPATCHED,CONFIRMED,UNCONFIRMED,FAILED,SKIPPED}` is the `ActionOutcome` name verbatim (DP-A2).
 
 ## M3.6e.2 Phase 3 Note (2026-05-22)
 

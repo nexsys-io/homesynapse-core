@@ -15,6 +15,7 @@ import com.homesynapse.automation.AutomationEngineAssembly;
 import com.homesynapse.automation.AutomationSchema;
 import com.homesynapse.automation.CommandDispatchAssembly;
 import com.homesynapse.automation.CommandDispatchService;
+import com.homesynapse.automation.ExplanationService;
 import com.homesynapse.automation.InMemoryAutomationIdentityStore;
 import com.homesynapse.automation.LoadFailure;
 import com.homesynapse.automation.LoadResult;
@@ -714,6 +715,15 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                     app, stateQueryService, stateProjection::cursorPosition, clock);
             RestFilters.installAdminEndpoints(
                     app, eventBus, this, stateQueryService, stateProjection::cursorPosition);
+            // M7.5a: the run-query (causal read) endpoints. The ExplanationService is a pure
+            // log-derived projection (reads the EventStore + the registry for best-effort
+            // names); it is Object-erased on the gateway so com.homesynapse.automation stays
+            // off rest-api's exported API. Installed AFTER auth + the readiness gate so
+            // /api/v1/runs* inherit bearer auth and the 503 gate.
+            ExplanationService explanationService =
+                    ExplanationService.over(persistenceFactory.eventStore(), automationRegistry);
+            RestFilters.installRunQueryEndpoints(
+                    app, explanationService, stateProjection::cursorPosition, clock);
             // AB-1: loopback bind by default; LAN exposure is the explicit
             // config.bindHost() opt-in. Never bind all-interfaces by default.
             app.start(config.bindHost(), config.httpPort());

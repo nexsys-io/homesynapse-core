@@ -23,6 +23,19 @@ module com.homesynapse.api.rest {
     requires transitive com.homesynapse.state;
     requires com.homesynapse.event.bus;
 
+    // M7.5a: the run-query endpoints consume ExplanationService + RunExplanation/
+    // RunSummary INTERNALLY (package-private handlers + the Object-erased
+    // installRunQueryEndpoints gateway param), so this edge stays PLAIN
+    // (non-transitive) — automation is not on rest-api's exported API.
+    // build.gradle.kts already has implementation(project(":core:automation")).
+    requires com.homesynapse.automation;
+
+    // M7.5a: the causal-chain handler parses the raw command-parameter JSON string
+    // (command_issued.parameters) into the wire `params` object. rest-api is the JSON
+    // boundary (LTD-08) and already has implementation(libs.jackson.databind); used
+    // only inside a package-private handler, so PLAIN requires.
+    requires com.fasterxml.jackson.databind;
+
     requires io.javalin;
     requires org.slf4j;
 

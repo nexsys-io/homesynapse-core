@@ -28,4 +28,8 @@ dependencies {
 
     // M7.1: SLF4J for engine-internal logging (no SLF4J type on the public API).
     implementation(libs.slf4j.api)
+
+    // M7.5a: StandardExplanationServiceTest seeds an InMemoryEventStore (the event-model
+    // test fixture) to drive the log-derived ExplanationService projection. Test-scope only.
+    testImplementation(testFixtures(project(":core:event-model")))
 }
