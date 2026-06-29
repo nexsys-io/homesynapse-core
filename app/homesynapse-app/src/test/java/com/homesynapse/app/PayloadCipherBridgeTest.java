@@ -47,6 +47,14 @@ class PayloadCipherBridgeTest {
     private static final Clock FIXED_CLOCK =
             Clock.fixed(Instant.parse("2026-06-11T00:00:00Z"), ZoneOffset.UTC);
 
+    /**
+     * A representative AAD (the F1 envelope version byte the persistence codec
+     * binds in production). The adapter is version-agnostic — it binds whatever
+     * AAD it is handed — so these seam tests thread one constant through every
+     * encrypt/decrypt pair; the encrypt and decrypt {@code aad} MUST match.
+     */
+    private static final byte[] AAD = {1};
+
     @TempDir
     Path configDir;
 
@@ -63,14 +71,14 @@ class PayloadCipherBridgeTest {
         byte[] plaintext =
                 "presence_signal payload".getBytes(StandardCharsets.UTF_8);
 
-        EncryptedPayload payload = cipher.encrypt("presence_personal", plaintext);
+        EncryptedPayload payload = cipher.encrypt("presence_personal", plaintext, AAD);
 
         assertThat(payload.keyVersion()).isEqualTo(1);
         assertThat(payload.iv()).hasSize(12);
         assertThat(payload.ciphertext()).isNotEqualTo(plaintext);
 
         byte[] decrypted = cipher.decrypt("presence_personal",
-                payload.keyVersion(), payload.ciphertext(), payload.iv());
+                payload.keyVersion(), payload.ciphertext(), payload.iv(), AAD);
         assertThat(decrypted).isEqualTo(plaintext);
     }
 
@@ -80,11 +88,11 @@ class PayloadCipherBridgeTest {
     void freshAdapterDecryptsPriorCiphertext() {
         byte[] plaintext = "stored then read back".getBytes(StandardCharsets.UTF_8);
         EncryptedPayload payload = Main.payloadCipher(configDir, FIXED_CLOCK)
-                .encrypt("identity", plaintext);
+                .encrypt("identity", plaintext, AAD);
 
         byte[] decrypted = Main.payloadCipher(configDir, FIXED_CLOCK)
                 .decrypt("identity", payload.keyVersion(),
-                        payload.ciphertext(), payload.iv());
+                        payload.ciphertext(), payload.iv(), AAD);
 
         assertThat(decrypted).isEqualTo(plaintext);
     }
@@ -95,12 +103,12 @@ class PayloadCipherBridgeTest {
     void scopeIsolationSurvivesTheBridge() {
         PayloadCipher cipher = Main.payloadCipher(configDir, FIXED_CLOCK);
         EncryptedPayload payload = cipher.encrypt("identity",
-                "person-linked".getBytes(StandardCharsets.UTF_8));
+                "person-linked".getBytes(StandardCharsets.UTF_8), AAD);
         cipher.encrypt("presence_personal",
-                "other scope".getBytes(StandardCharsets.UTF_8));
+                "other scope".getBytes(StandardCharsets.UTF_8), AAD);
 
         assertThatThrownBy(() -> cipher.decrypt("presence_personal",
-                payload.keyVersion(), payload.ciphertext(), payload.iv()))
+                payload.keyVersion(), payload.ciphertext(), payload.iv(), AAD))
                 .isInstanceOf(IllegalStateException.class);
     }
 
@@ -111,16 +119,16 @@ class PayloadCipherBridgeTest {
         // Two encrypts under one scope on one adapter: counter nonces, monotonic.
         PayloadCipher first = Main.payloadCipher(configDir, FIXED_CLOCK);
         byte[] n1 = first.encrypt("identity",
-                "one".getBytes(StandardCharsets.UTF_8)).iv();
+                "one".getBytes(StandardCharsets.UTF_8), AAD).iv();
         byte[] n2 = first.encrypt("identity",
-                "two".getBytes(StandardCharsets.UTF_8)).iv();
+                "two".getBytes(StandardCharsets.UTF_8), AAD).iv();
         assertThat(n2).isNotEqualTo(n1);
         assertThat(counterOf(n2)).isGreaterThan(counterOf(n1));
 
         // A fresh adapter over the same config dir resumes strictly above the
         // persisted high-water mark — never reissuing a used nonce.
         byte[] n3 = Main.payloadCipher(configDir, FIXED_CLOCK)
-                .encrypt("identity", "three".getBytes(StandardCharsets.UTF_8)).iv();
+                .encrypt("identity", "three".getBytes(StandardCharsets.UTF_8), AAD).iv();
         assertThat(counterOf(n3)).isGreaterThan(counterOf(n2));
     }
 

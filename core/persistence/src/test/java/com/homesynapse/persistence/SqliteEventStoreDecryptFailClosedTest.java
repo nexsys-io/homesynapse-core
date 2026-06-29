@@ -24,6 +24,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -32,6 +38,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.Supplier;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
@@ -143,12 +150,13 @@ final class SqliteEventStoreDecryptFailClosedTest {
     private static PayloadCipher decryptThrows(Supplier<RuntimeException> failure) {
         return new PayloadCipher() {
             @Override
-            public EncryptedPayload encrypt(String scopeId, byte[] plaintext) {
+            public EncryptedPayload encrypt(String scopeId, byte[] plaintext, byte[] aad) {
                 throw new UnsupportedOperationException("read-only decrypt-failure stub");
             }
 
             @Override
-            public byte[] decrypt(String scopeId, int keyVersion, byte[] ciphertext, byte[] iv) {
+            public byte[] decrypt(String scopeId, int keyVersion, byte[] ciphertext, byte[] iv,
+                                  byte[] aad) {
                 throw failure.get();
             }
         };
@@ -210,6 +218,71 @@ final class SqliteEventStoreDecryptFailClosedTest {
                             .isEqualTo("presence_personal");
                     org.assertj.core.api.Assertions.assertThat(ex.keyVersion()).isEqualTo(1);
                 });
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // AB-4 F1 — the envelope version byte fails closed on an unknown value
+    // ──────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("an encrypted row whose stored envelope leads with an unknown version byte"
+            + " fails the batch closed (UNKNOWN_ENVELOPE_VERSION) — never implicit-v1, never"
+            + " fed to the cipher")
+    void unknownEnvelopeVersion_failsBatchClosed() throws SequenceConflictException, SQLException {
+        Path dbPath = tempDir.resolve("events.db");
+        writeOneEncryptedRow(dbPath);
+
+        // Corrupt the stored at-rest envelope's leading version byte (v1 = 0x01)
+        // to an unknown value. The DatabaseExecutor is already shut down inside
+        // writeOneEncryptedRow, so a foreign JDBC writer is safe (Windows
+        // file-lock discipline).
+        overwriteLeadingEnvelopeByte(dbPath, (byte) 0x7F);
+
+        // Re-open with a faithful cipher: the strict version parse rejects the
+        // row BEFORE the cipher is consulted, so even a working cipher fails closed.
+        SqliteEventStore reader = startStore(dbPath,
+                new CountingPayloadCipher(tempDir.resolve("reader-nonce.json")), ENCRYPTED);
+        assertThatThrownBy(() -> reader.readFrom(0L, 10))
+                .isInstanceOfSatisfying(PayloadDecryptionException.class, ex -> {
+                    assertThat(ex.failureKind())
+                            .isEqualTo(PayloadDecryptionException.FailureKind.UNKNOWN_ENVELOPE_VERSION);
+                    assertThat(ex.globalPosition()).isEqualTo(1L);
+                    assertThat(ex.scopeId()).isEqualTo("presence_personal");
+                    assertThat(ex.keyVersion()).isEqualTo(1);
+                });
+    }
+
+    /**
+     * Overwrites the first byte of the encrypted row's stored {@code payload}
+     * BLOB (the F1 envelope version discriminator) with {@code newLeadingByte}.
+     * Opened only after the executor is shut down (Windows file-lock safety).
+     */
+    private static void overwriteLeadingEnvelopeByte(Path dbPath, byte newLeadingByte)
+            throws SQLException {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath)) {
+            try (Statement pragma = conn.createStatement()) {
+                pragma.execute("PRAGMA busy_timeout = 5000");
+            }
+            long position;
+            byte[] payload;
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(
+                         "SELECT global_position, payload FROM events "
+                                 + "WHERE dek_ref IS NOT NULL ORDER BY global_position ASC LIMIT 1")) {
+                if (!rs.next()) {
+                    throw new AssertionError("no encrypted row to corrupt");
+                }
+                position = rs.getLong("global_position");
+                payload = rs.getBytes("payload");
+            }
+            payload[0] = newLeadingByte;
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "UPDATE events SET payload = ? WHERE global_position = ?")) {
+                ps.setBytes(1, payload);
+                ps.setLong(2, position);
+                ps.executeUpdate();
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────

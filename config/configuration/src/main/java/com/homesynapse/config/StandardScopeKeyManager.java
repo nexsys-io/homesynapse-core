@@ -95,6 +95,15 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
     private static final String CIPHER_TRANSFORMATION = "AES/GCM/NoPadding";
     private static final String KEY_ALGORITHM = "AES";
 
+    /**
+     * F3/F1 (AB-4) — the empty additional-authenticated-data array. The
+     * random-IV {@link #encrypt} secrets path and the internal DEK wrap/unwrap
+     * bind no AAD; the counter-nonce {@link #encryptPayload} payload path binds
+     * the caller-supplied AAD (the persistence envelope version byte). Shared
+     * and never mutated (GCM only reads it).
+     */
+    private static final byte[] NO_AAD = new byte[0];
+
     /** Doc 15 §4.2 — HKDF info prefix for scope-KEK derivation. */
     private static final String SCOPE_INFO_PREFIX = "scope:";
 
@@ -132,6 +141,29 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
     private Map<String, Map<Integer, Long>> nonceHighWater;
 
     /**
+     * F3 (AB-4) — the per-scope nonce-construction binding (NIST SP 800-38D
+     * §8.3). A scope binds to exactly one construction on its first encrypt:
+     * {@link NonceConstruction#RANDOM_IV} via {@link #encrypt} (the
+     * {@code config_secrets} path) or {@link NonceConstruction#COUNTER} via
+     * {@link #encryptPayload} (the event-payload path). A later encrypt under
+     * the other construction is rejected — mixing a random IV and a counter
+     * nonce under one DEK risks a {@code (key, nonce)} collision that breaks
+     * GCM confidentiality and authenticity. {@link #decrypt} is
+     * construction-neutral and does not bind. First-use-wins, in-memory (the
+     * MVP scope set is disjoint by construction — secrets vs event scopes — so
+     * a real boot never mixes; this guards a future wiring mistake).
+     */
+    private final Map<String, NonceConstruction> scopeConstruction = new HashMap<>();
+
+    /** F3 (AB-4) — the GCM nonce construction a scope is bound to. */
+    private enum NonceConstruction {
+        /** Fresh random 96-bit IV per call ({@link #encrypt}, secrets). */
+        RANDOM_IV,
+        /** Durable monotonic counter nonce ({@link #encryptPayload}, events). */
+        COUNTER
+    }
+
+    /**
      * Creates the manager. Touches no files — all key material is created
      * or loaded lazily on first use (INV-CE-02).
      *
@@ -153,6 +185,9 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
         DekHandle dek;
         lock.lock();
         try {
+            // F3: this scope binds to the random-IV construction; a later
+            // encryptPayload (counter) on the same scope is rejected.
+            bindConstructionLocked(scopeId, NonceConstruction.RANDOM_IV);
             dek = activeDekLocked(scopeId);
         } finally {
             lock.unlock();
@@ -160,20 +195,31 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
 
         byte[] iv = new byte[GCM_IV_LENGTH_BYTES];
         random.nextBytes(iv);
+        // Secrets bind no AAD (no envelope versioning on that path).
         byte[] ciphertext = runGcm(Cipher.ENCRYPT_MODE, dek.key(), iv,
-                plaintext, scopeId);
+                plaintext, scopeId, NO_AAD);
         return new ScopeCipherResult(ciphertext, iv, dek.keyVersion());
     }
 
     @Override
     public ScopeCipherResult encryptPayload(String scopeId, byte[] plaintext) {
+        return encryptPayload(scopeId, plaintext, NO_AAD);
+    }
+
+    @Override
+    public ScopeCipherResult encryptPayload(String scopeId, byte[] plaintext,
+                                            byte[] aad) {
         requireScopeId(scopeId);
         Objects.requireNonNull(plaintext, "plaintext must not be null");
+        Objects.requireNonNull(aad, "aad must not be null");
 
         DekHandle dek;
         byte[] nonce;
         lock.lock();
         try {
+            // F3: this scope binds to the counter construction; a later
+            // encrypt (random IV) on the same scope is rejected.
+            bindConstructionLocked(scopeId, NonceConstruction.COUNTER);
             dek = activeDekLocked(scopeId);
             // Allocate the next counter value AND fsync the new high-water
             // mark before the nonce leaves this method (OR-M6-NONCE
@@ -189,22 +235,33 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
         }
         // GCM runs outside the lock on the caller's (publishing virtual)
         // thread with a per-call Cipher, mirroring encrypt(): the counter
-        // allocation is the only serialized step.
+        // allocation is the only serialized step. The AAD (the at-rest
+        // envelope version byte, F1) is bound into the tag but not encrypted.
         byte[] ciphertext = runGcm(Cipher.ENCRYPT_MODE, dek.key(), nonce,
-                plaintext, scopeId);
+                plaintext, scopeId, aad);
         return new ScopeCipherResult(ciphertext, nonce, dek.keyVersion());
     }
 
     @Override
     public byte[] decrypt(String scopeId, int keyVersion, byte[] ciphertext,
                           byte[] iv) {
+        return decrypt(scopeId, keyVersion, ciphertext, iv, NO_AAD);
+    }
+
+    @Override
+    public byte[] decrypt(String scopeId, int keyVersion, byte[] ciphertext,
+                          byte[] iv, byte[] aad) {
         requireScopeId(scopeId);
         Objects.requireNonNull(ciphertext, "ciphertext must not be null");
         Objects.requireNonNull(iv, "iv must not be null");
+        Objects.requireNonNull(aad, "aad must not be null");
 
         byte[] dek;
         lock.lock();
         try {
+            // decrypt is construction-neutral (F3): it does not bind a
+            // construction, so a fresh manager can decrypt a stored payload
+            // before it ever encrypts in that scope (the read-on-restart path).
             loadStoreLocked();
             ScopeKey row = findRowLocked(scopeId, keyVersion);
             if (row == null) {
@@ -223,7 +280,28 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
         } finally {
             lock.unlock();
         }
-        return runGcm(Cipher.DECRYPT_MODE, dek, iv, ciphertext, scopeId);
+        return runGcm(Cipher.DECRYPT_MODE, dek, iv, ciphertext, scopeId, aad);
+    }
+
+    /**
+     * F3 (AB-4) — binds {@code scopeId} to one GCM nonce construction on first
+     * use and rejects a later cross-construction call. Caller holds the lock.
+     *
+     * @throws IllegalStateException if the scope is already bound to a
+     *         different construction
+     */
+    private void bindConstructionLocked(String scopeId, NonceConstruction construction) {
+        NonceConstruction existing = scopeConstruction.putIfAbsent(scopeId, construction);
+        if (existing != null && existing != construction) {
+            throw new IllegalStateException(
+                    "scope '" + scopeId + "' is bound to the " + existing
+                            + " nonce construction; the " + construction
+                            + " construction is rejected — a scope must use exactly"
+                            + " one nonce construction. Mixing a random IV and a"
+                            + " counter nonce under one DEK risks a (key, nonce)"
+                            + " collision that breaks GCM confidentiality and"
+                            + " authenticity (NIST SP 800-38D §8.3, F3).");
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -267,7 +345,9 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
         random.nextBytes(dek);
         byte[] wrapIv = new byte[GCM_IV_LENGTH_BYTES];
         random.nextBytes(wrapIv);
-        byte[] encryptedDek = runGcm(Cipher.ENCRYPT_MODE, kek, wrapIv, dek, scopeId);
+        // DEK wrap binds no AAD (the wrapped DEK carries no envelope version).
+        byte[] encryptedDek = runGcm(Cipher.ENCRYPT_MODE, kek, wrapIv, dek,
+                scopeId, NO_AAD);
 
         ScopeKey row = new ScopeKey(scopeId, keyVersion, encryptedDek, wrapIv,
                 clock.instant(), null);
@@ -288,7 +368,7 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
         }
         byte[] kek = kekLocked(row.scopeId());
         byte[] dek = runGcm(Cipher.DECRYPT_MODE, kek, row.iv(),
-                row.encryptedDek(), row.scopeId());
+                row.encryptedDek(), row.scopeId(), NO_AAD);
         if (dek.length != KEY_LENGTH_BYTES) {
             throw new IllegalStateException(
                     SCOPE_KEYS_FILE_NAME + " is corrupt: unwrapped DEK for scope '"
@@ -564,12 +644,22 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
         }
         Path file = configDir.resolve(SCOPE_NONCE_COUNTERS_FILE_NAME);
         try {
-            // writeAtomically fsyncs the temp file (channel.force) before the
-            // atomic rename — the high-water mark is durable when this returns
-            // (OR-M6-NONCE).
-            AtomicYamlWriter.writeAtomically(file,
+            // F13b (AB-4): the DURABLE write — writeAtomicallyDurable fsyncs the
+            // temp file (channel.force) before the atomic rename AND fails closed
+            // if the directory-entry fsync genuinely fails on a POSIX filesystem
+            // (a non-durable high-water mark could replay a nonce on crash →
+            // catastrophic GCM (key, nonce) reuse). A platform that cannot open a
+            // directory channel (Windows/non-POSIX) is tolerated — durability
+            // there rides the metadata journal. The nonce-counter store is the
+            // ONLY writer that opts into fail-closed dir-fsync; scope_keys/secrets
+            // keep the best-effort writeAtomically (OR-M6-NONCE / Doc 15 §6).
+            AtomicYamlWriter.writeAtomicallyDurable(file,
                     MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(array));
         } catch (IOException e) {
+            // A pre-rename failure (temp create/write/rename): the prior counter
+            // file is intact. A confirmed dir-fsync durability failure surfaces
+            // as an UncheckedIOException from writeAtomicallyDurable and is NOT
+            // caught here — it propagates as the fail-closed signal.
             throw new UncheckedIOException(
                     SCOPE_NONCE_COUNTERS_FILE_NAME + " cannot be written; the prior"
                             + " counter state is intact: " + file, e);
@@ -594,13 +684,22 @@ final class StandardScopeKeyManager implements ScopeKeyManager {
      * One AES-256-GCM operation with a per-call {@link Cipher} —
      * {@code Cipher} instances are not thread-safe (LTD-11 confinement).
      * Exception messages never carry key material or plaintext.
+     *
+     * <p>{@code aad} is bound as additional authenticated data (covered by the
+     * tag, not encrypted) when non-empty — F1's envelope-version binding. An
+     * empty {@code aad} is a no-op, so the encrypt and decrypt sides agree as
+     * long as both pass the same array (the secrets and DEK-wrap paths both
+     * pass {@link #NO_AAD}).</p>
      */
     private static byte[] runGcm(int mode, byte[] key, byte[] iv, byte[] input,
-                                 String scopeId) {
+                                 String scopeId, byte[] aad) {
         try {
             Cipher cipher = Cipher.getInstance(CIPHER_TRANSFORMATION);
             cipher.init(mode, new SecretKeySpec(key, KEY_ALGORITHM),
                     new GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv));
+            if (aad.length > 0) {
+                cipher.updateAAD(aad);
+            }
             return cipher.doFinal(input);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException(

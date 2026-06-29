@@ -124,10 +124,33 @@ public interface ScopeKeyManager {
      * @param plaintext the serialized payload bytes; never {@code null}
      * @return ciphertext (GCM tag appended), the counter nonce as the
      *         {@code iv}, and the DEK version; never {@code null}
-     * @throws IllegalStateException if a key file is corrupt or the
-     *         cryptographic operation fails
+     * @throws IllegalStateException if a key file is corrupt, the
+     *         cryptographic operation fails, or the scope is already bound to
+     *         the random-IV {@link #encrypt} construction (F3 — one nonce
+     *         construction per scope)
      */
     ScopeCipherResult encryptPayload(String scopeId, byte[] plaintext);
+
+    /**
+     * Counter-nonce payload encryption (as {@link #encryptPayload(String, byte[])})
+     * that additionally binds {@code aad} as AES-GCM additional authenticated
+     * data (AB-4 F1) — bound into the tag but not encrypted. The persistence
+     * write path uses it to bind the 1-byte at-rest envelope version
+     * discriminator (Doc 15 §4.1) so the version is downgrade-resistant; the
+     * version byte itself is framed in the persistence envelope codec.
+     *
+     * @param scopeId   an encrypted scope; never {@code null} or blank
+     * @param plaintext the serialized payload bytes; never {@code null}
+     * @param aad       additional authenticated data bound into the GCM tag
+     *                  but not encrypted; never {@code null}, may be empty to
+     *                  bind nothing
+     * @return ciphertext (GCM tag appended), the counter nonce, and the DEK
+     *         version; never {@code null}
+     * @throws IllegalStateException if a key file is corrupt, the cryptographic
+     *         operation fails, or the scope is already bound to the random-IV
+     *         construction (F3)
+     */
+    ScopeCipherResult encryptPayload(String scopeId, byte[] plaintext, byte[] aad);
 
     /**
      * Decrypts ciphertext produced by {@link #encrypt} or
@@ -151,6 +174,30 @@ public interface ScopeKeyManager {
      *         corrupt
      */
     byte[] decrypt(String scopeId, int keyVersion, byte[] ciphertext, byte[] iv);
+
+    /**
+     * Decrypts ciphertext (as {@link #decrypt(String, int, byte[], byte[])})
+     * that additionally bound {@code aad} as AES-GCM additional authenticated
+     * data at encrypt time (AB-4 F1). The {@code aad} MUST equal the encrypt-side
+     * value byte-for-byte or GCM authentication fails — this is what makes the
+     * bound envelope version downgrade-resistant.
+     *
+     * @param scopeId    the encryption scope; never {@code null} or blank
+     * @param keyVersion the DEK version that encrypted the ciphertext
+     * @param ciphertext the ciphertext with the GCM tag appended;
+     *                   never {@code null}
+     * @param iv         the 96-bit IV; never {@code null}
+     * @param aad        the additional authenticated data bound at encrypt
+     *                   time; never {@code null}, may be empty
+     * @return the plaintext; never {@code null}
+     * @throws IllegalArgumentException if no {@code (scopeId, keyVersion)}
+     *         entry exists, or it is marked {@code destroyedAt}
+     * @throws IllegalStateException if GCM authentication fails (wrong scope,
+     *         wrong key, tampered ciphertext, or mismatched {@code aad}) or a
+     *         key file is corrupt
+     */
+    byte[] decrypt(String scopeId, int keyVersion, byte[] ciphertext, byte[] iv,
+                   byte[] aad);
 
     /**
      * Creates the standard manager rooted at the injected configuration

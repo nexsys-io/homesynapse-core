@@ -175,6 +175,25 @@ final class AtRestEncryptionWritePathTest {
     }
 
     @Test
+    @DisplayName("F1 (AB-4): the stored at-rest envelope leads with the v1 version byte"
+            + " (0x01) — the framing that read-back strictly parses and binds as GCM AAD")
+    void encryptedRow_storedEnvelopeLeadsWithV1Byte() throws Exception {
+        Path dbPath = tempDir.resolve("events.db");
+        CountingPayloadCipher cipher = new CountingPayloadCipher(tempDir.resolve("nonce.json"));
+        SqliteEventStore store = startStore(dbPath, cipher, ENCRYPTED);
+
+        store.publishRoot(presenceDraft("envelope-probe"));
+
+        shutdownExecutor();
+        byte[] storedPayload = rawEncryptedPayload(dbPath);
+        // The first byte of the stored payload BLOB is the F1 version
+        // discriminator (v1 = 0x01); the ciphertext follows.
+        assertThat(storedPayload).isNotNull();
+        assertThat(storedPayload.length).isGreaterThan(1);
+        assertThat(storedPayload[0]).isEqualTo((byte) 0x01);
+    }
+
+    @Test
     @DisplayName("a non-sensitive (device-state) event persists plaintext with NULL"
             + " payload_iv/dek_ref")
     void nonSensitiveScope_persistsPlaintext() throws Exception {
@@ -236,7 +255,7 @@ final class AtRestEncryptionWritePathTest {
         // without ever inserting it — the catastrophic case the durability
         // discipline must tolerate as a harmless GAP, never a reuse.
         long burned = counterOf(cipher1.encrypt("presence_personal",
-                "never-inserted".getBytes(StandardCharsets.UTF_8)).iv());
+                "never-inserted".getBytes(StandardCharsets.UTF_8), new byte[]{1}).iv());
         shutdownExecutor(); // crash: no graceful checkpoint
 
         // Restart: a fresh cipher re-inits from the persisted high-water mark.
@@ -370,6 +389,21 @@ final class AtRestEncryptionWritePathTest {
             }
         }
         return rows;
+    }
+
+    /** Reads the raw stored {@code payload} BLOB of the first encrypted row. */
+    private static byte[] rawEncryptedPayload(Path dbPath) throws SQLException {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath)) {
+            try (Statement pragma = conn.createStatement()) {
+                pragma.execute("PRAGMA busy_timeout = 5000");
+            }
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(
+                         "SELECT payload FROM events WHERE dek_ref IS NOT NULL "
+                                 + "ORDER BY global_position ASC LIMIT 1")) {
+                return rs.next() ? rs.getBytes("payload") : null;
+            }
+        }
     }
 
     /** Decodes the counter from a 96-bit nonce (big-endian trailing 8 bytes). */

@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Tests for the M6.3 counter-nonce payload path
@@ -160,21 +162,70 @@ class ScopeKeyManagerPayloadNonceTest {
     }
 
     @Test
-    @DisplayName("the fence holds: encrypt stays random-IV; encryptPayload is the counter")
-    void fence_randomIvPathUnchanged() {
+    @DisplayName("F3: the two constructions stay distinct on DISJOINT scopes — random-IV"
+            + " secrets and counter-nonce events each behave correctly")
+    void fence_disjointScopesEachConstruction() {
         ScopeKeyManager manager = manager();
 
-        // M6.2 secrets path: random IV — two calls differ unpredictably.
-        ScopeCipherResult r1 = manager.encrypt("identity", bytes("secret one"));
-        ScopeCipherResult r2 = manager.encrypt("identity", bytes("secret two"));
+        // M6.2 secrets path on a secrets scope: random IV — two calls differ.
+        ScopeCipherResult r1 = manager.encrypt("config_secrets", bytes("secret one"));
+        ScopeCipherResult r2 = manager.encrypt("config_secrets", bytes("secret two"));
         assertThat(r1.iv()).isNotEqualTo(r2.iv());
 
-        // M6.3 payload path: deterministic counter — strictly +1 each call,
-        // on its own counter sequence, untouched by the random-IV calls above.
+        // M6.3 payload path on an event scope: deterministic counter — strictly
+        // +1 each call, on its own counter sequence, untouched by the secrets calls.
         long p1 = counterOf(manager.encryptPayload("identity", bytes("payload one")).iv());
         long p2 = counterOf(manager.encryptPayload("identity", bytes("payload two")).iv());
         assertThat(p1).isEqualTo(1L);
         assertThat(p2).isEqualTo(2L);
+    }
+
+    @Test
+    @DisplayName("F3: one scope cannot mix nonce constructions — encrypt then encryptPayload"
+            + " (and vice versa) on the same scope is rejected; legitimate disjoint paths stay allowed")
+    void fence_crossConstructionRejected() {
+        ScopeKeyManager manager = manager();
+
+        // random-IV first, then counter on the SAME scope → rejected.
+        manager.encrypt("scope_a", bytes("secret"));
+        assertThatThrownBy(() -> manager.encryptPayload("scope_a", bytes("payload")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("nonce construction");
+
+        // counter first, then random-IV on the SAME scope → rejected.
+        manager.encryptPayload("scope_b", bytes("payload"));
+        assertThatThrownBy(() -> manager.encrypt("scope_b", bytes("secret")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("nonce construction");
+
+        // The legitimate production split (secrets→encrypt, events→encryptPayload
+        // on disjoint scopes) is never rejected.
+        assertThatCode(() -> {
+            manager.encrypt("config_secrets", bytes("s"));
+            manager.encryptPayload("presence_personal", bytes("p"));
+        }).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("F1: the AAD binds into the GCM tag — same AAD round-trips, a different AAD"
+            + " fails authentication (downgrade resistance)")
+    void encryptPayload_aadBoundIntoTag_downgradeResistant() {
+        ScopeKeyManager manager = manager();
+        byte[] plaintext = bytes("person-linked presence payload");
+        byte[] aadV1 = {1};
+        byte[] aadV2 = {2};
+
+        ScopeCipherResult result = manager.encryptPayload("presence_personal", plaintext, aadV1);
+
+        // Same AAD → round-trips.
+        assertThat(manager.decrypt("presence_personal", result.keyVersion(),
+                result.ciphertext(), result.iv(), aadV1))
+                .isEqualTo(plaintext);
+
+        // A flipped/forged AAD (a downgrade attempt) → GCM authentication fails.
+        assertThatThrownBy(() -> manager.decrypt("presence_personal", result.keyVersion(),
+                result.ciphertext(), result.iv(), aadV2))
+                .isInstanceOf(IllegalStateException.class);
     }
 
     @Test

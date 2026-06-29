@@ -9,6 +9,8 @@ import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventOrigin;
 import com.homesynapse.event.EventPriority;
+import com.homesynapse.event.EventTypes;
+import com.homesynapse.event.PresenceSignalEvent;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.test.EventStoreContractTest;
@@ -27,6 +29,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -390,6 +397,73 @@ final class SqlitePersistenceLifecycleTest {
         assertThat(viewRecord).isPresent();
         assertThat(viewRecord.get().position()).isEqualTo(77L);
         assertThat(viewRecord.get().data()).isEqualTo(viewData);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // AB-4 activation gate: cipher-presence flips the encrypted-scope set
+    // ──────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("AB-4: a non-null cipher activates encrypt-on-write for the sensitive scopes;"
+            + " a null cipher leaves every scope plaintext (the cipher-presence gate)")
+    void cipherPresence_gatesEncryptedScopes() throws Exception {
+        // The @BeforeEach lifecycle is unused here (constructed, never started —
+        // a no-op stop()); these two lifecycles own their own database files.
+
+        // WITH a cipher: the gate wires DEFAULT_ENCRYPTED_SCOPES, so a presence
+        // event (→ presence_personal) is encrypted at rest with the F1 v1 byte.
+        Path encDb = tempDir.resolve("enc-events.db");
+        SqlitePersistenceLifecycle withCipher = new SqlitePersistenceLifecycle(
+                encDb, CONFIG, FIXED_CLOCK, TEST_HOME_ID, ALL_TEST_CLASSES,
+                new CountingPayloadCipher(tempDir.resolve("enc-nonce.json")));
+        withCipher.start().join();
+        withCipher.eventStore().publishRoot(presenceDraft("activated"));
+        withCipher.stop();
+
+        StoredRow encrypted = firstRow(encDb);
+        assertThat(encrypted.dekRef()).isEqualTo("presence_personal:1");
+        assertThat(encrypted.payload()).isNotNull();
+        assertThat(encrypted.payload()[0]).isEqualTo((byte) 0x01); // F1 v1 envelope byte
+
+        // WITHOUT a cipher: the gate leaves the enabled scope-set empty → the
+        // same presence event stays plaintext-at-rest (NULL dek_ref).
+        Path plainDb = tempDir.resolve("plain-events.db");
+        SqlitePersistenceLifecycle noCipher = new SqlitePersistenceLifecycle(
+                plainDb, CONFIG, FIXED_CLOCK, TEST_HOME_ID, ALL_TEST_CLASSES);
+        noCipher.start().join();
+        noCipher.eventStore().publishRoot(presenceDraft("plaintext"));
+        noCipher.stop();
+
+        assertThat(firstRow(plainDb).dekRef()).isNull();
+    }
+
+    private static EventDraft presenceDraft(String data) {
+        EntityId entityId = new EntityId(UlidFactory.generate(FIXED_CLOCK));
+        return new EventDraft(EventTypes.PRESENCE_SIGNAL, 1, null,
+                SubjectRef.entity(entityId), EventPriority.DIAGNOSTIC,
+                EventOrigin.DEVICE_AUTONOMOUS,
+                new PresenceSignalEvent("wifi_probe", "router", data), null, null);
+    }
+
+    private record StoredRow(String dekRef, byte[] payload) {
+    }
+
+    /** Raw-reads the first row's {@code dek_ref}/{@code payload} after shutdown. */
+    private static StoredRow firstRow(Path dbPath) throws SQLException {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath)) {
+            try (Statement pragma = conn.createStatement()) {
+                pragma.execute("PRAGMA busy_timeout = 5000");
+            }
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(
+                         "SELECT dek_ref, payload FROM events "
+                                 + "ORDER BY global_position ASC LIMIT 1")) {
+                if (!rs.next()) {
+                    throw new AssertionError("no row in events table");
+                }
+                return new StoredRow(rs.getString("dek_ref"), rs.getBytes("payload"));
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────

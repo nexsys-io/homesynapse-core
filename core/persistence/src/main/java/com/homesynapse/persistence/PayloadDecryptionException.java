@@ -36,14 +36,26 @@ public final class PayloadDecryptionException extends RuntimeException {
     /**
      * Read-side decrypt failure classification. Mirrors the two
      * {@link PayloadCipher#decrypt} exception cases (CASE-a / CASE-b) plus the
-     * two store-local pre-conditions that must hold before the cipher is even
-     * consulted.
+     * store-local pre-conditions that must hold before the cipher is even
+     * consulted (no cipher wired, a malformed {@code dek_ref}, or an
+     * unrecognized at-rest envelope version).
      */
     public enum FailureKind {
         /** No {@link PayloadCipher} is wired, but an encrypted row was read. */
         NO_CIPHER_WIRED,
         /** The {@code dek_ref} column is not parseable as {@code scope_id:key_version}. */
         MALFORMED_DEK_REF,
+        /**
+         * The stored at-rest envelope's leading version byte is absent or
+         * unrecognized (AB-4 F1, Doc 15 §4.1). The MVP supports exactly one
+         * envelope version ({@code v1} = AES-256-GCM); an absent or unknown
+         * leading byte is a hard, fail-closed decrypt failure — never an
+         * implicit-{@code v1} fallback, and never fed to the cipher. The byte
+         * is also bound as GCM AAD, so a stored byte that survives this strict
+         * check but was tampered to a different value would additionally fail
+         * the auth tag ({@link #GCM_AUTH_FAILED}).
+         */
+        UNKNOWN_ENVELOPE_VERSION,
         /** GCM authentication failed — corrupt or tampered ciphertext (CASE-b). */
         GCM_AUTH_FAILED,
         /** The decryption key is absent or destroyed — crypto-shred (CASE-a). */

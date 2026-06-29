@@ -321,13 +321,13 @@ final class HomeSynapseCoreTest {
         // in the app module's PayloadCipherBridgeTest.
         PayloadCipher cipher = new PayloadCipher() {
             @Override
-            public EncryptedPayload encrypt(String scopeId, byte[] plaintext) {
+            public EncryptedPayload encrypt(String scopeId, byte[] plaintext, byte[] aad) {
                 return new EncryptedPayload(plaintext.clone(), new byte[12], 1);
             }
 
             @Override
             public byte[] decrypt(String scopeId, int keyVersion,
-                                  byte[] ciphertext, byte[] iv) {
+                                  byte[] ciphertext, byte[] iv, byte[] aad) {
                 return ciphertext.clone();
             }
         };

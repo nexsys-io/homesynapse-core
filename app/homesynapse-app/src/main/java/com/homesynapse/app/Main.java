@@ -30,11 +30,16 @@ import java.util.concurrent.CountDownLatch;
  * calls {@link SystemLifecycleManager#shutdown(String)}, and calls
  * {@link SystemLifecycleManager#start()} on the platform main thread (LTD-19).</p>
  *
- * <p><strong>AB-1 boundary.</strong> {@code start()} now opens the HTTP surface
+ * <p><strong>AB-1 boundary.</strong> {@code start()} opens the HTTP surface
  * behind bearer-token authentication, loopback-bound by default (core-review C1
- * closed inside {@code HomeSynapseCore}). The at-rest payload cipher remains
- * <em>inert</em> — the {@link #payloadCipher(Path, Clock)} adapter is built only
- * when AB-4 activates encryption; this entry point still passes no cipher.</p>
+ * closed inside {@code HomeSynapseCore}).</p>
+ *
+ * <p><strong>AB-4 boundary.</strong> The at-rest payload cipher is now
+ * <em>live</em>: {@code main()} builds the {@link #payloadCipher(Path, Clock)}
+ * adapter and passes it into the six-argument {@code HomeSynapseCore}
+ * constructor, so {@code SqlitePersistenceLifecycle} enables at-rest encryption
+ * for {@code [identity, presence_personal]} (encrypt-from-genesis — the
+ * immutable log is encrypted from the first sensitive write).</p>
  */
 public final class Main {
 
@@ -59,10 +64,13 @@ public final class Main {
         // home_id file if present, else mint one and persist it.
         HomeId homeId = resolveHomeId(configDir, clock);
 
-        // AB-3 boundary: the at-rest payload cipher stays INERT — the five-arg
-        // ctor is reserved for AB-4, which will pass payloadCipher(configDir, clock).
+        // AB-4 boundary: the at-rest payload cipher goes LIVE — the six-argument
+        // ctor passes the held-not-consumed payloadCipher(configDir, clock) adapter,
+        // flipping SqlitePersistenceLifecycle's cipher-presence gate so encryption
+        // is enabled for [identity, presence_personal] (Doc 15 §3.4, AMD-94).
         SystemLifecycleManager manager = new HomeSynapseCore(
-                dbPath, configDir, HomeSynapseConfig.HOME_DEFAULT, clock, homeId);
+                dbPath, configDir, HomeSynapseConfig.HOME_DEFAULT, clock, homeId,
+                payloadCipher(configDir, clock));
 
         CountDownLatch shutdownLatch = new CountDownLatch(1);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -138,10 +146,13 @@ public final class Main {
      * this adapter closes the key-management/encryption cycle with zero new
      * module edges (the AMD-45 injection-at-the-composition-root discipline).</p>
      *
-     * <p><strong>AB-3.</strong> This adapter is NOT wired into the runtime yet —
-     * AB-3 leaves the at-rest cipher inert. AB-4 passes the adapter into the
-     * five-argument {@code HomeSynapseCore} constructor. Package-private so the
-     * app-level bridge round-trip test exercises the real adapter.</p>
+     * <p><strong>AB-4.</strong> This adapter is now wired into the runtime —
+     * {@code main()} passes it into the six-argument {@code HomeSynapseCore}
+     * constructor, activating at-rest encryption. The {@code aad} threaded
+     * through both directions is the F1 envelope version byte, framed by the
+     * persistence envelope codec and bound here into the GCM tag (downgrade
+     * resistance). Package-private so the app-level bridge round-trip test
+     * exercises the real adapter.</p>
      *
      * @param configDir the resolved configuration directory the key files live
      *                  under; never {@code null}
@@ -154,18 +165,21 @@ public final class Main {
         ScopeKeyManager keyManager = ScopeKeyManager.create(configDir, clock);
         return new PayloadCipher() {
             @Override
-            public EncryptedPayload encrypt(String scopeId, byte[] plaintext) {
+            public EncryptedPayload encrypt(String scopeId, byte[] plaintext,
+                                            byte[] aad) {
                 // M6.3: counter-nonce payload path (Doc 15 §3.4), NOT the
-                // random-IV encrypt() (that stays the M6.2 secrets path).
-                ScopeCipherResult result = keyManager.encryptPayload(scopeId, plaintext);
+                // random-IV encrypt() (that stays the M6.2 secrets path). The
+                // aad (the F1 envelope version byte) is bound into the GCM tag.
+                ScopeCipherResult result =
+                        keyManager.encryptPayload(scopeId, plaintext, aad);
                 return new EncryptedPayload(
                         result.ciphertext(), result.iv(), result.keyVersion());
             }
 
             @Override
             public byte[] decrypt(String scopeId, int keyVersion,
-                                  byte[] ciphertext, byte[] iv) {
-                return keyManager.decrypt(scopeId, keyVersion, ciphertext, iv);
+                                  byte[] ciphertext, byte[] iv, byte[] aad) {
+                return keyManager.decrypt(scopeId, keyVersion, ciphertext, iv, aad);
             }
         };
     }

@@ -94,7 +94,7 @@ final class CountingPayloadCipher implements PayloadCipher {
     }
 
     @Override
-    public EncryptedPayload encrypt(String scopeId, byte[] plaintext) {
+    public EncryptedPayload encrypt(String scopeId, byte[] plaintext, byte[] aad) {
         int version;
         byte[] nonce;
         lock.lock();
@@ -105,13 +105,16 @@ final class CountingPayloadCipher implements PayloadCipher {
         } finally {
             lock.unlock();
         }
-        byte[] ciphertext = gcm(Cipher.ENCRYPT_MODE, dek(scopeId, version), nonce, plaintext);
+        // F1 (AB-4): bind the caller's aad (the envelope version byte) into the
+        // GCM tag — faithfully modelling the production cipher's AAD contract.
+        byte[] ciphertext = gcm(Cipher.ENCRYPT_MODE, dek(scopeId, version), nonce, plaintext, aad);
         return new EncryptedPayload(ciphertext, nonce, version);
     }
 
     @Override
-    public byte[] decrypt(String scopeId, int keyVersion, byte[] ciphertext, byte[] iv) {
-        return gcm(Cipher.DECRYPT_MODE, dek(scopeId, keyVersion), iv, ciphertext);
+    public byte[] decrypt(String scopeId, int keyVersion, byte[] ciphertext, byte[] iv,
+                          byte[] aad) {
+        return gcm(Cipher.DECRYPT_MODE, dek(scopeId, keyVersion), iv, ciphertext, aad);
     }
 
     /**
@@ -167,10 +170,14 @@ final class CountingPayloadCipher implements PayloadCipher {
         }
     }
 
-    private static byte[] gcm(int mode, SecretKeySpec key, byte[] iv, byte[] input) {
+    private static byte[] gcm(int mode, SecretKeySpec key, byte[] iv, byte[] input,
+                              byte[] aad) {
         try {
             Cipher cipher = Cipher.getInstance(TRANSFORMATION);
             cipher.init(mode, key, new GCMParameterSpec(GCM_TAG_BITS, iv));
+            if (aad.length > 0) {
+                cipher.updateAAD(aad);
+            }
             return cipher.doFinal(input);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("GCM " + mode + " failed", e);

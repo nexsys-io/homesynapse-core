@@ -32,6 +32,7 @@ import java.sql.Types;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -127,6 +128,26 @@ final class SqliteEventStore implements EventPublisher, EventStore {
      * {@code AtRestEncryptionWritePathTest}.
      */
     private static final String PRESENCE_PERSONAL_SCOPE_ID = "presence_personal";
+
+    /**
+     * AB-4 / F1 — the at-rest AEAD envelope format version (Doc 15 §4.1,
+     * AMD-94). {@code v1} = AES-256-GCM, 96-bit per-scope counter nonce,
+     * per-scope DEK — the M6.3 envelope. For an encrypted row the byte is the
+     * FIRST byte of the stored {@code payload} BLOB (prepended on write,
+     * strictly parsed on read) AND is bound as GCM AAD (the
+     * {@link PayloadCipher#encrypt}/{@link PayloadCipher#decrypt} {@code aad}),
+     * so a tampered or stripped version byte fails closed
+     * ({@link PayloadDecryptionException.FailureKind#UNKNOWN_ENVELOPE_VERSION}
+     * on the strict parse, or {@code GCM_AUTH_FAILED} via the auth tag) — never
+     * an implicit-{@code v1} fallback. Zero-DDL: the byte rides the existing
+     * {@code payload} BLOB; there is no {@code envelope_version} column.
+     *
+     * <p>The AAD tamper-evidence is real now (the tag covers the byte);
+     * <em>chain-coverage</em> tamper-evidence stays inert until chain
+     * activation ({@code chain_hash} is the 32-byte ZERO vector today,
+     * Doc 15 §2.3) — no over-claim here.</p>
+     */
+    private static final byte ENVELOPE_VERSION_V1 = 1;
 
     /**
      * 32-byte zero vector for the {@code chain_hash} column (AMD-37).
@@ -406,8 +427,16 @@ final class SqliteEventStore implements EventPublisher, EventStore {
                         "at-rest encryption enabled for scope " + scopeId
                                 + " but no PayloadCipher is wired");
             }
-            EncryptedPayload encrypted = payloadCipher.encrypt(scopeId, payloadBytes);
-            storedBytes = encrypted.ciphertext();
+            // F1 (AB-4): bind the envelope version byte as GCM AAD (downgrade
+            // resistance) AND prepend it to the stored envelope (chain-coverable
+            // once the chain is live). The cipher binds the AAD into the tag; the
+            // version byte itself is framed here — this is the single assemble
+            // site, matched by the single parse site in decryptStoredPayload.
+            byte[] aad = {ENVELOPE_VERSION_V1};
+            EncryptedPayload encrypted =
+                    payloadCipher.encrypt(scopeId, payloadBytes, aad);
+            storedBytes = prependEnvelopeVersion(ENVELOPE_VERSION_V1,
+                    encrypted.ciphertext());
             payloadIv = encrypted.iv();
             dekRef = scopeId + DEK_REF_DELIMITER + encrypted.keyVersion();
         } else {
@@ -885,6 +914,18 @@ final class SqliteEventStore implements EventPublisher, EventStore {
     }
 
     /**
+     * Frames the at-rest AEAD envelope (F1, AB-4): the 1-byte version
+     * discriminator followed by the GCM ciphertext. The single assemble site,
+     * matched by the single parse in {@link #decryptStoredPayload}.
+     */
+    private static byte[] prependEnvelopeVersion(byte version, byte[] ciphertext) {
+        byte[] envelope = new byte[ciphertext.length + 1];
+        envelope[0] = version;
+        System.arraycopy(ciphertext, 0, envelope, 1, ciphertext.length);
+        return envelope;
+    }
+
+    /**
      * Decrypts a stored ciphertext payload using the injected cipher,
      * parsing {@code scope_id:key_version} from {@code dek_ref} with a
      * last-colon split (Doc 15 §4.1).
@@ -922,7 +963,7 @@ final class SqliteEventStore implements EventPublisher, EventStore {
      *         contract above; the failure domain is the whole read batch
      */
     private byte[] decryptStoredPayload(
-            long globalPosition, String dekRef, byte[] payloadIv, byte[] ciphertext) {
+            long globalPosition, String dekRef, byte[] payloadIv, byte[] storedEnvelope) {
         if (payloadCipher == null) {
             throw new PayloadDecryptionException(
                     PayloadDecryptionException.FailureKind.NO_CIPHER_WIRED,
@@ -952,8 +993,35 @@ final class SqliteEventStore implements EventPublisher, EventStore {
                     "malformed dek_ref '" + dekRef + "' at global_position "
                             + globalPosition + "; key_version is not an integer", e);
         }
+        // F1 (AB-4): strict envelope-version parse — never implicit-v1. An
+        // empty envelope or an unrecognized leading byte is a hard, fail-closed
+        // decrypt failure (the byte is also GCM-AAD-bound below, so a tampered
+        // byte that somehow matched v1 would still fail the auth tag).
+        if (storedEnvelope.length < 1) {
+            throw new PayloadDecryptionException(
+                    PayloadDecryptionException.FailureKind.UNKNOWN_ENVELOPE_VERSION,
+                    globalPosition, scopeId, keyVersion,
+                    "empty at-rest envelope at global_position " + globalPosition
+                            + " (scope=" + scopeId + ", key_version=" + keyVersion
+                            + "); expected a leading v1 version byte — no implicit-v1"
+                            + " fallback (Doc 15 §4.1, AB-4 F1)");
+        }
+        byte version = storedEnvelope[0];
+        if (version != ENVELOPE_VERSION_V1) {
+            throw new PayloadDecryptionException(
+                    PayloadDecryptionException.FailureKind.UNKNOWN_ENVELOPE_VERSION,
+                    globalPosition, scopeId, keyVersion,
+                    "unrecognized at-rest envelope version 0x"
+                            + Integer.toHexString(version & 0xFF) + " at global_position "
+                            + globalPosition + " (scope=" + scopeId + ", key_version="
+                            + keyVersion + "); this build supports only v1 (AES-256-GCM)"
+                            + " — an unknown or stripped version byte is a hard decrypt"
+                            + " failure, never implicit-v1 (Doc 15 §4.1, AB-4 F1)");
+        }
+        byte[] aad = {version};
+        byte[] ciphertext = Arrays.copyOfRange(storedEnvelope, 1, storedEnvelope.length);
         try {
-            return payloadCipher.decrypt(scopeId, keyVersion, ciphertext, payloadIv);
+            return payloadCipher.decrypt(scopeId, keyVersion, ciphertext, payloadIv, aad);
         } catch (IllegalArgumentException e) {
             // CASE-a — the (scope, key_version) key is absent or destroyed
             // (crypto-shred, Doc 15 §3.6): the ciphertext is permanently
