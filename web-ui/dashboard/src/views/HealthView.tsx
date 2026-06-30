@@ -11,11 +11,12 @@ import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { StatusPill } from '../components/StatusPill';
 import type { Tone } from '../lib/format';
+import { t } from '../lib/i18n';
 
 function projectionMeta(mode: ProjectionMode): { tone: Tone; label: string; plain: string } {
   switch (mode) {
     case 'LIVE':
-      return { tone: 'ok', label: 'Live', plain: 'HomeSynapse is up to date and processing events in real time.' };
+      return { tone: 'ok', label: 'Live', plain: t('health.live') };
     case 'TRANSITION':
       return { tone: 'warn', label: 'Catching up', plain: 'Almost there — finishing catch-up after a restart.' };
     case 'REPLAY':

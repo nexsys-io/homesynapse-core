@@ -1,0 +1,57 @@
+/* Segmented theme control. Compact enough for the sidebar footer; the active segment shows its
+   label (the others are icon-only but keep an accessible name via the input's aria-label). */
+.group {
+  display: flex;
+  gap: 2px;
+  margin: 0;
+  padding: 2px;
+  border: 1px solid var(--hs-border);
+  border-radius: var(--hs-radius-md);
+  background: var(--hs-surface-sunk);
+  min-width: 0;
+}
+
+.opt {
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 26px; /* >= 24px touch target (WCAG 2.2 SC 2.5.8) */
+  padding: 4px 6px;
+  border-radius: var(--hs-radius-sm);
+  color: var(--hs-text-secondary);
+  font-size: var(--hs-text-xs);
+  font-weight: var(--hs-weight-medium);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.opt:hover {
+  background: var(--hs-surface-hover);
+  color: var(--hs-text);
+}
+
+/* Selected: fill + label + icon (shape) — not conveyed by color alone. Mirrors the nav active
+   treatment for system-wide consistency. */
+.active,
+.active:hover {
+  flex: 1 1 auto;
+  background: var(--hs-accent-50);
+  color: var(--hs-accent-700);
+  font-weight: var(--hs-weight-semibold);
+}
+
+/* The real radio is visually hidden; surface its keyboard focus on the segment. */
+.opt:focus-within {
+  outline: 2px solid var(--hs-focus-ring);
+  outline-offset: 1px;
+}
+
+.label {
+  line-height: 1;
+}
+/* Only the selected segment shows text; the rest stay icon-only to fit a narrow rail. */
+.opt:not(.active) .label {
+  display: none;
+}

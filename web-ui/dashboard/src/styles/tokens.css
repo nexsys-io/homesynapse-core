@@ -1,27 +1,25 @@
 /*
- * HomeSynapse — Design Tokens
- * ---------------------------------------------------------------------------
- * The visual foundation. Inherits the ratified brand DNA: "infrastructure-grade
- * software presented with consumer-grade calm." Calm-neutral surface, architectural
- * near-black/white neutrals, a SINGLE cool accent, warmth kept OUT of the UI (W-9).
- * Evidence over decoration.
+ * HomeSynapse — Design Tokens  ·  GENERATED FILE — DO NOT EDIT BY HAND.
+ * Source of truth: src/styles/tokens/tokens.dtcg.json (W3C Design Tokens / DTCG).
+ * Regenerate: `npm run tokens`  ·  Drift-guard in CI: `npm run tokens:check`.
  *
- * Rules that bind every component:
- *  - Use these custom properties. Never hard-code a hex value in a component.
- *  - Health + command-outcome semantics are conveyed by color + SHAPE + LABEL,
- *    never color alone (WCAG 1.4.1). The tokens give the color; the component adds
- *    the icon and text.
- *  - Light is the shipping MVP theme. Dark is wired (opt-in via [data-theme="dark"])
- *    but post-MVP per Doc 13 §14.
- *  - All color pairs meet WCAG AA (>= 4.5:1 for text, >= 3:1 for large/UI) on their
- *    intended surface.
+ * The visual foundation. "Infrastructure-grade software, consumer-grade calm." Calm-neutral
+ * surface, architectural near-black/white neutrals, a SINGLE cool accent, warmth kept OUT of
+ * the UI (W-9). Health + command-outcome semantics are conveyed by color + SHAPE + LABEL,
+ * never color alone (WCAG 1.4.1). All color pairs meet WCAG AA on their intended surface.
+ *
+ * Theme model (FE-2, D-FE-1): DARK is the recorded default; `prefers-color-scheme` is honored
+ * on first load for users who have not chosen; a persistent dark/light/system toggle sets
+ * [data-theme] on <html>. Light is first-class. Same token names in every theme, so no
+ * component changes between themes.
  */
 
+/* Default = dark (recorded brand default). Also the fallback for system mode. */
 :root {
-  /* ---- Neutral ramp (architectural, slightly cool gray) ---- */
-  --hs-neutral-0:   #ffffff;
-  --hs-neutral-25:  #fbfcfd;
-  --hs-neutral-50:  #f6f8fa;
+  /* Neutral ramp (architectural, slightly cool gray) */
+  --hs-neutral-0: #ffffff;
+  --hs-neutral-25: #fbfcfd;
+  --hs-neutral-50: #f6f8fa;
   --hs-neutral-100: #eceff3;
   --hs-neutral-200: #dde2e9;
   --hs-neutral-300: #c4ccd6;
@@ -32,63 +30,34 @@
   --hs-neutral-800: #262c35;
   --hs-neutral-900: #161a20;
   --hs-neutral-950: #0d1014;
-
-  /* ---- The single cool accent (UniFi-class blue; calm, not hype) ---- */
-  --hs-accent-50:  #e9f3fb;
+  /* The single cool accent (UniFi-class blue; calm, not hype) */
+  --hs-accent-50: #e9f3fb;
   --hs-accent-100: #cfe6f7;
   --hs-accent-300: #6db8e8;
-  --hs-accent-500: #1577be;  /* AA on white (4.5:1) for text + links */
+  --hs-accent-500: #1577be;
   --hs-accent-600: #11608f;
   --hs-accent-700: #0d4a6e;
-
-  /* ---- Status / health (traffic-light semantics, Doc 13 §3.8) ---- */
-  --hs-ok-500:     #1a8f4c;  /* HEALTHY / CONFIRMED — AA on white */
-  --hs-ok-bg:      #e6f4ec;
-  --hs-warn-500:   #9a6700;  /* DEGRADED / UNCONFIRMED — amber, AA on white */
-  --hs-warn-bg:    #fbf1d9;
-  --hs-error-500:  #c1392b;  /* UNHEALTHY / FAILED — AA on white */
-  --hs-error-bg:   #fbeae8;
-  --hs-info-500:   var(--hs-accent-500); /* DISPATCHED / in-flight */
-  --hs-info-bg:    var(--hs-accent-50);
-  --hs-unknown-500:#6a5b8a;  /* UNKNOWN origin / SKIPPED — honest, never blank */
-  --hs-unknown-bg: #efecf5;
-
-  /* ---- Semantic surface roles (what components actually reference) ---- */
-  --hs-bg:            var(--hs-neutral-50);
-  --hs-surface:       var(--hs-neutral-0);
-  --hs-surface-sunk:  var(--hs-neutral-100);
-  --hs-surface-hover: var(--hs-neutral-50);
-  --hs-border:        var(--hs-neutral-200);
-  --hs-border-strong: var(--hs-neutral-300);
-  --hs-text:          var(--hs-neutral-900);
-  --hs-text-secondary:var(--hs-neutral-600);
-  --hs-text-muted:    var(--hs-neutral-500);
-  --hs-text-on-accent:var(--hs-neutral-0);
-  --hs-link:          var(--hs-accent-500);
-  --hs-focus-ring:    var(--hs-accent-500);
-
-  /* ---- Typography (system stack — local-first, no web fonts, C13-06) ---- */
-  --hs-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-                  Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
-  --hs-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono",
-                  Menlo, Consolas, monospace;
-
-  --hs-text-xs:   0.75rem;   /* 12 */
-  --hs-text-sm:   0.8125rem; /* 13 */
-  --hs-text-base: 0.9375rem; /* 15 — comfortable reading default */
-  --hs-text-md:   1.0625rem; /* 17 */
-  --hs-text-lg:   1.375rem;  /* 22 */
-  --hs-text-xl:   1.75rem;   /* 28 */
-
+  /* Foreground on accent */
+  --hs-text-on-accent: var(--hs-neutral-0);
+  /* Typography — system stacks (local-first, no web fonts, C13-06) */
+  --hs-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+  --hs-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  /* Type scale */
+  --hs-text-xs: 0.75rem;
+  --hs-text-sm: 0.8125rem;
+  --hs-text-base: 0.9375rem;
+  --hs-text-md: 1.0625rem;
+  --hs-text-lg: 1.375rem;
+  --hs-text-xl: 1.75rem;
+  /* Font weights */
   --hs-weight-normal: 400;
   --hs-weight-medium: 500;
   --hs-weight-semibold: 600;
-
+  /* Line heights */
   --hs-leading-tight: 1.25;
   --hs-leading-normal: 1.5;
-  --hs-leading-relaxed: 1.65; /* explanation prose — readability */
-
-  /* ---- Space scale (4px base) ---- */
+  --hs-leading-relaxed: 1.65;
+  /* Space scale (4px base) */
   --hs-space-1: 0.25rem;
   --hs-space-2: 0.5rem;
   --hs-space-3: 0.75rem;
@@ -96,50 +65,141 @@
   --hs-space-5: 1.5rem;
   --hs-space-6: 2rem;
   --hs-space-8: 3rem;
-
-  /* ---- Radius / border / shadow (restrained; calm, not glossy) ---- */
+  /* Radius */
   --hs-radius-sm: 4px;
   --hs-radius-md: 8px;
   --hs-radius-lg: 12px;
   --hs-radius-pill: 999px;
+  /* Border width */
   --hs-border-width: 1px;
-  --hs-shadow-sm: 0 1px 2px rgba(13, 16, 20, 0.06), 0 1px 1px rgba(13, 16, 20, 0.04);
-  --hs-shadow-md: 0 4px 12px rgba(13, 16, 20, 0.08);
-  --hs-shadow-drawer: -8px 0 28px rgba(13, 16, 20, 0.12);
-
-  /* ---- Motion (subtle; honors prefers-reduced-motion in global.css) ---- */
+  /* Motion (honors prefers-reduced-motion in global.css) */
   --hs-ease: cubic-bezier(0.2, 0, 0, 1);
   --hs-dur-fast: 120ms;
   --hs-dur: 200ms;
-
-  /* ---- Layout ---- */
+  /* Layout */
   --hs-sidebar-w: 224px;
   --hs-content-max: 1180px;
   --hs-z-drawer: 40;
   --hs-z-banner: 50;
+  /* Semantic surface + text roles */
+  --hs-bg: var(--hs-neutral-950);
+  --hs-surface: var(--hs-neutral-900);
+  --hs-surface-sunk: var(--hs-neutral-800);
+  --hs-surface-hover: var(--hs-neutral-800);
+  --hs-border: var(--hs-neutral-800);
+  --hs-border-strong: var(--hs-neutral-700);
+  --hs-text: var(--hs-neutral-100);
+  --hs-text-secondary: var(--hs-neutral-400);
+  --hs-text-muted: var(--hs-neutral-500);
+  --hs-link: var(--hs-accent-300);
+  --hs-focus-ring: var(--hs-accent-300);
+  /* Status / health (color + SHAPE + LABEL — never color alone, WCAG 1.4.1) */
+  --hs-ok-500: #4ed28a;
+  --hs-ok-bg: #16291f;
+  --hs-warn-500: #e3b341;
+  --hs-warn-bg: #2b2410;
+  --hs-error-500: #f08a7e;
+  --hs-error-bg: #2c1714;
+  --hs-info-500: var(--hs-accent-300);
+  --hs-info-bg: #112230;
+  --hs-unknown-500: #b3a3d6;
+  --hs-unknown-bg: #211b2e;
+  /* Shadows */
+  --hs-shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+  --hs-shadow-md: 0 4px 12px rgba(0,0,0,0.5);
+  --hs-shadow-drawer: -8px 0 28px rgba(0,0,0,0.55);
 }
 
-/* Dark theme — opt-in (post-MVP per Doc 13 §14). Same token names remapped so
-   no component needs to change. Enable with <html data-theme="dark">. */
+/* System mode (no explicit choice) + OS prefers light → light. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    /* Semantic surface + text roles */
+    --hs-bg: var(--hs-neutral-50);
+    --hs-surface: var(--hs-neutral-0);
+    --hs-surface-sunk: var(--hs-neutral-100);
+    --hs-surface-hover: var(--hs-neutral-50);
+    --hs-border: var(--hs-neutral-200);
+    --hs-border-strong: var(--hs-neutral-300);
+    --hs-text: var(--hs-neutral-900);
+    --hs-text-secondary: var(--hs-neutral-600);
+    --hs-text-muted: var(--hs-neutral-500);
+    --hs-link: var(--hs-accent-500);
+    --hs-focus-ring: var(--hs-accent-500);
+    /* Status / health (color + SHAPE + LABEL — never color alone, WCAG 1.4.1) */
+    --hs-ok-500: #1a8f4c;
+    --hs-ok-bg: #e6f4ec;
+    --hs-warn-500: #9a6700;
+    --hs-warn-bg: #fbf1d9;
+    --hs-error-500: #c1392b;
+    --hs-error-bg: #fbeae8;
+    --hs-info-500: var(--hs-accent-500);
+    --hs-info-bg: var(--hs-accent-50);
+    --hs-unknown-500: #6a5b8a;
+    --hs-unknown-bg: #efecf5;
+    /* Shadows */
+    --hs-shadow-sm: 0 1px 2px rgba(13, 16, 20, 0.06), 0 1px 1px rgba(13, 16, 20, 0.04);
+    --hs-shadow-md: 0 4px 12px rgba(13, 16, 20, 0.08);
+    --hs-shadow-drawer: -8px 0 28px rgba(13, 16, 20, 0.12);
+  }
+}
+
+/* Explicit light choice (toggle). */
+:root[data-theme='light'] {
+  /* Semantic surface + text roles */
+  --hs-bg: var(--hs-neutral-50);
+  --hs-surface: var(--hs-neutral-0);
+  --hs-surface-sunk: var(--hs-neutral-100);
+  --hs-surface-hover: var(--hs-neutral-50);
+  --hs-border: var(--hs-neutral-200);
+  --hs-border-strong: var(--hs-neutral-300);
+  --hs-text: var(--hs-neutral-900);
+  --hs-text-secondary: var(--hs-neutral-600);
+  --hs-text-muted: var(--hs-neutral-500);
+  --hs-link: var(--hs-accent-500);
+  --hs-focus-ring: var(--hs-accent-500);
+  /* Status / health (color + SHAPE + LABEL — never color alone, WCAG 1.4.1) */
+  --hs-ok-500: #1a8f4c;
+  --hs-ok-bg: #e6f4ec;
+  --hs-warn-500: #9a6700;
+  --hs-warn-bg: #fbf1d9;
+  --hs-error-500: #c1392b;
+  --hs-error-bg: #fbeae8;
+  --hs-info-500: var(--hs-accent-500);
+  --hs-info-bg: var(--hs-accent-50);
+  --hs-unknown-500: #6a5b8a;
+  --hs-unknown-bg: #efecf5;
+  /* Shadows */
+  --hs-shadow-sm: 0 1px 2px rgba(13, 16, 20, 0.06), 0 1px 1px rgba(13, 16, 20, 0.04);
+  --hs-shadow-md: 0 4px 12px rgba(13, 16, 20, 0.08);
+  --hs-shadow-drawer: -8px 0 28px rgba(13, 16, 20, 0.12);
+}
+
+/* Explicit dark choice (toggle) — re-asserts dark over a system-light match. */
 :root[data-theme='dark'] {
-  --hs-bg:            var(--hs-neutral-950);
-  --hs-surface:       var(--hs-neutral-900);
-  --hs-surface-sunk:  var(--hs-neutral-800);
+  /* Semantic surface + text roles */
+  --hs-bg: var(--hs-neutral-950);
+  --hs-surface: var(--hs-neutral-900);
+  --hs-surface-sunk: var(--hs-neutral-800);
   --hs-surface-hover: var(--hs-neutral-800);
-  --hs-border:        var(--hs-neutral-800);
+  --hs-border: var(--hs-neutral-800);
   --hs-border-strong: var(--hs-neutral-700);
-  --hs-text:          var(--hs-neutral-100);
-  --hs-text-secondary:var(--hs-neutral-400);
-  --hs-text-muted:    var(--hs-neutral-500);
-  --hs-link:          var(--hs-accent-300);
-  --hs-focus-ring:    var(--hs-accent-300);
-
-  --hs-ok-500:   #4ed28a;  --hs-ok-bg:   #16291f;
-  --hs-warn-500: #e3b341;  --hs-warn-bg: #2b2410;
-  --hs-error-500:#f08a7e;  --hs-error-bg:#2c1714;
-  --hs-info-500: var(--hs-accent-300); --hs-info-bg: #112230;
-  --hs-unknown-500:#b3a3d6; --hs-unknown-bg:#211b2e;
-
+  --hs-text: var(--hs-neutral-100);
+  --hs-text-secondary: var(--hs-neutral-400);
+  --hs-text-muted: var(--hs-neutral-500);
+  --hs-link: var(--hs-accent-300);
+  --hs-focus-ring: var(--hs-accent-300);
+  /* Status / health (color + SHAPE + LABEL — never color alone, WCAG 1.4.1) */
+  --hs-ok-500: #4ed28a;
+  --hs-ok-bg: #16291f;
+  --hs-warn-500: #e3b341;
+  --hs-warn-bg: #2b2410;
+  --hs-error-500: #f08a7e;
+  --hs-error-bg: #2c1714;
+  --hs-info-500: var(--hs-accent-300);
+  --hs-info-bg: #112230;
+  --hs-unknown-500: #b3a3d6;
+  --hs-unknown-bg: #211b2e;
+  /* Shadows */
   --hs-shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
   --hs-shadow-md: 0 4px 12px rgba(0,0,0,0.5);
   --hs-shadow-drawer: -8px 0 28px rgba(0,0,0,0.55);

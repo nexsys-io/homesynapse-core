@@ -2,6 +2,8 @@
 
 *Frontend-dev lane, first beat delivered 2026-06-26. Was scaffold-only; now a buildable TypeScript Preact SPA (shell + design system + auth + device/health/event views + the explainability hero, built against the frozen read-API contract).*
 
+*2026-06-29 beat (FE-0/FE-2/FE-3, per the master-plan amendment-1): design tokens are now **generated** from a platform-neutral W3C-DTCG source (D-FE-8); **dark is the recorded default** theme with a dark/light/system toggle honoring `prefers-color-scheme` (D-FE-1); copy is **name-light + i18n-keyed** (D-FE-9). D-FE-10 typeface measured (see the 2026-06-29 lane return). See Gotchas.*
+
 ## Design Doc Reference
 - `homesynapse-core-docs/design/13-web-ui-observability-mvp.md` (Locked) — governs stack + UX scope.
 - `nexsys-hivemind/context/decisions/2026-06-21_dashboard-read-API-contract-freeze.md` (FROZEN v1.1) — the read-API contract this builds against; mirrored field-for-field in `src/lib/api/contract.ts`.
@@ -29,6 +31,9 @@
 - **Build/test require Node** and run as the frontend CI gate (`ci/frontend.yml`, npm `verify`). The Core lane's `./gradlew check` is intentionally NOT coupled to Node (npm tasks hang off `assemble`, never `check`).
 - **CI wiring is a cross-lane item:** `ci/frontend.yml` is delivered here, ready for the hub to place into `.github/workflows/`.
 - The contract carries **no entity display-name field**; the UI humanizes `entityId` (`labelFor`). A `name`/`label` field is a candidate additive contract change (raised in the lane return).
+- **Design tokens are GENERATED — never hand-edit `tokens.css`.** Source of truth: `src/styles/tokens/tokens.dtcg.json` (W3C Design Tokens). Regenerate with `npm run tokens`; the drift-guard `npm run tokens:check` is wired into `verify` (and `prebuild` regenerates). The generator (`scripts/build-tokens.mjs`) is zero-dependency; the source is DTCG, so Style Dictionary can be adopted later for native/B2B outputs without re-authoring (D-FE-8).
+- **Dark is the recorded default theme (D-FE-1).** First paint is set pre-CSS by an inline boot script in `index.html` (no FOUC); `prefers-color-scheme` is honored for "system"; a persistent dark/light/system toggle (`src/lib/theme.ts` + `src/components/ThemeToggle.tsx`) sets `[data-theme]` on `<html>`. The theme preference is stored in `localStorage` — this is non-secret UI state and is deliberately distinct from the in-memory-only auth token (AB-1).
+- **Name-light + i18n-keyed copy (FE-3, D-FE-9).** The product name comes from `BRAND.productName` (`src/lib/i18n.ts`) — never hardcode it (the unratified rename flips one token). User-facing strings are a keyed catalog via `t()`; V1 ships English; locale/RTL/Intl-format seams are reserved. (Most enum-label copy still lives in `format.ts`; migrating those maps behind `t()` is the same pattern and can follow. The static `index.html` `<title>`/`<noscript>` remain as the no-JS fallback; `document.title` is set from the brand token at runtime.)
 
 ---
 

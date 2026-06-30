@@ -7,6 +7,7 @@ import type { ComponentChildren } from 'preact';
 import type { ResponseMeta } from '../lib/api/contract';
 import { ApiProblem } from '../lib/api';
 import { timeAgo } from '../lib/format';
+import { t } from '../lib/i18n';
 import styles from './feedback.module.css';
 
 export function Loading({ label = 'Loading…' }: { label?: string }) {
@@ -50,7 +51,7 @@ export function ReplayingBanner() {
     <div class={styles.replaying} role="status" aria-live="polite">
       <span class={styles.spinner} aria-hidden="true" />
       <span>
-        <strong>Starting up.</strong> HomeSynapse is catching up to live — this takes a moment after a restart.
+        <strong>Starting up.</strong> {t('boot.startingBody')}
       </span>
     </div>
   );

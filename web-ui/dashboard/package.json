@@ -7,6 +7,9 @@
   "license": "UNLICENSED",
   "scripts": {
     "dev": "vite",
+    "tokens": "node scripts/build-tokens.mjs",
+    "tokens:check": "node scripts/build-tokens.mjs --check",
+    "prebuild": "npm run tokens",
     "build": "vite build",
     "preview": "vite preview --port 4173",
     "typecheck": "tsc --noEmit",
@@ -15,7 +18,7 @@
     "test:watch": "vitest",
     "check:bundle": "node scripts/check-bundle-size.mjs",
     "check:contract": "node scripts/contract-check.mjs",
-    "verify": "npm run lint && npm run typecheck && npm run test && npm run build && npm run check:bundle && npm run check:contract"
+    "verify": "npm run tokens:check && npm run lint && npm run typecheck && npm run test && npm run build && npm run check:bundle && npm run check:contract"
   },
   "dependencies": {
     "preact": "^10.22.1",

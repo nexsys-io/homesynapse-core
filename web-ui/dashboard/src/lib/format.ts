@@ -16,6 +16,7 @@ import type {
   RunStatus,
   TypedValue,
 } from './api/contract';
+import { t } from './i18n';
 
 export type Tone = 'ok' | 'warn' | 'error' | 'info' | 'unknown' | 'neutral';
 
@@ -83,7 +84,7 @@ export function originMeta(o: Origin): { label: string; tone: Tone; phrase: stri
     case 'USER':
       return { label: 'You', tone: 'neutral', phrase: 'by you' };
     case 'EXTERNAL':
-      return { label: 'Outside', tone: 'warn', phrase: 'outside HomeSynapse' };
+      return { label: 'Outside', tone: 'warn', phrase: t('origin.external.phrase') };
     case 'UNKNOWN':
       return { label: 'Unknown', tone: 'unknown', phrase: "and we're not sure what caused it" };
   }

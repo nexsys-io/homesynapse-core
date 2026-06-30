@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import { causalSentence, labelFor, outcomeMeta, originMeta, runStatusMeta, timeAgo, verdictMeta } from './format';
 import { causalChains } from './api/mock/mockData';
+import { BRAND } from './i18n';
 
 describe('plain-language formatting', () => {
   it('humanizes entity ids into readable names', () => {
@@ -29,7 +30,7 @@ describe('plain-language formatting', () => {
 
   it('never leaves origin a silent blank — UNKNOWN is an honest value', () => {
     expect(originMeta('UNKNOWN').label).toBe('Unknown');
-    expect(originMeta('EXTERNAL').phrase).toBe('outside HomeSynapse');
+    expect(originMeta('EXTERNAL').phrase).toBe(`outside ${BRAND.productName}`);
   });
 
   it('maps the three-way non-firing verdict to plain language', () => {

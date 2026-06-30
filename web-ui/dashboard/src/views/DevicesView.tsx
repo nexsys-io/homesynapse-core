@@ -9,6 +9,7 @@ import { api } from '../lib/api';
 import type { EntitySummary } from '../lib/api/contract';
 import { useApi } from '../lib/poll';
 import { availabilityMeta, attrValue, clockTime, labelFor, timeAgo } from '../lib/format';
+import { t } from '../lib/i18n';
 import { Page, Card } from '../components/layout';
 import { DataTable } from '../components/DataTable';
 import { Resource } from '../components/Resource';
@@ -21,7 +22,7 @@ export function DevicesView() {
   const [selected, setSelected] = useState<string | null>(null);
 
   return (
-    <Page title="Devices" lede="Everything HomeSynapse can see in your home." meta={state.meta}>
+    <Page title="Devices" lede={t('devices.lede')} meta={state.meta}>
       <Card pad={false}>
         <Resource state={state}>
           {(rows: EntitySummary[]) => (

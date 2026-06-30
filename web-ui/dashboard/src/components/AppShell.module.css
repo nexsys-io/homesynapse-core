@@ -41,7 +41,8 @@
 .feature.active { background: var(--hs-accent-500); color: var(--hs-text-on-accent); }
 .feature:not(.active) { box-shadow: inset 0 0 0 1px var(--hs-border); }
 
-.footer { margin-top: auto; display: flex; flex-direction: column; gap: var(--hs-space-2); padding: 0 var(--hs-space-1); }
+.footer { margin-top: auto; display: flex; flex-direction: column; gap: var(--hs-space-3); padding: 0 var(--hs-space-1); }
+.footerRow { display: flex; align-items: center; justify-content: space-between; gap: var(--hs-space-2); }
 .phase {
   display: inline-flex;
   align-items: center;

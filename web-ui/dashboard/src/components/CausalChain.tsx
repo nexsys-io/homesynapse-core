@@ -24,6 +24,7 @@ import {
   type Tone,
 } from '../lib/format';
 import styles from './CausalChain.module.css';
+import { t } from '../lib/i18n';
 
 export function CausalChain({ chain }: { chain: Chain }) {
   const status = runStatusMeta(chain.outcome.status);
@@ -92,10 +93,7 @@ export function CausalChain({ chain }: { chain: Chain }) {
         </p>
       ) : null}
 
-      <p class={styles.permanence}>
-        This explanation is rebuilt from HomeSynapse&rsquo;s permanent activity log — it is never deleted, so the run
-        you need is always here.
-      </p>
+      <p class={styles.permanence}>{t('hero.permanence')}</p>
     </div>
   );
 }

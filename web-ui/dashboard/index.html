@@ -4,8 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#0d1014" />
     <!-- Local-first (C13-06): no external resources. Title carries Glance-level health (Doc 13 §3.6 L0). -->
     <title>HomeSynapse</title>
+    <!-- Anti-FOUC theme boot (FE-2, D-FE-1): set [data-theme] before first paint so there is no
+         light-flash. Dark is the default; "system" (no stored choice) defers to the CSS
+         prefers-color-scheme rule. Mirrors src/lib/theme.ts; no external resources. -->
+    <script>
+      (function () {
+        try {
+          var p = localStorage.getItem('hs-theme');
+          var root = document.documentElement;
+          if (p === 'light' || p === 'dark') root.setAttribute('data-theme', p);
+          else root.removeAttribute('data-theme');
+          var dark = p === 'dark' || ((p === 'system' || !p) && matchMedia('(prefers-color-scheme: dark)').matches);
+          root.style.colorScheme = dark ? 'dark' : 'light';
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m) m.setAttribute('content', dark ? '#0d1014' : '#f6f8fa');
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

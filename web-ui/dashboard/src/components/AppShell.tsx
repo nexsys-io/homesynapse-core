@@ -4,6 +4,8 @@ import { clearToken } from '../lib/auth';
 import { usePollCursor, type Phase } from '../lib/poll';
 import { href } from '../lib/router';
 import type { RouteName } from '../lib/router';
+import { ThemeToggle } from './ThemeToggle';
+import { BRAND } from '../lib/i18n';
 import styles from './AppShell.module.css';
 
 const NAV: { to: string; label: string; match: RouteName[]; icon: string; feature?: boolean }[] = [
@@ -30,7 +32,7 @@ export function AppShell({ active, children }: { active: RouteName; children: Co
     <div class={styles.shell}>
       <nav class={styles.sidebar} aria-label="Main">
         <div class={styles.brand}>
-          <span class={styles.dot} /> HomeSynapse
+          <span class={styles.dot} /> {BRAND.productName}
         </div>
         <ul class={styles.nav}>
           {NAV.map((item) => {
@@ -52,12 +54,15 @@ export function AppShell({ active, children }: { active: RouteName; children: Co
           })}
         </ul>
         <div class={styles.footer}>
-          <span class={`${styles.phase} ${styles[pm.cls]}`} title={`System status: ${pm.label}`}>
-            <span class={styles.phaseDot} /> {pm.label}
-          </span>
-          <button class={styles.signout} onClick={() => clearToken()}>
-            Disconnect
-          </button>
+          <ThemeToggle />
+          <div class={styles.footerRow}>
+            <span class={`${styles.phase} ${styles[pm.cls]}`} title={`System status: ${pm.label}`}>
+              <span class={styles.phaseDot} /> {pm.label}
+            </span>
+            <button class={styles.signout} onClick={() => clearToken()}>
+              Disconnect
+            </button>
+          </div>
         </div>
       </nav>
       <main class={styles.main}>{children}</main>

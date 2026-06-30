@@ -5,6 +5,7 @@
  */
 import { useState } from 'preact/hooks';
 import { setToken, getAuthError } from '../lib/auth';
+import { BRAND, t } from '../lib/i18n';
 import styles from './AuthGate.module.css';
 
 export function AuthGate() {
@@ -19,10 +20,10 @@ export function AuthGate() {
   return (
     <div class={styles.screen}>
       <form class={styles.card} onSubmit={connect}>
-        <div class={styles.brand}>HomeSynapse</div>
+        <div class={styles.brand}>{BRAND.productName}</div>
         <h1 class={styles.title}>Connect to your home</h1>
         <p class={styles.lede}>
-          Paste the pairing token from your HomeSynapse device. You&rsquo;ll find it in{' '}
+          {t('auth.tokenHelp')}{' '}
           <code>config/initial_api_token</code>, shown once when the device first started.
         </p>
 

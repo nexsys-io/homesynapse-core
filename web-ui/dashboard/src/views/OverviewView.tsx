@@ -8,6 +8,7 @@ import type { EntitySummary, ProjectionStatus, RunSummary } from '../lib/api/con
 import { useApi } from '../lib/poll';
 import { href } from '../lib/router';
 import { runStatusMeta, timeAgo } from '../lib/format';
+import { t } from '../lib/i18n';
 import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { StatusPill } from '../components/StatusPill';
@@ -28,9 +29,7 @@ export function OverviewView() {
             <div class={`${styles.banner} ${live ? styles.ok : styles.warn}`}>
               <StatusPill tone={live ? 'ok' : 'warn'} label={live ? 'All running' : 'Catching up'} />
               <span class={styles.bannerText}>
-                {live
-                  ? 'HomeSynapse is live and watching your home in real time.'
-                  : 'HomeSynapse is catching up after a restart — this only takes a moment.'}
+                {live ? t('overview.live') : t('overview.catchingUp')}
               </span>
             </div>
           );
