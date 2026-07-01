@@ -1,0 +1,19 @@
+/*
+ * Self-hosted UI typeface (FE-3 / D-FE-10 ruling). Inter, variable weight axis, tightly subset
+ * to the dashboard's glyph set (~25 KB woff2). Local-first: the file ships in the jlink image and
+ * is served from the same loopback origin as the app — NEVER a CDN / Google Fonts (INV-LF-01).
+ *
+ * The system stack stays the fallback in --hs-font-sans (tokens), and font-display:swap means
+ * text paints immediately in the fallback and swaps to Inter on load — no blocking, no invisible
+ * text (FOIT). Geometric marker glyphs (●✓✕◆) are not in Inter's Latin set and fall back per-glyph;
+ * they are decorative (aria-hidden) so this is fine.
+ *
+ * Provenance + the exact, reproducible subset command: ./fonts/README.md.
+ */
+@font-face {
+  font-family: 'Inter Variable';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/inter-variable-subset.woff2') format('woff2');
+}

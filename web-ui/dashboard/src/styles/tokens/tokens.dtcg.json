@@ -35,8 +35,8 @@
     },
     "font": {
       "$type": "fontFamily",
-      "$description": "System stacks only — local-first, no web fonts (C13-06 / INV-LF-01). See D-FE-10 measurement before introducing a self-hosted face.",
-      "sans": { "$value": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, Helvetica, Arial, \"Apple Color Emoji\", \"Segoe UI Emoji\", sans-serif", "$extensions": { "hs": { "var": "hs-font-sans" } } },
+      "$description": "Sans leads with self-hosted Inter Variable (FE-3/D-FE-10 — ~25 KB tight subset, variable weight axis, shipped in-image + served from loopback, NEVER a CDN; INV-LF-01 holds), then the system stack as fallback. mono stays system. See src/styles/fonts.css + src/styles/fonts/README.md.",
+      "sans": { "$value": "\"Inter Variable\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, Helvetica, Arial, \"Apple Color Emoji\", \"Segoe UI Emoji\", sans-serif", "$extensions": { "hs": { "var": "hs-font-sans" } } },
       "mono": { "$value": "ui-monospace, \"SF Mono\", \"Cascadia Code\", \"JetBrains Mono\", Menlo, Consolas, monospace", "$extensions": { "hs": { "var": "hs-font-mono" } } }
     },
     "textSize": {

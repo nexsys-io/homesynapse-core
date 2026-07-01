@@ -3,6 +3,7 @@
  * Minimal reset + element defaults + accessibility primitives. Component-specific
  * styling lives in *.module.css files (CSS Modules, Doc 13 §3.1).
  */
+@import './fonts.css';
 @import './tokens.css';
 
 *, *::before, *::after { box-sizing: border-box; }

@@ -40,7 +40,7 @@
   /* Foreground on accent */
   --hs-text-on-accent: var(--hs-neutral-0);
   /* Typography — system stacks (local-first, no web fonts, C13-06) */
-  --hs-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+  --hs-font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
   --hs-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
   /* Type scale */
   --hs-text-xs: 0.75rem;
