@@ -23,6 +23,7 @@ const PHASE_META: Record<Phase, { label: string; cls: string }> = {
   replaying: { label: 'Catching up', cls: 'warn' },
   error: { label: 'Reconnecting', cls: 'error' },
   auth: { label: 'Sign in', cls: 'unknown' },
+  offline: { label: 'Offline', cls: 'error' },
 };
 
 export function AppShell({ active, children }: { active: RouteName; children: ComponentChildren }) {

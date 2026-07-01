@@ -3,7 +3,7 @@
 import type { ComponentChildren } from 'preact';
 import type { ApiState } from '../lib/poll';
 import type { ResponseMeta } from '../lib/api/contract';
-import { ErrorState, Loading, ReplayingBanner } from './feedback';
+import { ErrorState, Loading, OfflineState, ReplayingBanner } from './feedback';
 
 export function Resource<T>({
   state,
@@ -21,6 +21,8 @@ export function Resource<T>({
       return <Loading label="Signing in…" />;
     case 'error':
       return <ErrorState error={state.error} onRetry={state.reload} />;
+    case 'offline':
+      return <OfflineState onRetry={state.reload} />;
     case 'ok':
       return <>{children(state.data as T, state.meta)}</>;
   }

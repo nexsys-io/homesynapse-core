@@ -8,7 +8,7 @@
  */
 import { createClient, type ApiClient, ApiProblem } from './client';
 import { createRealTransport } from './realTransport';
-import { createMockTransport, mockControls } from './mock/mockTransport';
+import { createMockTransport } from './mock/mockTransport';
 import { makeApi, type Api } from './endpoints';
 import { getToken, clearToken, setAuthError } from '../auth';
 
@@ -38,4 +38,4 @@ const client: ApiClient = createClient({
 });
 
 export const api: Api = makeApi(client);
-export { ApiProblem, mockControls };
+export { ApiProblem };

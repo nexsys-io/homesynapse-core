@@ -37,5 +37,8 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Verify (lint + typecheck + test + build + budget + contract)
+      # `npm run test` includes the axe-core a11y suite (src/a11y.test.tsx), so WCAG structural
+      # checks are machine-gated here on every change (color-contrast is verified visually — jsdom
+      # cannot compute layout). Requires `npm install` to have added axe-core to the lockfile.
+      - name: Verify (lint + typecheck + test [incl. axe a11y] + build + budget + contract)
         run: npm run verify

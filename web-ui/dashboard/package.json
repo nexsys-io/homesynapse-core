@@ -29,6 +29,7 @@
     "@preact/preset-vite": "^2.9.1",
     "@testing-library/preact": "^3.2.4",
     "@types/node": "^20.14.10",
+    "axe-core": "^4.12.1",
     "eslint": "^9.9.0",
     "globals": "^15.9.0",
     "jsdom": "^24.1.1",

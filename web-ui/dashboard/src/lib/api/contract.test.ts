@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { createMockTransport } from './mock/mockTransport';
 import { ENDPOINT_IDS, validateAgainstContract, validators, CONTRACT_VERSION, type EndpointId } from './shapes';
+import { SCENARIOS } from './mock/scenarios';
 import { setToken } from '../auth';
 
 setToken('test-token');
@@ -47,4 +48,28 @@ describe('frozen read-API contract', () => {
   it('rejects a body that violates the shape', () => {
     expect(() => validateAgainstContract('A1:entities', { data: [{ entityId: 'x', availability: 'BOGUS', stale: false }], meta: { viewPosition: 1, timestamp: 't' } })).toThrow();
   });
+});
+
+/* T1.2: every scenario the mock can serve must be contract-shaped — so FE-4 verifies real
+   shapes and live-integration (FE-1) meets nothing the UI hasn't already faced. */
+describe('every mock scenario is contract-shaped', () => {
+  const META = { viewPosition: 1, timestamp: new Date().toISOString() };
+  const env = (data: unknown) => ({ data, meta: META });
+
+  for (const s of SCENARIOS) {
+    it(`scenario "${s.id}" conforms to the frozen contract`, () => {
+      const d = s.build();
+      expect(() => validateAgainstContract('A1:entities', env(d.entities))).not.toThrow();
+      for (const v of Object.values(d.entityDetail)) expect(() => validateAgainstContract('A2:entity', env(v))).not.toThrow();
+      for (const v of Object.values(d.entityState)) expect(() => validateAgainstContract('A3:entityState', env(v))).not.toThrow();
+      expect(() => validateAgainstContract('A4:projection', env(d.projection))).not.toThrow();
+      expect(() => validateAgainstContract('A5:dlq', env(d.dlq))).not.toThrow();
+      expect(() => validateAgainstContract('B1:events', env(d.events))).not.toThrow();
+      expect(() => validateAgainstContract('B2:health', env(d.health))).not.toThrow();
+      expect(() => validateAgainstContract('B3:runs', env(d.runs))).not.toThrow();
+      for (const v of Object.values(d.causalChains)) expect(() => validateAgainstContract('B3:causalChain', env(v))).not.toThrow();
+      for (const v of Object.values(d.nonFiring)) expect(() => validateAgainstContract('B3:nonFiring', env(v))).not.toThrow();
+      expect(() => validateAgainstContract('B3:automations', env(d.automations))).not.toThrow();
+    });
+  }
 });

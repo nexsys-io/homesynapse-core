@@ -57,6 +57,10 @@ export class ApiProblem extends Error {
   get isReplaying() {
     return this.problem.type === 'state-store-replaying';
   }
+  /** status 0 / network-unreachable: the hub could not be reached (offline). */
+  get isOffline() {
+    return this.status === 0 || this.problem.type === 'network-unreachable';
+  }
 }
 
 function buildPath(path: string, query?: RawRequest['query']): string {
@@ -89,12 +93,20 @@ export function createClient(opts: ClientOptions): ApiClient {
     async get<T>(_endpoint: EndpointId, path: string, query?: RawRequest['query']): Promise<ApiResult<T>> {
       const fullPath = buildPath(path, query);
       const cached = useEtags ? etagCache.get(fullPath) : undefined;
-      const res = await opts.transport.send({
-        method: 'GET',
-        path,
-        query,
-        ifNoneMatch: cached?.etag,
-      });
+      let res: RawResponse;
+      try {
+        res = await opts.transport.send({ method: 'GET', path, query, ifNoneMatch: cached?.etag });
+      } catch (e) {
+        // A transport-level throw = the hub is unreachable (fetch throws TypeError; the mock's
+        // 'offline' condition throws too). Surface it as a typed, first-class offline problem.
+        if (e instanceof ApiProblem) throw e;
+        throw new ApiProblem({
+          type: 'network-unreachable',
+          title: 'Cannot reach your home',
+          status: 0,
+          detail: 'The dashboard could not reach the hub. It may be restarting, or the network dropped.',
+        });
+      }
 
       if (res.status === 304 && cached) {
         return cached.result as ApiResult<T>;

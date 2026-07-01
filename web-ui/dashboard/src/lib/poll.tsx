@@ -17,7 +17,7 @@ import { api, ApiProblem } from './api';
 import type { ApiResult } from './api/client';
 import { onTokenChange } from './auth';
 
-export type Phase = 'starting' | 'live' | 'replaying' | 'error' | 'auth';
+export type Phase = 'starting' | 'live' | 'replaying' | 'error' | 'auth' | 'offline';
 
 interface PollState {
   viewPosition: number;
@@ -25,6 +25,13 @@ interface PollState {
 }
 
 const PollCtx = createContext<PollState>({ viewPosition: 0, phase: 'starting' });
+
+/* Lets a non-poll caller (the dev/demo panel) force an immediate poll so a scenario/condition
+   switch is reflected at once instead of on the next interval. No-op when no loop is mounted. */
+let kickFn: (() => void) | null = null;
+export function kickPoll(): void {
+  kickFn?.();
+}
 
 export function PollProvider({
   intervalMs = 1500,
@@ -44,6 +51,7 @@ export function PollProvider({
       clearTimeout(timer);
       timer = setTimeout(tick, ms);
     };
+    kickFn = () => schedule(0);
 
     async function tick() {
       if (!active || document.hidden) return;
@@ -67,6 +75,10 @@ export function PollProvider({
         } else if (e instanceof ApiProblem && (e.isAuthRequired || e.isForbidden)) {
           setState((p) => (p.phase === 'auth' ? p : { ...p, phase: 'auth' }));
           schedule(intervalMs * 2);
+        } else if (e instanceof ApiProblem && e.isOffline) {
+          setState((p) => (p.phase === 'offline' ? p : { ...p, phase: 'offline' }));
+          backoff = Math.min(backoff * 1.5, 5000);
+          schedule(backoff);
         } else {
           setState((p) => (p.phase === 'error' ? p : { ...p, phase: 'error' }));
           backoff = Math.min(backoff * 1.5, 5000);
@@ -84,6 +96,7 @@ export function PollProvider({
 
     return () => {
       active = false;
+      kickFn = null;
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVis);
       offToken();
@@ -99,7 +112,7 @@ export function usePollCursor(): PollState {
 
 /* ---- Per-view data loading, coalesced on the global cursor ---- */
 
-export type LoadStatus = 'loading' | 'ok' | 'error' | 'replaying' | 'auth';
+export type LoadStatus = 'loading' | 'ok' | 'error' | 'replaying' | 'auth' | 'offline';
 export interface ApiState<T> {
   status: LoadStatus;
   data?: T;
@@ -126,6 +139,7 @@ export function useApi<T>(fetcher: () => Promise<ApiResult<T>>): ApiState<T> {
     } catch (e) {
       if (e instanceof ApiProblem && e.isReplaying) setS({ status: 'replaying', error: e });
       else if (e instanceof ApiProblem && (e.isAuthRequired || e.isForbidden)) setS({ status: 'auth', error: e });
+      else if (e instanceof ApiProblem && e.isOffline) setS({ status: 'offline', error: e });
       else setS({ status: 'error', error: e as Error });
     }
   }, []);

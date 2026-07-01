@@ -57,6 +57,24 @@ export function ReplayingBanner() {
   );
 }
 
+/** Honest offline/degraded state — the hub is unreachable. Calm (polite live region), not an
+    alarm; the poll loop keeps retrying with backoff, and retry is offered. Never a fake success. */
+export function OfflineState({ onRetry }: { onRetry?: () => void }) {
+  return (
+    <div class={styles.center} role="status" aria-live="polite">
+      <p class={styles.emptyTitle}>Can&rsquo;t reach your home right now</p>
+      <p class={styles.muted}>
+        The dashboard lost contact with the hub. It keeps trying — nothing in your home is affected.
+      </p>
+      {onRetry ? (
+        <button class={styles.retry} onClick={onRetry}>
+          Try again
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 /** Freshness signal sourced from the response meta (viewPosition cursor + time). */
 export function Freshness({ meta }: { meta?: ResponseMeta }) {
   if (!meta) return null;

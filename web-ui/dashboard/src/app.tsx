@@ -6,8 +6,10 @@ import { useEffect, useState } from 'preact/hooks';
 import { hasToken, onTokenChange } from './lib/auth';
 import { PollProvider } from './lib/poll';
 import { useHashRoute, type Route } from './lib/router';
+import { API_MODE } from './lib/api';
 import { AppShell } from './components/AppShell';
 import { AuthGate } from './components/AuthGate';
+import { DevPanel } from './components/DevPanel';
 import { OverviewView } from './views/OverviewView';
 import { DevicesView } from './views/DevicesView';
 import { HealthView } from './views/HealthView';
@@ -22,11 +24,18 @@ export function App() {
   const [authed, setAuthed] = useState(hasToken());
   useEffect(() => onTokenChange((t) => setAuthed(t !== null)), []);
 
-  if (!authed) return <AuthGate />;
   return (
-    <PollProvider>
-      <Shell />
-    </PollProvider>
+    <>
+      {authed ? (
+        <PollProvider>
+          <Shell />
+        </PollProvider>
+      ) : (
+        <AuthGate />
+      )}
+      {/* Dev/demo scenario switcher — mock builds only; absent in a real-backend build. */}
+      {API_MODE === 'mock' ? <DevPanel /> : null}
+    </>
   );
 }
 

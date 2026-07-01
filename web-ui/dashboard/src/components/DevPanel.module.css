@@ -1,0 +1,110 @@
+.root {
+  position: fixed;
+  right: var(--hs-space-4);
+  bottom: var(--hs-space-4);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--hs-space-2);
+}
+
+.fab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--hs-border-strong);
+  border-radius: var(--hs-radius-pill);
+  background: var(--hs-surface);
+  color: var(--hs-text);
+  box-shadow: var(--hs-shadow-md);
+  font-size: var(--hs-text-sm);
+  font-weight: var(--hs-weight-medium);
+}
+.fab:hover {
+  background: var(--hs-surface-hover);
+}
+.fabLabel {
+  line-height: 1;
+}
+
+.panel {
+  width: 264px;
+  max-width: calc(100vw - 2 * var(--hs-space-4));
+  background: var(--hs-surface);
+  border: 1px solid var(--hs-border);
+  border-radius: var(--hs-radius-lg);
+  box-shadow: var(--hs-shadow-md);
+  padding: var(--hs-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hs-space-2);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.title {
+  font-size: var(--hs-text-sm);
+  font-weight: var(--hs-weight-semibold);
+  color: var(--hs-text);
+}
+.close {
+  display: inline-flex;
+  padding: 4px;
+  border: none;
+  background: transparent;
+  color: var(--hs-text-muted);
+  border-radius: var(--hs-radius-sm);
+}
+.close:hover {
+  color: var(--hs-text);
+  background: var(--hs-surface-hover);
+}
+
+.legend {
+  font-size: var(--hs-text-xs);
+  font-weight: var(--hs-weight-semibold);
+  color: var(--hs-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: var(--hs-space-1);
+}
+
+.grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.chip {
+  padding: 5px 9px;
+  min-height: 26px;
+  border: 1px solid var(--hs-border);
+  border-radius: var(--hs-radius-md);
+  background: var(--hs-surface-sunk);
+  color: var(--hs-text-secondary);
+  font-size: var(--hs-text-xs);
+  font-weight: var(--hs-weight-medium);
+  text-align: left;
+}
+.chip:hover {
+  color: var(--hs-text);
+  background: var(--hs-surface-hover);
+}
+.active,
+.active:hover {
+  background: var(--hs-accent-50);
+  color: var(--hs-accent-700);
+  border-color: transparent;
+  font-weight: var(--hs-weight-semibold);
+}
+
+.note {
+  margin: 2px 0 0;
+  font-size: var(--hs-text-xs);
+  color: var(--hs-text-muted);
+}
