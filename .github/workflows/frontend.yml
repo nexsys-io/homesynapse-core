@@ -1,27 +1,41 @@
 # Frontend CI for the V1 observability dashboard.
 #
-# WIRING NOTE (cross-lane): this lane writes only under web-ui/dashboard/, so this
-# workflow is delivered here ready-to-use. The hub adds it to .github/workflows/
-# (repo-root shared infra) — a one-step spine change the frontend lane must not make
-# unilaterally (dispatch §0/§6). Once placed, it is the frontend gate of record.
+# WIRING NOTE (cross-lane): the frontend lane writes only under web-ui/dashboard/, so this workflow
+# is staged here as the source of truth. To take effect it must be PLACED at
+# .github/workflows/frontend.yml (repo-root shared infra) — a one-step change the lane cannot make
+# unilaterally. Every path below is repo-root-relative and is correct from that location.
+#
+# BRANCH-PROTECTION NOTE (the "worse than none" trap): this workflow is PATH-FILTERED to
+# web-ui/dashboard/**. If you mark it a REQUIRED status check, PRs that do NOT touch the dashboard
+# will never trigger it and can hang forever waiting for the check to report. Either (a) do not mark
+# it required, or (b) use a path-aware required-check setup (a merge queue, or a companion job that
+# always runs and reports "skipped"). Also confirm the branch names below match your trunk model.
 name: Frontend CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main] # add develop/others here only if your trunk model uses them
     paths: ['web-ui/dashboard/**']
   pull_request:
     branches: [main]
     paths: ['web-ui/dashboard/**']
+  workflow_dispatch: {} # allow a manual run from the Actions tab
 
 permissions:
   contents: read
 
+# Cancel a superseded run when new commits land on the same branch/PR (saves minutes, avoids races).
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   dashboard:
-    name: Lint · Typecheck · Test · Build · Budget · Contract
+    name: Lint · Typecheck · Test (a11y) · Build · Budget · Contract
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # All `run:` steps execute in the dashboard dir; `uses:` steps (checkout, setup-node) are
+    # unaffected and run at the repo root, which is what they expect.
     defaults:
       run:
         working-directory: web-ui/dashboard
@@ -30,6 +44,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
+          # '20' installs the latest 20.x (>=20.19), which satisfies every dependency's engines — so
+          # the EBADENGINE you saw locally (node 22.6.0, below a dep's 22.13 floor) does not occur in
+          # CI. npm ci is lockfile-exact, so the committed package-lock.json (incl. axe-core) governs.
           node-version: '20'
           cache: npm
           cache-dependency-path: web-ui/dashboard/package-lock.json
@@ -37,5 +54,9 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Verify (lint + typecheck + test + build + budget + contract)
+      # `npm run verify` = tokens drift-guard · lint · typecheck · test · build · bundle-budget ·
+      # contract-check. `test` includes the axe-core a11y suite (src/a11y.test.tsx), so WCAG
+      # structural checks are gated on every change (color-contrast is verified visually — jsdom
+      # cannot compute layout).
+      - name: Verify
         run: npm run verify
