@@ -99,12 +99,18 @@ interface ChainOpts {
   terminalReason?: string | null;
   durationMs?: number;
   minAgo?: number;
+  /** Exact trigger time (overrides minAgo) — for scenarios anchored to build time. */
+  matchedAtIso?: string;
+  /** Full actions override (e.g. the E5 multi-action / live-flip chains). */
+  actions?: CausalAction[];
 }
 
 function makeChain(runId: string, o: ChainOpts = {}): CausalChain {
   const status = o.status ?? 'COMPLETED';
   const outcome = o.outcome ?? (status === 'SKIPPED' ? 'SKIPPED' : 'CONFIRMED');
   const condResult = o.conditionResult ?? status !== 'SKIPPED';
+  const actions =
+    o.actions ?? [makeAction(outcome, { targetRef: { type: 'ENTITY', id: o.targetId ?? 'ent_hallway_light' } })];
   return {
     runId,
     automationId: o.automationId ?? 'auto_demo',
@@ -112,17 +118,17 @@ function makeChain(runId: string, o: ChainOpts = {}): CausalChain {
     trigger: {
       type: 'state_changed',
       subjectRef: { type: 'ENTITY', id: o.triggerId ?? 'ent_hallway_motion' },
-      matchedAt: iso(o.minAgo ?? 2),
+      matchedAt: o.matchedAtIso ?? iso(o.minAgo ?? 2),
       firingValue: 'motion = detected',
     },
     conditions: [makeCondition(condResult)],
-    actions: [makeAction(outcome, { targetRef: { type: 'ENTITY', id: o.targetId ?? 'ent_hallway_light' } })],
+    actions,
     outcome: {
       status,
       reason: o.terminalReason ?? null,
       durationMs: o.durationMs ?? 412,
-      actionCount: 1,
-      commandCount: outcome === 'SKIPPED' ? 0 : 1,
+      actionCount: actions.length,
+      commandCount: actions.filter((a) => a.outcome !== 'SKIPPED').length,
     },
     cascade: { parentRunId: o.parentRunId ?? null, depth: o.depth ?? 0 },
   };
@@ -332,6 +338,123 @@ function buildLarge(): MockDataset {
   return { ...defaultDataset, automations: [makeAutomation('auto_demo', 'Demo automation')], runs, causalChains, events };
 }
 
+/* The four MEASURED confirmation-rendering semantics (AMD-97, ratified 2026-07-01; measured
+ * truth: nexsys-bench/corpus/devices/philips-hue-white-a19.md). Each behavior is one click:
+ *  1. run_e5_ct         — color confirms SLOWLY and legitimately: DISPATCHED flips to CONFIRMED
+ *                         ~8.4s after scenario activation (the measured upper command→report
+ *                         sample), rendered live by the poll. Calm pending inside the window.
+ *  2. run_e5_idempotent — no-change ⇒ no report: the backend confirms from cache/readback and
+ *                         SAYS so; the UI renders the honest terminal state, never a spinner.
+ *  3. run_e5_effect     — identify/effect class: acknowledged but never reported ⇒ honest
+ *                         UNCONFIRMED immediately (an ACK is not confirmation).
+ *  4. run_e5_superseded — rapid re-command coalesces reporting: the older expectation EXPIRES
+ *                         (honest unconfirmed, never false-fail/false-confirm); no stale chip.
+ * The timing values live in the corpus + Doc 08 §3.6 — the UI itself runs NO timeout; only
+ * this mock (standing in for Core's confirmation engine) knows the window.
+ */
+function buildE5Confirmation(): MockDataset {
+  const t0 = Date.now(); // scenario-activation anchor (NOT the module-load `now`)
+  const at = (msAgo: number) => new Date(t0 - msAgo).toISOString();
+  const CT_CONFIRM_MS = 8_400; // measured upper bound: 447-mired command→report 20:23:40.575→:48.999
+
+  const lamp = { type: 'ENTITY', id: 'ent_livingroom_lamp' };
+  const confirmed = () => Date.now() - t0 >= CT_CONFIRM_MS;
+
+  // 1 — the live-flipping CT action (getters re-evaluate on every poll read).
+  const ctAction: CausalAction = {
+    type: 'device_command',
+    targetRef: lamp,
+    command: 'set_color_temperature',
+    params: { color_temp_kelvin: 2700 },
+    get outcome(): ActionOutcome {
+      return confirmed() ? 'CONFIRMED' : 'DISPATCHED';
+    },
+    get reason(): string | null {
+      return confirmed() ? 'The device reported the new color temperature.' : null;
+    },
+  };
+
+  const chains: Record<string, CausalChain> = {
+    run_e5_ct: makeChain('run_e5_ct', {
+      automationId: 'auto_e5',
+      automationName: 'Evening Color Scene',
+      matchedAtIso: at(1_000),
+      actions: [ctAction],
+      durationMs: 240,
+    }),
+    run_e5_idempotent: makeChain('run_e5_idempotent', {
+      automationId: 'auto_e5',
+      automationName: 'Evening Color Scene',
+      matchedAtIso: at(40_000),
+      actions: [
+        makeAction('CONFIRMED', {
+          targetRef: lamp,
+          command: 'turn_on',
+          params: {},
+          reason: 'Already on — confirmed from the device’s current state (no change to report).',
+        }),
+      ],
+      durationMs: 180,
+    }),
+    run_e5_effect: makeChain('run_e5_effect', {
+      automationId: 'auto_e5',
+      automationName: 'Evening Color Scene',
+      matchedAtIso: at(90_000),
+      actions: [
+        makeAction('UNCONFIRMED', {
+          targetRef: lamp,
+          command: 'identify',
+          params: {},
+          reason: 'The device acknowledged this command but never reports performing it.',
+        }),
+      ],
+      durationMs: 150,
+    }),
+    run_e5_superseded: makeChain('run_e5_superseded', {
+      automationId: 'auto_e5',
+      automationName: 'Evening Color Scene',
+      matchedAtIso: at(150_000),
+      actions: [
+        makeAction('UNCONFIRMED', {
+          targetRef: lamp,
+          command: 'set_color_temperature',
+          params: { color_temp_kelvin: 3500 },
+          reason: 'Superseded — a newer color command replaced this one before the device reported.',
+        }),
+        makeAction('CONFIRMED', {
+          targetRef: lamp,
+          command: 'set_color_temperature',
+          params: { color_temp_kelvin: 2200 },
+          reason: null,
+        }),
+      ],
+      durationMs: 620,
+    }),
+  };
+
+  const runSpecs: { id: string; msAgo: number }[] = [
+    { id: 'run_e5_ct', msAgo: 1_000 },
+    { id: 'run_e5_idempotent', msAgo: 40_000 },
+    { id: 'run_e5_effect', msAgo: 90_000 },
+    { id: 'run_e5_superseded', msAgo: 150_000 },
+  ];
+
+  return {
+    ...defaultDataset,
+    automations: [makeAutomation('auto_e5', 'Evening Color Scene', { lastRunId: 'run_e5_ct' })],
+    runs: runSpecs.map((r) =>
+      makeRun(r.id, {
+        automationId: 'auto_e5',
+        automationName: 'Evening Color Scene',
+        triggeredAt: at(r.msAgo),
+        status: 'COMPLETED',
+      }),
+    ),
+    causalChains: chains,
+    nonFiring: { auto_e5: makeNonFiring('auto_e5', 'NEVER_TRIGGERED', { automationName: 'Evening Color Scene' }) },
+  };
+}
+
 // Connected but empty — exercises the "empty as teaching", never a blank panel.
 function buildEmpty(): MockDataset {
   return {
@@ -363,6 +486,7 @@ export const SCENARIOS: Scenario[] = [
   { id: 'all-outcomes', label: 'All outcomes', group: 'Story', blurb: 'One automation, every command outcome + run status — confirmed, sent-not-confirmed, failed, skipped, cancelled, interrupted.', build: buildAllOutcomes },
   { id: 'cascade', label: 'Cascade', group: 'Story', blurb: 'A run that triggered another — the child links back to “what triggered this”.', build: buildCascade },
   { id: 'all-verdicts', label: 'All “why not?” verdicts', group: 'Story', blurb: 'Condition-not-met, never-triggered, acted-but-unconfirmed, disabled.', build: buildAllVerdicts },
+  { id: 'e5-confirmation', label: 'Confirmation, measured', group: 'Story', blurb: 'AMD-97 honest states at measured timing: color confirms slowly (flips live ~8s in), idempotent confirmed-from-cache, effect honestly unconfirmed, superseded expiry.', build: buildE5Confirmation },
   { id: 'all-origins', label: 'All event origins', group: 'Story', blurb: 'Automation, device, you, external, and the honest UNKNOWN.', build: buildAllOrigins },
   { id: 'large', label: 'Large (300 runs · 500 events)', group: 'Scale', blurb: 'Forces list virtualization + a render budget.', build: buildLarge },
   { id: 'empty', label: 'Empty (fresh install)', group: 'Scale', blurb: 'Connected but nothing has happened yet — empty states that teach.', build: buildEmpty },

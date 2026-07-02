@@ -113,23 +113,30 @@ export interface TypedValue {
  * A. EXISTING contracts (consume live)
  * ========================================================================= */
 
-/** A1 — GET /api/v1/entities (3-field hot-path projection). */
+/** A1 — GET /api/v1/entities (hot-path projection).
+ *  `name` is the v1.1 ADDITIVE optional display name (freeze §A, 2026-06-26 C8):
+ *  Core returns it when set, omits it when unset — clients tolerate absence and
+ *  fall back to a humanized slug (format.displayName). */
 export interface EntitySummary {
   entityId: string;
+  name?: string;
   availability: Availability;
   stale: boolean;
 }
 
-/** A2 — GET /api/v1/entities/{id} (hot-path detail). */
+/** A2 — GET /api/v1/entities/{id} (hot-path detail). Optional `name` per C8. */
 export interface EntityDetail {
   entityId: string;
+  name?: string;
   availability: Availability;
   attributes: Record<string, TypedValue>;
 }
 
-/** A3 — GET /api/v1/entities/{id}/state (full materialized EntityState, Doc 03 §4.1). */
+/** A3 — GET /api/v1/entities/{id}/state (full materialized EntityState, Doc 03 §4.1).
+ *  Optional `name` per C8 (additive, tolerate absence). */
 export interface EntityState {
   entityId: string;
+  name?: string;
   availability: Availability;
   attributes: Record<string, TypedValue>;
   stateVersion: number;

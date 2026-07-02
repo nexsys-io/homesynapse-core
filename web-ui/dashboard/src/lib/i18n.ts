@@ -30,6 +30,9 @@ const en = {
   'overview.catchingUp': `${BRAND.productName} is catching up after a restart — this only takes a moment.`,
   'hero.permanence': `This explanation is rebuilt from ${BRAND.productName}’s permanent activity log — it is never deleted, so the run you need is always here.`,
   'origin.external.phrase': `outside ${BRAND.productName}`,
+  // The M7.5c gap, rendered honestly (FE-1): the hub doesn't serve this read yet.
+  'events.notServedYet.title': 'Your hub doesn’t share the activity feed yet.',
+  'events.notServedYet.hint': `Everything else on this dashboard is live. The feed arrives with a ${BRAND.productName} update — nothing is wrong.`,
 } as const;
 
 type Messages = typeof en;

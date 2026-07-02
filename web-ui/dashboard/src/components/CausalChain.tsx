@@ -20,7 +20,9 @@ import {
   clockTime,
   labelFor,
   outcomeMeta,
+  pendingHint,
   runStatusMeta,
+  unconfirmableHint,
   type Tone,
 } from '../lib/format';
 import styles from './CausalChain.module.css';
@@ -59,9 +61,16 @@ export function CausalChain({ chain }: { chain: Chain }) {
           );
         })}
 
-        {/* Actions */}
+        {/* Actions. Confirmation semantics are MEASURED + ratified (AMD-97): the backend
+            owns the per-capability confirm window; the UI renders each honest state as the
+            poll delivers it and NEVER runs its own timeout. The hints below are calm,
+            class-keyed plain language — no numbers, no timers, no failure-anxiety. */}
         {chain.actions.map((a, i) => {
           const om = outcomeMeta(a.outcome);
+          const hint =
+            a.outcome === 'DISPATCHED' ? pendingHint(a.command)
+            : a.outcome === 'UNCONFIRMED' ? unconfirmableHint(a.command)
+            : null;
           return (
             <Step
               key={i}
@@ -71,6 +80,7 @@ export function CausalChain({ chain }: { chain: Chain }) {
               line={`${actionPhrase(a.command)} ${labelFor(a.targetRef.id)}.`}
               pill={<StatusPill tone={om.tone} label={om.label} title={om.help} size="sm" />}
             >
+              {hint ? <p class={styles.hint}>{hint}</p> : null}
               <Detail label="Command">{a.command}{attrValueList(a.params)}</Detail>
               {a.reason ? <Detail label="Note">{a.reason}</Detail> : null}
             </Step>

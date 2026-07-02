@@ -64,6 +64,16 @@
   line-height: var(--hs-leading-normal);
 }
 
+/* Confirmation-semantics hint (AMD-97): calm plain-language context under an action —
+   e.g. "color confirms slowly" while pending. Muted, never alarm-styled. */
+.hint {
+  margin: 2px 0 0 0;
+  font-size: var(--hs-text-sm);
+  color: var(--hs-text-secondary);
+  line-height: var(--hs-leading-normal);
+  max-width: 56ch;
+}
+
 .details { margin-top: 4px; }
 .detail { font-size: var(--hs-text-sm); }
 .summary {

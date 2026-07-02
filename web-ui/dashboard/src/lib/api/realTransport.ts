@@ -15,7 +15,9 @@ export function createRealTransport(baseUrl: string, getToken: () => string | nu
           if (v !== undefined && v !== '') url.searchParams.set(k, String(v));
         }
       }
-      const headers: Record<string, string> = { Accept: 'application/json' };
+      // Strict content negotiation (FE1_GO_LIVE follow-up): non-2xx bodies are
+      // application/problem+json (RFC 9457) — accept both explicitly.
+      const headers: Record<string, string> = { Accept: 'application/json, application/problem+json' };
       const token = getToken();
       if (token) headers['Authorization'] = `Bearer ${token}`;
       if (req.ifNoneMatch) headers['If-None-Match'] = req.ifNoneMatch;

@@ -8,7 +8,14 @@
  * 503 `state-store-replaying` boot state.
  */
 import type { Envelope, PaginationMeta, ProblemDetail, ResponseMeta } from './contract';
-import type { EndpointId } from './shapes';
+import { validateAgainstContract, ContractError, type EndpointId } from './shapes';
+
+/* FE-1 dev-runtime validation (FE1_GO_LIVE §A): validate LIVE response bodies against the
+ * frozen-contract validators so Core drift is caught at the moment of integration, in the
+ * console — the smoke bar is "no console contract errors". Build-time flag: statically
+ * replaced by Vite, so production builds without it tree-shake the validators away.
+ * A live validator failure is a CROSS-LANE EVENT (report to the hub) — never a client patch. */
+const VALIDATE_LIVE = import.meta.env.VITE_VALIDATE === 'true';
 
 export interface RawRequest {
   method: 'GET';
@@ -90,7 +97,7 @@ export function createClient(opts: ClientOptions): ApiClient {
   const etagCache = new Map<string, { etag: string; result: ApiResult<unknown> }>();
 
   return {
-    async get<T>(_endpoint: EndpointId, path: string, query?: RawRequest['query']): Promise<ApiResult<T>> {
+    async get<T>(endpoint: EndpointId, path: string, query?: RawRequest['query']): Promise<ApiResult<T>> {
       const fullPath = buildPath(path, query);
       const cached = useEtags ? etagCache.get(fullPath) : undefined;
       let res: RawResponse;
@@ -127,6 +134,23 @@ export function createClient(opts: ClientOptions): ApiClient {
           status: 502,
           detail: `Expected { data, meta } from ${fullPath}`,
         });
+      }
+
+      if (VALIDATE_LIVE) {
+        // Log-and-continue: drift must be VISIBLE (the FE-1 smoke bar is a clean console),
+        // but the view stays renderable so the rest of the pass remains evaluable.
+        try {
+          validateAgainstContract(endpoint, res.body);
+        } catch (e) {
+          if (e instanceof ContractError) {
+            console.error(
+              `[contract-drift] ${endpoint} ${fullPath}: ${e.message} — ` +
+                'frozen v1.1 violation on a LIVE response. Cross-lane event: report to the hub; do NOT patch the client.',
+            );
+          } else {
+            throw e;
+          }
+        }
       }
       const result: ApiResult<T> = {
         data: env.data,

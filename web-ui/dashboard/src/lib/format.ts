@@ -20,8 +20,13 @@ import { t } from './i18n';
 
 export type Tone = 'ok' | 'warn' | 'error' | 'info' | 'unknown' | 'neutral';
 
-/* ---- Names: humanize an entityId (the contract carries no display name — see
-   the lane return; a `name` field is a candidate additive contract change). ---- */
+/* ---- Names. The v1.1 contract carries an OPTIONAL entity display `name` (additive
+   C8, 2026-06-26): prefer it when present; fall back to humanizing the entityId.
+   (Core fills it when the config/M9 work lands — clients tolerate absence.) ---- */
+export function displayName(e: { entityId: string; name?: string }): string {
+  return e.name ?? labelFor(e.entityId);
+}
+
 export function labelFor(id: string): string {
   const stripped = id.replace(/^(ent_|sys_|auto_|dev_)/, '');
   if (!stripped) return id;
@@ -65,13 +70,57 @@ export function outcomeMeta(o: ActionOutcome): { label: string; tone: Tone; help
       return {
         label: 'Sent, not confirmed',
         tone: 'warn',
-        help: 'We sent it, but the device never confirmed — it may be slow or briefly offline.',
+        // Neutral on WHY (some devices never report; some were briefly offline) —
+        // the per-action reason carries the specifics. Calm and honest, never alarm.
+        help: 'We sent it, but the device did not confirm it acted.',
       };
     case 'FAILED':
       return { label: 'Failed', tone: 'error', help: 'The command failed. See the reason.' };
     case 'SKIPPED':
       return { label: 'Skipped', tone: 'unknown', help: 'This step did not run.' };
   }
+}
+
+/* ---- Measured confirmation-rendering semantics (AMD-97, ratified 2026-07-01) ----
+ * The moat's honesty is a UI behavior too. The UI NEVER runs its own confirmation
+ * timeout — the backend owns the per-capability window (Doc 08 §3.6 `confirmation[]`,
+ * measured in nexsys-bench/corpus/) and the poll renders each transition when the
+ * projection advances. These hints are presentation-level plain language keyed on the
+ * COMMAND CLASS only: no numbers, no timers, no hardcoded global (SK-INV-01-safe).
+ */
+
+export type CommandKind = 'effect' | 'color' | 'other';
+
+/** Classify a command for confirmation-copy purposes. Effect/identify-class first —
+ *  those are the measured UNCONFIRMABLE-by-report paths (an ACK is not confirmation). */
+export function commandKind(command: string): CommandKind {
+  const c = command.toLowerCase();
+  // Measured unconfirmable-by-report class (bench 2026-07-01: identify + color_loop).
+  if (/(identify|effect|loop|blink|flash)/.test(c)) return 'effect';
+  // Color-class only when the command SAYS color (set_temperature on a thermostat is
+  // NOT color; set_color_temperature contains "color" and matches).
+  if (/(color|hue|saturation|kelvin|mired)/.test(c)) return 'color';
+  return 'other';
+}
+
+/** Shown while an action is DISPATCHED (pending). Color-class capabilities legitimately
+ *  confirm slowly (measured: batched color reporting) — say so calmly, so waiting reads
+ *  as normal, never as failure. Returns null when there is nothing useful to add. */
+export function pendingHint(command: string): string | null {
+  if (commandKind(command) === 'color') {
+    return 'Color changes confirm slowly on some bulbs — this can take several seconds.';
+  }
+  return null;
+}
+
+/** Shown when an effect/identify-class action lands UNCONFIRMED: these devices acknowledge
+ *  the command but never report doing it, so an immediate honest "not confirmed" is the
+ *  EXPECTED behavior — not a fault. Returns null for other command kinds. */
+export function unconfirmableHint(command: string): string | null {
+  if (commandKind(command) === 'effect') {
+    return 'This kind of command is acknowledged but never reported back, so it cannot be confirmed.';
+  }
+  return null;
 }
 
 /* ---- Event origin (never a silent blank) ---- */

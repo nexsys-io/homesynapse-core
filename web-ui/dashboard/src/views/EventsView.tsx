@@ -5,17 +5,34 @@
  * caused it" (research FM-1). Built against the B1 mock; swaps to real when Core
  * lands GET /api/v1/events.
  */
-import { api } from '../lib/api';
+import { api, ApiProblem } from '../lib/api';
 import type { EventSummary } from '../lib/api/contract';
 import { useApi } from '../lib/poll';
 import { clockTime, originMeta, timeAgo } from '../lib/format';
+import { t } from '../lib/i18n';
 import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { StatusPill } from '../components/StatusPill';
+import { EmptyState } from '../components/feedback';
 import styles from './EventsView.module.css';
 
 export function EventsView() {
   const state = useApi(() => api.listEvents({ sort: 'DESC', limit: 50 }));
+
+  // The M7.5c live gap, degraded gracefully (FE-1): Core does not serve GET /api/v1/events
+  // until M7.5c, so a live backend answers 404 not-found here. That is an EXPECTED state on
+  // a current hub — render it as calm teaching, never as an error. (Mock mode always serves
+  // the endpoint, so this renders only against a real pre-M7.5c Core.)
+  if (state.status === 'error' && state.error instanceof ApiProblem && state.error.type === 'not-found') {
+    return (
+      <Page title="Activity" lede="Recent things that happened in your home, newest first." meta={state.meta}>
+        <Card>
+          <EmptyState title={t('events.notServedYet.title')} hint={t('events.notServedYet.hint')} />
+        </Card>
+      </Page>
+    );
+  }
+
   return (
     <Page title="Activity" lede="Recent things that happened in your home, newest first." meta={state.meta}>
       <Card pad={false}>

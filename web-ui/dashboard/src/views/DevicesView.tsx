@@ -1,14 +1,14 @@
 /*
  * DevicesView — A1 list -> A2/A3 detail drawer. LIVE against the real A-class
  * endpoints. Shows availability, freshness, and the typed attribute values.
- * (The contract carries no display name yet; we humanize the entityId — flagged
- * to the hub as a candidate additive field.)
+ * Display names: the v1.1 contract carries an OPTIONAL entity `name` (additive C8) —
+ * prefer it when Core sends it; fall back to the humanized entityId (displayName).
  */
 import { useState } from 'preact/hooks';
 import { api } from '../lib/api';
 import type { EntitySummary } from '../lib/api/contract';
 import { useApi } from '../lib/poll';
-import { availabilityMeta, attrValue, clockTime, labelFor, timeAgo } from '../lib/format';
+import { availabilityMeta, attrValue, clockTime, displayName, labelFor, timeAgo } from '../lib/format';
 import { t } from '../lib/i18n';
 import { Page, Card } from '../components/layout';
 import { DataTable } from '../components/DataTable';
@@ -19,7 +19,7 @@ import { Loading, ErrorState, EmptyState } from '../components/feedback';
 
 export function DevicesView() {
   const state = useApi(() => api.listEntities({ sort: 'ASC' }));
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<{ entityId: string; name?: string } | null>(null);
 
   return (
     <Page title="Devices" lede={t('devices.lede')} meta={state.meta}>
@@ -29,10 +29,10 @@ export function DevicesView() {
             <DataTable<EntitySummary>
               rows={rows}
               rowKey={(r) => r.entityId}
-              onActivate={(r) => setSelected(r.entityId)}
+              onActivate={(r) => setSelected({ entityId: r.entityId, name: r.name })}
               emptyLabel="No devices paired yet."
               columns={[
-                { key: 'name', header: 'Device', render: (r) => <strong>{labelFor(r.entityId)}</strong> },
+                { key: 'name', header: 'Device', render: (r) => <strong>{displayName(r)}</strong> },
                 {
                   key: 'status',
                   header: 'Status',
@@ -57,8 +57,8 @@ export function DevicesView() {
         </Resource>
       </Card>
 
-      <Drawer open={selected !== null} title={selected ? labelFor(selected) : ''} onClose={() => setSelected(null)}>
-        {selected ? <EntityDetail id={selected} /> : null}
+      <Drawer open={selected !== null} title={selected ? displayName(selected) : ''} onClose={() => setSelected(null)}>
+        {selected ? <EntityDetail id={selected.entityId} /> : null}
       </Drawer>
     </Page>
   );

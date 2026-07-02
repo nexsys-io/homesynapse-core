@@ -36,11 +36,17 @@ export function AuthGate() {
         <label class={styles.label} for="token">
           Pairing token
         </label>
+        {/* A pairing token is NOT a password: ask password managers not to capture or
+            autofill it (observed live: Bitwarden offered to fill the gate — FE-1).
+            The vendor data-attributes are best-effort hints; harmless where unsupported. */}
         <input
           id="token"
           class={styles.input}
           type="password"
           autocomplete="off"
+          data-bwignore
+          data-1p-ignore
+          data-lpignore="true"
           spellcheck={false}
           placeholder="paste token"
           value={value}

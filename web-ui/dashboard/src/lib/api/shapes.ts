@@ -62,6 +62,12 @@ function oneOf<T extends string>(v: unknown, domain: T[], path: string): asserts
 function isStr(v: unknown, path: string): asserts v is string {
   if (typeof v !== 'string') throw new ContractError(`${path}: expected string, got ${typeof v}`);
 }
+/** Optional field: absent is fine (additive-tolerant, freeze §A C8); present must be a string. */
+function optStr(o: Record<string, unknown>, key: string, path: string): void {
+  if (key in o && typeof o[key] !== 'string') {
+    throw new ContractError(`${path}.${key}: optional field present but not a string`);
+  }
+}
 function isNum(v: unknown, path: string): asserts v is number {
   if (typeof v !== 'number') throw new ContractError(`${path}: expected number, got ${typeof v}`);
 }
@@ -92,6 +98,7 @@ export const validators: Record<EndpointId, Validator> = {
       const p = `A1.data[${i}]`;
       if (!isObj(e)) throw new ContractError(`${p}: must be object`);
       isStr(req(e, 'entityId', p), `${p}.entityId`);
+      optStr(e, 'name', p);
       oneOf(req(e, 'availability', p), AVAILABILITY, `${p}.availability`);
       isBool(req(e, 'stale', p), `${p}.stale`);
     });
@@ -102,6 +109,7 @@ export const validators: Record<EndpointId, Validator> = {
     const d = req(b, 'data', 'A2');
     if (!isObj(d)) throw new ContractError('A2.data must be object');
     isStr(req(d, 'entityId', 'A2.data'), 'A2.data.entityId');
+    optStr(d, 'name', 'A2.data');
     oneOf(req(d, 'availability', 'A2.data'), AVAILABILITY, 'A2.data.availability');
     if (!isObj(req(d, 'attributes', 'A2.data'))) throw new ContractError('A2.data.attributes must be object');
     meta(req(b, 'meta', 'A2'), 'A2.meta');
@@ -111,6 +119,7 @@ export const validators: Record<EndpointId, Validator> = {
     const d = req(b, 'data', 'A3');
     if (!isObj(d)) throw new ContractError('A3.data must be object');
     isStr(req(d, 'entityId', 'A3.data'), 'A3.data.entityId');
+    optStr(d, 'name', 'A3.data');
     oneOf(req(d, 'availability', 'A3.data'), AVAILABILITY, 'A3.data.availability');
     const attrs = req(d, 'attributes', 'A3.data');
     if (!isObj(attrs)) throw new ContractError('A3.data.attributes must be object');
