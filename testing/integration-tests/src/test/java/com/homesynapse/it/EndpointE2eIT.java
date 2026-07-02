@@ -181,6 +181,9 @@ final class EndpointE2eIT {
         // alongside the state projection, so the set is no longer "exactly one";
         // assert by subscriber id (position-independent — the bus does not
         // guarantee array order) rather than pinning the array index/size.
+        // M7.5c-a: the body carries the frozen v1.1.1 {data, meta} envelope —
+        // the additive subscribers detail lives under $.data, and meta.viewPosition
+        // is the dashboard's poll cursor (freeze §0).
         harness = HomeSynapseE2eHarness.start(
                 tempDir.resolve("homesynapse-events.db"), FIXED_CLOCK, TEST_HOME_ID);
         LiveModeAwaiter.awaitLive(harness);
@@ -189,9 +192,12 @@ final class EndpointE2eIT {
                 harness.baseUri().resolve("/internal/dlq"), harness.authToken());
 
         assertThat(response.statusCode()).isEqualTo(200);
-        assertThatJson(response.body()).inPath("$.subscribers").isArray();
-        assertThatJson(response.body()).inPath("$.subscribers[*].subscriberId")
+        assertThatJson(response.body()).inPath("$.data.depth").isNumber();
+        assertThatJson(response.body()).inPath("$.data.parkedSubscribers").isArray();
+        assertThatJson(response.body()).inPath("$.data.subscribers").isArray();
+        assertThatJson(response.body()).inPath("$.data.subscribers[*].subscriberId")
                 .isArray().contains("state_projection", "automation_engine");
+        assertThatJson(response.body()).inPath("$.meta.viewPosition").isNumber();
     }
 
     // ── helpers ────────────────────────────────────────────────────────

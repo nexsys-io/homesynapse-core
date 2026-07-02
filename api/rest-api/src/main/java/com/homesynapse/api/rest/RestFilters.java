@@ -142,9 +142,16 @@ public final class RestFilters {
      * Registers the M3.6e.2 admin/operational endpoints on the given Javalin
      * application instance:
      * <ul>
-     *   <li>{@code GET /internal/dlq} — per-subscriber DLQ status</li>
-     *   <li>{@code GET /internal/projection} — state-projection status</li>
+     *   <li>{@code GET /internal/dlq} — DLQ status (frozen v1.1.1 §A5)</li>
+     *   <li>{@code GET /internal/projection} — state-projection status
+     *       (frozen v1.1.1 §A4)</li>
      * </ul>
+     *
+     * <p>M7.5c-a conformed both responses to the frozen {@code {data, meta}}
+     * envelope (DRIFT-1 adjudication 2026-07-02); the handlers therefore need
+     * the projection cursor, the log head, the projection version, and a
+     * {@link Clock} — all threaded from the composition root as
+     * {@code java.base} types (NO new module edge).</p>
      *
      * <p>These endpoints live under {@code /internal/*} and are
      * intentionally NOT gated by {@link ReadinessFilter} — operators need
@@ -168,7 +175,18 @@ public final class RestFilters {
      * @param queryService         the materialized state query service;
      *                             never {@code null}
      * @param viewPositionSupplier supplier for the projection's current
-     *                             cursor position; never {@code null}
+     *                             cursor position (typically
+     *                             {@code stateProjection::cursorPosition});
+     *                             never {@code null}
+     * @param logHeadSupplier      supplier for the event log's head position
+     *                             (typically {@code eventStore::latestPosition}
+     *                             — feeds the frozen A4 {@code lagEvents});
+     *                             never {@code null}
+     * @param projectionVersion    the running code's projection version (the
+     *                             same constant the composition root passes to
+     *                             {@code StateProjection.create(...)})
+     * @param clock                injected clock for response timestamps;
+     *                             never {@code null}
      * @throws ClassCastException if {@code javalinApp} is not a
      *         {@link io.javalin.Javalin} instance, or if {@code bus} is not
      *         an {@link EventBus} instance
@@ -177,18 +195,24 @@ public final class RestFilters {
                                              Object bus,
                                              ReadinessSource readinessSource,
                                              StateQueryService queryService,
-                                             LongSupplier viewPositionSupplier) {
+                                             LongSupplier viewPositionSupplier,
+                                             LongSupplier logHeadSupplier,
+                                             int projectionVersion,
+                                             Clock clock) {
         Objects.requireNonNull(javalinApp, "javalinApp");
         Objects.requireNonNull(bus, "bus");
         Objects.requireNonNull(readinessSource, "readinessSource");
         Objects.requireNonNull(queryService, "queryService");
         Objects.requireNonNull(viewPositionSupplier, "viewPositionSupplier");
+        Objects.requireNonNull(logHeadSupplier, "logHeadSupplier");
+        Objects.requireNonNull(clock, "clock");
         Javalin app = (Javalin) javalinApp;
         EventBus eventBus = (EventBus) bus;
-        app.get("/internal/dlq", new DlqStatusEndpoint(eventBus));
+        app.get("/internal/dlq",
+                new DlqStatusEndpoint(eventBus, viewPositionSupplier, clock));
         app.get("/internal/projection",
-                new ProjectionStatusEndpoint(
-                        readinessSource, queryService, viewPositionSupplier));
+                new ProjectionStatusEndpoint(readinessSource, queryService,
+                        viewPositionSupplier, logHeadSupplier, projectionVersion, clock));
     }
 
     /**

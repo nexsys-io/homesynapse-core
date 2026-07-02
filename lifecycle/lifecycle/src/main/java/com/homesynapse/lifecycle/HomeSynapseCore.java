@@ -167,6 +167,14 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     /** Subscriber identifier used for the materialized state projection. */
     private static final String PROJECTION_SUBSCRIBER_ID = "state_projection";
 
+    /**
+     * Running code's projection version (M4.0b-5, AMD-53). Single source of
+     * truth: passed to {@code StateProjection.create(...)} AND surfaced by
+     * {@code GET /internal/projection}'s frozen {@code projectionVersion}
+     * field (M7.5c-a) — the two must never diverge.
+     */
+    private static final int PROJECTION_VERSION = 5;
+
     /** Subscriber identifier used for the automation_engine (trigger) subscriber. */
     private static final String AUTOMATION_SUBSCRIBER_ID = "automation_engine";
 
@@ -403,7 +411,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 AttributeSchemaResolver.of(StandardCapabilities.attributeSchemas());
         this.stateProjection = StateProjection.create(
                 new ProjectionId(PROJECTION_SUBSCRIBER_ID),
-                5,                                          // M4.0b-5 (AMD-53) projection version
+                PROJECTION_VERSION,                         // M4.0b-5 (AMD-53) projection version
                 persistenceFactory.viewCheckpointStore(),
                 persistenceFactory.stateCheckpointSource(),
                 persistenceFactory.atomicCheckpointSink(), // AMD-45 §2.1
@@ -713,8 +721,14 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             RestFilters.installReadinessGate(app, this);
             RestFilters.installEntityQueryEndpoints(
                     app, stateQueryService, stateProjection::cursorPosition, clock);
+            // M7.5c-a: the /internal/* reads carry the frozen {data, meta} envelope
+            // (v1.1.1 §A4/§A5, DRIFT-1). The log head (eventStore::latestPosition)
+            // feeds the frozen A4 lagEvents; PROJECTION_VERSION is the same constant
+            // handed to StateProjection.create. Both cross the gateway as java.base
+            // types — no new rest-api module edge.
             RestFilters.installAdminEndpoints(
-                    app, eventBus, this, stateQueryService, stateProjection::cursorPosition);
+                    app, eventBus, this, stateQueryService, stateProjection::cursorPosition,
+                    persistenceFactory.eventStore()::latestPosition, PROJECTION_VERSION, clock);
             // M7.5a: the run-query (causal read) endpoints. The ExplanationService is a pure
             // log-derived projection (reads the EventStore + the registry for best-effort
             // names); it is Object-erased on the gateway so com.homesynapse.automation stays
