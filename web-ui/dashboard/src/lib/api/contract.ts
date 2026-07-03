@@ -11,7 +11,7 @@
  *   B-class = FROZEN-UNBUILT (mock to these shapes; Core implements TO them).
  */
 
-export const CONTRACT_VERSION = 'v1.1-2026-06-21' as const;
+export const CONTRACT_VERSION = 'v1.1.1-2026-07-02' as const;
 
 /* ===========================================================================
  * 0. Transport + cross-cutting (binds every endpoint)
@@ -37,7 +37,11 @@ export interface Envelope<T> {
   meta: ResponseMeta;
 }
 
-/** RFC 9457 problem+json. Non-2xx bodies are application/problem+json. */
+/** RFC 9457 problem+json. Non-2xx bodies are application/problem+json.
+ *  `type` is the full URI form `https://homesynapse.local/problems/<slug>`
+ *  (v1.1.1 correction, 2026-07-02 — per Locked Doc 09 §3.8 + the shipped
+ *  `ProblemType.TYPE_URI_PREFIX`). Clients key on the trailing SLUG — never
+ *  match the whole URI byte-for-byte. See `problemSlug()`. */
 export interface ProblemDetail {
   type: string;
   title: string;
@@ -48,7 +52,23 @@ export interface ProblemDetail {
   errors?: { field: string; message: string }[];
 }
 
-/** Frozen ProblemType taxonomy (slug -> status). */
+/** The ratified problem-type URI prefix (v1.1.1). Mirror of the constant the
+ *  amendment pins: Doc 09 §3.8 / `ProblemType.TYPE_URI_PREFIX` (source-verified
+ *  ProblemType.java:160). Wire `type` = this prefix + slug. */
+export const PROBLEM_TYPE_URI_PREFIX = 'https://homesynapse.local/problems/' as const;
+
+/** Derive the stable slug from a problem `type` (v1.1.1 matching rule):
+ *  strip the ratified URI prefix when present; tolerate a bare slug (client-
+ *  minted problems like `network-unreachable` never travel the wire). */
+export function problemSlug(type: string | undefined): string {
+  if (!type) return '';
+  return type.startsWith(PROBLEM_TYPE_URI_PREFIX)
+    ? type.slice(PROBLEM_TYPE_URI_PREFIX.length)
+    : type;
+}
+
+/** Frozen ProblemType taxonomy (slug -> status). Slugs are the stable
+ *  identifier set; the wire carries them in URI form (v1.1.1). */
 export const PROBLEM_TYPES = {
   'not-found': 404,
   'entity-disabled': 409,
@@ -147,18 +167,36 @@ export interface EntityState {
   staleAfter: string | null;
 }
 
-/** A4 — GET /internal/projection. */
+/** A4 — GET /internal/projection. Enveloped `{data, meta}` since M7.5c-a
+ *  (v1.1.1 DRIFT-1 conformance). Frozen four + the ruled ADDITIVE extras
+ *  (`entityCount`, `ready`) — optional here per the C8 additive-tolerance
+ *  precedent; live Core emits them. */
 export interface ProjectionStatus {
   mode: ProjectionMode;
   viewPosition: number;
   lagEvents: number;
   projectionVersion: number;
+  entityCount?: number;
+  ready?: boolean;
 }
 
-/** A5 — GET /internal/dlq. */
+/** A5 additive per-subscriber detail (ruled extra, M7.5c-a). */
+export interface DlqSubscriber {
+  subscriberId: string;
+  mode: string;
+  dlqDepth: number;
+  crashCount: number;
+  oldestParkedAt: string | null;
+}
+
+/** A5 — GET /internal/dlq. Enveloped since M7.5c-a (v1.1.1 DRIFT-1
+ *  conformance). `parkedSubscribers` is the RATIFIED shape: subscriber IDS
+ *  (ids with dlqDepth > 0) — consistent with B2's `parkedSubscribers:
+ *  string[]`. `subscribers` is the ruled additive detail. */
 export interface DlqStatus {
   depth: number;
-  parkedSubscribers: { subscriberId: string; reason?: string }[];
+  parkedSubscribers: string[];
+  subscribers?: DlqSubscriber[];
 }
 
 /* ===========================================================================

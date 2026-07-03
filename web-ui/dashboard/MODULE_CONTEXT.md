@@ -8,13 +8,15 @@
 
 *2026-07-02 beat (FE-1 live integration + the E5 fold): the dashboard ran against a LIVE local Core (M7.5a/b endpoints, AB-1 bearer auth) for the first time. The **measured AMD-97 confirmation-rendering semantics are folded** — reason-aware honest-outcome copy + class-keyed pending/unconfirmable hints in `format.ts`/`CausalChain.tsx` (the UI runs NO confirmation timeout; the backend owns the per-capability window), plus an **`e5-confirmation` scenario** whose color-temperature run flips Sent→Confirmed live at the measured ~8.4s mark (`e5-semantics.test.ts` locks all four behaviors). FE-1 wiring: dev-server **proxy** `/api`+`/internal`→`VITE_CORE_ORIGIN` (default loopback:7070); **`VITE_VALIDATE=true`** dev-runtime contract validation in `client.ts` (console.error `[contract-drift]`, log-and-continue); strict `Accept: application/json, application/problem+json`; **EventsView renders an honest "hub doesn't share the activity feed yet" state on live 404** (the M7.5c gap — never an error); the C8 additive optional entity `name` folded into `contract.ts`/`shapes.ts` with `displayName()` preference; AuthGate asks password managers to ignore the pairing-token field (observed live: Bitwarden offered to fill it).*
 
+*2026-07-02 beat 2 (FE-1b, the v1.1.1 fold): the two adjudicated FE-1 drifts are folded client-side against freeze **v1.1.1**. **DRIFT-2:** problem `type` is the URI form (`https://homesynapse.local/problems/<slug>`, Doc 09 §3.8) — `contract.ts` pins `PROBLEM_TYPE_URI_PREFIX` + `problemSlug()`; `ApiProblem` gains a derived `.slug` and ALL type-keyed detection (auth/forbidden/replaying/offline/EventsView not-found) keys on the slug suffix, tolerating bare slugs for client-minted problems; the mock emits URI-form types so mock === wire. **DRIFT-1:** A4/A5 are enveloped-real since core `e3d7296` (M7.5c-a) — no client shim ever existed (the envelope check was always strict); the fold is contract-currency: A4 gains the ruled additive `entityCount?`/`ready?`; A5 `parkedSubscribers` corrected to the RATIFIED `string[]` (ids; the mirror's pre-ratification object guess is removed — HealthView renders ids + the additive `subscribers[]` detail when present). `contract.test.ts` pins the prefix, the slug rule, the ratified A4/A5 shapes, and that bare bodies FAIL; `contract-check.mjs` trips on version + prefix drift. CONTRACT_VERSION = `v1.1.1-2026-07-02`.*
+
 ## Design Doc Reference
 - `homesynapse-core-docs/design/13-web-ui-observability-mvp.md` (Locked) — governs stack + UX scope.
-- `nexsys-hivemind/context/decisions/2026-06-21_dashboard-read-API-contract-freeze.md` (FROZEN v1.1) — the read-API contract this builds against; mirrored field-for-field in `src/lib/api/contract.ts`.
+- `nexsys-hivemind/context/decisions/2026-06-21_dashboard-read-API-contract-freeze.md` (FROZEN **v1.1.1**, 2026-07-02) — the read-API contract this builds against; mirrored field-for-field in `src/lib/api/contract.ts`. v1.1.1 = the URI-form problem `type` (clients key on the slug suffix) + the A4/A5 envelope conformance ruling.
 - `FRONTEND_DOCTRINE.md` (this module) — the lean, reusable frontend doctrine (candidate for hub promotion).
 
 ## Dependencies
-- Runtime: consumes the Core HTTP surface (REST) over loopback — A-class endpoints live; B-class (events, health, runs/causal-chain/non-firing/automations) mocked to frozen shapes until Core delivers them. No Java dependency; communicates only over HTTP.
+- Runtime: consumes the Core HTTP surface (REST) over loopback — A1–A5 real (A4/A5 enveloped since M7.5c-a) **and** the B3 hero four (runs, causal-chain, non-firing, automations) real since M7.5a/b; B1 `/events` + B2 `/health` still mocked to frozen shapes until M7.5c-b/c. No Java dependency; communicates only over HTTP.
 - Build: Node + npm + Vite (dev/build only; not on the Pi at runtime). Preact 10, uPlot (lazy), TypeScript, Vitest, ESLint.
 
 ## Consumers
@@ -31,6 +33,7 @@
 ## Gotchas
 - **One switch flips mock/real:** `src/lib/api/index.ts` (`VITE_USE_MOCKS`; default mock in dev, real in prod). Endpoints are transport-agnostic; only the transport changes as Core lands B-class.
 - **Contract drift fails CI, not the demo:** runtime validators in `src/lib/api/shapes.ts` + `contract.test.ts` + `scripts/contract-check.mjs`.
+- **Problem types are URI-form on the wire (v1.1.1):** key detection on `ApiProblem.slug` (the suffix of `PROBLEM_TYPE_URI_PREFIX`), NEVER on the whole `type` byte-for-byte and never on a bare-slug equality against a wire value. Client-minted problems (`network-unreachable`) stay bare — `problemSlug()` tolerates both.
 - **Plain-language copy is centralized** in `src/lib/format.ts` and locked by `format.test.ts` (the stranger/"mom" test).
 - **Build/test require Node** and run as the frontend CI gate (`ci/frontend.yml`, npm `verify`). The Core lane's `./gradlew check` is intentionally NOT coupled to Node (npm tasks hang off `assemble`, never `check`).
 - **CI wiring is a cross-lane item:** `ci/frontend.yml` is delivered here, ready for the hub to place into `.github/workflows/`.

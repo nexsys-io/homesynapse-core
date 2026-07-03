@@ -6,7 +6,14 @@
  * every transport condition (503 / offline / slow / 401 / 403 / ETag-304) is one control away.
  */
 import type { RawRequest, RawResponse, Transport } from '../client';
-import type { Envelope, PaginationMeta, ProblemDetail, ProjectionStatus } from '../contract';
+import {
+  PROBLEM_TYPE_URI_PREFIX,
+  type Envelope,
+  type PaginationMeta,
+  type ProblemDetail,
+  type ProblemType,
+  type ProjectionStatus,
+} from '../contract';
 import { getCondition, getDataset, getGeneration, latencyMs } from './mockState';
 
 let vp = 48_500;
@@ -19,8 +26,13 @@ function envelope<T>(data: T, pagination?: PaginationMeta): Envelope<T> {
 function problem(p: ProblemDetail): RawResponse {
   return { status: p.status, headers: {}, body: p };
 }
+/** Wire-faithful problem `type` (v1.1.1): the mock emits the URI form exactly
+ *  as Core does, so mock === wire and slug-suffix matching is what gets tested. */
+function typeUri(slug: ProblemType): string {
+  return PROBLEM_TYPE_URI_PREFIX + slug;
+}
 function notFound(detail: string): RawResponse {
-  return problem({ type: 'not-found', title: 'Not found', status: 404, detail });
+  return problem({ type: typeUri('not-found'), title: 'Not found', status: 404, detail });
 }
 const listPagination = (limit = 50): PaginationMeta => ({ nextCursor: null, hasMore: false, limit });
 
@@ -55,14 +67,14 @@ export function createMockTransport(getToken: () => string | null): Transport {
       const token = getToken();
       if (condition === 'auth-required' || !token) {
         return problem({
-          type: 'authentication-required',
+          type: typeUri('authentication-required'),
           title: 'Authentication required',
           status: 401,
           detail: 'Paste the pairing token from config/initial_api_token.',
         });
       }
       if (condition === 'forbidden' || token === 'invalid') {
-        return problem({ type: 'forbidden', title: 'Forbidden', status: 403, detail: 'Token invalid or expired.' });
+        return problem({ type: typeUri('forbidden'), title: 'Forbidden', status: 403, detail: 'Token invalid or expired.' });
       }
 
       const data = getDataset();
@@ -71,12 +83,13 @@ export function createMockTransport(getToken: () => string | null): Transport {
       // "starting up", not an error toast — Doc 13 §0). /internal/dlq still answers.
       if (condition === 'replaying') {
         if (req.path === '/internal/projection') {
-          const replaying: ProjectionStatus = { ...data.projection, mode: 'REPLAY', lagEvents: 128 };
+          // ready mirrors mode===LIVE (the live A4 derivation) — keep the mock honest.
+          const replaying: ProjectionStatus = { ...data.projection, mode: 'REPLAY', lagEvents: 128, ready: false };
           return respond(req, envelope(replaying));
         }
         if (req.path.startsWith('/api/')) {
           return problem({
-            type: 'state-store-replaying',
+            type: typeUri('state-store-replaying'),
             title: 'Starting up',
             status: 503,
             detail: 'The projection is catching up. Retrying shortly.',

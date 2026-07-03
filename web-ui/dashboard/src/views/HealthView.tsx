@@ -79,12 +79,21 @@ export function HealthView() {
                 </div>
                 {stuck && d.parkedSubscribers.length > 0 ? (
                   <dl class="kv">
-                    {d.parkedSubscribers.map((s) => (
-                      <div class="kvRow" key={s.subscriberId}>
-                        <dt>{s.subscriberId}</dt>
-                        <dd>{s.reason ?? 'parked'}</dd>
-                      </div>
-                    ))}
+                    {/* v1.1.1: parkedSubscribers is the ratified id list (strings);
+                        the additive subscribers[] detail fills the per-id count when present. */}
+                    {d.parkedSubscribers.map((id) => {
+                      const detail = d.subscribers?.find((s) => s.subscriberId === id);
+                      return (
+                        <div class="kvRow" key={id}>
+                          <dt>{id}</dt>
+                          <dd>
+                            {detail
+                              ? `${detail.dlqDepth} item${detail.dlqDepth === 1 ? '' : 's'} parked`
+                              : 'parked'}
+                          </dd>
+                        </div>
+                      );
+                    })}
                   </dl>
                 ) : null}
               </div>

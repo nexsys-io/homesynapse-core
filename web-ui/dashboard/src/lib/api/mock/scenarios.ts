@@ -461,8 +461,10 @@ function buildEmpty(): MockDataset {
     entities: [],
     entityDetail: {},
     entityState: {},
-    projection: { mode: 'LIVE', viewPosition: base.projection.viewPosition, lagEvents: 0, projectionVersion: 5 },
-    dlq: { depth: 0, parkedSubscribers: [] },
+    // Wire-faithful A4/A5 (v1.1.1): an empty home still carries the ruled additive
+    // extras — 0 entities, ready, and the platform subscribers all LIVE.
+    projection: { mode: 'LIVE', viewPosition: base.projection.viewPosition, lagEvents: 0, projectionVersion: 5, entityCount: 0, ready: true },
+    dlq: { depth: 0, parkedSubscribers: [], subscribers: base.dlq.subscribers },
     health: { phase: 'RUNNING', projection: { mode: 'LIVE', viewPosition: base.projection.viewPosition, lagEvents: 0 }, dlq: { depth: 0, parkedSubscribers: [] }, integrations: [] },
     automations: [],
     runs: [],

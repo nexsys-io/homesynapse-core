@@ -7,7 +7,9 @@
 import { readFileSync } from 'node:fs';
 
 const SHAPES = 'src/lib/api/shapes.ts';
-const EXPECTED_VERSION = 'v1.1-2026-06-21';
+const EXPECTED_VERSION = 'v1.1.1-2026-07-02';
+// v1.1.1: the ratified problem-type URI prefix (Doc 09 §3.8 / ProblemType.TYPE_URI_PREFIX).
+const EXPECTED_PROBLEM_PREFIX = 'https://homesynapse.local/problems/';
 const REQUIRED = [
   'A1:entities',
   'A2:entity',
@@ -40,6 +42,10 @@ if (missing.length > 0) {
 const versionFile = readFileSync('src/lib/api/contract.ts', 'utf8');
 if (!versionFile.includes(EXPECTED_VERSION)) {
   console.error(`✗ CONTRACT_VERSION is not ${EXPECTED_VERSION} — confirm the freeze the client builds against.`);
+  process.exit(1);
+}
+if (!versionFile.includes(EXPECTED_PROBLEM_PREFIX)) {
+  console.error(`✗ PROBLEM_TYPE_URI_PREFIX missing or drifted — clients key on the slug suffix of ${EXPECTED_PROBLEM_PREFIX}<slug> (v1.1.1).`);
   process.exit(1);
 }
 

@@ -7,7 +7,7 @@
  * problem+json, ETag/If-None-Match (304), and first-class detection of the
  * 503 `state-store-replaying` boot state.
  */
-import type { Envelope, PaginationMeta, ProblemDetail, ResponseMeta } from './contract';
+import { problemSlug, type Envelope, type PaginationMeta, type ProblemDetail, type ResponseMeta } from './contract';
 import { validateAgainstContract, ContractError, type EndpointId } from './shapes';
 
 /* FE-1 dev-runtime validation (FE1_GO_LIVE §A): validate LIVE response bodies against the
@@ -52,21 +52,27 @@ export class ApiProblem extends Error {
   get type() {
     return this.problem.type;
   }
+  /** The stable problem identifier (v1.1.1): the slug suffix of the URI-form
+   *  `type`, tolerating bare slugs (client-minted problems). ALL type-keyed
+   *  detection goes through this — never match the whole URI byte-for-byte. */
+  get slug() {
+    return problemSlug(this.problem.type);
+  }
   /** 401: prompt for a token. */
   get isAuthRequired() {
-    return this.status === 401 || this.problem.type === 'authentication-required';
+    return this.status === 401 || this.slug === 'authentication-required';
   }
   /** 403: token invalid/expired. */
   get isForbidden() {
-    return this.status === 403 || this.problem.type === 'forbidden';
+    return this.status === 403 || this.slug === 'forbidden';
   }
   /** 503 state-store-replaying: "starting up / catching up", NOT a hard error. */
   get isReplaying() {
-    return this.problem.type === 'state-store-replaying';
+    return this.slug === 'state-store-replaying';
   }
   /** status 0 / network-unreachable: the hub could not be reached (offline). */
   get isOffline() {
-    return this.status === 0 || this.problem.type === 'network-unreachable';
+    return this.status === 0 || this.slug === 'network-unreachable';
   }
 }
 

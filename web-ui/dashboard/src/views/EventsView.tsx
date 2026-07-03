@@ -22,8 +22,9 @@ export function EventsView() {
   // The M7.5c live gap, degraded gracefully (FE-1): Core does not serve GET /api/v1/events
   // until M7.5c, so a live backend answers 404 not-found here. That is an EXPECTED state on
   // a current hub — render it as calm teaching, never as an error. (Mock mode always serves
-  // the endpoint, so this renders only against a real pre-M7.5c Core.)
-  if (state.status === 'error' && state.error instanceof ApiProblem && state.error.type === 'not-found') {
+  // the endpoint, so this renders only against a real pre-M7.5c Core.) Keyed on the SLUG
+  // (v1.1.1 — the wire `type` is the URI form).
+  if (state.status === 'error' && state.error instanceof ApiProblem && state.error.slug === 'not-found') {
     return (
       <Page title="Activity" lede="Recent things that happened in your home, newest first." meta={state.meta}>
         <Card>

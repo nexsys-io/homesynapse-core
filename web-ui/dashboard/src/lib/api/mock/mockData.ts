@@ -104,8 +104,26 @@ export const entityState: Record<string, EntityState> = {
 };
 
 /* ---- Health (A4 / A5 / B2) ---- */
-export const projection: ProjectionStatus = { mode: 'LIVE', viewPosition: vp, lagEvents: 0, projectionVersion: 5 };
-export const dlq: DlqStatus = { depth: 0, parkedSubscribers: [] };
+/* Wire-faithful since M7.5c-a (v1.1.1): live Core always emits the ruled additive
+   extras (A4 entityCount/ready; A5 subscribers[]), so the mock carries them too —
+   live integration must meet no shape the UI hasn't already faced. */
+export const projection: ProjectionStatus = {
+  mode: 'LIVE',
+  viewPosition: vp,
+  lagEvents: 0,
+  projectionVersion: 5,
+  entityCount: entities.length,
+  ready: true,
+};
+export const dlq: DlqStatus = {
+  depth: 0,
+  parkedSubscribers: [],
+  subscribers: [
+    { subscriberId: 'state_projection', mode: 'LIVE', dlqDepth: 0, crashCount: 0, oldestParkedAt: null },
+    { subscriberId: 'automation_engine', mode: 'LIVE', dlqDepth: 0, crashCount: 0, oldestParkedAt: null },
+    { subscriberId: 'pending_command_ledger', mode: 'LIVE', dlqDepth: 0, crashCount: 0, oldestParkedAt: null },
+  ],
+};
 export const health: ConsolidatedHealth = {
   phase: 'RUNNING',
   projection: { mode: 'LIVE', viewPosition: vp, lagEvents: 0 },

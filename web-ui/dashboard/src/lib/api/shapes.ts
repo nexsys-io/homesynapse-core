@@ -133,6 +133,8 @@ export const validators: Record<EndpointId, Validator> = {
     meta(req(b, 'meta', 'A3'), 'A3.meta');
   },
   'A4:projection': (b) => {
+    // Enveloped since M7.5c-a (v1.1.1 DRIFT-1). Frozen four required; the ruled
+    // additive extras (entityCount, ready) type-checked when present.
     if (!isObj(b)) throw new ContractError('A4: body must be object');
     const d = req(b, 'data', 'A4');
     if (!isObj(d)) throw new ContractError('A4.data must be object');
@@ -140,15 +142,30 @@ export const validators: Record<EndpointId, Validator> = {
     isNum(req(d, 'viewPosition', 'A4.data'), 'A4.data.viewPosition');
     isNum(req(d, 'lagEvents', 'A4.data'), 'A4.data.lagEvents');
     isNum(req(d, 'projectionVersion', 'A4.data'), 'A4.data.projectionVersion');
+    if ('entityCount' in d) isNum(d.entityCount, 'A4.data.entityCount');
+    if ('ready' in d) isBool(d.ready, 'A4.data.ready');
     meta(req(b, 'meta', 'A4'), 'A4.meta');
   },
   'A5:dlq': (b) => {
+    // Enveloped since M7.5c-a (v1.1.1 DRIFT-1). parkedSubscribers = subscriber
+    // IDS (the ratified shape, consistent with B2); subscribers[] is the ruled
+    // additive per-subscriber detail, type-checked when present.
     if (!isObj(b)) throw new ContractError('A5: body must be object');
     const d = req(b, 'data', 'A5');
     if (!isObj(d)) throw new ContractError('A5.data must be object');
     isNum(req(d, 'depth', 'A5.data'), 'A5.data.depth');
-    if (!Array.isArray(req(d, 'parkedSubscribers', 'A5.data'))) {
-      throw new ContractError('A5.data.parkedSubscribers must be array');
+    const parked = req(d, 'parkedSubscribers', 'A5.data');
+    if (!Array.isArray(parked)) throw new ContractError('A5.data.parkedSubscribers must be array');
+    parked.forEach((s, i) => isStr(s, `A5.data.parkedSubscribers[${i}]`));
+    if ('subscribers' in d) {
+      if (!Array.isArray(d.subscribers)) throw new ContractError('A5.data.subscribers must be array');
+      d.subscribers.forEach((s, i) => {
+        const p = `A5.data.subscribers[${i}]`;
+        if (!isObj(s)) throw new ContractError(`${p}: must be object`);
+        isStr(req(s, 'subscriberId', p), `${p}.subscriberId`);
+        isStr(req(s, 'mode', p), `${p}.mode`);
+        isNum(req(s, 'dlqDepth', p), `${p}.dlqDepth`);
+      });
     }
     meta(req(b, 'meta', 'A5'), 'A5.meta');
   },
