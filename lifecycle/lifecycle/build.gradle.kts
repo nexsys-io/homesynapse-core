@@ -29,10 +29,17 @@ dependencies {
     api(project(":core:state-store"))
 
     // M3.6d-b: HomeSynapseCore aggregates IntegrationEvents.LIFECYCLE_EVENT_CLASSES
-    // into the event-type registry. `implementation` scope — IntegrationEvents is
-    // referenced only inside the composition root, not exposed on the lifecycle
-    // module's public API (matches the non-transitive `requires` directive).
-    implementation(project(":integration:integration-api"))
+    // into the event-type registry. M9.1 FLIPPED this to `api` scope in lockstep
+    // with the `requires transitive com.homesynapse.integration` promotion: the
+    // canonical 7-arg HomeSynapseCore constructor exposes List<IntegrationFactory>
+    // (an integration-api type) on the exported public API.
+    api(project(":integration:integration-api"))
+
+    // M9.1: the composition root constructs IntegrationSupervisorAssembly and
+    // holds the IntegrationSupervisor. `implementation` scope — runtime types are
+    // referenced only inside HomeSynapseCore + a package-private accessor,
+    // matching the plain `requires com.homesynapse.integration.runtime`.
+    implementation(project(":integration:integration-runtime"))
 
     // M3.6e.1: HomeSynapseCore registers a ReadinessFilter from rest-api as
     // the Javalin before("/api/*") gate. `implementation` scope — only the

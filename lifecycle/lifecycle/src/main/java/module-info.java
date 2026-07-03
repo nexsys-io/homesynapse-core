@@ -37,9 +37,18 @@ module com.homesynapse.lifecycle {
 
     // M3.6d-b: HomeSynapseCore aggregates IntegrationEvents.LIFECYCLE_EVENT_CLASSES
     // with EventTypes.CORE_PRODUCTION_EVENT_CLASSES at startup to feed the event
-    // type registry. Non-transitive — IntegrationEvents is referenced only inside
-    // the composition root, not exposed on the lifecycle module's public API.
-    requires com.homesynapse.integration;
+    // type registry. M9.1 PROMOTED this to transitive: the canonical 7-arg
+    // HomeSynapseCore constructor takes List<IntegrationFactory> — an
+    // integration-api type on a PUBLIC ctor of an EXPORTED class — so a plain
+    // requires would trip -Xlint:exports (-Werror). Paired with api(...) in
+    // build.gradle.kts (the lockstep rule).
+    requires transitive com.homesynapse.integration;
+
+    // M9.1: the composition root constructs IntegrationSupervisorAssembly and
+    // holds the supervisor. Referenced only INSIDE HomeSynapseCore + the
+    // package-private accessor (NOT exported API) -> plain requires,
+    // implementation(...) in Gradle (the AB-3 config/device/automation pattern).
+    requires com.homesynapse.integration.runtime;
 
     // M3.6e.1: HomeSynapseCore registers ReadinessFilter (from rest-api) as a
     // Javalin before("/api/*") gate. Non-transitive — the type is referenced

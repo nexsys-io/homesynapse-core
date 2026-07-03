@@ -18,7 +18,14 @@ subprojects {
 // Module dependency direction enforcement (INV-RF-01, architectural layers)
 // ---------------------------------------------------------------------------
 moduleGraphAssert {
-    maxHeight = 7  // deepest path: platform-api → ... → homesynapse-app
+    // M9.1 raised 7 → 8: the ruled lifecycle → integration-runtime edge (the
+    // Phase-6 composition root hosts the IntegrationSupervisor) inserts one
+    // intended layer into the pre-existing deepest path. Deepest path now:
+    // app → lifecycle → integration-runtime → integration-api → persistence
+    // → state-store → device-model → event-model → platform-api (8 edges).
+    // Every hop is an architectural layer; do not raise again without the
+    // same justification.
+    maxHeight = 8
     allowed = arrayOf(
         // Platform layer
         ":platform:platform-api -> ",  // leaf — depends on nothing

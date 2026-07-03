@@ -1,4 +1,4 @@
-# integration-runtime — `com.homesynapse.integration.runtime` — Scaffold — OTP-style supervisor, adapter lifecycle, health monitoring, Kahn's startup ordering
+# integration-runtime — `com.homesynapse.integration.runtime` — M9.1 SLICE IMPLEMENTED — StandardIntegrationSupervisor (minimal FSM) + CommandRoutingSubscriber (the command_dispatched → CommandHandler spine) + assembly; supervisor breadth (DEGRADED/SUSPENDED/probes/Kahn/JFR) deferred to the post-hero unit
 
 ## Purpose
 
@@ -6,7 +6,22 @@ The Integration Runtime module is the supervisory layer that loads, isolates, mo
 
 Where integration-api (Block I) defines *what an adapter declares and receives*, this module defines *what the supervisor does with those declarations*: lifecycle management, health state machine, restart intensity enforcement, exception classification, thread allocation, and shutdown orchestration. The `IntegrationSupervisor` interface is consumed by the Startup/Lifecycle module for boot/shutdown, the REST API for integration management endpoints, and the Observability module for composite health indicators.
 
-This module now contains 7 Java files: 2 enums (ExceptionClassification — **4 values** after AMD-56; HealthDetail — **12 values**, new in AMD-57), 2 records (SlidingWindow — 3 fields, IntegrationHealthRecord — **14 fields** after AMD-57), 1 interface (IntegrationSupervisor — 9 methods), package-info.java, and module-info.java.
+This module now contains **13 Java files** (M9.1; the pre-M9.1 text said "7 Java files" in one place and "6 Java files" in another — 7 was correct, counting package-info.java and module-info.java): 2 enums (ExceptionClassification — **4 values** after AMD-56; HealthDetail — **12 values**, new in AMD-57), 2 records (SlidingWindow — 3 fields, IntegrationHealthRecord — **14 fields** after AMD-57), 1 interface (IntegrationSupervisor — 9 methods), **6 M9.1 production classes** (see the M9.1 section below), package-info.java, and module-info.java.
+
+### M9.1 changes (integration spine, 2026-07-02)
+
+The first `IntegrationSupervisor` implementation and the `command_dispatched` → `CommandHandler.handle(CommandEnvelope)` routing subscriber landed. Six new types:
+
+| Type | Visibility | Purpose |
+|---|---|---|
+| `IntegrationSupervisorAssembly` | **public** final class | The composition-root seam (mirrors `PendingCommandLedgerAssembly`): `SUBSCRIBER_ID = "integration_supervisor"`, `record Components(IntegrationSupervisor supervisor, Subscriber subscriber)`, `subscriptionFilter()` (command_issued + command_dispatched, DIAGNOSTIC floor, ENTITY subjects), the 6-arg static factory `integrationSupervisor(EventPublisher, EntityRegistry, StateQueryService, Function<String,ConfigurationAccess>, Function<String,Map<String,Object>>, Clock)`, and `abandon(IntegrationSupervisor)` — the W4 fast-stop gateway (the `InProcessEventBus.abandon()` concrete-class precedent; the frozen 9-method interface carries no fast path). |
+| `IntegrationIds` | **public** final class | `deriveStable(String integrationType)` — M9.1-interim deterministic identity: first 128 bits of SHA-256 of `"homesynapse:integration:" + type` into the `Ulid` carrier. Stable across restarts; documented LTD-04 deviation (NOT time-ordered). **[Design point] DP-B pending Nick's durable-identity ruling before M9.2 device adoption.** |
+| `StandardIntegrationSupervisor` | package-private | The M9.1 FSM slice: registration (factory-list order; Kahn deferred), DP-11 thread allocation (NETWORK→VT, SERIAL→platform, named `integration-<type>-0`), HEALTHY ↔ TRANSIENT-restart-cycle → FAILED, descriptor-driven exponential backoff (clock-driven interrupt-safe waits — W8), grace-bounded close (10 s default; ctor-injectable for tests), lifecycle-event publication (zero mint), and the package-private router seam (`routeTarget(IntegrationId)` / `recordHandlerError`). |
+| `CommandRoutingSubscriber` | package-private | The bus `Subscriber`: `command_issued` join-cache (all modes) + LIVE-only `command_dispatched` → `handle(...)` on the per-adapter single-threaded command executor (`integration-cmd-<type>`). |
+| `ExceptionClassifier` | package-private | `classify(Throwable)` — the Doc 05 §3.7 M9.1 slice: PermanentIntegrationException→PERMANENT · InterruptedException→SHUTDOWN_SIGNAL · OOM/LinkageError→PERMANENT · everything else→TRANSIENT. Shutdown-aware reclassification lives in the supervisor's run loop (per-adapter `shuttingDown` flag), not the pure classifier. Nothing maps to AUTH_FAILED yet (AMD-56 routing = deferred breadth). |
+| `SupervisorHealthReporter` | package-private | Per-integration `HealthReporter` write-through: heartbeat from the injected Clock, keepalive stores the adapter-reported Instant verbatim, errors increment the error-window count. `reportHealthTransition` is logged, not evaluated (no evaluation logic in M9.1). |
+
+JPMS: `+ requires transitive com.homesynapse.event.bus` (the assembly's `Components` exposes the bus `Subscriber` type — paired with `api(project(":core:event-bus"))`), `+ requires org.slf4j` (implementation-only, `implementation(libs.slf4j.api)`).
 
 ### M4.C changes (AMD-54..64 freeze, 2026-06-05)
 
@@ -32,16 +47,18 @@ This module now contains 7 Java files: 2 enums (ExceptionClassification — **4 
 ```
 module com.homesynapse.integration.runtime {
     requires transitive com.homesynapse.integration;
+    requires transitive com.homesynapse.event.bus;   // M9.1
+    requires org.slf4j;                              // M9.1
 
     exports com.homesynapse.integration.runtime;
 }
 ```
 
-`requires transitive` because integration-api types (IntegrationFactory, IntegrationId, HealthState, HealthParameters) appear throughout the exported API surface — in IntegrationSupervisor method signatures and IntegrationHealthRecord record components. The event-model dependency in build.gradle.kts (`implementation`) is for Phase 3 internal use only (producing lifecycle events via EventPublisher) — no event-model types appear in Phase 2's exported API. Phase 3 will add `requires com.homesynapse.event` (non-transitive).
+`requires transitive com.homesynapse.integration` because integration-api types (IntegrationFactory, IntegrationId, HealthState, HealthParameters) appear throughout the exported API surface. `requires transitive com.homesynapse.event.bus` (M9.1) because `IntegrationSupervisorAssembly.Components` exposes the bus `Subscriber` type — paired with `api(project(":core:event-bus"))` (the exports lockstep). Event-model, device-model, state-store, config, and platform types all resolve TRANSITIVELY through `com.homesynapse.integration` — no direct requires exists or is needed (the pre-M9.1 prose claiming an event-model `implementation` Gradle edge was stale: the actual build.gradle.kts had only `api(":integration:integration-api")` before M9.1). `org.slf4j` is plain/`implementation` (LTD-15).
 
 ## Package Structure
 
-**`com.homesynapse.integration.runtime`** — Single flat package. 6 Java files total.
+**`com.homesynapse.integration.runtime`** — Single flat package. 13 Java files total (M9.1; the pre-M9.1 "6 Java files" here disagreed with the header's "7" — both are superseded).
 
 ## Complete Type Inventory
 
@@ -120,18 +137,24 @@ Integration-api's `requires transitive` chain provides transitive access to plat
 | configuration (`com.homesynapse.config`) | ConfigurationAccess for IntegrationContext construction | transitively via integration-api |
 | jdk.jfr | RecordingStream for health monitoring mechanism 3 (resource compliance) | JDK module |
 
-### Gradle (build.gradle.kts)
+### Gradle (build.gradle.kts, M9.1)
 
 ```kotlin
 api(project(":integration:integration-api"))
-implementation(project(":core:event-model"))
+api(project(":core:event-bus"))            // M9.1 lockstep with requires transitive
+implementation(libs.slf4j.api)             // M9.1 lockstep with plain requires
+
+testImplementation(project(":testing:test-support"))
+testImplementation(testFixtures(project(":integration:integration-api")))
+testImplementation(testFixtures(project(":core:event-model")))
 ```
 
-The `api` scope for integration-api is correct — integration-api types appear in the runtime module's public API. The `implementation` scope for event-model is correct — event-model is only used internally for producing lifecycle events in Phase 3. **Do not change these dependencies.**
+The `api` scopes match the two `requires transitive` directives (the exports lockstep). There is NO direct event-model edge — event-model resolves transitively through integration-api (the pre-M9.1 claim of an `implementation(":core:event-model")` line here was stale; it never existed in the actual file).
 
 ## Consumers
 
-### Current consumers: None
+### Current consumers:
+- **lifecycle** (`com.homesynapse.lifecycle`, M9.1) — Phase 6 of `HomeSynapseCore` constructs `IntegrationSupervisorAssembly.integrationSupervisor(...)`, registers the router via `subscribeRuntime` (`SUBSCRIBER_ID`, `subscriptionFilter()`, `coalesceExempt=true`, AFTER projection LIVE), calls `supervisor.start(factories).get(30, SECONDS)` (boot continues on failure — INV-RF-01), `supervisor.stop()` in `doTeardown`, and `IntegrationSupervisorAssembly.abandon(supervisor)` in `abandon()`. Plain `requires` / `implementation(...)` — runtime types stay off lifecycle's exported API.
 
 ### Planned consumers:
 - **lifecycle** (`com.homesynapse.lifecycle`) — Calls `IntegrationSupervisor.start(factories)` during boot Phase 4, calls `IntegrationSupervisor.stop()` during shutdown step 5 (after WebSocket, before REST API). The lifecycle module assembles the `List<IntegrationFactory>` per DECIDE-04.
@@ -197,16 +220,28 @@ The `api` scope for integration-api is correct — integration-api types appear 
 
 **GOTCHA: Unknown RuntimeException defaults to TRANSIENT, not PERMANENT.** This is deliberate (Doc 05 §3.7) to prevent the Home Assistant anti-pattern where an unexpected exception type permanently kills an integration. The safe default is restart-with-backoff. Only known-unrecoverable exceptions (PermanentIntegrationException, OutOfMemoryError, etc.) trigger permanent failure.
 
+**GOTCHA (M9.1): the router's join cache — bounded, all-modes populated, evict-on-join.** `command_dispatched` carries no command name/parameters, so `CommandRoutingSubscriber` joins it to its `command_issued` via `causalContext().causationId()` against a 1024-entry insertion-ordered cache (drop-oldest with a WARN `integration.command_cache_evicted`). The cache is populated in ALL subscriber modes (a `command_issued` delivered during TRANSITION legitimately joins a LIVE `command_dispatched` across the flip) but **dispatch fires only for LIVE `command_dispatched`** (INV-ES-09). A successful join EVICTS the entry — a bus at-least-once redelivery is a join miss, so `handle(...)` runs exactly once per dispatched command (AMD-90-INV-01 composes). A join miss is WARN `integration.route_join_miss` + skip: no dispatch, no result event — the pending-command ledger's timeout owns that outcome.
+
+**GOTCHA (M9.1): the router publishes FAILURE results only.** On a normal `handle(...)` return the router publishes NOTHING — the adapter owns the eventual `command_result` (Doc 08 §3.10 step 7). The router's own `command_result`s (`integration_unavailable` / `unsupported` / `handler_error`) are CRITICAL, origin SYSTEM, causation-chained from the `command_dispatched` envelope. `InterruptedException` from `handle(...)` restores the interrupt and publishes nothing (shutdown).
+
+**GOTCHA (M9.1 / DP-6): integration identity is an INTERIM hash derivation.** `IntegrationIds.deriveStable(type)` — SHA-256-based, stable across restarts, deliberately NOT a time-ordered ULID (documented LTD-04 deviation). **[Design point] DP-B**: Nick rules the durable identity story before M9.2's real device adoption makes it one-way. Everything resolves ids through this single seam.
+
+**GOTCHA (M9.1): "running" means HOSTED, not merely a health state.** `isRunning(id)` (and the router's `routeTarget`) require the adapter to be hosted (created + not torn down) AND HEALTHY/DEGRADED. A cleanly-stopped adapter keeps its last health state (`integration_stopped` publishes the AMD-58-style same-state pair) but is no longer hosted. An administratively stopped HEALTHY integration is therefore restartable only via `restartIntegration` (manual `startIntegration` stays FAILED-only per the frozen contract).
+
+**GOTCHA (M9.1): the M9.1 deferred-breadth list.** DEGRADED/SUSPENDED, the probe ladder, suspension cycles, heartbeat-timeout sweeps, window-rate evaluation, JFR/resource quotas, planned-restart suppression behaviors (Doc 05 §3.14 — only the `plannedRestart` flag is carried), dependency-graph (Kahn) ordering, integration-scoped registry/query wrappers, AUTH_FAILED routing, and the health-score formula (the slice reports binary 1.0/0.0) are ALL deferred to the post-hero supervisor-breadth unit (NQ-6 validates restart defaults first). A normal (non-shutdown) `run()` return classifies TRANSIENT and restarts.
+
 ## Phase 3 Notes
 
-- **Health state machine implementation:** The supervisor maintains mutable per-integration state: current HealthState, three ConcurrentLinkedDeque\<Instant\> sliding windows (error, timeout, slow-call), restart timestamps for intensity tracking, probe state for SUSPENDED recovery cycles. State transitions are guarded by the rules in Doc 05 §3.4.
-- **Restart backoff:** Exponential backoff starting from probeInitialDelay, capped at probeMaxDelay. Restart intensity tracked per integration — maxRestarts within restartWindow escalates to FAILED.
-- **Thread allocation:** Virtual thread per NETWORK adapter via Executors.newVirtualThreadPerTaskExecutor(). Dedicated platform thread per SERIAL adapter (JNI pinning). Named threads for diagnostics (e.g., "integration-zigbee-0").
-- **IntegrationContext construction:** The supervisor constructs per-adapter IntegrationContext with integration-scoped wrappers: EntityRegistry filtered by integrationId, StateQueryService filtered by integrationId, isolated SchedulerService, isolated ManagedHttpClient (if requested), shared EventPublisher (event namespace enforcement is Phase 3).
+*(M9.1 status tags added 2026-07-02: the spine slice is BUILT; everything tagged "deferred to post-hero unit" is supervisor breadth the M9.1 instruction explicitly excluded.)*
+
+- **Health state machine implementation [M9.1 SLICE BUILT; full FSM deferred to post-hero unit]:** M9.1 tracks per-integration state under one ReentrantLock (an error-window count, restart timestamps in an ArrayDeque, HEALTHY/FAILED transitions). The three-deque sliding windows, probe state, and DEGRADED/SUSPENDED transitions per Doc 05 §3.4 are the breadth unit's.
+- **Restart backoff [BUILT, M9.1]:** Exponential from the DESCRIPTOR's `BackoffParameters` (initialDelay × multiplier^n, capped at maxDelay — NOT probeInitialDelay/probeMaxDelay as this note previously sketched; the probe parameters belong to the SUSPENDED recovery ladder, which is deferred). Intensity: maxRestarts within restartWindow escalates to FAILED (`HealthDetail.RESTART_LIMIT_EXCEEDED`). Clock-driven interrupt-safe waits (W8) — testable under a stepped TestClock.
+- **Thread allocation [BUILT, M9.1]:** One supervise-loop thread per adapter — virtual for NETWORK, dedicated platform for SERIAL (JNI pinning), named `integration-<type>-0` — plus a single-threaded per-adapter VIRTUAL command executor named `integration-cmd-<type>` (FIFO command delivery, Doc 08 §3.10 step 1).
+- **IntegrationContext construction [M9.1 SLICE BUILT; scoped wrappers deferred to post-hero unit]:** M9.1 passes the REAL (unscoped) EntityRegistry/StateQueryService, a per-integration `SupervisorHealthReporter`, and per-integration-scoped `ConfigurationAccess` from the injected `Function<String, ConfigurationAccess>` (the composition root binds `ConfigurationAccess.scoped(type, configurationService.getCurrentModel())` — the B7 corrected path, so config IS scoped now). The 5 service-gated tails (scheduler/telemetry/http/security/discovery) stay null until an adapter declares them (Zigbee at M9.4). Integration-SCOPED registry/query wrappers are the breadth unit's.
 - **Dependency graph:** Kahn's algorithm with cycle detection (AMD-14). Build adjacency list from IntegrationDescriptor.dependsOn() → resolve integrationType to IntegrationId. Detect cycles before starting any integration. Shutdown in reverse topological order.
 - **JFR monitoring:** RecordingStream subscribes to per-integration JFR events (CPU time, memory allocation, thread count). Feeds resourceComplianceScore in health score calculation.
 - **Lifecycle event production:** On every health state transition, construct the appropriate IntegrationLifecycleEvent subtype and publish via EventPublisher with EventOrigin.SYSTEM. CRITICAL priority for SUSPENDED and FAILED transitions.
-- **Command dispatch subscription:** Subscribe to command_dispatched events on the event bus. Filter by integration ownership (entityId → integrationId lookup via EntityRegistry). Construct CommandEnvelope. Invoke adapter's CommandHandler on the adapter's thread.
+- **Command dispatch subscription: BUILT (M9.1).** `CommandRoutingSubscriber` consumes `command_dispatched` and invokes the owning adapter's `CommandHandler` on the per-adapter command executor. NOTE the built shape differs from this note's original sketch: the router does NOT re-resolve entity→integration via EntityRegistry — `dispatched.integrationId()` is authoritative (that resolution already happened in `StandardCommandDispatchService`), and the command name/parameters come from the DP-2 causation join against `command_issued`.
 - **ManagedHttpClient implementation:** Wrap java.net.http.HttpClient with Semaphore for concurrency limiting, token bucket for rate limiting. Connection pool isolation per adapter. Lifecycle tied to adapter — close() cancels pending requests and releases the connection pool.
 - **Shutdown orchestration:** Set per-adapter shuttingDown flag, interrupt virtual threads / close serial ports, wait for grace period, log abandoned adapters, produce integration_stopped events for clean shutdowns.
 - **Planned restart lifecycle (Doc 05 §3.14):** When `restartIntegration()` is called, set `plannedRestart = true` on the IntegrationHealthRecord. While true: suppress `availability_changed` events for owned entities, queue inbound commands (do not drop), exclude owned devices from orphan detection (AMD-17). Clear the flag when the adapter reaches HEALTHY or when 60s timeout expires (whichever comes first). On timeout, treat as normal restart failure. The automation engine accesses planned restart state via event subscription (`integration_stopped` with reason `planned_restart`), NOT by reading `IntegrationHealthRecord.plannedRestart()` directly — JPMS prevents core modules from importing integration-runtime types.

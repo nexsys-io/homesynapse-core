@@ -14,6 +14,7 @@ import com.homesynapse.device.EntityRole;
 import com.homesynapse.device.EntityType;
 import com.homesynapse.device.StandardCapabilities;
 import com.homesynapse.event.AutomationInvokedEvent;
+import com.homesynapse.event.CausalContext;
 import com.homesynapse.event.CommandDispatchedEvent;
 import com.homesynapse.event.CommandIdempotency;
 import com.homesynapse.event.CommandIssuedEvent;
@@ -30,6 +31,7 @@ import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.event.bus.SubscriberSnapshot;
 import com.homesynapse.integration.IntegrationEvents;
+import com.homesynapse.integration.runtime.IntegrationIds;
 import com.homesynapse.persistence.PersistenceFactory;
 import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.DeviceId;
@@ -118,15 +120,18 @@ import java.util.stream.Stream;
  * are visible." A subscriber that trips to {@code SUSPENDED} (a replayed {@code onEvent} threw) is
  * itself a replay-safety regression and fails fast rather than spinning to timeout.
  *
- * <h2>Time (§4c) and the M9 forward note</h2>
+ * <h2>Time (§4c) and the M9 adapter seam (M9.1)</h2>
  *
  * <p>Time is injected via {@code Clock.fixed} (lifecycle test code self-enforces Clock injection;
  * the await loops use real-time {@code Thread.sleep}, which is clock-independent and terminates under
- * a fixed clock). <strong>Today the observable outbound dispatch side-effect is the
- * {@code command_dispatched} publish</strong> (there is no real device adapter until M9); the seam is
- * instrumented via the durable event store. When M9 lands a real adapter call, extend this gate to
- * also assert the adapter recorder is zero across the replay window (see the lifecycle MODULE_CONTEXT
- * M9-seam note).
+ * a fixed clock). <strong>Since M9.1 the outbound dispatch side-effect is REAL:</strong> the core
+ * boots with the {@link RecordingIntegrationFactory} (a registered, ROUTABLE fake — the seeded
+ * {@code command_dispatched} carries the fake's derived id and chains causation from the seeded
+ * {@code command_issued}, so a broken acts-in-REPLAY router would join and invoke
+ * {@code CommandHandler.handle(...)}). The gate therefore asserts the adapter recorder is
+ * <strong>zero across the replay window</strong> (INV-ES-09 — pure-function replay), exactly as this
+ * javadoc's original M9 forward note demanded, and the LIVE positive control asserts the recorder
+ * FIRES for one new trigger (non-vacuousness: the same harness sees a real adapter call in LIVE).</p>
  */
 @DisplayName("RunPipelineReplaySafetyTest -- composition-root D2 pure-function-replay gate (M7.4d)")
 final class RunPipelineReplaySafetyTest {
@@ -145,11 +150,12 @@ final class RunPipelineReplaySafetyTest {
     private static final String AUTOMATION_LIVE_SLUG = "live-control";
 
     // The seed targets (NOT registered during replay) and the LIVE positive-control routing chain.
+    // Since M9.1 BOTH route to the recording fake's derived integration id: the seeded
+    // command_dispatched must be ROUTABLE (INV-ES-09 — a broken acts-in-REPLAY router would
+    // reach the registered fake), and the LIVE control proves the recorder fires.
     private static final String SEED_ENTITY_ULID = "01J" + "E".repeat(23);
-    private static final String SEED_INTEGRATION_ULID = "01J" + "K".repeat(23);
     private static final String LIVE_ENTITY_ULID = "01J" + "F".repeat(23);
     private static final String LIVE_DEVICE_ULID = "01J" + "G".repeat(23);
-    private static final String LIVE_INTEGRATION_ULID = "01J" + "H".repeat(23);
 
     // The seeded prior run, written before boot and replayed from checkpoint 0. A replay-pure pipeline
     // adds NONE of these; each constant is therefore the exact post-replay count for a correct system.
@@ -159,12 +165,13 @@ final class RunPipelineReplaySafetyTest {
     private static final int LOADED_AUTOMATION_COUNT = 2;
 
     private final EntityId seedEntityId = EntityId.parse(SEED_ENTITY_ULID);
-    private final IntegrationId seedIntegrationId = IntegrationId.parse(SEED_INTEGRATION_ULID);
     private final EntityId liveEntityId = EntityId.parse(LIVE_ENTITY_ULID);
     private final DeviceId liveDeviceId = DeviceId.parse(LIVE_DEVICE_ULID);
-    private final IntegrationId liveIntegrationId = IntegrationId.parse(LIVE_INTEGRATION_ULID);
+    private final IntegrationId fakeIntegrationId =
+            IntegrationIds.deriveStable(RecordingIntegrationFactory.INTEGRATION_TYPE);
 
     private HomeSynapseCore core;
+    private RecordingIntegrationFactory recordingFake;
 
     /** Explicit no-arg constructor for {@code -Xlint:all -Werror} builds. */
     RunPipelineReplaySafetyTest() {
@@ -196,6 +203,11 @@ final class RunPipelineReplaySafetyTest {
         // registry during replay) — asserting both stay at the seeded count makes the gate non-vacuous.
         assertThat(countEventsOfType(EventTypes.COMMAND_DISPATCHED)).isEqualTo(SEEDED_COMMAND_DISPATCHED);
         assertThat(countEventsOfType(EventTypes.COMMAND_RESULT)).isZero();
+
+        // M9.1 (INV-ES-09): the REAL adapter seam stayed silent too. The seeded dispatched is
+        // joinable AND routable to the registered fake — a broken acts-in-REPLAY router would
+        // have invoked handle() on it.
+        assertThat(recordingFake.recordedCommands()).isEmpty();
     }
 
     @Test
@@ -213,6 +225,7 @@ final class RunPipelineReplaySafetyTest {
         assertThat(countEventsOfType(EventTypes.AUTOMATION_TRIGGERED)).isZero();
         assertThat(countEventsOfType(EventTypes.AUTOMATION_COMPLETED)).isZero();
         assertThat(countEventsOfType(EventTypes.COMMAND_ISSUED)).isEqualTo(SEEDED_COMMAND_ISSUED);
+        assertThat(recordingFake.recordedCommands()).isEmpty();    // M9.1 INV-ES-09
     }
 
     @Test
@@ -231,28 +244,33 @@ final class RunPipelineReplaySafetyTest {
         assertThat(countEventsOfType(EventTypes.STATE_CONFIRMED)).isEqualTo(SEEDED_STATE_CONFIRMED);
         assertThat(countEventsOfType(EventTypes.COMMAND_CONFIRMATION_TIMED_OUT)).isZero();
         assertThat(core.pendingCommandLedger().pendingCount()).isZero();
+        assertThat(recordingFake.recordedCommands()).isEmpty();    // M9.1 INV-ES-09
     }
 
     @Test
     @DisplayName("positive control: after the SAME seeded-and-replayed core reaches LIVE, one new "
-            + "trigger DOES dispatch (a new command_dispatched targeting the live entity) — proving the "
-            + "gate would catch a replay-acts regression")
+            + "trigger DOES dispatch (a new command_dispatched targeting the live entity) AND the "
+            + "adapter recorder fires — proving the gate would catch a replay-acts regression")
     void afterLive_newTrigger_doesDispatch(@TempDir Path tempDir) throws Exception {
         seedBootAndAwaitReplayComplete(tempDir);
 
         // Replay produced zero dispatch (the three assertions above); the store holds only the seeded
-        // command_dispatched.
+        // command_dispatched, and the fake's recorder is untouched (M9.1 INV-ES-09).
         long dispatchedAfterReplay = countEventsOfType(EventTypes.COMMAND_DISPATCHED);
         assertThat(dispatchedAfterReplay).isEqualTo(SEEDED_COMMAND_DISPATCHED);
+        assertThat(recordingFake.recordedCommands()).isEmpty();
 
         // Now drive ONE new trigger in LIVE on the positive-control automation (a routable, seeded
-        // entity). This is what makes the three "zero on replay" assertions meaningful — the same
-        // harness must see non-zero in LIVE.
+        // entity, wired to the recording fake's derived integration id). This is what makes the
+        // "zero on replay" assertions meaningful — the same harness must see non-zero in LIVE, at
+        // BOTH seams: the durable command_dispatched AND the real adapter recorder.
         seedLiveControlDeviceAndEntity();
         fireManualTrigger(AUTOMATION_LIVE_SLUG);
 
         assertThat(awaitCommandDispatchedFor(liveEntityId)).isTrue();
         assertThat(countEventsOfType(EventTypes.COMMAND_DISPATCHED)).isGreaterThan(dispatchedAfterReplay);
+        assertThat(awaitRecorderNonEmpty()).isTrue();
+        assertThat(recordingFake.recordedCommands().get(0).entityRef()).isEqualTo(liveEntityId);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -268,6 +286,7 @@ final class RunPipelineReplaySafetyTest {
         HomeSynapseConfig config = HomeSynapseConfig.testing();
         writeConfig(tempDir);
         seedPriorRun(tempDir.resolve("homesynapse-events.db"), config);
+        recordingFake = RecordingIntegrationFactory.recording();
         core = newCore(tempDir, config);
         core.start();
         // Both automations must have loaded — a config-load regression (e.g. the EventTrigger shape
@@ -278,12 +297,16 @@ final class RunPipelineReplaySafetyTest {
     }
 
     private HomeSynapseCore newCore(Path tempDir, HomeSynapseConfig config) {
+        // M9.1: boot with the recording fake registered — the gate's replay window now
+        // covers the REAL adapter seam (INV-ES-09), not just the durable publishes.
         return new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"),
                 tempDir.resolve("config"),
                 config,
                 FIXED_CLOCK,
-                TEST_HOME_ID);
+                TEST_HOME_ID,
+                null,
+                List.of(recordingFake));
     }
 
     /**
@@ -350,13 +373,19 @@ final class RunPipelineReplaySafetyTest {
                             CommandIdempotency.NOT_IDEMPOTENT),
                     null, null));
 
-            // 2. command_dispatched — the prior dispatch (consumed by no runtime subscriber; present so
-            //    the seed is a realistic complete run).
-            publisher.publishRoot(new EventDraft(
+            // 2. command_dispatched — the prior dispatch. Since M9.1 this row is consumed by the
+            //    CommandRoutingSubscriber, so the seed makes it maximally dangerous: causation
+            //    CHAINED from the seeded command_issued (joinable in the router's cache) and
+            //    integrationId = the REGISTERED recording fake's derived id (routable). A broken
+            //    acts-in-REPLAY router would join, resolve the fake, and invoke handle() — the
+            //    recorder-zero assertion catches exactly that (INV-ES-09).
+            publisher.publish(new EventDraft(
                     EventTypes.COMMAND_DISPATCHED, 1, FIXED_INSTANT, SubjectRef.entity(seedEntityId),
                     EventPriority.DIAGNOSTIC, EventOrigin.AUTOMATION,
-                    new CommandDispatchedEvent(seedEntityId.value(), seedIntegrationId.value(), "{}"),
-                    null, null));
+                    new CommandDispatchedEvent(seedEntityId.value(), fakeIntegrationId.value(), "{}"),
+                    null, null),
+                    CausalContext.chain(issued.causalContext().correlationId(),
+                            issued.eventId().value()));
 
             // 3. state_reported — the confirming report AND the EventTrigger-matching event for replay.
             EventEnvelope reported = publisher.publishRoot(new EventDraft(
@@ -393,20 +422,24 @@ final class RunPipelineReplaySafetyTest {
             SubscriberMode automation = subscriberMode("automation_engine");
             SubscriberMode dispatch = subscriberMode("command_dispatch_service");
             SubscriberMode ledger = subscriberMode("pending_command_ledger");
+            SubscriberMode router = subscriberMode("integration_supervisor");
             failOnSuspended("automation_engine", automation);
             failOnSuspended("command_dispatch_service", dispatch);
             failOnSuspended("pending_command_ledger", ledger);
+            failOnSuspended("integration_supervisor", router);
             if (automation == SubscriberMode.LIVE
                     && dispatch == SubscriberMode.LIVE
-                    && ledger == SubscriberMode.LIVE) {
+                    && ledger == SubscriberMode.LIVE
+                    && router == SubscriberMode.LIVE) {
                 return;
             }
             sleepBriefly();
         }
         throw new AssertionError("the runtime subscribers (automation_engine, command_dispatch_service, "
-                + "pending_command_ledger) did not all reach LIVE within ~5s after boot — the seeded "
-                + "log's REPLAY -> TRANSITION -> LIVE catch-up did not complete, so the replay-window "
-                + "side-effect snapshot cannot be taken deterministically");
+                + "pending_command_ledger, integration_supervisor) did not all reach LIVE within ~5s "
+                + "after boot — the seeded log's REPLAY -> TRANSITION -> LIVE catch-up did not "
+                + "complete, so the replay-window side-effect snapshot cannot be taken "
+                + "deterministically");
     }
 
     private static void failOnSuspended(String subscriberId, SubscriberMode mode) {
@@ -436,10 +469,21 @@ final class RunPipelineReplaySafetyTest {
                 .count();
     }
 
+    /** Polls the fake's recorder until it holds at least one envelope (the LIVE adapter seam). */
+    private boolean awaitRecorderNonEmpty() {
+        for (int poll = 0; poll < 250; poll++) {       // ~5s at 20ms
+            if (!recordingFake.recordedCommands().isEmpty()) {
+                return true;
+            }
+            sleepBriefly();
+        }
+        return false;
+    }
+
     /**
      * Polls the durable store until a {@code command_dispatched} targeting {@code entityId} appears
-     * (the LIVE positive control; the seam's observable side-effect today — the M9 adapter call will
-     * inherit this gate). Real-time polling, clock-independent.
+     * (the LIVE positive control; since M9.1 the adapter recorder is asserted alongside this
+     * durable seam). Real-time polling, clock-independent.
      */
     private boolean awaitCommandDispatchedFor(EntityId entityId) {
         Ulid target = entityId.value();
@@ -474,8 +518,10 @@ final class RunPipelineReplaySafetyTest {
         Entity entity = new Entity(liveEntityId, "live-control-light", EntityType.LIGHT,
                 "Live Control Light", liveDeviceId, 0, null, true, List.of(), List.of(instance),
                 EntityRole.PRIMARY, FIXED_INSTANT);
+        // M9.1: the device row routes to the recording fake's derived id, so the LIVE
+        // positive control exercises the REAL adapter seam (router join -> handle()).
         Device device = new Device(liveDeviceId, "live-control-device", "Live Control Device", "Acme",
-                "Model", null, null, null, liveIntegrationId, null, null, List.of(), Set.of(),
+                "Model", null, null, null, fakeIntegrationId, null, null, List.of(), Set.of(),
                 FIXED_INSTANT);
         core.deviceRegistry().createDevice(device);
         core.entityRegistry().createEntity(entity);

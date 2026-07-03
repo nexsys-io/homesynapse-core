@@ -30,6 +30,7 @@ import com.homesynapse.automation.StandardConditionEvaluator;
 import com.homesynapse.automation.StandardRunConditionGate;
 import com.homesynapse.automation.StandardSelectorResolver;
 import com.homesynapse.automation.StandardTriggerEvaluator;
+import com.homesynapse.config.ConfigurationAccess;
 import com.homesynapse.config.ConfigurationService;
 import com.homesynapse.config.ConfigurationServiceFactory;
 import com.homesynapse.config.SchemaRegistry;
@@ -62,6 +63,9 @@ import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.event.bus.SubscriberSnapshot;
 import com.homesynapse.event.bus.SubscriptionFilter;
 import com.homesynapse.integration.IntegrationEvents;
+import com.homesynapse.integration.IntegrationFactory;
+import com.homesynapse.integration.runtime.IntegrationSupervisor;
+import com.homesynapse.integration.runtime.IntegrationSupervisorAssembly;
 import com.homesynapse.observability.HealthStatus;
 import com.homesynapse.persistence.DeploymentProfile;
 import com.homesynapse.persistence.PayloadCipher;
@@ -94,6 +98,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -131,7 +138,13 @@ import org.slf4j.LoggerFactory;
  *       auth, loopback-bound by default (AB-1; core-review C1 closed). Auth is
  *       installed before the port binds; {@link #exposeHttpSurface()} is the
  *       idempotent bring-up the test/harness path also uses.</li>
- *   <li><b>INTEGRATIONS</b> — out of scope for AB-3 (adapters connect later).</li>
+ *   <li><b>INTEGRATIONS</b> — the integration spine (M9.1): the routing
+ *       subscriber registers AFTER the projection is LIVE, then the
+ *       {@code IntegrationSupervisor} hosts the injected factories, bounded so
+ *       a hanging integration never takes down boot (INV-RF-01). Skipped
+ *       entirely when the factory list is empty (the AB-3/AB-4
+ *       held-not-consumed precedent — byte-identical runtime behavior for
+ *       {@code Main} until it injects factories).</li>
  * </ol>
  *
  * <p>The engine then enters {@link LifecyclePhase#RUNNING} and the §3.10 health
@@ -203,6 +216,13 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
      */
     private final PayloadCipher payloadCipher;
 
+    /**
+     * The integration factories Phase 6 hosts (M9.1, DECIDE-04 — the caller
+     * assembles the list explicitly; no ServiceLoader). Never {@code null};
+     * empty means Phase 6 is skipped entirely (no supervisor, no router).
+     */
+    private final List<IntegrationFactory> integrationFactories;
+
     // ── Phase / health state (callable from any thread at any time) ─────────
     private volatile LifecyclePhase phase = LifecyclePhase.BOOTSTRAP;
     private final Map<String, SubsystemState> subsystems = new ConcurrentHashMap<>();
@@ -237,6 +257,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     private RunManager runManager;
     private CommandDispatchService commandDispatchService;
     private PendingCommandLedger pendingCommandLedger;
+    private IntegrationSupervisor integrationSupervisor;
     private HealthLoop healthLoop;
     private Javalin httpServer;
 
@@ -262,8 +283,10 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
 
     /**
      * Constructs a composition root with the at-rest payload-encryption seam
-     * (Doc 15 §3.8). AB-3 passes {@code null} here (cipher inert); AB-4 passes
-     * the real adapter.
+     * (Doc 15 §3.8) and no integrations. Delegates to the M9.1 canonical 7-arg
+     * form with an empty factory list — Phase 6 is skipped entirely, so every
+     * pre-M9.1 caller (including {@code Main}) keeps byte-identical runtime
+     * behavior until it injects factories.
      *
      * @param dbPath        full path to the SQLite database file; never {@code null}
      * @param configDir     the configuration directory; never {@code null}
@@ -279,12 +302,46 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                            Clock clock,
                            HomeId homeId,
                            PayloadCipher payloadCipher) {
+        this(dbPath, configDir, config, clock, homeId, payloadCipher, List.of());
+    }
+
+    /**
+     * Constructs a composition root — the M9.1 canonical form: the at-rest
+     * payload-encryption seam (Doc 15 §3.8) plus the integration factory list
+     * Phase 6 hosts (DP-7). The 5-arg and 6-arg forms delegate here (the
+     * AB-3/AB-4 delegation-chain style), so every existing caller compiles
+     * unchanged.
+     *
+     * @param dbPath               full path to the SQLite database file; never
+     *                             {@code null}
+     * @param configDir            the configuration directory; never {@code null}
+     * @param config               consolidated runtime configuration; never
+     *                             {@code null}
+     * @param clock                injected clock; never {@code null}
+     * @param homeId               home identity for this installation; never
+     *                             {@code null}
+     * @param payloadCipher        the at-rest cipher adapter, or {@code null} to
+     *                             leave at-rest payload encryption inert
+     * @param integrationFactories the integration factories Phase 6 starts
+     *                             (DECIDE-04 — assembled explicitly by the
+     *                             caller); never {@code null}, may be empty
+     *                             (Phase 6 skipped)
+     */
+    public HomeSynapseCore(Path dbPath,
+                           Path configDir,
+                           HomeSynapseConfig config,
+                           Clock clock,
+                           HomeId homeId,
+                           PayloadCipher payloadCipher,
+                           List<IntegrationFactory> integrationFactories) {
         this.dbPath = Objects.requireNonNull(dbPath, "dbPath");
         this.configDir = Objects.requireNonNull(configDir, "configDir");
         this.config = Objects.requireNonNull(config, "config");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.homeId = Objects.requireNonNull(homeId, "homeId");
         this.payloadCipher = payloadCipher;
+        this.integrationFactories = List.copyOf(
+                Objects.requireNonNull(integrationFactories, "integrationFactories"));
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -587,8 +644,61 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         setPhase(LifecyclePhase.EXTERNAL_INTERFACES);
         bringUpHttpSurface();
 
-        // ── Phase 6 INTEGRATIONS — out of scope for AB-3 ─────────────────────
+        // ── Phase 6 INTEGRATIONS — the integration spine (M9.1) ─────────────
         setPhase(LifecyclePhase.INTEGRATIONS);
+        // DP-7 skip-if-empty: with no factories there is no supervisor and no
+        // router — byte-identical runtime behavior to the pre-M9.1 boot (the
+        // AB-3/AB-4 held-not-consumed precedent). Main injects nothing yet.
+        if (!integrationFactories.isEmpty()) {
+            Instant integrationStart = clock.instant();
+            // DP-3: integration-runtime carries no JSON library — the
+            // command-parameter decoder rides the persistence ObjectMapper (the
+            // M7.4b commandParameterSerializer in the opposite direction), so an
+            // adapter's CommandEnvelope.parameters round-trip with the at-rest
+            // encoding, AttributeValues included.
+            // B7 (hub-audit corrected path): per-integration-scoped config access
+            // composed over the live config model via the config module's public
+            // factory — the supervisor scopes each adapter's context by type.
+            IntegrationSupervisorAssembly.Components integration =
+                    IntegrationSupervisorAssembly.integrationSupervisor(
+                            eventPublisher,
+                            entityRegistry,
+                            stateQueryService,
+                            type -> ConfigurationAccess.scoped(
+                                    type, configurationService.getCurrentModel()),
+                            persistenceFactory.commandParameterDecoder(),
+                            clock);
+            this.integrationSupervisor = integration.supervisor();
+            // The routing subscriber registers AFTER the projection reached LIVE
+            // (gated in Phase 3) — the same catch-up ordering invariant as
+            // 3.4/3.4b/3.4c: the router's LIVE-only guard (INV-ES-09) is the
+            // subscriber half; this ordering is the composition-root half. It is
+            // torn down in BOTH shutdown branches (the paired-teardown /
+            // reverted-M7.3 lesson: the router holds ONLY the bus's per-subscriber
+            // SQLite read connection — released by unsubscribe/abandon).
+            // coalesceExempt=true: a coalesced command_dispatched is a command
+            // that never reaches the device (correctness-critical, Doc 01 §3.6).
+            eventBus.subscribeRuntime(
+                    new SubscriberInfo(IntegrationSupervisorAssembly.SUBSCRIBER_ID,
+                            IntegrationSupervisorAssembly.subscriptionFilter(), true),
+                    integration.subscriber());
+            // DP-8: the supervisor start is bounded — a hanging integration never
+            // takes down core (INV-RF-01); the health surface carries the failure
+            // and boot continues.
+            try {
+                integrationSupervisor.start(integrationFactories)
+                        .get(30, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                LOG.error("integration.start_interrupted: integration startup interrupted; "
+                        + "boot continues (INV-RF-01)", interrupted);
+            } catch (ExecutionException | TimeoutException | RuntimeException startFailure) {
+                LOG.error("integration.start_failed: integration startup failed or timed "
+                        + "out; boot continues (INV-RF-01) — the supervisor health surface "
+                        + "carries the failure", startFailure);
+            }
+            recordSubsystem("integration", LifecyclePhase.INTEGRATIONS, integrationStart);
+        }
 
         // ── READY + RUNNING ──────────────────────────────────────────────────
         this.started = true;
@@ -879,6 +989,14 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             if (runManager != null) {
                 runManager.close();
             }
+            // Fast supervisor stop for the integration spine (M9.1, W4): interrupt the adapters
+            // and skip the grace-period waits and stopped-event publishes — the abandon path
+            // skips durability work by design. The router's bus subscription (and its read
+            // connection) is dropped by the bulk eventBus.abandon() below, exactly like the
+            // ledger's — no per-subscriber unsubscribe in this branch.
+            if (integrationSupervisor != null) {
+                IntegrationSupervisorAssembly.abandon(integrationSupervisor);
+            }
             // The pending_command_ledger (M7.4c) has NO separate close() — its only resource is the
             // bus's per-subscriber SQLite read connection, which eventBus.abandon() closes for every
             // active runtime below. So unlike commandDispatchService/runManager (which own their own
@@ -925,14 +1043,26 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 scheduler.shutdown();
             }
             if (eventBus != null) {
-                // Reverse registration order: ledger (3.4c) -> dispatch (3.4b) -> automation (3.4)
-                // -> projection (3.2). unsubscribe(...) closes each runtime's per-subscriber read
-                // connection — the pending_command_ledger's is the M7.3-reverted leak, so its
-                // teardown sits alongside command_dispatch_service's here (symmetry is the check).
+                // Reverse registration order: integration router (Phase 6, registered last)
+                // -> ledger (3.4c) -> dispatch (3.4b) -> automation (3.4) -> projection (3.2).
+                // unsubscribe(...) closes each runtime's per-subscriber read connection — the
+                // pending_command_ledger's is the M7.3-reverted leak; the M9.1 router holds
+                // the same single resource, so its teardown leads the chain (symmetry is the
+                // check).
+                if (integrationSupervisor != null) {
+                    eventBus.unsubscribe(IntegrationSupervisorAssembly.SUBSCRIBER_ID);
+                }
                 eventBus.unsubscribe(PendingCommandLedgerAssembly.SUBSCRIBER_ID);
                 eventBus.unsubscribe(CommandDispatchAssembly.SUBSCRIBER_ID);
                 eventBus.unsubscribe(AUTOMATION_SUBSCRIBER_ID);
                 eventBus.unsubscribe(PROJECTION_SUBSCRIBER_ID);
+            }
+            // Paired teardown for the integration spine (M9.1): the adapters stop AFTER the
+            // router unsubscribed (no new dispatches can reach a stopping adapter) and BEFORE
+            // the dispatch service closes (W4 ordering). stop() is the graceful branch —
+            // grace-bounded close per adapter, integration_stopped events published.
+            if (integrationSupervisor != null) {
+                integrationSupervisor.stop();
             }
             // Paired teardown for the command_dispatch_service subscriber (M7.4a): release any
             // held resource alongside triggerEvaluator.close() (the reverted-M7.3 lesson).
@@ -1103,6 +1233,14 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     /** @return the live pending-command ledger query surface (or {@code null} before start). */
     PendingCommandLedger pendingCommandLedger() {
         return pendingCommandLedger;
+    }
+
+    /**
+     * @return the integration supervisor (or {@code null} before start, and null
+     *         forever when the factory list is empty — Phase 6 skipped, DP-7)
+     */
+    IntegrationSupervisor integrationSupervisor() {
+        return integrationSupervisor;
     }
 
     private void recordSubsystem(String name, LifecyclePhase subsystemPhase, Instant startInstant) {

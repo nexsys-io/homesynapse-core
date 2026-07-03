@@ -86,4 +86,30 @@ public interface ConfigurationAccess {
      *         not a boolean
      */
     Optional<Boolean> getBoolean(String key);
+
+    /**
+     * Creates a {@code ConfigurationAccess} scoped to one integration type's
+     * section ({@code integrations.{integrationType}}) of the given model —
+     * the M9.1 exposure seam for the Integration Supervisor's per-adapter
+     * context composition (the {@code StateQueryService.materialized(...)}
+     * gateway pattern: the canonical package-private
+     * {@code ScopedConfigurationAccess} stays hidden; construction crosses the
+     * package boundary through this factory).
+     *
+     * <p>Snapshot semantics: the section's values are captured at construction
+     * time (a missing section yields an empty map — INV-CE-02, zero-config is
+     * valid). A config reload produces a new model; the supervisor composes a
+     * fresh scoped instance per adapter (re)creation, so a restarted adapter
+     * observes the reloaded values.</p>
+     *
+     * @param integrationType the integration type whose section to scope to;
+     *                        never {@code null} or blank
+     * @param model           the loaded configuration model; never {@code null}
+     * @return an immutable access scoped to that integration's section;
+     *         never {@code null}
+     * @throws IllegalArgumentException if {@code integrationType} is blank
+     */
+    static ConfigurationAccess scoped(String integrationType, ConfigModel model) {
+        return new ScopedConfigurationAccess(integrationType, model);
+    }
 }

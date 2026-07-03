@@ -58,11 +58,13 @@ public final class PersistenceFactory implements AutoCloseable {
 
     private final SqlitePersistenceLifecycle lifecycle;
     private final CommandParameterSerializer commandParameterSerializer;
+    private final CommandParameterDecoder commandParameterDecoder;
     private volatile boolean abandoned = false;
 
     private PersistenceFactory(SqlitePersistenceLifecycle lifecycle) {
         this.lifecycle = lifecycle;
         this.commandParameterSerializer = new CommandParameterSerializer();
+        this.commandParameterDecoder = new CommandParameterDecoder();
     }
 
     /**
@@ -271,6 +273,30 @@ public final class PersistenceFactory implements AutoCloseable {
      */
     public Function<Map<String, Object>, String> commandParameterSerializer() {
         return commandParameterSerializer;
+    }
+
+    /**
+     * Returns the command parameter decoder — the {@link #commandParameterSerializer()}
+     * in the opposite direction (M9.1): {@code command_issued.parameters} JSON object
+     * string &rarr; parameter map, over the same persistence
+     * {@link com.fasterxml.jackson.databind.ObjectMapper} configuration.
+     *
+     * <p>The composition root sources the integration spine's
+     * {@code parameterDecoder} from here (DP-3 — {@code integration-runtime}
+     * carries no JSON library), so an adapter's {@code CommandEnvelope.parameters}
+     * round-trip faithfully with the M7.4b serialization — including value-model
+     * {@code AttributeValue}s via the AMD-52 codec. Null/blank/{@code "{}"} decode
+     * to {@code Map.of()}; malformed input logs a WARN and decodes to
+     * {@code Map.of()} — never an exception on the caller's thread.</p>
+     *
+     * <p>The return type is {@link Function} (java.base), NOT {@code ObjectMapper}:
+     * Jackson stays internal (the same {@code -Xlint:exports} rationale as the
+     * serializer).</p>
+     *
+     * @return the JSON-object-string &rarr; parameter-map decoder, never {@code null}
+     */
+    public Function<String, Map<String, Object>> commandParameterDecoder() {
+        return commandParameterDecoder;
     }
 
     // ─── Lifecycle ───
