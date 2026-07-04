@@ -39,20 +39,22 @@ import java.util.function.Predicate;
  * on the submitting thread; each submission yields a {@link CompletableFuture}-style
  * result whose failure carries the per-command timeout.
  *
- * <p><strong>Version negotiation (AMD-96):</strong> runs exactly once per session,
- * before any other command, always in the legacy frame format (W8). Tiers: negotiated
- * 13–14 → accept (14 pins the wide {@code sl_status_t} seam, D-M92-4); 8–12 →
+ * <p><strong>Version negotiation (AMD-96, band narrowed by the M9.4 consolidated
+ * amendment):</strong> runs exactly once per session, before any other command,
+ * always in the legacy frame format (W8). Tiers: negotiated 13 → accept; 8–12 →
  * structured WARN {@code zigbee.ezsp_legacy_version}, then best-effort proceed;
- * below 8 → {@link PermanentIntegrationException} (frame format incompatible); above
- * 14 → {@link PermanentIntegrationException} (unknown frame dialect — EmberZNet 8.1+
- * negotiates v15+). The version truth is the negotiation response at stack init,
- * never an external registry (AMD-96/E6).
+ * below 8 → {@link PermanentIntegrationException} (frame format incompatible);
+ * above 13 → {@link PermanentIntegrationException} (unknown frame dialect — the
+ * v14 0x0034/0x0045 dialect awaits Wave-2 characterization; the {@code decodeStatus}
+ * width seam stays, D-M92-4). The version truth is the negotiation response at
+ * stack init, never an external registry (AMD-96/E6).
  *
- * <p><strong>Scope (D-M92-6, updated M9.3):</strong> {@code formNetwork}/
- * {@code resumeNetwork}/{@code permitJoin}/{@code ping} (M9.2) and
- * {@code interview} (M9.3 — one attempt per call; retry/sleepy orchestration is
- * {@link PendingInterviewQueue}'s) are implemented; {@code sendZclFrame} (M9.4)
- * and {@code topologyScan} (post-M9.4 §3.11 unit) remain stubbed with
+ * <p><strong>Scope (D-M92-6, updated M9.4a):</strong> {@code formNetwork}/
+ * {@code resumeNetwork}/{@code permitJoin}/{@code ping} (M9.2), {@code interview}
+ * (M9.3 — one attempt per call; retry/sleepy orchestration is
+ * {@link PendingInterviewQueue}'s), and {@code sendZclFrame} (M9.4a — the command
+ * write path over the bench-proven v13 unicast) are implemented;
+ * {@code topologyScan} (post-M9.4 §3.11 unit) remains stubbed with
  * {@link UnsupportedOperationException} naming the completing milestone.
  *
  * <p>Thread-safe ({@link ReentrantLock} only, LTD-11): callers are virtual threads;
@@ -71,8 +73,15 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     static final int MINIMUM_PROTOCOL_VERSION = 8;
     /** The AMD-96 acceptance band lower edge; below it → WARN + best-effort. */
     static final int TARGET_PROTOCOL_VERSION = 13;
-    /** The AMD-96 acceptance band upper edge (v14 = synthetic-tested, D-M92-4). */
-    static final int MAX_SUPPORTED_PROTOCOL_VERSION = 14;
+    /**
+     * The acceptance band upper edge — narrowed 14 &rarr; 13 by the M9.4 consolidated
+     * amendment (correcting AMD-96's edge): the v14 0x0034/0x0045 frame dialect is
+     * uncharacterized on owned silicon, and half-right v14 support is a deaf radio
+     * that looks paired (never-false-ALIVE). Acceptance stays ==13 until the Wave-2
+     * v14-batch unit characterizes the dialect; the {@code decodeStatus} width seam
+     * is untouched (synthetic-tested, D-M92-4).
+     */
+    static final int MAX_SUPPORTED_PROTOCOL_VERSION = 13;
     /**
      * Per-command timeout floor: the bench EmberZNet dump pins
      * {@code CONFIG_APS_ACK_TIMEOUT=1600} ms (D-M92-5).
@@ -238,7 +247,10 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
                                 + " is newer than the supported band "
                                 + TARGET_PROTOCOL_VERSION + "-"
                                 + MAX_SUPPORTED_PROTOCOL_VERSION
-                                + "; the frame dialect is unknown to this adapter");
+                                + "; the frame dialect is unknown to this adapter. "
+                                + "Supported coordinator firmware: EmberZNet 7.4.x "
+                                + "(EZSP v13) — reflash per the AMD-96 contingency, or "
+                                + "await the v14 dialect characterization.");
             }
             if (ncpVersion != PREFERRED_PROTOCOL_VERSION) {
                 // UG100: the host must re-send version at the NCP's version before
@@ -475,9 +487,65 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
 
     @Override
     public void sendZclFrame(ZclFrame frame, IEEEAddress target) {
-        throw new UnsupportedOperationException(
-                "ZCL command dispatch is delivered in M9.4; the M9.2 transport/EZSP "
-                        + "layer does not implement it");
+        Objects.requireNonNull(frame, "frame");
+        Objects.requireNonNull(target, "target");
+        lock.lock();
+        try {
+            requireNegotiated();
+            // The frozen surface is no-throws/void: rejection is already WARN-logged
+            // by the unicast path; the M9.4a command handler uses the package-private
+            // boolean seam below to render an honest command_result instead.
+            sendZclFrameLocked(frame, lookupNetworkAddress(target));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * The M9.4a command-dispatch seam (§3.10): sends one ZCL frame as an APS
+     * unicast and reports NCP acceptance — the failure surface the zigbee
+     * {@code CommandHandler} converts into an honest {@code command_result}
+     * (the frozen {@link CoordinatorProtocol} surface gains no new throws).
+     *
+     * @param frame the ZCL frame, never {@code null}
+     * @param networkAddress the target's 16-bit network address
+     * @return {@code true} if the NCP accepted the frame for transmission
+     */
+    boolean sendZclFrame(ZclFrame frame, int networkAddress) {
+        Objects.requireNonNull(frame, "frame");
+        lock.lock();
+        try {
+            requireNegotiated();
+            return sendZclFrameLocked(frame, networkAddress);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Encodes the ZCL header ([fc][mfr LE]?[tsn][commandId]) + payload and rides the
+     * bench-proven v13 unicast path — the wire layout is {@link #sendUnicastLocked}'s,
+     * never re-implemented. TSN and APS sequence follow the interview-path convention
+     * ({@code nextZdoSequenceLocked()} mirrored into both).
+     */
+    private boolean sendZclFrameLocked(ZclFrame frame, int networkAddress) {
+        int tsn = nextZdoSequenceLocked();
+        byte[] payload = frame.payload();
+        boolean manufacturerSpecific = frame.manufacturerCode() > 0;
+        int headerLength = manufacturerSpecific ? 5 : 3;
+        byte[] zcl = new byte[headerLength + payload.length];
+        int frameControl = frame.isClusterSpecific() ? 0x01 : 0x00;
+        if (manufacturerSpecific) {
+            frameControl |= 0x04;
+            zcl[1] = (byte) (frame.manufacturerCode() & 0xFF);
+            zcl[2] = (byte) ((frame.manufacturerCode() >> 8) & 0xFF);
+        }
+        zcl[0] = (byte) frameControl;
+        zcl[headerLength - 2] = (byte) tsn;
+        zcl[headerLength - 1] = (byte) frame.commandId();
+        System.arraycopy(payload, 0, zcl, headerLength, payload.length);
+        return sendUnicastLocked(networkAddress, HA_PROFILE_ID, frame.clusterId(),
+                frame.sourceEndpoint(), frame.destinationEndpoint(), tsn, zcl);
     }
 
     /**
@@ -681,7 +749,8 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      * {@code EmberNodeId} (the bellows v4-lineage shape, no leading status);
      * the v14 dialect of this reply is bench-verified at M9.4.
      */
-    private int lookupNetworkAddress(IEEEAddress device) {
+    // Package-private (M9.4a): the command handler's F-6 re-resolution seam.
+    int lookupNetworkAddress(IEEEAddress device) {
         lock.lock();
         try {
             requireNegotiated();

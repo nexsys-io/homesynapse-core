@@ -82,4 +82,46 @@ final class ExceptionClassifierTest {
         assertThatThrownBy(() -> ExceptionClassifier.classify(null))
                 .isInstanceOf(NullPointerException.class);
     }
+
+    // ── M9.4a (F-5 + the cause-walk ruling): the three pinned scenarios ─────
+
+    @Test
+    void wrappedPie_classifiesPermanent() {
+        // "finding a PIE anywhere in a cause chain means someone deliberately threw
+        // permanent intent, and suppressing that intent is the bug, not the walk."
+        assertThat(ExceptionClassifier.classify(new RuntimeException(
+                new PermanentIntegrationException("bad firmware"))))
+                .isEqualTo(ExceptionClassification.PERMANENT);
+    }
+
+    @Test
+    void unsupportedOperation_classifiesPermanent() {
+        // Doc 05 §3.7 taxonomy currency: an UnsupportedOperation is definitionally
+        // non-transient — retry cannot make an unimplemented operation succeed.
+        assertThat(ExceptionClassifier.classify(
+                new UnsupportedOperationException("not on this handler")))
+                .isEqualTo(ExceptionClassification.PERMANENT);
+    }
+
+    @Test
+    void wrappedAnythingElse_staysTransient() {
+        // The HA anti-pattern guard survives both new arms: only PIE gets the walk.
+        assertThat(ExceptionClassifier.classify(
+                new RuntimeException(new IOException("read timed out"))))
+                .isEqualTo(ExceptionClassification.TRANSIENT);
+        // A WRAPPED UnsupportedOperationException stays TRANSIENT by design — the UOE
+        // arm is bare-instanceof only; deliberate permanence travels as PIE.
+        assertThat(ExceptionClassifier.classify(
+                new RuntimeException(new UnsupportedOperationException("wrapped"))))
+                .isEqualTo(ExceptionClassification.TRANSIENT);
+    }
+
+    @Test
+    void pieCauseWalk_isCycleBounded() {
+        RuntimeException outer = new RuntimeException("outer");
+        RuntimeException inner = new RuntimeException("inner", outer);
+        outer.initCause(inner);   // a 2-cycle: the identity-hop cap must terminate the walk
+        assertThat(ExceptionClassifier.classify(outer))
+                .isEqualTo(ExceptionClassification.TRANSIENT);
+    }
 }

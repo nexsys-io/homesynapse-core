@@ -281,8 +281,40 @@ final class ZigbeeDeviceCache {
         if (previous != null) {
             ieeeByNetworkAddress.remove(previous.networkAddress());
         }
-        ieeeByNetworkAddress.put(updated.networkAddress(),
+        Long victim = ieeeByNetworkAddress.put(updated.networkAddress(),
                 updated.ieeeAddress().value());
+        if (victim != null && victim != updated.ieeeAddress().value()) {
+            // F-6: the 16-bit address was REASSIGNED — the victim record's cached
+            // networkAddress is stale truth. Invalidate it to the unknown sentinel
+            // so the dispatch identity join (§3.3) treats the hint as broken and
+            // re-resolves via the coordinator, never actuating the wrong device.
+            invalidateAddressLocked(victim, updated.networkAddress());
+        }
+    }
+
+    /**
+     * The protocol's unknown-address sentinel (EmberNodeId 0xFFFF — the same value
+     * {@code lookupNodeIdByEui64} treats as not-in-table): a record carrying it has
+     * NO usable network address and must be re-resolved before dispatch (F-6).
+     */
+    static final int NETWORK_ADDRESS_UNKNOWN = 0xFFFF;
+
+    private void invalidateAddressLocked(long victimIeee, int reassignedAddress) {
+        ZigbeeDeviceRecord record = devices.get(victimIeee);
+        if (record == null) {
+            return;
+        }
+        devices.put(victimIeee, new ZigbeeDeviceRecord(record.ieeeAddress(),
+                NETWORK_ADDRESS_UNKNOWN, record.nodeDescriptor(), record.endpoints(),
+                record.manufacturerName(), record.modelIdentifier(),
+                record.powerSource(), record.lastSeen(), record.interviewStatus(),
+                record.matchedProfileId()));
+        dirty = true;
+        log.warn("zigbee.network_address_collision: nwk=0x{} reassigned away from "
+                        + "device {}; the victim's cached address is invalidated "
+                        + "pending re-resolution (F-6)",
+                Integer.toHexString(reassignedAddress),
+                record.ieeeAddress().toHexString());
     }
 
     private void writeLocked(Instant now) {

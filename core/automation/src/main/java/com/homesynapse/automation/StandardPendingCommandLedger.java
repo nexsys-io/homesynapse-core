@@ -16,11 +16,14 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 
 import com.homesynapse.device.AnyChange;
 import com.homesynapse.device.CapabilityInstance;
 import com.homesynapse.device.CommandDefinition;
 import com.homesynapse.device.ConfirmationMode;
+import com.homesynapse.device.ConfirmationPolicy;
+import com.homesynapse.device.ParameterSchema;
 import com.homesynapse.device.ConfirmationResult;
 import com.homesynapse.device.Entity;
 import com.homesynapse.device.EntityRegistry;
@@ -83,9 +86,19 @@ import org.slf4j.LoggerFactory;
  *       ({@link EntityRegistry#findEntity} &rarr; {@link Entity#capabilities()} &rarr; the
  *       matching {@link CapabilityInstance}) and reading its {@link ExpectedOutcome}
  *       (attribute + {@link Expectation}). {@code CommandIssuedEvent} carries no attribute /
- *       expectation / policy, and no {@code ExpectationFactory} implementation exists at HEAD,
- *       so the {@link ExpectedOutcome} on the capability's {@link CommandDefinition} is the
- *       expectation source (NOT {@code ExpectationFactory}).</li>
+ *       expectation / policy; a declared {@link ExpectedOutcome} on the capability's
+ *       {@link CommandDefinition} is the primary expectation source, and when none is
+ *       declared {@link #deriveOutcome} — the {@code ExpectationFactory} seam realized
+ *       (M9.4a, F-3/DP-b) — derives a parameterized expectation from the decoded command
+ *       parameters and the capability's confirmation policy. Derivation is the fallback,
+ *       never the override, and a derivation it cannot ground declines to the pre-existing
+ *       optimistic-in-effect semantics.</li>
+ *   <li><strong>Supersession expiry</strong> (F-2 / Doc 08 §3.6 caveat 3: "expectations
+ *       superseded by a newer command on the same attribute expire — never false-fail,
+ *       never false-confirm"). A newer LIVE {@code command_issued} on the same
+ *       (entity, target attribute) removes older in-flight entries and records a
+ *       {@code command_result(outcome="superseded")} disposition. ISSUANCE supersedes, not
+ *       tracking success — an untracked newer command still moves the device.</li>
  *   <li><strong>OPTIMISTIC bypass</strong> (AMD-90). A command whose capability declares
  *       {@link ConfirmationMode#DISABLED} (the in-tree "confirmation off / optimistic" signal;
  *       AMD-90's {@code CommandAction.confirmation} enum is not on the frozen action model) is
@@ -131,10 +144,32 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
      */
     private static final String OUTCOME_EXPIRED_ON_RESTART = "expired_on_restart";
 
+    /**
+     * The {@code command_result.outcome} the ledger writes when a newer command on the same
+     * (entity, target attribute) expires an older in-flight expectation (F-2 / Doc 08 §3.6
+     * caveat 3 — a recorded disposition, never false-fail, never false-confirm).
+     */
+    private static final String OUTCOME_SUPERSEDED = "superseded";
+
+    /**
+     * The {@code command_result.outcome} an integration adapter writes as its immediate honest
+     * verdict for an UNCONFIRMABLE command (Doc 02 §3.8 / AMD-97). The ledger never writes it
+     * — it is named here so the disposition guard in {@code onCommandResult} recognizes it.
+     */
+    private static final String OUTCOME_UNCONFIRMED = "unconfirmed";
+
     private final EventPublisher publisher;
     private final EntityRegistry entityRegistry;
     private final Clock clock;
     private final long defaultConfirmationTimeoutMs;
+
+    /**
+     * Decodes {@code command_issued.parameters} (a JSON object string) for the F-3 derivation
+     * seam. Persistence-owned at the composition root ({@code commandParameterDecoder()}) so
+     * parameters round-trip with the at-rest encoding; a {@code java.util.function} type, so
+     * automation gains no module edge.
+     */
+    private final Function<String, Map<String, Object>> parameterDecoder;
 
     /**
      * Guards every mutation of the indices, the replay accumulator, and the restart-offer
@@ -175,9 +210,13 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
      *                                     {@code command_issued} carries a non-positive
      *                                     {@code confirmationTimeoutMs} (AMD-90 default 30000;
      *                                     REC-161 calibration); must be {@code > 0}
+     * @param parameterDecoder             decodes {@code command_issued.parameters} for the
+     *                                     F-3 expectation derivation (the persistence-owned
+     *                                     decoder at the composition root), never {@code null}
      */
     StandardPendingCommandLedger(EventPublisher publisher, EntityRegistry entityRegistry,
-                                 Clock clock, long defaultConfirmationTimeoutMs) {
+                                 Clock clock, long defaultConfirmationTimeoutMs,
+                                 Function<String, Map<String, Object>> parameterDecoder) {
         this.publisher = Objects.requireNonNull(publisher, "publisher");
         this.entityRegistry = Objects.requireNonNull(entityRegistry, "entityRegistry");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -186,6 +225,7 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
                     "defaultConfirmationTimeoutMs must be positive: " + defaultConfirmationTimeoutMs);
         }
         this.defaultConfirmationTimeoutMs = defaultConfirmationTimeoutMs;
+        this.parameterDecoder = Objects.requireNonNull(parameterDecoder, "parameterDecoder");
     }
 
     // ── PendingCommandLedger ────────────────────────────────────────────────
@@ -276,10 +316,13 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
     // ── LIVE handlers ───────────────────────────────────────────────────────
 
     /**
-     * A LIVE {@code command_issued}: derive the {@link PendingCommand} from the target's
-     * capability and track it (status {@link PendingStatus#DISPATCHED}). A capability with
-     * {@link ConfirmationMode#DISABLED} (or no expected outcome) is the OPTIMISTIC bypass —
-     * nothing is tracked (AMD-90).
+     * A LIVE {@code command_issued}: expire superseded in-flight expectations on the same
+     * (entity, target attribute) — F-2 / Doc 08 §3.6 caveat 3 — then derive the
+     * {@link PendingCommand} from the target's capability (declared outcome first, F-3
+     * derivation as the fallback) and track it (status {@link PendingStatus#DISPATCHED}).
+     * A capability with {@link ConfirmationMode#DISABLED} (or no declared/derived outcome)
+     * is the OPTIMISTIC bypass — nothing is tracked (AMD-90) — but issuance still
+     * supersedes when the target attribute resolves.
      */
     private void onCommandIssued(EventEnvelope event, CommandIssuedEvent issued) {
         EntityId target = EntityId.of(issued.targetEntityRef());
@@ -288,29 +331,41 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
         if (capability.isEmpty()) {
             LOG.debug("command_issued {} for {}: no capability defines '{}'; not tracked",
                     event.eventId(), target, commandName);
-            return;
+            return;         // target attribute unresolvable — expires nothing, tracks nothing
         }
         CapabilityInstance instance = capability.get();
-        if (instance.confirmation().mode() == ConfirmationMode.DISABLED) {
-            return;                                 // OPTIMISTIC bypass (AMD-90)
-        }
-        Optional<ExpectedOutcome> outcome =
-                chooseOutcome(instance.commands().get(commandName), instance);
-        if (outcome.isEmpty()) {
-            return;                                 // nothing to confirm — optimistic in effect
-        }
-        long timeoutMs = issued.confirmationTimeoutMs() > 0
-                ? issued.confirmationTimeoutMs() : defaultConfirmationTimeoutMs;
-        Instant deadline = clock.instant().plusMillis(timeoutMs);
-        PendingCommand command = new PendingCommand(event.eventId(), target, commandName,
-                outcome.get().attributeKey(), outcome.get().expectation(), deadline,
-                issued.idempotencyClass(), PendingStatus.DISPATCHED);
+        boolean disabled = instance.confirmation().mode() == ConfirmationMode.DISABLED;
+        CommandDefinition definition = instance.commands().get(commandName);
+        Optional<ExpectedOutcome> outcome = disabled ? Optional.empty()
+                : chooseOutcome(definition, instance)
+                        .or(() -> deriveOutcome(definition, instance, issued));
+        // F-2: ISSUANCE supersedes, not tracking success — resolve the NEW command's target
+        // attribute even when it declines tracking (an untracked newer command still moves
+        // the device): the declared/derived outcome's attribute, else the capability's first
+        // authoritative attribute. DISABLED with an empty authoritative list resolves nothing.
+        Optional<String> supersededAttribute = outcome.map(ExpectedOutcome::attributeKey)
+                .or(() -> instance.confirmation().authoritativeAttributes().isEmpty()
+                        ? Optional.empty()
+                        : Optional.of(instance.confirmation().authoritativeAttributes().get(0)));
+        List<Publication> pending = new ArrayList<>();
         lock.lock();
         try {
-            index(new Tracked(command, event.causalContext().correlationId(), null));
+            if (supersededAttribute.isPresent()) {
+                expireSuperseded(target, supersededAttribute.get(), event.eventId(), pending);
+            }
+            if (!disabled && outcome.isPresent()) {
+                long timeoutMs = issued.confirmationTimeoutMs() > 0
+                        ? issued.confirmationTimeoutMs() : defaultConfirmationTimeoutMs;
+                Instant deadline = clock.instant().plusMillis(timeoutMs);
+                PendingCommand command = new PendingCommand(event.eventId(), target,
+                        commandName, outcome.get().attributeKey(), outcome.get().expectation(),
+                        deadline, issued.idempotencyClass(), PendingStatus.DISPATCHED);
+                index(new Tracked(command, event.causalContext().correlationId(), null));
+            }
         } finally {
             lock.unlock();
         }
+        publishAll(pending);
     }
 
     /**
@@ -319,6 +374,14 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
      * emits {@code command_confirmation_timed_out} once (removal makes the emission idempotent).
      */
     private void onCommandResult(EventEnvelope event, CommandResultEvent result) {
+        if (isDispositionOutcome(result.outcome())) {
+            // The ledger's own dispositions (superseded / expired_on_restart) and the
+            // adapter's immediate honest verdict (unconfirmed, AMD-97) are terminal REPORTS
+            // about an already-concluded command, not adapter rejections of an in-flight one
+            // — redelivery must never terminal-match a newer tracked entry on the same
+            // (entity, command) key (the F-2 loop-back guard).
+            return;
+        }
         EntityId target = EntityId.of(result.targetEntityRef());
         List<Publication> pending = new ArrayList<>();
         lock.lock();
@@ -433,7 +496,7 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
                 lock.lock();
                 try {
                     replayInFlight.put(event.eventId(), new ReplayInFlight(event.eventId(), target,
-                            issued.commandType(), issued.idempotencyClass(),
+                            issued.commandType(), issued.parameters(), issued.idempotencyClass(),
                             base.plusMillis(timeoutMs), event.causalContext().correlationId(), null));
                 } finally {
                     lock.unlock();
@@ -472,12 +535,25 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
      * Classifies the commands still in-flight at the REPLAY&rarr;LIVE boundary by idempotency
      * class (Doc 07 §3.11.2). The ledger raises re-offer SIGNALS but never re-issues
      * (AMD-90-INV-01); {@code NOT_IDEMPOTENT} is expired with a {@code command_result}.
+     *
+     * <p>F-10 (TRANSITION-window honesty): a candidate whose deadline is still in the FUTURE
+     * relative to the injected clock is a LIVE command issued during catch-up, not crash
+     * residue — §3.11.2's crash-recovery text governs commands in-flight at crash time, and a
+     * post-restart issue is definitionally outside it. Such a candidate is re-indexed as a
+     * tracked command (never classified, never expired, and — the conservative no-re-fire
+     * posture — never re-issued). Only past-deadline candidates flow to the idempotency
+     * switch.</p>
      */
     private void classifyRestart() {
+        Instant now = clock.instant();
         List<Publication> pending = new ArrayList<>();
         lock.lock();
         try {
             for (ReplayInFlight candidate : replayInFlight.values()) {
+                if (candidate.deadline().isAfter(now)) {
+                    reindexLive(candidate);
+                    continue;
+                }
                 switch (candidate.idempotency()) {
                     case IDEMPOTENT -> reissueOffered.add(candidate);
                     case CONDITIONAL -> adapterEvaluationOffered.add(candidate);
@@ -491,7 +567,68 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
         publishAll(pending);
     }
 
+    /**
+     * Re-indexes a future-deadline catch-up candidate as a live tracked command (F-10),
+     * resolving its expectation exactly as the LIVE path would — declared outcome first,
+     * derivation as the fallback; a capability that cannot resolve (or {@code DISABLED} /
+     * no outcome) mirrors the LIVE non-tracking semantics: optimistic in effect, never a
+     * false {@code expired_on_restart}. Reconstruction only — status {@code DISPATCHED},
+     * correlation and any acknowledged result id preserved, the original deadline kept.
+     * Caller holds {@link #lock}.
+     */
+    private void reindexLive(ReplayInFlight candidate) {
+        Optional<CapabilityInstance> capability =
+                resolveCapability(candidate.targetRef(), candidate.commandName());
+        if (capability.isEmpty()) {
+            LOG.debug("catch-up command {} for {}: no capability defines '{}'; not re-indexed"
+                            + " (optimistic in effect)", candidate.commandEventId(),
+                    candidate.targetRef(), candidate.commandName());
+            return;
+        }
+        CapabilityInstance instance = capability.get();
+        if (instance.confirmation().mode() == ConfirmationMode.DISABLED) {
+            return;                                 // OPTIMISTIC bypass (AMD-90)
+        }
+        CommandDefinition definition = instance.commands().get(candidate.commandName());
+        Optional<ExpectedOutcome> outcome = chooseOutcome(definition, instance)
+                .or(() -> deriveOutcome(definition, instance, candidate.parameters(),
+                        candidate.targetRef().value(), candidate.commandName()));
+        if (outcome.isEmpty()) {
+            return;                                 // nothing to confirm — optimistic in effect
+        }
+        PendingCommand command = new PendingCommand(candidate.commandEventId(),
+                candidate.targetRef(), candidate.commandName(), outcome.get().attributeKey(),
+                outcome.get().expectation(), candidate.deadline(), candidate.idempotency(),
+                PendingStatus.DISPATCHED);
+        index(new Tracked(command, candidate.correlationId(), candidate.resultEventId()));
+    }
+
     // ── Index maintenance (all callers hold {@link #lock}) ──────────────────
+
+    /**
+     * F-2 / Doc 08 §3.6 caveat 3: removes every in-flight entry on
+     * {@code (target, attributeKey)} from BOTH indices (the P11 dual-index rule — empty
+     * byEntity sets are dropped by {@link #remove}) and queues one
+     * {@code command_result(outcome="superseded")} disposition each, naming the superseding
+     * command event in the failure reason. The expired entry never times out and never
+     * confirms afterward. Caller holds {@link #lock}; publications flush after release.
+     */
+    private void expireSuperseded(EntityId target, String attributeKey, EventId supersededBy,
+                                  List<Publication> pending) {
+        Set<EventId> ids = byEntity.get(target);
+        if (ids == null) {
+            return;
+        }
+        for (EventId id : List.copyOf(ids)) {       // copy: removal mutates the set
+            Tracked tracked = byCommand.get(id);
+            if (tracked == null
+                    || !tracked.command().targetAttribute().equals(attributeKey)) {
+                continue;
+            }
+            remove(tracked);
+            pending.add(superseded(tracked, supersededBy));
+        }
+    }
 
     private void index(Tracked tracked) {
         EventId id = tracked.command().commandEventId();
@@ -523,13 +660,31 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
         if (ids == null) {
             return Optional.empty();
         }
+        // N-6: the no-causation fallback picks the OLDEST deadline deterministically
+        // (tie-broken by command event id) — a HashSet iteration order must never decide
+        // which in-flight command a result concludes.
+        Tracked oldest = null;
         for (EventId id : ids) {
             Tracked tracked = byCommand.get(id);
-            if (tracked != null && tracked.command().commandName().equals(commandName)) {
-                return Optional.of(tracked);
+            if (tracked == null || !tracked.command().commandName().equals(commandName)) {
+                continue;
+            }
+            if (oldest == null || comparesBefore(tracked, oldest)) {
+                oldest = tracked;
             }
         }
-        return Optional.empty();
+        return Optional.ofNullable(oldest);
+    }
+
+    /** Deterministic N-6 ordering: earlier deadline first, then smaller command event id. */
+    private static boolean comparesBefore(Tracked candidate, Tracked incumbent) {
+        int byDeadline = candidate.command().deadline()
+                .compareTo(incumbent.command().deadline());
+        if (byDeadline != 0) {
+            return byDeadline < 0;
+        }
+        return candidate.command().commandEventId().value()
+                .compareTo(incumbent.command().commandEventId().value()) < 0;
     }
 
     private Optional<EventId> findReplayKey(EntityId target, String commandName, Ulid causationId) {
@@ -583,6 +738,95 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
         return Optional.of(definition.expectedOutcomes().get(0));
     }
 
+    /**
+     * The parameterized-expectation derivation (F-3 / DP-b — the seam the Phase-2 docs
+     * called {@code ExpectationFactory}, realized): when a confirming capability declares no
+     * static {@link ExpectedOutcome}, derive one from the decoded {@code command_issued}
+     * parameters and the capability's {@link ConfirmationPolicy}. Invoked only when
+     * {@link #chooseOutcome} is empty and the mode is not {@code DISABLED} — the fallback,
+     * never the override. The rule NEVER guesses: a derivation it cannot ground (mode outside
+     * TOLERANCE/EXACT_MATCH, empty authoritative list, not exactly one required parameter of
+     * the expected type, null tolerance, missing/mistyped decoded value, decoder failure)
+     * declines to {@link Optional#empty()} — the pre-existing optimistic-in-effect semantics.
+     * The derived outcome's {@code timeoutMs} carries the policy default for the record's
+     * completeness but is NOT the deadline source — the {@code command_issued} timeout arm
+     * is (a single timeout source per path; two would be a wrong-verdict generator).
+     */
+    Optional<ExpectedOutcome> deriveOutcome(CommandDefinition definition,
+            CapabilityInstance instance, CommandIssuedEvent issued) {
+        return deriveOutcome(definition, instance, issued.parameters(),
+                issued.targetEntityRef(), issued.commandType());
+    }
+
+    private Optional<ExpectedOutcome> deriveOutcome(CommandDefinition definition,
+            CapabilityInstance instance, String parameters, Ulid target, String commandType) {
+        ConfirmationPolicy confirmation = instance.confirmation();
+        ConfirmationMode mode = confirmation.mode();
+        if (mode != ConfirmationMode.TOLERANCE && mode != ConfirmationMode.EXACT_MATCH) {
+            return Optional.empty();
+        }
+        if (definition == null || confirmation.authoritativeAttributes().isEmpty()) {
+            return Optional.empty();
+        }
+        List<ParameterSchema> required = definition.parameters().stream()
+                .filter(ParameterSchema::required)
+                .toList();
+        if (required.size() != 1) {
+            return Optional.empty();
+        }
+        ParameterSchema parameter = required.get(0);
+        boolean applicableType = mode == ConfirmationMode.TOLERANCE
+                ? parameter.type() == AttributeType.INT || parameter.type() == AttributeType.FLOAT
+                : parameter.type() == AttributeType.BOOLEAN;
+        if (!applicableType) {
+            return Optional.empty();
+        }
+        if (mode == ConfirmationMode.TOLERANCE && confirmation.defaultTolerance() == null) {
+            return Optional.empty();    // P1 javadoc: "null when not applicable" — never NPE
+        }
+        Object decoded;
+        try {
+            decoded = parameterDecoder.apply(parameters).get(parameter.parameterName());
+        } catch (RuntimeException ex) {
+            LOG.debug("command_issued for {}: parameters of '{}' are not decodable; "
+                            + "derivation declines, optimistic in effect ({})",
+                    target, commandType, ex.getMessage());
+            return Optional.empty();
+        }
+        String attribute = confirmation.authoritativeAttributes().get(0);
+        if (mode == ConfirmationMode.TOLERANCE) {
+            if (!(decoded instanceof Number number)) {
+                LOG.debug("command_issued for {}: parameter '{}' of '{}' is absent or not "
+                                + "numeric; derivation declines, optimistic in effect",
+                        target, parameter.parameterName(), commandType);
+                return Optional.empty();
+            }
+            return Optional.of(new ExpectedOutcome(attribute,
+                    new WithinTolerance(number.doubleValue(),
+                            confirmation.defaultTolerance().doubleValue()),
+                    confirmation.defaultTimeoutMs()));
+        }
+        if (!(decoded instanceof Boolean flag)) {
+            LOG.debug("command_issued for {}: parameter '{}' of '{}' is absent or not "
+                            + "boolean; derivation declines, optimistic in effect",
+                    target, parameter.parameterName(), commandType);
+            return Optional.empty();
+        }
+        return Optional.of(new ExpectedOutcome(attribute,
+                new ExactMatch(new BooleanValue(flag)), confirmation.defaultTimeoutMs()));
+    }
+
+    /**
+     * Outcomes that are dispositions — terminal reports the ledger or an adapter already
+     * rendered about a concluded command — as opposed to adapter rejections of an in-flight
+     * one. {@code onCommandResult} must never terminal-match them (the F-2 loop-back guard).
+     */
+    private static boolean isDispositionOutcome(String outcome) {
+        return OUTCOME_SUPERSEDED.equals(outcome)
+                || OUTCOME_EXPIRED_ON_RESTART.equals(outcome)
+                || OUTCOME_UNCONFIRMED.equals(outcome);
+    }
+
     // ── Publication builders ────────────────────────────────────────────────
 
     private Publication confirmed(Tracked tracked, EventId reportEventId, String actualValue) {
@@ -600,6 +844,23 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
                 new CommandConfirmationTimedOutEvent(command.commandEventId(), resultEventId);
         return new Publication(EventTypes.COMMAND_CONFIRMATION_TIMED_OUT, payload,
                 command.targetRef(), EventPriority.DIAGNOSTIC, tracked.correlationId(),
+                command.commandEventId().value());
+    }
+
+    /**
+     * The superseded disposition (F-2): correlation stays the expired command's run;
+     * causation is the expired command's own event id (the {@link #timedOut}/
+     * {@link #expiredOnRestart} convention — it also lets the REPLAY rebuild conclude the
+     * RIGHT entry); the superseding command event is named in the failure reason.
+     */
+    private Publication superseded(Tracked tracked, EventId supersededBy) {
+        PendingCommand command = tracked.command();
+        CommandResultEvent payload = new CommandResultEvent(command.targetRef().value(),
+                command.commandName(), OUTCOME_SUPERSEDED,
+                "superseded by a newer command on the same attribute; superseding command "
+                        + "event " + supersededBy.value());
+        return new Publication(EventTypes.COMMAND_RESULT, payload, command.targetRef(),
+                EventPriority.NORMAL, tracked.correlationId(),
                 command.commandEventId().value());
     }
 
@@ -744,21 +1005,23 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
     /**
      * A command observed in-flight in the log during REPLAY (and the crash-recovery signal it
      * becomes). Reconstructable from the immutable log alone (INV-SA-03): identity, target,
-     * idempotency class, the event-derived deadline, the run correlation, and the acknowledging
+     * the serialized parameters (the F-10 re-index derivation input), idempotency class, the
+     * event-derived deadline, the run correlation, and the acknowledging
      * {@code command_result} id (if one was logged).
      */
     record ReplayInFlight(
             EventId commandEventId,
             EntityId targetRef,
             String commandName,
+            String parameters,
             CommandIdempotency idempotency,
             Instant deadline,
             Ulid correlationId,
             EventId resultEventId) {
 
         ReplayInFlight withResult(EventId resultEventId) {
-            return new ReplayInFlight(commandEventId, targetRef, commandName, idempotency,
-                    deadline, correlationId, resultEventId);
+            return new ReplayInFlight(commandEventId, targetRef, commandName, parameters,
+                    idempotency, deadline, correlationId, resultEventId);
         }
     }
 

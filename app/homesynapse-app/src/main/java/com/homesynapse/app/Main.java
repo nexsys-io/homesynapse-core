@@ -6,6 +6,8 @@ package com.homesynapse.app;
 
 import com.homesynapse.config.ScopeCipherResult;
 import com.homesynapse.config.ScopeKeyManager;
+import com.homesynapse.device.InMemoryDeviceRegistry;
+import com.homesynapse.integration.zigbee.ZigbeeIntegrationFactory;
 import com.homesynapse.lifecycle.HomeSynapseConfig;
 import com.homesynapse.lifecycle.HomeSynapseCore;
 import com.homesynapse.lifecycle.SystemLifecycleManager;
@@ -19,6 +21,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
 /**
@@ -64,13 +67,26 @@ public final class Main {
         // home_id file if present, else mint one and persist it.
         HomeId homeId = resolveHomeId(configDir, clock);
 
-        // AB-4 boundary: the at-rest payload cipher goes LIVE — the six-argument
-        // ctor passes the held-not-consumed payloadCipher(configDir, clock) adapter,
-        // flipping SqlitePersistenceLifecycle's cipher-presence gate so encryption
-        // is enabled for [identity, presence_personal] (Doc 15 §3.4, AMD-94).
-        SystemLifecycleManager manager = new HomeSynapseCore(
+        // M9.4a §4.2 — the zigbee integration factory (DECIDE-04: constructed
+        // directly, never discovered). R4: the DeviceRegistry instance is
+        // app-constructed and passed on the factory ctor path — NOT an
+        // IntegrationContext component (the frozen 12). The M9.4a public path
+        // reports a permanent failure at initialize() (the serial transport binds
+        // at M9.4b) — honest FAILED-no-retry; boot continues (INV-RF-01).
+        Path zigbeeDataDir = baseDir.resolve("data").resolve("zigbee");
+        Files.createDirectories(zigbeeDataDir);
+        InMemoryDeviceRegistry zigbeeDeviceRegistry = new InMemoryDeviceRegistry();
+        ZigbeeIntegrationFactory zigbeeFactory = new ZigbeeIntegrationFactory(
+                () -> zigbeeDeviceRegistry, zigbeeDataDir, clock);
+
+        // AB-4 boundary: the at-rest payload cipher goes LIVE — the ctor passes
+        // the payloadCipher(configDir, clock) adapter, flipping
+        // SqlitePersistenceLifecycle's cipher-presence gate so encryption is
+        // enabled for [identity, presence_personal] (Doc 15 §3.4, AMD-94).
+        HomeSynapseCore core = new HomeSynapseCore(
                 dbPath, configDir, HomeSynapseConfig.HOME_DEFAULT, clock, homeId,
-                payloadCipher(configDir, clock));
+                payloadCipher(configDir, clock), List.of(zigbeeFactory));
+        SystemLifecycleManager manager = core;
 
         CountDownLatch shutdownLatch = new CountDownLatch(1);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -86,6 +102,13 @@ public final class Main {
         // Synchronous, blocks until the engine reaches RUNNING; AB-1 opens the
         // HTTP surface behind auth (loopback-bound) during start() Phase 5.
         manager.start();
+
+        // W10: the integrations.zigbee schema fragment registers AFTER Phase 6
+        // (Doc 12 — only CORE schemas compose before config.load()); the adapter's
+        // config subtree is served by the existing per-type ConfigurationAccess
+        // scoping inside the supervisor assembly.
+        core.registerIntegrationSchema(ZigbeeIntegrationFactory.INTEGRATION_TYPE,
+                ZigbeeIntegrationFactory.configSchemaJson());
         System.out.println("HomeSynapse Core is RUNNING (phase=" + manager.currentPhase()
                 + "); HTTP surface exposed behind bearer-token auth, loopback-bound (AB-1)."
                 + " Send SIGTERM to stop.");

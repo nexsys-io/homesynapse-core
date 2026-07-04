@@ -613,7 +613,8 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         PendingCommandLedgerAssembly.Components pendingLedger =
                 PendingCommandLedgerAssembly.pendingCommandLedger(
                         eventPublisher, entityRegistry, clock,
-                        PendingCommandLedgerAssembly.DEFAULT_CONFIRMATION_TIMEOUT_MS);
+                        PendingCommandLedgerAssembly.DEFAULT_CONFIRMATION_TIMEOUT_MS,
+                        persistenceFactory.commandParameterDecoder());
         this.pendingCommandLedger = pendingLedger.ledger();
         eventBus.subscribeRuntime(
                 new SubscriberInfo(PendingCommandLedgerAssembly.SUBSCRIBER_ID,
@@ -1204,6 +1205,35 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
 
     // ── Package-private accessors for the lifecycle wiring test (NOT exported API,
     //    so config/device/automation stay non-transitive requires) ─────────────
+
+    /**
+     * Registers an integration adapter's config-schema fragment (W10). Doc 12
+     * defers INTEGRATION schemas past core composition (only CORE schemas register
+     * before {@code config.load()}), so the composition-root host calls this after
+     * {@code start()} returns. The signature is {@code java.base}-only by design —
+     * the M3.6e.1 gateway pattern keeps {@code com.homesynapse.config} off this
+     * module's exported API (its {@code requires} stays non-transitive).
+     *
+     * @param integrationType the integration type key (e.g. {@code "zigbee"}),
+     *        never {@code null}
+     * @param schemaJson the schema fragment as JSON text, never {@code null}
+     * @throws IllegalStateException if called before {@code start()} assembled the
+     *         configuration subsystem
+     */
+    public void registerIntegrationSchema(String integrationType, String schemaJson) {
+        SchemaRegistry registry = this.schemaRegistry;
+        if (registry == null) {
+            throw new IllegalStateException(
+                    "Integration schemas register after start(); the configuration "
+                            + "subsystem is not assembled yet");
+        }
+        registry.registerIntegrationSchema(integrationType, schemaJson);
+    }
+
+    /** @return the schema registry (or {@code null} before start). */
+    SchemaRegistry schemaRegistry() {
+        return schemaRegistry;
+    }
 
     /** @return the assembled configuration service (or {@code null} before start). */
     ConfigurationService configurationService() {

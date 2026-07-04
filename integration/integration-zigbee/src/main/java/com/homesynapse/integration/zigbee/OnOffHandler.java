@@ -25,6 +25,11 @@ final class OnOffHandler extends ZigbeeClusterHandler {
         super(device, clock);
     }
 
+    /** ZCL8 §3.8.2.3: Off command id. */
+    static final int COMMAND_OFF = 0x00;
+    /** ZCL8 §3.8.2.3: On command id. */
+    static final int COMMAND_ON = 0x01;
+
     @Override
     List<NormalizedAttribute> normalize(int endpoint, int clusterId,
             Map<Integer, Object> attributes) {
@@ -33,5 +38,18 @@ final class OnOffHandler extends ZigbeeClusterHandler {
             return List.of(new NormalizedAttribute("on", on, null, null, null));
         }
         return List.of();
+    }
+
+    @Override
+    public ZclFrame buildCommand(String commandType,
+            Map<String, Object> parameters) {
+        // ZCL8 §3.8.2.3: On (0x01) / Off (0x00) carry no payload.
+        return switch (commandType) {
+            case "turn_on" -> new ZclFrame(1, 1, CLUSTER_ID, COMMAND_ON, true, 0,
+                    new byte[0]);
+            case "turn_off" -> new ZclFrame(1, 1, CLUSTER_ID, COMMAND_OFF, true, 0,
+                    new byte[0]);
+            default -> super.buildCommand(commandType, parameters);
+        };
     }
 }

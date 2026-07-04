@@ -5,8 +5,10 @@
 package com.homesynapse.automation;
 
 import java.time.Clock;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
 import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.event.EventPriority;
@@ -28,9 +30,10 @@ import com.homesynapse.event.bus.SubscriptionFilter;
  * consumers) and the bus {@link Subscriber} (for registration). The composition root constructs
  * the ledger's plain-value dependencies — an {@link EventPublisher}, the {@link EntityRegistry}
  * (capability resolution on {@code command_issued}), an injected {@link Clock} (REC-156/167),
- * and the default confirmation window (AMD-90: 30000 ms; REC-161 calibration) — and calls
- * {@link #pendingCommandLedger(EventPublisher, EntityRegistry, Clock, long)} to obtain the
- * three views, then subscribes {@link Components#subscriber()} with {@link #subscriptionFilter()}
+ * the default confirmation window (AMD-90: 30000 ms; REC-161 calibration), and the
+ * persistence-owned command-parameter decoder (the F-3 derivation input) — and calls
+ * {@link #pendingCommandLedger(EventPublisher, EntityRegistry, Clock, long, Function)} to obtain
+ * the three views, then subscribes {@link Components#subscriber()} with {@link #subscriptionFilter()}
  * after the state projection has reached {@code LIVE} (the catch-up ordering invariant) and drives
  * {@link Components#expirationTick()} from a periodic scheduler (M7.4c — the deadline sweep).</p>
  */
@@ -81,19 +84,26 @@ public final class PendingCommandLedgerAssembly {
      * @param clock                        the injected clock (REC-156/167), never {@code null}
      * @param defaultConfirmationTimeoutMs the fallback confirmation window in milliseconds,
      *                                     {@code > 0}
+     * @param parameterDecoder             decodes {@code command_issued.parameters} for the
+     *                                     F-3 parameterized-expectation derivation (the
+     *                                     composition root passes the persistence-owned
+     *                                     {@code commandParameterDecoder()}), never {@code null}
      * @return the three interface views of the ledger; never {@code null}
-     * @throws NullPointerException     if {@code publisher}, {@code entityRegistry}, or
-     *                                  {@code clock} is {@code null}
+     * @throws NullPointerException     if {@code publisher}, {@code entityRegistry},
+     *                                  {@code clock}, or {@code parameterDecoder} is
+     *                                  {@code null}
      * @throws IllegalArgumentException if {@code defaultConfirmationTimeoutMs <= 0}
      */
     public static Components pendingCommandLedger(EventPublisher publisher,
                                                  EntityRegistry entityRegistry, Clock clock,
-                                                 long defaultConfirmationTimeoutMs) {
+                                                 long defaultConfirmationTimeoutMs,
+                                                 Function<String, Map<String, Object>> parameterDecoder) {
         Objects.requireNonNull(publisher, "publisher");
         Objects.requireNonNull(entityRegistry, "entityRegistry");
         Objects.requireNonNull(clock, "clock");
+        Objects.requireNonNull(parameterDecoder, "parameterDecoder");
         StandardPendingCommandLedger ledger = new StandardPendingCommandLedger(
-                publisher, entityRegistry, clock, defaultConfirmationTimeoutMs);
+                publisher, entityRegistry, clock, defaultConfirmationTimeoutMs, parameterDecoder);
         return new Components(ledger, ledger, ledger::pollExpirations);
     }
 

@@ -4,6 +4,7 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import com.homesynapse.device.CapabilityInstance;
 import com.homesynapse.device.Device;
 import com.homesynapse.device.DeviceRegistry;
 import com.homesynapse.device.Entity;
@@ -90,15 +91,22 @@ final class ZigbeeAdoptionSlice {
     private static final Logger log =
             LoggerFactory.getLogger(ZigbeeAdoptionSlice.class);
 
+    /** An entity's protocol-side binding (the §3.3 command-path identity join). */
+    record EntityBinding(IEEEAddress ieee, int endpoint) {
+    }
+
     private final IntegrationId integrationId;
     private final DeviceRegistry deviceRegistry;
     private final EntityRegistry entityRegistry;
+    private final DeviceProfileRegistry profileRegistry;
     private final EventPublisher publisher;
     private final Clock clock;
     private final ReentrantLock lock = new ReentrantLock();
     private final Map<Long, Proposal> proposals = new HashMap<>();
     private final Map<Long, DeviceId> devicesByIeee = new HashMap<>();
     private final Map<Long, Map<Integer, EntityId>> entitiesByIeee = new HashMap<>();
+    private final Map<EntityId, EntityBinding> bindingsByEntity = new HashMap<>();
+    private final Map<Long, String> profilesByIeee = new HashMap<>();
 
     /**
      * Creates the slice.
@@ -107,16 +115,22 @@ final class ZigbeeAdoptionSlice {
      * @param deviceRegistry the device registry (the DeviceIdentifiers dedup
      *        surface), never {@code null}
      * @param entityRegistry the entity registry, never {@code null}
+     * @param profileRegistry the device-profile registry (resolves the matched
+     *        profile id to its AMD-97 confirmation characterizations — DP-a),
+     *        never {@code null}
      * @param publisher the event publisher, never {@code null}
      * @param clock the time source (identity minting + event time), never {@code null}
      */
     ZigbeeAdoptionSlice(IntegrationId integrationId, DeviceRegistry deviceRegistry,
-            EntityRegistry entityRegistry, EventPublisher publisher, Clock clock) {
+            EntityRegistry entityRegistry, DeviceProfileRegistry profileRegistry,
+            EventPublisher publisher, Clock clock) {
         this.integrationId = Objects.requireNonNull(integrationId, "integrationId");
         this.deviceRegistry = Objects.requireNonNull(deviceRegistry,
                 "deviceRegistry");
         this.entityRegistry = Objects.requireNonNull(entityRegistry,
                 "entityRegistry");
+        this.profileRegistry = Objects.requireNonNull(profileRegistry,
+                "profileRegistry");
         this.publisher = Objects.requireNonNull(publisher, "publisher");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
@@ -137,7 +151,7 @@ final class ZigbeeAdoptionSlice {
         Optional<Device> existing = deviceRegistry.findByHardwareIdentifier(
                 HARDWARE_NAMESPACE, ieee.toHexString());
         if (existing.isPresent()) {
-            relink(ieee, existing.get());
+            relink(ieee, existing.get(), matchedProfileId);
             return DiscoveryOutcome.LINKED;
         }
         lock.lock();
@@ -224,6 +238,11 @@ final class ZigbeeAdoptionSlice {
                 continue;
             }
             EntityId entityId = EntityId.of(UlidFactory.generate(clock));
+            // DP-a (§2.2): the per-device confirmation tuning installs HERE, between
+            // classification and registration — the only write; every downstream read
+            // path (ledger, executor) consumes the tuned CapabilityInstance unchanged.
+            List<CapabilityInstance> capabilities = installOverrides(
+                    proposal.matchedProfileId(), classification.get().capabilities());
             entityRegistry.createEntity(new Entity(
                     entityId,
                     "zigbee-" + hex.toLowerCase(Locale.ROOT) + "-ep"
@@ -235,7 +254,7 @@ final class ZigbeeAdoptionSlice {
                     null,
                     true,
                     List.of(),
-                    classification.get().capabilities(),
+                    capabilities,
                     clock.instant()));
             entityIds.put(endpoint.endpointId(), entityId);
             created.add(entityId);
@@ -245,6 +264,11 @@ final class ZigbeeAdoptionSlice {
         try {
             devicesByIeee.put(ieee.value(), deviceId);
             entitiesByIeee.put(ieee.value(), Map.copyOf(entityIds));
+            entityIds.forEach((endpoint, entityId) -> bindingsByEntity.put(entityId,
+                    new EntityBinding(ieee, endpoint)));
+            if (proposal.matchedProfileId() != null) {
+                profilesByIeee.put(ieee.value(), proposal.matchedProfileId());
+            }
             proposals.remove(ieee.value());
         } finally {
             lock.unlock();
@@ -302,7 +326,7 @@ final class ZigbeeAdoptionSlice {
         }
     }
 
-    private void relink(IEEEAddress ieee, Device device) {
+    private void relink(IEEEAddress ieee, Device device, String matchedProfileId) {
         lock.lock();
         try {
             devicesByIeee.put(ieee.value(), device.deviceId());
@@ -314,8 +338,22 @@ final class ZigbeeAdoptionSlice {
                 }
                 entitiesByIeee.put(ieee.value(), Map.copyOf(links));
             }
+            entitiesByIeee.get(ieee.value()).forEach((endpoint, entityId) ->
+                    bindingsByEntity.put(entityId, new EntityBinding(ieee, endpoint)));
+            if (matchedProfileId != null) {
+                profilesByIeee.put(ieee.value(), matchedProfileId);
+            }
         } finally {
             lock.unlock();
+        }
+        // DP-a pin 2 (verbatim binding): "the re-link path re-installs overrides from
+        // the cached matchedProfileId (the in-memory registries start empty on
+        // restart)." The id arriving here is the rediscovery re-match — the same value
+        // recordInterview (re)writes to the cache. Idempotent: same profile => same
+        // tuning => updateEntity is skipped. The registry-empty-post-restart rebuild
+        // is FENCED (out of M9.4a scope); this installer reuse is its ready seam.
+        if (matchedProfileId != null) {
+            reinstallOverrides(device, matchedProfileId);
         }
         publishRoot(new EventDraft(
                 EventTypes.AVAILABILITY_CHANGED,
@@ -329,6 +367,75 @@ final class ZigbeeAdoptionSlice {
                 null));
         log.info("zigbee.device_relinked: device={} deviceId={} — re-pairing, "
                 + "no new adoption", ieee, device.deviceId());
+    }
+
+    /** Re-derives tuned capabilities and re-registers each entity whose set differs. */
+    private void reinstallOverrides(Device device, String matchedProfileId) {
+        for (Entity entity : entityRegistry.listEntitiesByDevice(device.deviceId())) {
+            List<CapabilityInstance> tuned =
+                    installOverrides(matchedProfileId, entity.capabilities());
+            if (!tuned.equals(entity.capabilities())) {
+                entityRegistry.updateEntity(new Entity(entity.entityId(),
+                        entity.entitySlug(), entity.entityType(), entity.displayName(),
+                        entity.deviceId(), entity.endpointIndex(), entity.areaId(),
+                        entity.enabled(), entity.labels(), tuned, entity.entityRole(),
+                        entity.createdAt()));
+            }
+        }
+    }
+
+    /**
+     * Applies the matched profile's confirmation tuning (DP-a): no profile match means
+     * standard defaults — a characterization is never synthesized.
+     */
+    private List<CapabilityInstance> installOverrides(String matchedProfileId,
+            List<CapabilityInstance> capabilities) {
+        if (matchedProfileId == null) {
+            return capabilities;
+        }
+        Optional<DeviceProfile> profile = profileRegistry.allProfiles().stream()
+                .filter(candidate -> matchedProfileId.equals(candidate.profileId()))
+                .findFirst();
+        if (profile.isEmpty()) {
+            log.warn("zigbee.profile_unresolved: matched profile '{}' is not in the "
+                    + "registry; standard confirmation defaults apply", matchedProfileId);
+            return capabilities;
+        }
+        return ConfirmationOverrideInstaller.apply(profile.get(), capabilities);
+    }
+
+    /**
+     * Resolves an adopted entity's protocol binding (the §3.3 command-path identity join).
+     *
+     * @param entityId the entity, never {@code null}
+     * @return the (IEEE, endpoint) binding, or empty when the entity is not this
+     *         integration's
+     */
+    Optional<EntityBinding> bindingFor(EntityId entityId) {
+        Objects.requireNonNull(entityId, "entityId");
+        lock.lock();
+        try {
+            return Optional.ofNullable(bindingsByEntity.get(entityId));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Resolves the matched profile id recorded at adoption/re-link for a device (the
+     * §3.3 characterization lookup input).
+     *
+     * @param ieee the device, never {@code null}
+     * @return the matched profile id, or empty when none matched
+     */
+    Optional<String> matchedProfileIdFor(IEEEAddress ieee) {
+        Objects.requireNonNull(ieee, "ieee");
+        lock.lock();
+        try {
+            return Optional.ofNullable(profilesByIeee.get(ieee.value()));
+        } finally {
+            lock.unlock();
+        }
     }
 
     private void publishRoot(EventDraft draft) {

@@ -68,7 +68,7 @@ class FixtureReplayTest {
         adoption = new ZigbeeAdoptionSlice(
                 new IntegrationId(UlidFactory.generate(clock)),
                 new InMemoryDeviceRegistry(), new InMemoryEntityRegistry(),
-                publisher, clock);
+                registry, publisher, clock);
         deduplicator = new ReportDeduplicator();
         pendingFrames = new ArrayList<>();
         ingestion = new ZclIngestionUnit(() -> {

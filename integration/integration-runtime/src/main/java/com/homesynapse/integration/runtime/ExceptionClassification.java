@@ -72,6 +72,12 @@ public enum ExceptionClassification {
      * {@code ConfigurationException}, {@code AuthenticationException},
      * {@code UnsupportedOperationException}, {@code OutOfMemoryError},
      * other {@code Error} subclasses.</p>
+     *
+     * <p>Cause-walk rule (M9.4, F-5): a {@code PermanentIntegrationException} found
+     * anywhere in a bounded {@code getCause()} chain also classifies PERMANENT —
+     * deliberately-thrown permanent intent survives wrapping. The walk is PIE-ONLY:
+     * {@code UnsupportedOperationException} classifies PERMANENT by bare
+     * {@code instanceof} alone, and a wrapped UOE stays {@link #TRANSIENT} by design.</p>
      */
     PERMANENT,
 

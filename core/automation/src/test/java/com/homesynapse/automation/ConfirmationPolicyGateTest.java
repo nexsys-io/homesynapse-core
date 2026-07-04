@@ -57,7 +57,7 @@ class ConfirmationPolicyGateTest {
     private StandardPendingCommandLedger ledgerFor(Entity entity) {
         return new StandardPendingCommandLedger(publisher,
                 new AutomationTestSupport.StubEntityRegistry(List.of(entity)),
-                AutomationTestSupport.FIXED_CLOCK, DEFAULT_TIMEOUT_MS);
+                AutomationTestSupport.FIXED_CLOCK, DEFAULT_TIMEOUT_MS, parameters -> Map.of());
     }
 
     private EventEnvelope turnOn() {

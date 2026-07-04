@@ -33,6 +33,11 @@ final class ColorControlHandler extends ZigbeeClusterHandler {
         super(device, clock);
     }
 
+    /** ZCL8 §5.2.2.3.14: Move to Color Temperature command id. */
+    static final int COMMAND_MOVE_TO_COLOR_TEMPERATURE = 0x0A;
+    /** ZCL8 §5.2.2.2.11: the largest legal non-reserved mired value. */
+    static final int MAX_LEGAL_MIREDS = 0xFEFF;
+
     @Override
     List<NormalizedAttribute> normalize(int endpoint, int clusterId,
             Map<Integer, Object> attributes) {
@@ -43,5 +48,30 @@ final class ColorControlHandler extends ZigbeeClusterHandler {
                     "K", String.valueOf(mireds), "mired"));
         }
         return List.of();
+    }
+
+    @Override
+    public ZclFrame buildCommand(String commandType,
+            Map<String, Object> parameters) {
+        if (!"set_color_temperature".equals(commandType)) {
+            return super.buildCommand(commandType, parameters);
+        }
+        // ZCL8 §5.2.2.3.14 Move to Color Temperature: [mireds u16 LE][transition u16 LE].
+        // The ingestion-side Kelvin canonicalization (AMD-96, K = round(1e6 / mireds))
+        // runs in REVERSE here and ONLY here: mireds = round(1e6 / kelvin), clamped to
+        // the ZCL-legal band [1, 0xFEFF]. Round-trip drift is the ±1-mired class the
+        // capability tolerance absorbs — never corrected with fudge factors.
+        int kelvin = intParameter(parameters, "kelvin", 0);
+        int mireds = kelvin <= 0 ? MAX_LEGAL_MIREDS
+                : Math.clamp(Math.round(1_000_000.0f / kelvin), 1, MAX_LEGAL_MIREDS);
+        int transition = transitionDeciseconds(parameters);
+        byte[] payload = {
+            (byte) (mireds & 0xFF),
+            (byte) ((mireds >> 8) & 0xFF),
+            (byte) (transition & 0xFF),
+            (byte) ((transition >> 8) & 0xFF),
+        };
+        return new ZclFrame(1, 1, CLUSTER_ID, COMMAND_MOVE_TO_COLOR_TEMPERATURE,
+                true, 0, payload);
     }
 }

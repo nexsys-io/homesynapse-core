@@ -48,8 +48,34 @@ final class ExceptionClassifier {
         if (failure instanceof OutOfMemoryError || failure instanceof LinkageError) {
             return ExceptionClassification.PERMANENT;
         }
+        if (failure instanceof UnsupportedOperationException) {
+            // Doc 05 §3.7 taxonomy currency (M9.4, F-5): an UnsupportedOperation is
+            // definitionally non-transient — retry cannot make an unimplemented
+            // operation succeed. Bare instanceof ONLY: a wrapped UOE stays TRANSIENT
+            // by design; deliberate permanence travels as PIE (which gets the walk).
+            return ExceptionClassification.PERMANENT;
+        }
+        if (hasPermanentIntentInCauseChain(failure)) {
+            // The PIE-only cause-walk (M9.4 ruling): finding a PIE anywhere in a cause
+            // chain means someone deliberately threw permanent intent — suppressing
+            // that intent is the bug, not the walk. Defense-in-depth: the checked
+            // seams should deliver PIE bare; the walk is the net, not the wire.
+            return ExceptionClassification.PERMANENT;
+        }
         // Everything else — IOException, unknown RuntimeException, wrapped causes —
         // is TRANSIENT (Doc 05 §3.7, the HA anti-pattern guard).
         return ExceptionClassification.TRANSIENT;
+    }
+
+    /** Bounded {@code getCause()} walk (identity-hop cap 8 — cycle-safe), PIE only. */
+    private static boolean hasPermanentIntentInCauseChain(Throwable failure) {
+        Throwable cause = failure.getCause();
+        for (int hop = 0; cause != null && hop < 8; hop++) {
+            if (cause instanceof PermanentIntegrationException) {
+                return true;
+            }
+            cause = cause.getCause();
+        }
+        return false;
     }
 }

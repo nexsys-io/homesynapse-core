@@ -154,4 +154,32 @@ class ZigbeeDeviceCacheTest {
 
         assertThat(fresh.all()).isEmpty();
     }
+
+    @Test
+    @DisplayName("F-6: a reindex collision invalidates the victim's address to the unknown sentinel — the index follows the new owner")
+    void reindexCollision_victimInvalidated() {
+        IEEEAddress newcomer = new IEEEAddress(0x00124B00AABBCCDDL);
+        cache.recordAnnounce(SNZB, 0x6B9A);
+
+        cache.recordAnnounce(newcomer, 0x6B9A);   // the coordinator reassigned 0x6B9A
+
+        assertThat(cache.deviceForNetworkAddress(0x6B9A)).contains(newcomer);
+        assertThat(cache.device(SNZB).orElseThrow().networkAddress())
+                .as("the victim must never silently keep the reassigned address")
+                .isEqualTo(ZigbeeDeviceCache.NETWORK_ADDRESS_UNKNOWN);
+        // The victim's identity metadata survives the invalidation.
+        assertThat(cache.device(SNZB).orElseThrow().ieeeAddress()).isEqualTo(SNZB);
+    }
+
+    @Test
+    @DisplayName("F-6: the same device re-announcing on its own address is NOT a collision")
+    void selfReannounce_noInvalidation() {
+        cache.recordAnnounce(SNZB, 0x6B9A);
+
+        cache.recordAnnounce(SNZB, 0x6B9A);
+
+        assertThat(cache.device(SNZB).orElseThrow().networkAddress())
+                .isEqualTo(0x6B9A);
+        assertThat(cache.deviceForNetworkAddress(0x6B9A)).contains(SNZB);
+    }
 }

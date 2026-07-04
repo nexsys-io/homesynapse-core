@@ -10,9 +10,11 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import com.homesynapse.device.ExactMatch;
 import com.homesynapse.device.Expectation;
+import com.homesynapse.device.StandardCapabilities;
 import com.homesynapse.event.CommandConfirmationTimedOutEvent;
 import com.homesynapse.event.CommandIdempotency;
 import com.homesynapse.event.CommandIssuedEvent;
@@ -59,7 +61,8 @@ class PendingCommandLedgerTest {
 
     private StandardPendingCommandLedger ledger(Clock clock) {
         return new StandardPendingCommandLedger(publisher,
-                new AutomationTestSupport.StubEntityRegistry(List.of()), clock, DEFAULT_TIMEOUT_MS);
+                new AutomationTestSupport.StubEntityRegistry(List.of()), clock,
+                DEFAULT_TIMEOUT_MS, parameters -> Map.of());
     }
 
     private PendingCommand dispatched(Instant deadline) {
@@ -218,10 +221,14 @@ class PendingCommandLedgerTest {
     @Test
     @DisplayName("REPLAY: an IDEMPOTENT command in-flight at restart is re-offered (a signal), not re-issued")
     void replay_idempotent_reoffered() {
-        StandardPendingCommandLedger ledger = ledger(AutomationTestSupport.FIXED_CLOCK);
+        // F-10: crash residue means the deadline has PASSED — step the clock beyond it
+        // before the boundary so the idempotency classification (not the live re-index) runs.
+        AutomationTestSupport.MutableClock clock = AutomationTestSupport.mutableClock();
+        StandardPendingCommandLedger ledger = ledger(clock);
         ledger.setMode(SubscriberMode.REPLAY);
         EventEnvelope issued = commandIssued(target, CommandIdempotency.IDEMPOTENT);
         ledger.onEvent(issued);
+        clock.advance(Duration.ofSeconds(31));
         ledger.onCaughtUp();
 
         assertThat(ledger.reissueOffered()).hasSize(1);
@@ -234,9 +241,12 @@ class PendingCommandLedgerTest {
     @Test
     @DisplayName("REPLAY: a NOT_IDEMPOTENT command in-flight at restart expires (command_result expired_on_restart)")
     void replay_notIdempotent_expiredOnRestart() {
-        StandardPendingCommandLedger ledger = ledger(AutomationTestSupport.FIXED_CLOCK);
+        // F-10 regression pin: a PAST-deadline NOT_IDEMPOTENT candidate expires exactly as today.
+        AutomationTestSupport.MutableClock clock = AutomationTestSupport.mutableClock();
+        StandardPendingCommandLedger ledger = ledger(clock);
         ledger.setMode(SubscriberMode.REPLAY);
         ledger.onEvent(commandIssued(target, CommandIdempotency.NOT_IDEMPOTENT));
+        clock.advance(Duration.ofSeconds(31));
         ledger.onCaughtUp();
 
         assertThat(publisher.countOfType(EventTypes.COMMAND_RESULT)).isEqualTo(1);
@@ -251,9 +261,11 @@ class PendingCommandLedgerTest {
     @Test
     @DisplayName("REPLAY: a CONDITIONAL command in-flight at restart is offered to the adapter")
     void replay_conditional_adapterOffered() {
-        StandardPendingCommandLedger ledger = ledger(AutomationTestSupport.FIXED_CLOCK);
+        AutomationTestSupport.MutableClock clock = AutomationTestSupport.mutableClock();
+        StandardPendingCommandLedger ledger = ledger(clock);
         ledger.setMode(SubscriberMode.REPLAY);
         ledger.onEvent(commandIssued(target, CommandIdempotency.CONDITIONAL));
+        clock.advance(Duration.ofSeconds(31));
         ledger.onCaughtUp();
 
         assertThat(ledger.adapterEvaluationOffered()).hasSize(1);
@@ -290,6 +302,53 @@ class PendingCommandLedgerTest {
 
         assertThat(ledger.reissueOffered()).isEmpty();
         assertThat(publisher.published()).isEmpty();
+    }
+
+    // ── F-10 — TRANSITION-window honesty (deadline-in-future candidates are LIVE) ─
+
+    @Test
+    @DisplayName("F-10: a future-deadline NOT_IDEMPOTENT candidate is re-indexed live at onCaughtUp — never expired_on_restart, confirmable by a later report")
+    void replay_futureDeadline_notIdempotent_reindexedLiveAndConfirmable() {
+        StandardPendingCommandLedger ledger = new StandardPendingCommandLedger(publisher,
+                new AutomationTestSupport.StubEntityRegistry(List.of(
+                        AutomationTestSupport.entityWith(target,
+                                AutomationTestSupport.deviceId(),
+                                StandardCapabilities.onOff()))),
+                AutomationTestSupport.FIXED_CLOCK, DEFAULT_TIMEOUT_MS, parameters -> Map.of());
+        ledger.setMode(SubscriberMode.REPLAY);
+        EventEnvelope issued = commandIssued(target, CommandIdempotency.NOT_IDEMPOTENT);
+        ledger.onEvent(issued);
+        ledger.onCaughtUp();   // clock == envelope time; deadline (+30s) is in the future
+
+        assertThat(publisher.countOfType(EventTypes.COMMAND_RESULT)).isZero();
+        assertThat(ledger.pendingCount()).isEqualTo(1);
+        PendingCommand tracked = ledger.getCommand(issued.eventId()).orElseThrow();
+        assertThat(tracked.status()).isEqualTo(PendingStatus.DISPATCHED);
+
+        ledger.onEvent(stateReported("true"));
+
+        assertThat(publisher.countOfType(EventTypes.STATE_CONFIRMED)).isEqualTo(1);
+        StateConfirmedEvent confirmed =
+                (StateConfirmedEvent) publisher.ofType(EventTypes.STATE_CONFIRMED).get(0).payload();
+        assertThat(confirmed.commandEventId()).isEqualTo(issued.eventId());
+    }
+
+    @Test
+    @DisplayName("F-10: a future-deadline IDEMPOTENT candidate is NOT added to reissueOffered — it is live, not crash residue")
+    void replay_futureDeadline_idempotent_notReoffered() {
+        StandardPendingCommandLedger ledger = new StandardPendingCommandLedger(publisher,
+                new AutomationTestSupport.StubEntityRegistry(List.of(
+                        AutomationTestSupport.entityWith(target,
+                                AutomationTestSupport.deviceId(),
+                                StandardCapabilities.onOff()))),
+                AutomationTestSupport.FIXED_CLOCK, DEFAULT_TIMEOUT_MS, parameters -> Map.of());
+        ledger.setMode(SubscriberMode.REPLAY);
+        ledger.onEvent(commandIssued(target, CommandIdempotency.IDEMPOTENT));
+        ledger.onCaughtUp();
+
+        assertThat(ledger.reissueOffered()).isEmpty();
+        assertThat(ledger.pendingCount()).isEqualTo(1);
+        assertThat(publisher.published()).isEmpty();   // re-indexing never publishes
     }
 
     private static Instant farFuture() {

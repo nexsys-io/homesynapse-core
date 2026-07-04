@@ -104,7 +104,9 @@ final class ZclCodec {
                         Integer.toHexString(dataType));
                 break;
             }
-            attributes.put(attributeId, decoded.value());
+            if (decoded.value() != null) {          // F-9: null = invalid marker, dropped
+                attributes.put(attributeId, decoded.value());
+            }
             position = decoded.nextOffset();
         }
         return attributes;
@@ -142,7 +144,9 @@ final class ZclCodec {
                         Integer.toHexString(dataType));
                 break;
             }
-            attributes.put(attributeId, decoded.value());
+            if (decoded.value() != null) {          // F-9: null = invalid marker, dropped
+                attributes.put(attributeId, decoded.value());
+            }
             position = decoded.nextOffset();
         }
         return attributes;
@@ -177,7 +181,16 @@ final class ZclCodec {
                 if (offset + 1 > payload.length) {
                     yield null;
                 }
-                yield new Decoded(payload[offset] != 0, offset + 1);
+                int marker = payload[offset] & 0xFF;
+                if (marker != 0x00 && marker != 0x01) {
+                    // F-9: any other marker (e.g. 0xFF "invalid") is NOT a value
+                    // observation — skip THIS record, keep the rest of the frame
+                    // (a null value; the callers drop it and continue).
+                    log.debug("ZCL bool attribute carries invalid marker 0x{}; "
+                            + "record skipped (F-9)", Integer.toHexString(marker));
+                    yield new Decoded(null, offset + 1);
+                }
+                yield new Decoded(marker == 0x01, offset + 1);
             }
             case 0x18, 0x20, 0x30 -> // map8, uint8, enum8
                     unsignedLittleEndian(payload, offset, 1);

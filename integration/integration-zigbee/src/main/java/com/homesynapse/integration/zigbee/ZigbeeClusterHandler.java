@@ -21,8 +21,11 @@ import java.util.Objects;
  * ingestion path calls the richer package-private {@link #normalize} directly
  * (the M7.4b richer-method pattern) because the frozen DTO drops the raw slot.
  *
- * <p>{@link #buildCommand} is the M9.4 command-dispatch half and throws until
- * that milestone lands.
+ * <p>{@link #buildCommand} is the command-dispatch half (M9.4a): the actuator
+ * handlers (OnOff/LevelControl/ColorControl) override it; the ingestion-only
+ * handlers inherit the default throw — an unsupported command cannot succeed
+ * on retry, so the {@code UnsupportedOperationException} deliberately
+ * classifies PERMANENT at the supervisor (Doc 05 §3.7, the M9.4 UOE arm).
  *
  * <p>Thread-safe: stateless behavior over immutable per-device bindings.
  */
@@ -68,10 +71,32 @@ abstract class ZigbeeClusterHandler implements ClusterHandler {
     }
 
     @Override
-    public final ZclFrame buildCommand(String commandType,
+    public ZclFrame buildCommand(String commandType,
             Map<String, Object> parameters) {
-        throw new UnsupportedOperationException(
-                "ZCL command building is delivered in M9.4; the M9.3 ingestion "
-                        + "layer implements the report path only");
+        throw new UnsupportedOperationException(getClass().getSimpleName()
+                + " does not support command '" + commandType + "'");
+    }
+
+    /**
+     * Coerces a decoded JSON parameter to an int — the command write path's
+     * single numeric coercion point (decoded parameters arrive as
+     * Integer/Long/Double depending on the JSON source).
+     */
+    static int intParameter(Map<String, Object> parameters, String name,
+            int fallback) {
+        Object value = parameters.get(name);
+        return value instanceof Number number
+                ? (int) Math.round(number.doubleValue()) : fallback;
+    }
+
+    /**
+     * The transition-time field shared by Move-to-Level / Move-to-Color-Temperature
+     * (ZCL8 §3.10.2.3.1: uint16, 0.1 s units): {@code 0x0000} (immediate) unless a
+     * {@code transition_ms} parameter is present (rounded to deciseconds).
+     */
+    static int transitionDeciseconds(Map<String, Object> parameters) {
+        Object value = parameters.get("transition_ms");
+        return value instanceof Number number
+                ? (int) Math.round(number.doubleValue() / 100.0) : 0;
     }
 }

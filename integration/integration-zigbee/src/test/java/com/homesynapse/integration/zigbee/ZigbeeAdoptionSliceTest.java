@@ -40,6 +40,7 @@ class ZigbeeAdoptionSliceTest {
     private RecordingEventPublisher publisher;
     private InMemoryDeviceRegistry deviceRegistry;
     private InMemoryEntityRegistry entityRegistry;
+    private StandardDeviceProfileRegistry profileRegistry;
     private ZigbeeAdoptionSlice slice;
 
     @BeforeEach
@@ -48,9 +49,11 @@ class ZigbeeAdoptionSliceTest {
         publisher = new RecordingEventPublisher(clock);
         deviceRegistry = new InMemoryDeviceRegistry();
         entityRegistry = new InMemoryEntityRegistry();
+        profileRegistry = new StandardDeviceProfileRegistry();
+        profileRegistry.register(new ZigbeeProfileLoader().loadBundled());
         slice = new ZigbeeAdoptionSlice(
                 new IntegrationId(UlidFactory.generate(clock)),
-                deviceRegistry, entityRegistry, publisher, clock);
+                deviceRegistry, entityRegistry, profileRegistry, publisher, clock);
     }
 
     private static InterviewResult snzbInterview() {
@@ -184,5 +187,62 @@ class ZigbeeAdoptionSliceTest {
         assertThatThrownBy(() -> slice.adopt(HUE))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("proposed");
+    }
+
+    // ── M9.4a §2 — adoption-installed confirmation overrides (DP-a) ─────────
+
+    @Test
+    @DisplayName("§2.2: adoption installs the matched profile's tuning — the Hue CT capability carries the measured 15 s window")
+    void adoptionInstallsConfirmationOverrides() {
+        slice.onDeviceDiscovered(hueInterview(),
+                MeasuredCorpusValues.HUE_PROFILE_ID);
+
+        ZigbeeAdoptionSlice.AdoptedDevice adopted = slice.adopt(HUE);
+
+        Entity entity = entityRegistry
+                .listEntitiesByDevice(adopted.deviceId()).get(0);
+        var colorTemperature = entity.capabilities().stream()
+                .filter(c -> c.capabilityId().equals("color_temperature"))
+                .findFirst().orElseThrow();
+        assertThat(colorTemperature.confirmation().defaultTimeoutMs())
+                .isEqualTo(15000L);
+        assertThat(colorTemperature.commands().get("set_color_temperature")
+                .defaultTimeout().toMillis()).isEqualTo(15000L);
+        assertThat(slice.matchedProfileIdFor(HUE))
+                .contains(MeasuredCorpusValues.HUE_PROFILE_ID);
+        assertThat(slice.bindingFor(entity.entityId()))
+                .contains(new ZigbeeAdoptionSlice.EntityBinding(HUE, 11));
+    }
+
+    @Test
+    @DisplayName("§2.3 (DP-a pin 2): the re-link path re-installs overrides from the matched profile id")
+    void relinkReinstallsOverrides() {
+        // Adopt WITHOUT a profile match: standard defaults land (CT window 5000 ms).
+        slice.onDeviceDiscovered(hueInterview(), null);
+        ZigbeeAdoptionSlice.AdoptedDevice adopted = slice.adopt(HUE);
+        Entity beforeRelink = entityRegistry
+                .listEntitiesByDevice(adopted.deviceId()).get(0);
+        assertThat(beforeRelink.capabilities().stream()
+                .filter(c -> c.capabilityId().equals("color_temperature"))
+                .findFirst().orElseThrow().confirmation().defaultTimeoutMs())
+                .isEqualTo(5000L);
+
+        // Re-pairing rediscovers WITH the match: relink must re-install the tuning.
+        slice.onDeviceDiscovered(hueInterview(),
+                MeasuredCorpusValues.HUE_PROFILE_ID);
+
+        Entity afterRelink = entityRegistry
+                .listEntitiesByDevice(adopted.deviceId()).get(0);
+        assertThat(afterRelink.capabilities().stream()
+                .filter(c -> c.capabilityId().equals("color_temperature"))
+                .findFirst().orElseThrow().confirmation().defaultTimeoutMs())
+                .isEqualTo(15000L);
+        // Idempotent: a second re-link with the same profile changes nothing further,
+        // publishes availability only, and never a new adoption event.
+        slice.onDeviceDiscovered(hueInterview(),
+                MeasuredCorpusValues.HUE_PROFILE_ID);
+        assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).toList()).hasSize(1);
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).toList())
+                .hasSize(2);
     }
 }

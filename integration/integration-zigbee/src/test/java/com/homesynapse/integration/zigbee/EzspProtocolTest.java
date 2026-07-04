@@ -86,18 +86,19 @@ class EzspProtocolTest {
     }
 
     @Test
-    @DisplayName("v14: renegotiates at the NCP's version and pins the wide status seam")
-    void negotiation_v14_renegotiatesAndPinsWideSeam() {
+    @DisplayName("v14: above the narrowed band (M9.4 consolidated amendment) — PIE naming the "
+            + "unknown dialect + the AMD-96 reflash contingency")
+    void negotiation_v14_permanentUntilDialectCharacterized() {
+        // The v14 0x0034/0x0045 dialect is uncharacterized on owned silicon (DP-d:
+        // "partially deaf is a three-hour sniffer session, PIE is a one-line diagnosis").
         connect(14);
 
-        startSessionOrFail();
-
-        assertThat(protocol.negotiatedVersion()).isEqualTo(14);
-        List<byte[]> commands = ncp.receivedEzspCommands();
-        assertThat(commands).hasSize(2);
-        assertThat(commands.get(1)[3]).isEqualTo((byte) 14); // renegotiated desired
-        // The wide seam is live: a 4-byte status response decodes as success.
-        protocol.permitJoin(60);
+        assertThatThrownBy(() -> protocol.startSession())
+                .isInstanceOf(PermanentIntegrationException.class)
+                .hasMessageContaining("14")
+                .hasMessageContaining("13-13")
+                .hasMessageContaining("the frame dialect is unknown to this adapter")
+                .hasMessageContaining("reflash");
     }
 
     @Test
@@ -441,22 +442,11 @@ class EzspProtocolTest {
         protocol.resumeNetwork(); // default handler reports a matching network
     }
 
-    @Test
-    @DisplayName("resumeNetwork at v14: the wide-status struct offsets parse "
-            + "end-to-end (review hardening H4 — statusWidthBytes=4 exercised on "
-            + "networkInit/networkState/getNetworkParameters)")
-    void resumeNetwork_restored_v14WideStatus() {
-        connect(14);
-        startSessionOrFail();
-        NetworkParameters params =
-                new NetworkParameters(15, 0x1A62, 0x00124B0012345678L, KEY_REF);
-        store.seed(params);
-
-        // The width-aware test helpers emit 4-byte sl_status_t shapes at v14;
-        // a wrong offset in EzspOps.currentNetwork would mis-read the PAN/channel
-        // and trip the mismatch path instead of resuming.
-        protocol.resumeNetwork();
-    }
+    // resumeNetwork_restored_v14WideStatus was DELETED at M9.4a (format #12 declared
+    // delta): it reached the wide-status seam only through v14 negotiation acceptance,
+    // which the narrowed band now rejects. The H4 wide-struct offset coverage survives
+    // at the codec seam (EzspCodecTest.statusSeam_v14_fourByteLittleEndian), which the
+    // band narrowing deliberately leaves untouched — Wave-2 recharacterizes on silicon.
 
     /** Seeds a stored network + an NCP reporting a DIFFERENT live network. */
     private void mismatchScenario() {
@@ -540,20 +530,77 @@ class EzspProtocolTest {
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("D-M92-6 stubs name their completing milestone (interview landed at M9.3)")
+    @DisplayName("D-M92-6 stub inventory: topologyScan names its completing milestone "
+            + "(interview landed at M9.3; sendZclFrame filled at M9.4a — format #12 delta)")
     void stubs_nameCompletingMilestone() {
         connect(13);
 
-        // interview(IEEEAddress) is IMPLEMENTED as of M9.3 (EzspInterviewTest
-        // covers it); the remaining stubs still name their milestone.
-        assertThatThrownBy(() -> protocol.sendZclFrame(
-                new ZclFrame(1, 1, 0x0006, 0x01, true, 0, new byte[0]),
-                new IEEEAddress(1L)))
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessageContaining("M9.4");
         assertThatThrownBy(() -> protocol.topologyScan())
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessageContaining("M9.4");
+    }
+
+    // ------------------------------------------------------------------
+    // sendZclFrame — the M9.4a command write path (§3.2)
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("sendZclFrame rides the bench-proven v13 unicast layout: tag u8 at "
+            + "[14], length at [15], ZCL header + payload after [16]")
+    void sendZclFrame_v13WireLayout() {
+        connect(13);
+        ncp.onEzspCommand(command -> {
+            if (!isLegacyVersion(command)
+                    && frameIdOf(command) == EzspCoordinatorProtocol.FRAME_SEND_UNICAST) {
+                return List.of(extendedResponse(command[0] & 0xFF,
+                        EzspCoordinatorProtocol.FRAME_SEND_UNICAST, statusBytes(0)));
+            }
+            return defaultHandler(command);
+        });
+        startSessionOrFail();
+
+        boolean accepted = protocol.sendZclFrame(
+                new ZclFrame(1, 11, 0x0006, 0x01, true, 0, new byte[0]), 0x260F);
+
+        assertThat(accepted).isTrue();
+        List<byte[]> commands = ncp.receivedEzspCommands();
+        byte[] unicast = commands.get(commands.size() - 1);
+        assertThat(frameIdOf(unicast))
+                .isEqualTo(EzspCoordinatorProtocol.FRAME_SEND_UNICAST);
+        byte[] parameters = extendedParameters(unicast);
+        assertThat(parameters[0]).isEqualTo((byte) 0x00);          // DIRECT
+        assertThat(parameters[1]).isEqualTo((byte) 0x0F);          // nwk LE lo
+        assertThat(parameters[2]).isEqualTo((byte) 0x26);          // nwk LE hi
+        assertThat(parameters[3]).isEqualTo((byte) 0x04);          // HA profile LE lo
+        assertThat(parameters[4]).isEqualTo((byte) 0x01);          // HA profile LE hi
+        assertThat(parameters[5]).isEqualTo((byte) 0x06);          // cluster LE lo
+        assertThat(parameters[6]).isEqualTo((byte) 0x00);          // cluster LE hi
+        assertThat(parameters[7]).isEqualTo((byte) 1);             // source EP
+        assertThat(parameters[8]).isEqualTo((byte) 11);            // destination EP
+        assertThat(parameters[14]).isEqualTo(parameters[13]);      // tag mirrors seq (u8)
+        assertThat(parameters[15]).isEqualTo((byte) 3);            // ZCL length: fc+tsn+cmd
+        assertThat(parameters[16]).isEqualTo((byte) 0x01);         // fc: cluster-specific
+        assertThat(parameters[18]).isEqualTo((byte) 0x01);         // commandId: On
+    }
+
+    @Test
+    @DisplayName("a non-zero sendUnicast status surfaces as false — the honest failure seam")
+    void sendZclFrame_rejectedStatus_returnsFalse() {
+        connect(13);
+        ncp.onEzspCommand(command -> {
+            if (!isLegacyVersion(command)
+                    && frameIdOf(command) == EzspCoordinatorProtocol.FRAME_SEND_UNICAST) {
+                return List.of(extendedResponse(command[0] & 0xFF,
+                        EzspCoordinatorProtocol.FRAME_SEND_UNICAST,
+                        statusBytes(0x66)));   // EMBER_NETWORK_DOWN-class rejection
+            }
+            return defaultHandler(command);
+        });
+        startSessionOrFail();
+
+        assertThat(protocol.sendZclFrame(
+                new ZclFrame(1, 11, 0x0006, 0x01, true, 0, new byte[0]), 0x260F))
+                .isFalse();
     }
 
     // ------------------------------------------------------------------

@@ -187,4 +187,34 @@ class ZclCodecTest {
                 0x00, 0x2A, 0x00,
                 0x04, 0x00, 0x05, 0x00, 0x07, 0x00, 0x00, 0x40);
     }
+
+    @Test
+    @DisplayName("F-9: a bool marker other than 0x00/0x01 is NOT a value observation — the record drops, the rest of the frame survives")
+    void invalidBoolMarker_recordDroppedFrameKept() {
+        // attr 0x0000 bool with the 0xFF invalid marker, then attr 0x4001 bool true:
+        // the first record is dropped (never an observation — it could otherwise
+        // false-CONFIRM a turn_on); the second still decodes.
+        byte[] payload = {
+                0x18, 0x2A, 0x0A,
+                0x00, 0x00, 0x10, (byte) 0xFF,
+                0x01, 0x40, 0x10, 0x01
+        };
+
+        Map<Integer, Object> attributes =
+                ZclCodec.parseAttributeReports(payload, 3);
+
+        assertThat(attributes).containsExactly(Map.entry(0x4001, Boolean.TRUE));
+    }
+
+    @Test
+    @DisplayName("F-9: an invalid bool marker in a Read Attributes Response drops the same way")
+    void invalidBoolMarker_readResponse_dropped() {
+        // attr 0x0000, status SUCCESS, bool 0x02 (invalid marker).
+        byte[] payload = {0x18, 0x2A, 0x01, 0x00, 0x00, 0x00, 0x10, 0x02};
+
+        Map<Integer, Object> attributes =
+                ZclCodec.parseReadAttributesResponse(payload, 3);
+
+        assertThat(attributes).isEmpty();
+    }
 }

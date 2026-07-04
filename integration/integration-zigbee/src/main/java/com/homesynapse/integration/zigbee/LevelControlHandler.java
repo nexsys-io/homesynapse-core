@@ -24,6 +24,9 @@ final class LevelControlHandler extends ZigbeeClusterHandler {
         super(device, clock);
     }
 
+    /** ZCL8 §3.10.2.3.5: Move to Level (with On/Off) command id. */
+    static final int COMMAND_MOVE_TO_LEVEL_WITH_ON_OFF = 0x04;
+
     @Override
     List<NormalizedAttribute> normalize(int endpoint, int clusterId,
             Map<Integer, Object> attributes) {
@@ -33,5 +36,26 @@ final class LevelControlHandler extends ZigbeeClusterHandler {
                     null, null));
         }
         return List.of();
+    }
+
+    @Override
+    public ZclFrame buildCommand(String commandType,
+            Map<String, Object> parameters) {
+        if (!"set_brightness".equals(commandType)) {
+            return super.buildCommand(commandType, parameters);
+        }
+        // ZCL8 §3.10.2.3.5 Move to Level (with On/Off): [level u8][transition u16 LE];
+        // level = round(percent × 254 / 100) clamped [0, 254] — the capability domain
+        // is percent; the 0–254 wire level exists only at this boundary.
+        int percent = intParameter(parameters, "level", 0);
+        int level = Math.clamp(Math.round(percent * 254 / 100.0f), 0, 254);
+        int transition = transitionDeciseconds(parameters);
+        byte[] payload = {
+            (byte) level,
+            (byte) (transition & 0xFF),
+            (byte) ((transition >> 8) & 0xFF),
+        };
+        return new ZclFrame(1, 1, CLUSTER_ID, COMMAND_MOVE_TO_LEVEL_WITH_ON_OFF,
+                true, 0, payload);
     }
 }

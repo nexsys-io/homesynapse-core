@@ -19,8 +19,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * Cluster handler tests (Doc 08 §3.5): per-cluster value normalization to the
  * in-tree canonical attribute keys, the AMD-96 Kelvin-at-ingestion conversion
- * with raw mireds retained, occupancy bit 0, battery raw/2, and the IAS Zone
- * tolerate-path. Command building is M9.4 and throws.
+ * with raw mireds retained, occupancy bit 0, battery raw/2 with the F-9
+ * invalid-marker guards, and the IAS Zone tolerate-path. Command building on
+ * the actuator trio is {@code BuildCommandTest}'s; the ingestion-only handlers
+ * throw (M9.4a).
  */
 class ClusterHandlersTest {
 
@@ -196,12 +198,49 @@ class ClusterHandlersTest {
     }
 
     @Test
-    @DisplayName("buildCommand is M9.4's — every handler throws with the milestone named")
-    void buildCommandIsM94() {
-        for (ZigbeeClusterHandler handler : handlers.values()) {
+    @DisplayName("buildCommand: the ingestion-only handlers throw naming handler + command (M9.4a — the actuator trio is BuildCommandTest's)")
+    void buildCommand_ingestionOnlyHandlersThrow() {
+        for (int clusterId : new int[] {0x0406, 0x0001, 0x0500}) {
+            ZigbeeClusterHandler handler = handlers.get(clusterId);
             assertThatThrownBy(() -> handler.buildCommand("turn_on", Map.of()))
                     .isInstanceOf(UnsupportedOperationException.class)
-                    .hasMessageContaining("M9.4");
+                    .hasMessageContaining(handler.getClass().getSimpleName())
+                    .hasMessageContaining("turn_on");
+        }
+    }
+
+    @Nested
+    @DisplayName("F-9 — invalid-marker guards")
+    class InvalidMarkers {
+
+        @Test
+        @DisplayName("battery 0xFF (unknown) produces no report")
+        void batteryUnknownMarkerSkipped() {
+            assertThat(normalize(0x0001, Map.of(0x0021, 255L))).isEmpty();
+        }
+
+        @Test
+        @DisplayName("battery > 200 half-percent units is out-of-band — skipped with DEBUG")
+        void batteryOutOfBandSkipped() {
+            assertThat(normalize(0x0001, Map.of(0x0021, 201L))).isEmpty();
+        }
+
+        @Test
+        @DisplayName("battery 200 = exactly 100 % — the legal ceiling reports")
+        void batteryCeilingReports() {
+            List<NormalizedAttribute> reports =
+                    normalize(0x0001, Map.of(0x0021, 200L));
+
+            assertThat(reports).hasSize(1);
+            assertThat(reports.get(0).value()).isEqualTo(100L);
+        }
+
+        @Test
+        @DisplayName("an invalid bool marker never becomes an on_off observation (and so can never CONFIRM a turn_on)")
+        void invalidBoolMarker_neverObserves() {
+            // The wire guard lives in ZclCodec (marker != 0x00/0x01 is dropped
+            // pre-handler); the handler's own type gate is the second net.
+            assertThat(normalize(0x0006, Map.of(0x0000, 255L))).isEmpty();
         }
     }
 

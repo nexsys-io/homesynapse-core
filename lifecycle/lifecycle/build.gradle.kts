@@ -79,4 +79,12 @@ dependencies {
     // EventBus stub. The base provides no-op subscribe/unsubscribe/notify;
     // the test subclass adds notify recording.
     testImplementation(testFixtures(project(":core:event-bus")))
+
+    // M9.4a (TEST-SCOPE): the hardware-free hero-loop + zigbee replay-purity
+    // gates boot the real composition root with the REAL zigbee factory over
+    // the scripted NCP (ZigbeeHardwareFreeRig, zigbee testFixtures). The ITs
+    // live HERE (the RunPipelineReplaySafetyTest harness home) so they run at
+    // the default check gate — testing/integration-tests is Pi-profile-gated.
+    testImplementation(project(":integration:integration-zigbee"))
+    testImplementation(testFixtures(project(":integration:integration-zigbee")))
 }

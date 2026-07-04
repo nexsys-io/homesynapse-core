@@ -1,5 +1,9 @@
 plugins {
     id("homesynapse.library-conventions")
+    // M9.4a (TEST-SCOPE): FakeNcp + FakeSerialByteChannel + the hardware-free rig
+    // promote to testFixtures so the cross-module composition-root gates consume
+    // the scripted NCP (the established testFixtures(project(...)) pattern).
+    `java-test-fixtures`
 }
 
 description = "Zigbee integration adapter (ZNP/EZSP transport, ZCL, device profiles)"
@@ -21,4 +25,8 @@ dependencies {
     implementation(libs.jackson.databind)
 
     testImplementation(project(":testing:test-support"))
+
+    // M9.4a (TEST-SCOPE): the rig's public surface exposes TestClock (the byte
+    // channel is clock-stepped), so the fixture dependency is api-scoped.
+    testFixturesApi(project(":testing:test-support"))
 }
