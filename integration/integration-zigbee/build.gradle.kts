@@ -16,6 +16,9 @@ dependencies {
     // M9.2 lockstep with the plain `requires org.slf4j` (implementation-only,
     // LTD-15 structured logging — the M9.1 integration-runtime precedent pair).
     implementation(libs.slf4j.api)
+    // M9.3 lockstep with the plain `requires com.fasterxml.jackson.databind`:
+    // interior-only JSON profile loading + device cache (tree model, no reflection).
+    implementation(libs.jackson.databind)
 
     testImplementation(project(":testing:test-support"))
 }

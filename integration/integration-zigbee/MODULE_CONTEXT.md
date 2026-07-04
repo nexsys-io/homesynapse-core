@@ -1,6 +1,6 @@
-# integration-zigbee — `com.homesynapse.integration.zigbee` — M9.2 IMPLEMENTED — transport/EZSP layer live (EZSP-first per DP-C) — Zigbee 3.0 coordinator, MVP protocol adapter, IEEEAddress (raw long, NOT ULID)
+# integration-zigbee — `com.homesynapse.integration.zigbee` — M9.3 IMPLEMENTED — interview pipeline + ingestion + device-profile registry live on the M9.2 transport — Zigbee 3.0 coordinator, MVP protocol adapter, IEEEAddress (raw long, NOT ULID)
 
-> **Type count (M9.2, 2026-07-03):** 38 pre-existing public Phase-2 types + 21 new M9.2 implementation types (ALL package-private — zero new public types) = 59 type files + module-info. Correction to the Phase-2 note below: `package-info.java` does NOT exist in the tree (the "39 files including package-info" claim counted module-info; package-info was never created). First test tree created in M9.2: 13 files (10 test classes + 3 fakes).
+> **Type count (M9.3, 2026-07-04):** 59 M9.2 type files + 41 new M9.3 types = **100 type files + module-info**. The 41 split: **10 new PUBLIC §1 freeze types** (`ConfirmationCharacterization`, `ReportsAuthoritative`, `ReportingPosture`, `Confirmability`, `DegradeRule`, `MatchCriteria`, `ExactModel`, `ModelWildcard`, `Fingerprint`, `EndpointSignature`) + **31 package-private implementation types** (loader/registry, interview FSM+queue, codecs, handlers, ingestion, adoption, configurator, cache, tracker — inventoried in the M9.3 section below). Public total 38→48; package-private 21→52. Test tree 13 → **34 files** (30 test classes + 4 fakes/utilities) + 2 copied bench fixtures under `src/test/resources/fixtures/`.
 
 ## Purpose
 
@@ -36,10 +36,13 @@ module com.homesynapse.integration.zigbee {
     requires transitive com.homesynapse.integration;
     requires com.fazecast.jSerialComm; // explicit JPMS module (ships module-info.class); interior-only per D-M92-1
     requires org.slf4j; // plain (implementation-only): Doc 08 §3.3 mandates structured log entries (LTD-15)
+    requires com.fasterxml.jackson.databind; // plain (implementation-only): the M9.3 JSON profile loader + device cache; no Jackson type on any exported signature (the D-M92-1 pattern)
 
     exports com.homesynapse.integration.zigbee;
 }
 ```
+
+M9.3 added the Jackson plain requires in Gradle lockstep (`implementation(libs.jackson.databind)`), TREE-MODEL ONLY (no reflective databind → no `opens` needed). `ConfirmationCharacterization` puts device-model's `ConfirmationMode` on the exported surface — legal with NO module-info change because integration-api `requires transitive com.homesynapse.device` (implied readability flows to every consumer).
 
 `requires transitive` for integration-api (the Phase-2 edge). M9.2 added two PLAIN requires in Gradle lockstep (`implementation(libs.jserialcomm)` + `implementation(libs.slf4j.api)`): jSerialComm stays interior-only (D-M92-1 — no jSerialComm type on any exported signature; note the jar is a full explicit JPMS module, NOT an automatic module), and org.slf4j is the forced LTD-15 edge (no module in the transitive chain provides it transitively — the M9.1 integration-runtime precedent pair).
 
@@ -77,7 +80,7 @@ module com.homesynapse.integration.zigbee {
 
 | Type | Fields | Purpose |
 |---|---|---|
-| `ManufacturerModelPair` (2) | `manufacturerName` (String), `modelIdentifier` (String) | Device profile matching key. Both non-null. |
+| `ManufacturerModelPair` (2) | `manufacturerName` (String), `modelIdentifier` (String) | Phase-2 data carrier; SUPERSEDED as the profile match key by the sealed `MatchCriteria` at M9.3 (stands alone — `ExactModel` does not wrap it; zero non-scaffold consumers at the retype, A7). Both non-null. |
 | `EndpointDescriptor` (5) | `endpointId` (1-240), `profileId`, `deviceTypeId`, `inputClusters` (List, copied), `outputClusters` (List, copied) | ZCL Simple Descriptor per endpoint. |
 | `NodeDescriptor` (4) | `deviceType` (0-2), `manufacturerCode`, `maxBufferSize` (>0), `macCapabilityFlags` | ZDO Node Descriptor. deviceType determines power-source. |
 | `ClusterOverride` (3) | `clusterId`, `attributeOverrides` (Map, copied), `disableDefaultHandler` | Per-cluster behavioral adjustments in device profiles. |
@@ -95,7 +98,7 @@ module com.homesynapse.integration.zigbee {
 | `AttributeReport` (4) | `entityRef`, `attributeKey`, `value` (Object), `eventTime` (Instant) | Normalized attribute observation. All non-null. Canonical values (°C, %). |
 | `InterviewResult` (8) | `ieeeAddress`, `networkAddress`, `nodeDescriptor`, `endpoints` (List, copied, non-empty), `manufacturerName`, `modelIdentifier`, `powerSource`, `interviewStatus` | Interview pipeline result. All non-null. |
 | `RouteHealth` (7) | `target`, `consecutiveFailures`, `totalFailures`, `totalSuccesses`, `lastSuccess` (**nullable**), `lastFailure` (**nullable**), `status` | Per-device route health tracking. AMD-07. |
-| `DeviceProfile` (9) | `profileId`, `matches` (Set, copied, non-empty), `category`, `clusterOverrides` (Map, **nullable**), `reportingOverrides` (Map, **nullable**), `manufacturerCodec` (String, **nullable**), `interviewSkips` (Set, **nullable**), `tuyaDatapoints` (List, **nullable**), `initializationWrites` (List, **nullable**) | Per-model device behavior overrides. 5 nullable collection fields use conditional defensive copy. |
+| `DeviceProfile` (**10** — AMD-97 realized at M9.3) | `profileId`, `matches` (**Set&lt;MatchCriteria&gt;** — retyped from `Set<ManufacturerModelPair>` at M9.3, copied, non-empty), `category`, `clusterOverrides` (Map, **nullable**), `reportingOverrides` (Map, **nullable**), `manufacturerCodec` (String, **nullable**), `interviewSkips` (Set, **nullable**), `tuyaDatapoints` (List, **nullable**), `initializationWrites` (List, **nullable**), `confirmation` (**List&lt;ConfirmationCharacterization&gt;, nullable** — component 10, the AMD-97 block; null/empty = read-only device) | Per-model device behavior overrides. **6** nullable collection fields use conditional defensive copy. profileId namespace convention: bare = first-party (reserved), `publisher.profile` = third-party (Doc 18 §3.5(a)/(b)). |
 | `ZigbeeDeviceRecord` (10) | `ieeeAddress`, `networkAddress` (0-0xFFFF), `nodeDescriptor` (**nullable**), `endpoints` (List, **nullable**, copied), `manufacturerName` (**nullable**), `modelIdentifier` (**nullable**), `powerSource`, `lastSeen`, `interviewStatus`, `matchedProfileId` (**nullable**) | Local device metadata cache. Nullable fields populated as interview progresses. |
 
 ### Sealed Interface Hierarchies (2)
@@ -127,7 +130,7 @@ module com.homesynapse.integration.zigbee {
 | Type | Kind | Purpose | Key Methods |
 |---|---|---|---|
 | `ClusterHandler` | interface | Per-cluster ZCL ↔ HomeSynapse translator | `handleAttributeReport(int, int, Map)` → `List<AttributeReport>`, `buildCommand(String, Map)` → `ZclFrame` |
-| `DeviceProfileRegistry` | interface | Profile loading, lookup, user override merging | `findProfile(String, String)` → `Optional<DeviceProfile>`, `registerProfile(DeviceProfile)`, `allProfiles()` → `Collection<DeviceProfile>` |
+| `DeviceProfileRegistry` | interface | Profile loading, lookup, user override merging | `findProfile(String, String)` → `Optional<DeviceProfile>` (ExactModel/ModelWildcard only), **`findProfile(InterviewResult)` (M9.3 additive widening — the fingerprint-capable path)**, `registerProfile(DeviceProfile)`, `allProfiles()` → `Collection<DeviceProfile>`. Precedence: Fingerprint > ExactModel > ModelWildcard, then USER > RUNTIME > BUNDLED, then priority desc, then profileId ascending (Doc 18 §3.5(d)). |
 | `AvailabilityTracker` | interface | Per-device availability state machine | `recordFrame(IEEEAddress, Instant)`, `recordCommandResult(IEEEAddress, boolean, Instant)`, `isAvailable(IEEEAddress)`, `lastReason(IEEEAddress)` |
 | `CoordinatorTransport` | interface | Serial protocol framing abstraction | `open(Object)`, `close()`, `sendFrame(byte[])`, `receiveFrame()` → `ZigbeeFrame`. NOT thread-safe — single transport thread. |
 | `CoordinatorProtocol` | interface | Zigbee protocol operations above transport | `formNetwork(NetworkParameters)`, `resumeNetwork()`, `permitJoin(int)`, `sendZclFrame(ZclFrame, IEEEAddress)`, `interview(IEEEAddress)` → `InterviewResult`, `topologyScan()` → `List<NeighborTableEntry>`, `ping()` → `boolean`. Thread-safe. |
@@ -148,6 +151,9 @@ All upstream core types (event-model, device-model, state-store, persistence, co
 
 ```kotlin
 api(project(":integration:integration-api"))
+implementation(libs.jserialcomm)   // M9.2, lockstep with plain requires
+implementation(libs.slf4j.api)     // M9.2, lockstep with plain requires
+implementation(libs.jackson.databind) // M9.3, lockstep with plain requires (interior tree-model)
 ```
 
 Changed from `implementation` to `api` because integration-api types appear in this module's public API signatures.
@@ -190,7 +196,7 @@ None in Phase 2.
 
 **GOTCHA: `IEEEAddress` has no range validation.** The handoff specified "non-negative, max 0xFFFFFFFFFFFFFFFFL" which is the entire unsigned 64-bit range. All `long` values are valid IEEE addresses. No constraint to enforce.
 
-**GOTCHA: `DeviceProfile` has 5 nullable collection fields.** clusterOverrides, reportingOverrides, interviewSkips, tuyaDatapoints, initializationWrites are all nullable. Use conditional defensive copy: `field != null ? List.copyOf(field) : null`. `List.copyOf(null)` throws NPE.
+**GOTCHA: `DeviceProfile` has 6 nullable collection fields (was 5; AMD-97 added `confirmation`).** clusterOverrides, reportingOverrides, interviewSkips, tuyaDatapoints, initializationWrites, confirmation are all nullable. Use conditional defensive copy: `field != null ? List.copyOf(field) : null`. `List.copyOf(null)` throws NPE.
 
 **GOTCHA: `ZigbeeDeviceRecord.endpoints` is a nullable List.** Unlike InterviewResult.endpoints (non-null, non-empty), ZigbeeDeviceRecord.endpoints is null when interview is not yet complete. Use conditional defensive copy.
 
@@ -279,6 +285,66 @@ M9.2 delivered the first REAL protocol substrate beneath the M9.1 integration sp
 - **DP-E reservation (D-M92-8, ZERO code):** `NetworkParameterStore` and the formation path are shaped so an exportable coordinator backup (the zigpy/z2m Open-Coordinator-Backup format class) can be added later without reshaping them: key material stays retrievable by reference (`loadNetworkKey`) rather than collapsed into an unexportable in-memory-only form, and `NetworkParameters` + the key ref jointly carry everything the backup format needs. Build nothing for it until the backup/restore WU.
 - **DP-B pointer:** no identity is minted anywhere in M9.2 (`PortIdentity` is a value record, not an entity identity). Device adoption (M9.3) consumes Nick's DP-B ruling on durable integration identity.
 - **M9.3 inheritance:** the charter §3.5 namespace convention + third-party-profile channel bind at M9.3 (`DeviceProfileRegistry` impl); `drainPendingCallbacks()` is the M9.3 ingestion feed; the `integrations.zigbee.adapter_type` config KEY binds at M9.3/M9.4 (M9.2 takes the override as a `TransportProbe.detect` parameter).
+
+---
+
+## M9.3 Implementation — Interview, Reporting Config, Ingestion, Device-Profile Registry (2026-07-04)
+
+M9.3 delivered the pipeline layer on the M9.2 transport: the §1 AMD-97/MatchCriteria freeze (the one-way doors), the Doc 08 §3.4 interview machine + sleepy queue, the §3.7 reporting configurator with the first-class ACK-lies downgrade, the measured-contract ingestion (drain → dedup → handlers → `state_reported`), the Doc 02 §3.12 adoption slice (identity-UNGATED per DP-B), the index-first profile loader/registry with the bundled measured corpus, and the §J fixture-replay acceptance gate. Command dispatch, the confirmation-acceptance engine, adapter factory/composition-root wiring, and `registerIntegrationSchema` are M9.4's.
+
+### M9.3 §1 Freeze Types (PUBLIC — the governance unit)
+
+| Type | Kind | Purpose |
+|---|---|---|
+| `ConfirmationCharacterization` (9) | record | One AMD-97 `confirmation[]` entry: capability, `confirmationMode` (**consumes device-model's `ConfirmationMode`** — the §1.1 STOP-gate found the core type), `authoritativeAttribute` (nullable), `reportsAuthoritative`, `reportingPosture`, `confirmability`, `recommendedTimeoutMs` (≥0), `degradeRule` (Set, copied), `notes` (nullable). Zigbee-scoped javadoc (§K/INV-CE-04) on this and every §1 type. |
+| `ReportsAuthoritative` (3) | enum | VERIFIED_REPORTS, READBACK_ONLY, NONE — with `Confirmability` carries the measured E5-#5 taxonomy split (never-reported vs no-attribute). |
+| `ReportingPosture` (4) | enum | ON_CHANGE, PERIODIC, SLEEPY, NONE. |
+| `Confirmability` (3) | enum | CONFIRMABLE, BEST_EFFORT, UNCONFIRMABLE — the load-bearing honest verdict (AMD-97-INV-01). |
+| `DegradeRule` (4) | enum | NO_REPORT_TIMEOUT_TO_UNCONFIRMED, NACK_TO_FAILED, IMMEDIATE_UNCONFIRMED, CONFIRM_FROM_CACHE_OR_READBACK — composable Set; free text lives in `notes`, never the rule. |
+| `MatchCriteria` | sealed interface | permits ExactModel, ModelWildcard, Fingerprint — SEALED FOREVER; Wave-2 populates fingerprint matching as behavior on an existing permit, never a hierarchy change (DP-2). `matches(String, String)` on the interface; exhaustive switches carry no `default`. |
+| `ExactModel` (2) / `ModelWildcard` (2) | records | Implemented matching (exact / manufacturer-exact + model-prefix). |
+| `Fingerprint` (3) | record | mfr + model + `List<EndpointSignature>` (non-empty). `matches()` throws `UnsupportedOperationException` with the Wave-2 pointer — a DEFINED permit with deferred behavior; registry arms treat it as no-match, never a silent match. |
+| `EndpointSignature` (4) | record | profileId / deviceType / inClusters / outClusters — pinned verbatim from the corpus IR `identity.fingerprint[]`. |
+
+### M9.3 Implementation Types (all package-private)
+
+| Type | Purpose |
+|---|---|
+| `ZigbeeProfileLoader` + `ProfileEntry` + `ProfileSource` + `ProfileLoadException` | §F/§H/§C loader: eager index (id + criteria + priority), LAZY memoized bodies (a malformed body errors on materialization, naming the profile); loader-owned `schemaVersion {major, minor}` — unknown major fail-closed, unknown minor tolerated; duplicate ids per load = error; sources USER/RUNTIME/BUNDLED rank in that order. Jackson tree-model only. |
+| `StandardDeviceProfileRegistry` | The resolution total order: criteria tier → source rank → priority desc → profileId asc. Fingerprint tier reserved (tier 0), contributes no matches until Wave-2. |
+| `StandardValueConverters` | The named converter registry (§D no-eval-in-data): raw, divideBy10, divideBy100, booleanInvert, batteryVoltageToPercent (2.0–3.0 V linear band, chosen constants). Unknown name = load error. |
+| `InterviewStateMachine` + `InterviewOps` (seam) + `InterviewAttempt` | §3.4 sequencer: 10 s/step + 60 s/whole (Clock-derived); one call = ONE attempt; EP-selection = first application endpoint in wire order (EP 242/GP profile skipped, never queried); Basic failure ⇒ PARTIAL with empty identity strings. `InterviewOps` returns Optional (empty = step failed) — no checked seams. |
+| `PendingInterviewQueue` | Clock-scheduled retry ladder (5/15/30 s), park-after-3-retries, resume-on-ANY-frame (also short-circuits backoff), 24 h expiry (`zigbee.interview_expired` WARN), re-announce resets the ladder. NO sleeping anywhere. |
+| `ZdoCodec` / `ZclCodec` / `EzspIncomingMessage` | Pure codecs: ZDP requests/responses (Node_Desc/Active_EP/Simple_Desc/Device_annce), ZCL header + Report/ReadResponse attribute records + ReadAttributes encoding, and the 0x0045 callback layout. Total: malformed input → empty/partial, never an exception. |
+| `ZigbeeClusterHandler` (base) + `OnOffHandler`/`LevelControlHandler`/`ColorControlHandler`/`OccupancySensingHandler`/`PowerConfigurationHandler`/`IasZoneHandler` + `ClusterHandlers` (factory) + `NormalizedAttribute` | Doc 08 §3.5 normalization to the IN-TREE capability vocabulary (`on`, `brightness`, `color_temp_kelvin`, `occupied`, `battery_pct`, `detected`/`open`). Handlers bind per device (IEEE + Clock) so the frozen `ClusterHandler` surface can fill entityRef/eventTime; ingestion calls the richer package-private `normalize(...)` (raw retained — the M7.4b pattern). `buildCommand` throws until M9.4. |
+| `ReportDeduplicator` | The measured contract: duplicate iff payload-equal AND TSN same-or-successor (mod 256), per (device, endpoint, cluster), cleared on announce. |
+| `ZclIngestionUnit` (+ nested `DeviceResolver`/`IngestionListener` seams) | drain → route (announce/ZCL) → dedup → dispatch → `state_reported` publishRoot. Unknown cluster/sender/unadopted endpoint = logged skip. Origin: PHYSICAL (state), DEVICE_AUTONOMOUS (battery). eventTime = injected-Clock frame-receive approximation. |
+| `ZigbeeAdoptionSlice` | Doc 02 §3.12 detection→proposal→adoption inside the adapter; dedup via `DeviceRegistry.findByHardwareIdentifier("zigbee", ieeeHex)` (constructor-injected — NOT an IntegrationContext component; M9.4 wiring decides the instance); IEEE match ⇒ re-link + `availability_changed`, NO adoption event; `adopt()` mints ULIDs (identity-ungated), registers Device/Entities/capabilities, publishes `device_adopted`; `entityFor(ieee, endpoint)` is the ingestion link. Blank identity → `"unknown"` sentinel (the frozen `DeviceDiscoveredEvent` rejects blanks). |
+| `EndpointClassifier` | §3.5 deviceType table + cluster fallback → (EntityType, StandardCapabilities instances). Occupancy outranks IAS when both present (the measured dual-path rule). |
+| `ReportingConfigurator` + `ReportingOps` (seam) + `ReportingPostureFact` | §3.7 bind→configure→VERIFY read-back; posture matrix: match ⇒ VERIFIED_REPORTS (ON_CHANGE / PERIODIC by min-interval); ACK-lies ⇒ posture from the READ-BACK (reporting-off ⇒ READBACK_ONLY/NONE); UNSUPPORTED ⇒ NONE/NONE; UNREPORTABLE ⇒ READBACK_ONLY/NONE; sleepy TIMEOUT ⇒ VERIFIED_REPORTS/SLEEPY; Xiaomi skip ⇒ no commands, VERIFIED_REPORTS/PERIODIC. IAS CIE write ATTEMPTED + recorded, never a gate. Facts feed the M9.4 confirmability consumption. |
+| `ZigbeeDeviceCache` | §3.14 cache + NWK→IEEE index + the `lastKnownAvailability` FILE sidecar (the frozen record carries no availability component); 30 s debounced writes + shutdown flush; corrupt file ⇒ empty cache + WARN. |
+| `StandardAvailabilityTracker` | Implements the frozen `AvailabilityTracker` + `evaluateTimeouts()`: battery 25 h passive offline; mains 10 min ⇒ PING CANDIDATES only (active ping is M9.4); M-1 restart-init from persisted state with ZERO transitions at init. |
+
+### M9.3 Gotchas
+
+- **Dedup payload scope:** dedup compares the ZCL COMMAND PAYLOAD (attribute records after the header), never the whole frame — the measured twins differ in their header TSN byte, so whole-frame equality never fires.
+- **EP-11 selection:** Basic reads target the FIRST APPLICATION endpoint in Active-EP wire order (the Hue light lives on EP 11); EP 242 is skipped by ENDPOINT ID before its descriptor is ever requested, and GP-profile endpoints are dropped after fetch as defense.
+- **ACK-lies downgrade:** posture derives from what the device DOES (the read-back), never what it ACKed; read-back `maxInterval 0xFFFF` = reporting off ⇒ READBACK_ONLY/NONE.
+- **Fixture-clock discipline:** replay tests `setFixed(...)` the TestClock to each fixture frame's timestamp BEFORE feeding the frame — `eventTime` then equals the capture wall-clock deterministically; fixture time never leaks into production paths as `now()`.
+- **`QuantityValue` normalizes in its compact constructor** (unit catalogue → canonical): `new QuantityValue(126, "K")` becomes −147.15 °C — color-temp Kelvin is an `IntValue`, never a `QuantityValue("K")` (bit the WithinTolerance test).
+- **`InterviewStatus` has NO FAILED constant** (COMPLETE/PARTIAL/PENDING): hard failure surfaces as PARTIAL-with-gathered-data after retries, or an endpointless attempt that has NO constructible `InterviewResult` — the frozen surface's `interview()` throws `IllegalStateException` for that case (the `resumeNetwork()` ISE precedent); the internal pipeline uses `InterviewAttempt` and never hits it.
+- **The frozen `DeviceDiscoveredEvent` is 4 fields** (integrationId, protocolAddress, manufacturer, model — non-blank): the Doc 08 §4.4 richer sketch (endpoints, interview_status, matched_profile_id) never landed in event-model; PARTIAL identity publishes the `"unknown"` sentinel.
+- **TWO handler seams, by design (hub P2 note, 2026-07-04):** the frozen PUBLIC Phase-2 `ClusterHandler` (handleAttributeReport + `buildCommand`) is the **M9.4 command-path seam** — implementor-less today, NOT dead; the package-private `ZigbeeClusterHandler` base is the **ingestion-side richer internal** (device+clock-bound, typed `state_reported`-ready output — the M7.4b richer-internal pattern, because the frozen DTO drops slots ingestion needs). M9.4 implements `buildCommand` against `ClusterHandler`; do NOT duplicate ingestion normalization onto those impls, and never retire the public interface silently (PD-1 precedent — retirement is a Doc 08 AMD).
+
+### M9.3 Phase-3 Notes (what M9.4 inherits)
+
+- **The adoption entry point is callable:** `ZigbeeAdoptionSlice.adopt(IEEEAddress)` — M9.4's API/composition-root wires the user-acceptance path; `DeviceRegistry` arrives constructor-injected (the AB-3 in-memory substrate at the composition root).
+- **The config schema resource awaits registration:** `src/main/resources/schema/zigbee-config-schema.json` ships now; the `SchemaRegistry.registerIntegrationSchema("zigbee", <json>)` call site + the `integrations.zigbee.profiles_path` key binding land with the adapter factory (W10).
+- **Posture facts feed confirmation acceptance:** `ReportingPostureFact` rows are the measured per-device inputs to the AMD-97 `confirmability` consumption in the M9.4 engine; re-recorded on every rejoin (and OTA re-interview re-characterizes — the Q10 STYRBAR class).
+- **`ReportingOps` needs its EZSP binding:** bind (ZDO 0x0021), ConfigureReporting/ReadReportingConfiguration (ZCL 0x06/0x08), and the IAS CIE write ride the M9.4 ZCL write path (`sendZclFrame`); M9.3 proved the configurator logic against fakes.
+- **Interview wire pins bench-verified at M9.4:** `sendUnicast 0x0034` / `incomingMessageHandler 0x0045` / `lookupNodeIdByEui64 0x0060` re-derived from bellows (v4 lineage inherited through v13); the v13 `lookupNodeIdByEui64` reply is a bare nodeId (no status) — the v14 dialect of that reply is a bench-verify item.
+- **The cycle contract (§G):** the M9.4 adapter run-loop calls `ZclIngestionUnit.processCycle()` FIRST each pass (drain before live NCP), then queue-driven interviews (`PendingInterviewQueue.due()`/`expireStale()`), then `ZigbeeDeviceCache.maybeFlush()`; the protocol's callback queue is bounded at 1024 with drop-oldest + WARN + `droppedCallbacks()`.
+- **`interview()` is single-attempt:** Doc 08's 3-retry/backoff ladder lives in the QUEUE as clock-scheduled eligibility, not inside the frozen surface — no thread ever sleeps through a backoff.
 
 ---
 

@@ -1,0 +1,121 @@
+{
+  "schemaVersion": {"major": 1, "minor": 0},
+  "provenance": {
+    "source": "BENCH_CAPTURE",
+    "corpus": [
+      "nexsys-bench/corpus/devices/philips-hue-white-a19.md",
+      "nexsys-bench/corpus/devices/sonoff-snzb-03p-motion.md"
+    ],
+    "benchCommit": "5ceff3b",
+    "capturedAt": "2026-07-01",
+    "note": "Pointer, not copy: the bench corpus is the source of truth for these measured values; this bundled file cites it. Corpus updates flow through the data channel (bundled resource + user override file), never coupled to a core release (Doc 18 seam 6)."
+  },
+  "profiles": [
+    {
+      "profileId": "philips_hue_white_color_a19",
+      "matches": [
+        {
+          "type": "exact_model",
+          "manufacturer": "Signify Netherlands B.V.",
+          "model": "LCA017"
+        },
+        {
+          "type": "fingerprint",
+          "manufacturer": "Signify Netherlands B.V.",
+          "model": "LCA017",
+          "endpoints": [
+            {
+              "profileId": "0x0104",
+              "deviceType": "0x010D",
+              "inClusters": ["0x0000", "0x0003", "0x0004", "0x0005", "0x0006", "0x0008", "0x0300", "0x1000", "0xFC01", "0xFC04"],
+              "outClusters": ["0x0019"]
+            }
+          ]
+        }
+      ],
+      "category": "STANDARD_ZCL",
+      "confirmation": [
+        {
+          "capability": "on_off",
+          "confirmationMode": "EXACT_MATCH",
+          "authoritativeAttribute": "OnOff/0x0000",
+          "reportsAuthoritative": "VERIFIED_REPORTS",
+          "reportingPosture": "ON_CHANGE",
+          "confirmability": "CONFIRMABLE",
+          "recommendedTimeoutMs": 5000,
+          "degradeRule": ["NO_REPORT_TIMEOUT_TO_UNCONFIRMED", "NACK_TO_FAILED", "CONFIRM_FROM_CACHE_OR_READBACK"],
+          "notes": "measured latency 293-701 ms; no-change commands produce no report"
+        },
+        {
+          "capability": "brightness",
+          "confirmationMode": "TOLERANCE",
+          "authoritativeAttribute": "LevelControl/0x0000",
+          "reportsAuthoritative": "VERIFIED_REPORTS",
+          "reportingPosture": "ON_CHANGE",
+          "confirmability": "CONFIRMABLE",
+          "recommendedTimeoutMs": 5000,
+          "degradeRule": ["NO_REPORT_TIMEOUT_TO_UNCONFIRMED", "NACK_TO_FAILED", "CONFIRM_FROM_CACHE_OR_READBACK"],
+          "notes": "measured latency 353-686 ms; fade transients precede the settled value"
+        },
+        {
+          "capability": "color_temperature",
+          "confirmationMode": "TOLERANCE",
+          "authoritativeAttribute": "ColorControl/0x0007",
+          "reportsAuthoritative": "VERIFIED_REPORTS",
+          "reportingPosture": "ON_CHANGE",
+          "confirmability": "CONFIRMABLE",
+          "recommendedTimeoutMs": 15000,
+          "degradeRule": ["NO_REPORT_TIMEOUT_TO_UNCONFIRMED", "NACK_TO_FAILED", "CONFIRM_FROM_CACHE_OR_READBACK"],
+          "notes": "batched reports at ~10 s min-interval; timeout must exceed the Color cluster report min-interval; drift ±1 mired"
+        },
+        {
+          "capability": "effect",
+          "confirmationMode": "DISABLED",
+          "authoritativeAttribute": "ColorControl/0x4002",
+          "reportsAuthoritative": "READBACK_ONLY",
+          "reportingPosture": "NONE",
+          "confirmability": "UNCONFIRMABLE",
+          "recommendedTimeoutMs": 0,
+          "degradeRule": ["IMMEDIATE_UNCONFIRMED"],
+          "notes": "color_loop_set ACKs SUCCESS then never reports effect state; 0x4002 readable on demand (readback demonstrated)"
+        },
+        {
+          "capability": "identify",
+          "confirmationMode": "DISABLED",
+          "authoritativeAttribute": null,
+          "reportsAuthoritative": "NONE",
+          "reportingPosture": "NONE",
+          "confirmability": "UNCONFIRMABLE",
+          "recommendedTimeoutMs": 0,
+          "degradeRule": ["IMMEDIATE_UNCONFIRMED"],
+          "notes": "DefaultResponse SUCCESS +90 ms, then no report, ever"
+        }
+      ]
+    },
+    {
+      "profileId": "sonoff_snzb_03p",
+      "matches": [
+        {
+          "type": "exact_model",
+          "manufacturer": "eWeLink",
+          "model": "SNZB-03P"
+        },
+        {
+          "type": "fingerprint",
+          "manufacturer": "eWeLink",
+          "model": "SNZB-03P",
+          "endpoints": [
+            {
+              "profileId": "0x0104",
+              "deviceType": "0x0107",
+              "inClusters": ["0x0000", "0x0001", "0x0003", "0x0020", "0x0406", "0x0500", "0xFC57"],
+              "outClusters": ["0x0003", "0x0019"]
+            }
+          ]
+        }
+      ],
+      "category": "STANDARD_ZCL",
+      "confirmation": []
+    }
+  ]
+}

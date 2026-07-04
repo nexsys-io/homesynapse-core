@@ -21,12 +21,24 @@ import java.util.Set;
  * minor quirks (reporting/range overrides), mixed standard/custom (manufacturer codec
  * for some clusters), or fully custom (proprietary protocol like Tuya 0xEF00).
  *
- * <p>Doc 08 §3.6, §4.3.
+ * <p><strong>Namespace convention on {@code profileId} (Doc 18 §3.5(a)/(b),
+ * Locked):</strong> a bare id (e.g. {@code "ikea_tradfri_bulb"}) is FIRST-PARTY —
+ * the bare namespace is reserved to first party. A dotted
+ * {@code publisher.profile} id (e.g. {@code "acme.energy-meter"}) is third-party,
+ * publisher-scoped, and immutable by convention. Distinct namespaces never merge;
+ * a third-party id can never silently shadow a first-party id.
+ *
+ * <p><strong>Zigbee-scoped (INV-CE-04):</strong> this record's vocabulary (clusters,
+ * endpoints, ZCL data types) is deliberately protocol-specific; it is NOT the
+ * generic profile contract. A future cross-protocol profile model is a separate
+ * design decision (Doc 18 §3.5(d) seam note).
+ *
+ * <p>Doc 08 §3.6 (as amended by AMD-97), §4.3.
  *
  * <p>Thread-safe: immutable record with defensively copied collections.
  *
- * @param profileId unique profile identifier (e.g., {@code "ikea_tradfri_bulb"}), never {@code null}
- * @param matches the set of manufacturer/model pairs this profile applies to, never {@code null}, never empty
+ * @param profileId unique profile identifier (e.g., {@code "ikea_tradfri_bulb"}), never {@code null}; namespaced per Doc 18 §3.5(b) — see the class note
+ * @param matches the set of match criteria this profile applies to, never {@code null}, never empty; precedence across criteria kinds is the registry's (Doc 18 §3.5(d))
  * @param category the device handling category, never {@code null}
  * @param clusterOverrides per-cluster behavioral adjustments keyed by cluster ID; {@code null} if no overrides
  * @param reportingOverrides per-cluster reporting configuration overrides keyed by cluster ID; {@code null} if no overrides
@@ -34,9 +46,11 @@ import java.util.Set;
  * @param interviewSkips set of interview steps to skip (e.g., {@code "configure_reporting"} for Xiaomi); {@code null} if all steps execute
  * @param tuyaDatapoints Tuya DP-to-capability mappings; {@code null} unless the device uses cluster 0xEF00
  * @param initializationWrites ZCL attribute writes executed after device adoption; {@code null} if no post-adoption writes needed
+ * @param confirmation the AMD-97 per-capability confirmation characterization block; {@code null} or empty for read-only devices (the measured SNZB-03P carries an EMPTY block)
  * @see DeviceCategory
  * @see DeviceProfileRegistry
- * @see ManufacturerModelPair
+ * @see MatchCriteria
+ * @see ConfirmationCharacterization
  * @see ClusterOverride
  * @see ReportingOverride
  * @see TuyaDatapointMapping
@@ -44,14 +58,15 @@ import java.util.Set;
  */
 public record DeviceProfile(
         String profileId,
-        Set<ManufacturerModelPair> matches,
+        Set<MatchCriteria> matches,
         DeviceCategory category,
         Map<Integer, ClusterOverride> clusterOverrides,
         Map<Integer, ReportingOverride> reportingOverrides,
         String manufacturerCodec,
         Set<String> interviewSkips,
         List<TuyaDatapointMapping> tuyaDatapoints,
-        List<InitializationWrite> initializationWrites) {
+        List<InitializationWrite> initializationWrites,
+        List<ConfirmationCharacterization> confirmation) {
 
     /**
      * Creates a device profile with validation and defensive copies.
@@ -65,6 +80,7 @@ public record DeviceProfile(
      * @param interviewSkips {@code null} if all interview steps execute
      * @param tuyaDatapoints {@code null} unless device uses cluster 0xEF00
      * @param initializationWrites {@code null} if no post-adoption writes
+     * @param confirmation {@code null} or empty for read-only devices
      */
     public DeviceProfile {
         Objects.requireNonNull(profileId, "profileId must not be null");
@@ -79,5 +95,6 @@ public record DeviceProfile(
         interviewSkips = interviewSkips != null ? Set.copyOf(interviewSkips) : null;
         tuyaDatapoints = tuyaDatapoints != null ? List.copyOf(tuyaDatapoints) : null;
         initializationWrites = initializationWrites != null ? List.copyOf(initializationWrites) : null;
+        confirmation = confirmation != null ? List.copyOf(confirmation) : null;
     }
 }

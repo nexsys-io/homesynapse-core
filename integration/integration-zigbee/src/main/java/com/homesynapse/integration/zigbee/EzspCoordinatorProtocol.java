@@ -22,6 +22,8 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.IntFunction;
+import java.util.function.Predicate;
 
 /**
  * EZSP implementation of {@link CoordinatorProtocol} (D-M92-6): version negotiation
@@ -46,10 +48,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * negotiates v15+). The version truth is the negotiation response at stack init,
  * never an external registry (AMD-96/E6).
  *
- * <p><strong>D-M92-6 scope:</strong> {@code formNetwork}/{@code resumeNetwork}/
- * {@code permitJoin}/{@code ping} are implemented; {@code interview} (M9.3),
- * {@code sendZclFrame} (M9.4), and {@code topologyScan} (post-M9.4 §3.11 unit) are
- * stubbed with {@link UnsupportedOperationException} naming the completing milestone.
+ * <p><strong>Scope (D-M92-6, updated M9.3):</strong> {@code formNetwork}/
+ * {@code resumeNetwork}/{@code permitJoin}/{@code ping} (M9.2) and
+ * {@code interview} (M9.3 — one attempt per call; retry/sleepy orchestration is
+ * {@link PendingInterviewQueue}'s) are implemented; {@code sendZclFrame} (M9.4)
+ * and {@code topologyScan} (post-M9.4 §3.11 unit) remain stubbed with
+ * {@link UnsupportedOperationException} naming the completing milestone.
  *
  * <p>Thread-safe ({@link ReentrantLock} only, LTD-11): callers are virtual threads;
  * the lock also guards the NOT-thread-safe transport underneath. The watchdog
@@ -91,6 +95,32 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     static final int FRAME_GET_NETWORK_PARAMETERS = 0x0028;
     static final int FRAME_ENERGY_SCAN_RESULT_HANDLER = 0x0048;
     static final int FRAME_SET_INITIAL_SECURITY_STATE = 0x0068;
+    // M9.3 interview frames (bellows commands.py, v4 lineage inherited by v13;
+    // re-derived 2026-07-03 per the double-derivation discipline).
+    static final int FRAME_SEND_UNICAST = 0x0034;
+    static final int FRAME_INCOMING_MESSAGE_HANDLER = 0x0045;
+    static final int FRAME_LOOKUP_NODE_ID_BY_EUI64 = 0x0060;
+
+    /** The ZDO/ZDP profile id (endpoint 0). */
+    static final int ZDO_PROFILE_ID = 0x0000;
+    /** The Home Automation profile id. */
+    static final int HA_PROFILE_ID = 0x0104;
+    /**
+     * EmberApsOption RETRY (0x0040) | ENABLE_ROUTE_DISCOVERY (0x0100) — the
+     * bellows unicast baseline for reliable interview exchanges.
+     */
+    static final int APS_OPTIONS_RETRY_ROUTE_DISCOVERY = 0x0140;
+    /** EmberNodeId broadcast/unknown sentinel from lookupNodeIdByEui64. */
+    static final int NODE_ID_UNKNOWN = 0xFFFF;
+    /** Basic-cluster identity attributes read at interview step 5 (Doc 08 §3.4). */
+    static final int[] BASIC_IDENTITY_ATTRIBUTES = {0x0004, 0x0005, 0x0007, 0x4000};
+    /**
+     * The pending-callback bound (§G): the deque is drained by the ingestion
+     * cycle; a chatty network between drains must never grow it unbounded.
+     * Overflow drops the OLDEST frame with a WARN and a running count — newest
+     * state observations are the ones worth keeping.
+     */
+    static final int MAX_PENDING_CALLBACKS = 1024;
 
     /** EmberNetworkStatus JOINED_NETWORK (1 byte on every version — not widened). */
     static final int EMBER_NETWORK_STATUS_JOINED = 0x02;
@@ -140,8 +170,10 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     private EzspCodec codec;
     private int negotiatedVersion = -1;
     private int sequence;
+    private int zdoSequence;
     private Instant lastActivity;
     private int keepaliveMisses;
+    private long droppedCallbacks;
 
     /**
      * Creates the protocol facade. Performs no I/O (INV-RF-03).
@@ -319,7 +351,9 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
 
     /**
      * Drains callbacks received while pumping command responses — the M9.3 ingestion
-     * layer consumes these.
+     * layer consumes these BEFORE live NCP interaction each cycle (§G
+     * bound-and-drain; the queue itself is bounded at
+     * {@value #MAX_PENDING_CALLBACKS} with a drop-oldest overflow policy).
      *
      * @return the callbacks in arrival order
      */
@@ -332,6 +366,33 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
         } finally {
             lock.unlock();
         }
+    }
+
+    /** Returns the count of callbacks dropped at the queue bound (§G). */
+    long droppedCallbacks() {
+        lock.lock();
+        try {
+            return droppedCallbacks;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Enqueues a callback under the {@value #MAX_PENDING_CALLBACKS} bound,
+     * dropping the oldest on overflow (WARN + running count) — the §G policy:
+     * an un-drained deque on a chatty network must degrade loudly, never grow
+     * into a slow memory leak. Callers hold the pipeline lock.
+     */
+    private void enqueueCallbackLocked(EzspFrame frame) {
+        if (pendingCallbacks.size() >= MAX_PENDING_CALLBACKS) {
+            pendingCallbacks.pollFirst();
+            droppedCallbacks++;
+            log.warn("zigbee.callback_queue_overflow: pending callbacks at the {} "
+                            + "bound; oldest dropped (total dropped: {})",
+                    MAX_PENDING_CALLBACKS, droppedCallbacks);
+        }
+        pendingCallbacks.addLast(frame);
     }
 
     @Override
@@ -419,11 +480,31 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
                         + "layer does not implement it");
     }
 
+    /**
+     * Runs ONE interview attempt (Doc 08 §3.4 steps 2–5) through the ZDO/ZCL
+     * binding of the {@link InterviewOps} seam. The 3-retry/backoff ladder and
+     * the sleepy park/resume machine live in {@link PendingInterviewQueue} —
+     * driven by the ingestion cycle, never by sleeping here.
+     *
+     * <p>Failure reporting follows the frozen no-throws surface's precedent
+     * ({@code resumeNetwork()}): a result that IS constructible reports failure
+     * through {@link InterviewResult#interviewStatus()} (PARTIAL); an attempt
+     * that gathered no endpoints has no constructible result (the record pins a
+     * non-empty endpoint list) and surfaces as an unchecked
+     * {@link IllegalStateException}. Never a new checked throw on the frozen
+     * surface (the M9.2 seam map).
+     */
     @Override
     public InterviewResult interview(IEEEAddress device) {
-        throw new UnsupportedOperationException(
-                "device interview is delivered in M9.3; the M9.2 transport/EZSP "
-                        + "layer does not implement it");
+        Objects.requireNonNull(device, "device");
+        int networkAddress = lookupNetworkAddress(device);
+        InterviewAttempt attempt =
+                new InterviewStateMachine(new EzspInterviewOps(), clock)
+                        .attempt(device, networkAddress);
+        return attempt.toInterviewResult().orElseThrow(() -> new IllegalStateException(
+                "Interview for device " + device + " gathered no endpoint metadata"
+                        + " (failed step: " + attempt.failedStep() + "); retry and"
+                        + " sleepy resume are the pending-interview queue's"));
     }
 
     @Override
@@ -506,7 +587,7 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
             }
             EzspFrame received = inbound.get().frame();
             if (received.isCallback()) {
-                pendingCallbacks.add(received);
+                enqueueCallbackLocked(received);
                 continue;
             }
             if (inbound.get().sequence() != seq) {
@@ -592,6 +673,252 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
         return status == EMBER_STATUS_NOT_JOINED;
     }
 
+    // ── M9.3 interview binding (ZDO/ZCL over sendUnicast) ──────────────────
+
+    /**
+     * Resolves an IEEE address to its current 16-bit network address via
+     * {@code lookupNodeIdByEui64} (0x0060). The v13 reply is a bare
+     * {@code EmberNodeId} (the bellows v4-lineage shape, no leading status);
+     * the v14 dialect of this reply is bench-verified at M9.4.
+     */
+    private int lookupNetworkAddress(IEEEAddress device) {
+        lock.lock();
+        try {
+            requireNegotiated();
+            byte[] eui64 = new byte[8];
+            long value = device.value();
+            for (int i = 0; i < 8; i++) {
+                eui64[i] = (byte) (value >> (8 * i));
+            }
+            EzspFrame response = executeLocked(FRAME_LOOKUP_NODE_ID_BY_EUI64,
+                    eui64, DEFAULT_COMMAND_TIMEOUT_MILLIS);
+            byte[] parameters = response.parameters();
+            if (parameters.length < 2) {
+                throw new EzspFormatException(
+                        "lookupNodeIdByEui64 response too short: "
+                                + parameters.length + " bytes, expected 2");
+            }
+            int nodeId = (parameters[0] & 0xFF) | ((parameters[1] & 0xFF) << 8);
+            if (nodeId == NODE_ID_UNKNOWN) {
+                throw new IllegalStateException("Device " + device
+                        + " is not in the coordinator address table; interview "
+                        + "requires a joined device");
+            }
+            return nodeId;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Sends one APS unicast under the pipeline lock.
+     *
+     * @return {@code true} if the NCP accepted the frame for transmission
+     */
+    private boolean sendUnicastLocked(int networkAddress, int profileId,
+            int clusterId, int sourceEndpoint, int destinationEndpoint,
+            int apsSequence, byte[] message) {
+        byte[] parameters = new byte[16 + message.length];
+        parameters[0] = 0x00; // EMBER_OUTGOING_DIRECT
+        parameters[1] = (byte) (networkAddress & 0xFF);
+        parameters[2] = (byte) ((networkAddress >> 8) & 0xFF);
+        parameters[3] = (byte) (profileId & 0xFF);
+        parameters[4] = (byte) ((profileId >> 8) & 0xFF);
+        parameters[5] = (byte) (clusterId & 0xFF);
+        parameters[6] = (byte) ((clusterId >> 8) & 0xFF);
+        parameters[7] = (byte) sourceEndpoint;
+        parameters[8] = (byte) destinationEndpoint;
+        parameters[9] = (byte) (APS_OPTIONS_RETRY_ROUTE_DISCOVERY & 0xFF);
+        parameters[10] = (byte) ((APS_OPTIONS_RETRY_ROUTE_DISCOVERY >> 8) & 0xFF);
+        parameters[11] = 0; // groupId LE low
+        parameters[12] = 0; // groupId LE high
+        parameters[13] = (byte) apsSequence;
+        parameters[14] = (byte) apsSequence; // messageTag: mirrors the sequence
+        parameters[15] = (byte) message.length;
+        System.arraycopy(message, 0, parameters, 16, message.length);
+        EzspFrame response = executeLocked(FRAME_SEND_UNICAST, parameters,
+                DEFAULT_COMMAND_TIMEOUT_MILLIS);
+        int status = codec.decodeStatus(response.parameters(), 0);
+        if (status != 0) {
+            log.warn("zigbee.aps_unicast_rejected: cluster=0x{} nwk=0x{} "
+                            + "status=0x{}", Integer.toHexString(clusterId),
+                    Integer.toHexString(networkAddress),
+                    Integer.toHexString(status));
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Pumps inbound frames under the pipeline lock until a matching
+     * {@code incomingMessageHandler} arrives or the deadline passes. Every
+     * non-matching callback is preserved for the ingestion drain.
+     */
+    private Optional<byte[]> awaitIncomingLocked(int profileId, int clusterId,
+            Predicate<byte[]> messageMatcher, Instant deadline) {
+        while (true) {
+            long remaining = Duration.between(clock.instant(), deadline).toMillis();
+            if (remaining <= 0) {
+                return Optional.empty();
+            }
+            Optional<EzspAshTransport.Inbound> inbound =
+                    transport.receiveDecoded(remaining);
+            if (inbound.isEmpty()) {
+                continue;
+            }
+            EzspFrame frame = inbound.get().frame();
+            if (!frame.isCallback()) {
+                log.warn("zigbee.ezsp_stale_response: non-callback frame 0x{} "
+                                + "while awaiting an incoming message; discarded",
+                        Integer.toHexString(frame.frameId()));
+                continue;
+            }
+            if (frame.frameId() == FRAME_INCOMING_MESSAGE_HANDLER) {
+                Optional<EzspIncomingMessage> message =
+                        EzspIncomingMessage.parse(frame.parameters());
+                if (message.isPresent()
+                        && message.get().profileId() == profileId
+                        && message.get().clusterId() == clusterId
+                        && messageMatcher.test(message.get().message())) {
+                    lastActivity = clock.instant();
+                    return Optional.of(message.get().message());
+                }
+            }
+            enqueueCallbackLocked(frame);
+        }
+    }
+
+    private int nextZdoSequenceLocked() {
+        zdoSequence = (zdoSequence + 1) & 0xFF;
+        return zdoSequence;
+    }
+
+    /**
+     * The {@link InterviewOps} binding over the EZSP pipeline (Doc 08 §3.4
+     * steps 2–5). Each step is one lock-scoped ZDO/ZCL exchange: the lock is
+     * released between steps so a 60 s interview never starves other callers.
+     * A step timeout or NCP rejection is an empty result — the retry policy is
+     * the queue's, and no checked exception crosses the seam.
+     */
+    private final class EzspInterviewOps implements InterviewOps {
+
+        /** Binds the ops seam to the enclosing protocol's pipeline. */
+        private EzspInterviewOps() {
+        }
+
+        @Override
+        public Optional<NodeDescriptor> nodeDescriptor(int networkAddress,
+                long timeoutMillis) {
+            return zdoExchange(networkAddress, ZdoCodec.CLUSTER_NODE_DESC_REQ,
+                    ZdoCodec.CLUSTER_NODE_DESC_RSP,
+                    tsn -> ZdoCodec.encodeAddressRequest(tsn, networkAddress),
+                    timeoutMillis)
+                    .flatMap(ZdoCodec::parseNodeDescriptorResponse);
+        }
+
+        @Override
+        public Optional<List<Integer>> activeEndpoints(int networkAddress,
+                long timeoutMillis) {
+            return zdoExchange(networkAddress, ZdoCodec.CLUSTER_ACTIVE_EP_REQ,
+                    ZdoCodec.CLUSTER_ACTIVE_EP_RSP,
+                    tsn -> ZdoCodec.encodeAddressRequest(tsn, networkAddress),
+                    timeoutMillis)
+                    .flatMap(ZdoCodec::parseActiveEndpointsResponse);
+        }
+
+        @Override
+        public Optional<EndpointDescriptor> simpleDescriptor(int networkAddress,
+                int endpoint, long timeoutMillis) {
+            return zdoExchange(networkAddress, ZdoCodec.CLUSTER_SIMPLE_DESC_REQ,
+                    ZdoCodec.CLUSTER_SIMPLE_DESC_RSP,
+                    tsn -> ZdoCodec.encodeSimpleDescriptorRequest(tsn,
+                            networkAddress, endpoint),
+                    timeoutMillis)
+                    .flatMap(ZdoCodec::parseSimpleDescriptorResponse);
+        }
+
+        @Override
+        public Optional<BasicInfo> readBasic(int networkAddress, int endpoint,
+                long timeoutMillis) {
+            lock.lock();
+            try {
+                requireNegotiated();
+                Instant deadline = clock.instant().plusMillis(timeoutMillis);
+                int tsn = nextZdoSequenceLocked();
+                byte[] zcl = ZclCodec.encodeReadAttributes(tsn,
+                        BASIC_IDENTITY_ATTRIBUTES);
+                if (!sendUnicastLocked(networkAddress, HA_PROFILE_ID, 0x0000, 1,
+                        endpoint, tsn, zcl)) {
+                    return Optional.empty();
+                }
+                return awaitIncomingLocked(HA_PROFILE_ID, 0x0000, message -> {
+                    Optional<ZclCodec.ZclHeader> header =
+                            ZclCodec.parseHeader(message);
+                    return header.isPresent()
+                            && !header.get().clusterSpecific()
+                            && header.get().commandId()
+                                    == ZclCodec.COMMAND_READ_ATTRIBUTES_RESPONSE
+                            && header.get().transactionSequence() == tsn;
+                }, deadline).flatMap(EzspInterviewOps::toBasicInfo);
+            } catch (EzspCommandTimeoutException e) {
+                log.warn("zigbee.interview_step_timeout: Basic read nwk=0x{} "
+                                + "endpoint={}: {}",
+                        Integer.toHexString(networkAddress), endpoint,
+                        e.getMessage());
+                return Optional.empty();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private Optional<byte[]> zdoExchange(int networkAddress, int requestCluster,
+                int responseCluster, IntFunction<byte[]> requestForTsn,
+                long timeoutMillis) {
+            lock.lock();
+            try {
+                requireNegotiated();
+                Instant deadline = clock.instant().plusMillis(timeoutMillis);
+                int tsn = nextZdoSequenceLocked();
+                byte[] request = requestForTsn.apply(tsn);
+                if (!sendUnicastLocked(networkAddress, ZDO_PROFILE_ID,
+                        requestCluster, 0, 0, tsn, request)) {
+                    return Optional.empty();
+                }
+                return awaitIncomingLocked(ZDO_PROFILE_ID, responseCluster,
+                        message -> message.length > 0
+                                && (message[0] & 0xFF) == tsn,
+                        deadline);
+            } catch (EzspCommandTimeoutException e) {
+                log.warn("zigbee.interview_step_timeout: ZDO cluster=0x{} "
+                                + "nwk=0x{}: {}",
+                        Integer.toHexString(requestCluster),
+                        Integer.toHexString(networkAddress), e.getMessage());
+                return Optional.empty();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private static Optional<BasicInfo> toBasicInfo(byte[] message) {
+            Optional<ZclCodec.ZclHeader> header = ZclCodec.parseHeader(message);
+            if (header.isEmpty()) {
+                return Optional.empty();
+            }
+            Map<Integer, Object> attributes = ZclCodec.parseReadAttributesResponse(
+                    message, header.get().payloadOffset());
+            if (!(attributes.get(0x0004) instanceof String manufacturer)
+                    || !(attributes.get(0x0005) instanceof String model)) {
+                return Optional.empty();
+            }
+            int powerSource = attributes.get(0x0007) instanceof Long power
+                    ? power.intValue() : 0;
+            String swBuildId = attributes.get(0x4000) instanceof String sw
+                    ? sw : null;
+            return Optional.of(new BasicInfo(manufacturer, model, powerSource,
+                    swBuildId));
+        }
+    }
+
     /**
      * The {@link NetworkFormation.CoordinatorOps} binding over the EZSP pipeline.
      * All methods run under the pipeline lock (reentrant) via formation's callers.
@@ -653,7 +980,7 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
                     lastActivity = clock.instant();
                     return energyByChannel;
                 }
-                pendingCallbacks.add(frame); // unrelated callback: kept for M9.3
+                enqueueCallbackLocked(frame); // unrelated callback: kept for ingestion
             }
         }
 

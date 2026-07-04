@@ -540,13 +540,12 @@ class EzspProtocolTest {
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("D-M92-6 stubs name their completing milestone")
+    @DisplayName("D-M92-6 stubs name their completing milestone (interview landed at M9.3)")
     void stubs_nameCompletingMilestone() {
         connect(13);
 
-        assertThatThrownBy(() -> protocol.interview(new IEEEAddress(1L)))
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessageContaining("M9.3");
+        // interview(IEEEAddress) is IMPLEMENTED as of M9.3 (EzspInterviewTest
+        // covers it); the remaining stubs still name their milestone.
         assertThatThrownBy(() -> protocol.sendZclFrame(
                 new ZclFrame(1, 1, 0x0006, 0x01, true, 0, new byte[0]),
                 new IEEEAddress(1L)))

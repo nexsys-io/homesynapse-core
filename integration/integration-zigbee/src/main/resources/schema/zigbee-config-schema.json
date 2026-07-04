@@ -1,0 +1,128 @@
+{
+  "$comment": "Integration config schema for the integrations.zigbee section (Doc 08 §9). Shipped at M9.3; the SchemaRegistry.registerIntegrationSchema call site lands with the adapter factory at M9.4 (W10 boundary). All options default sensibly: the adapter runs correctly with zero configuration (INV-CE-02).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "serial_port": {
+      "type": "string",
+      "description": "Serial port path. Auto-detected if omitted."
+    },
+    "baud_rate": {
+      "type": "integer",
+      "enum": [57600, 115200],
+      "description": "Baud rate. Auto-detected based on coordinator type."
+    },
+    "adapter_type": {
+      "type": "string",
+      "enum": ["znp", "ezsp"],
+      "description": "Coordinator adapter type. Auto-detected if omitted; set explicitly only if auto-detection fails."
+    },
+    "channel": {
+      "type": "integer",
+      "minimum": 11,
+      "maximum": 26,
+      "description": "Network channel. Auto-selected via energy scan on first run; channels 11/15/20 preferred, 21-26 fallback-only (Aqara/Xiaomi incompatibilities)."
+    },
+    "permit_join_duration": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 254,
+      "default": 120,
+      "description": "Permit join default duration in seconds (Zigbee spec maximum 254)."
+    },
+    "watchdog_interval_seconds": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 300,
+      "default": 30,
+      "description": "Coordinator watchdog ping interval."
+    },
+    "availability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mains_timeout_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60,
+          "default": 10,
+          "description": "Active ping after this many minutes of silence (mains-powered devices)."
+        },
+        "battery_timeout_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168,
+          "default": 25,
+          "description": "Passive offline timeout for battery-powered sleepy devices."
+        }
+      }
+    },
+    "topology_scan_interval_hours": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 24,
+      "default": 0,
+      "description": "Periodic topology scan interval; 0 disables periodic scans."
+    },
+    "reporting_overrides": {
+      "type": "object",
+      "description": "Per-cluster reporting configuration overrides, keyed by hex cluster id string (e.g. \"0x0402\").",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "min_interval": {"type": "integer", "minimum": 0},
+          "max_interval": {"type": "integer", "minimum": 0},
+          "reportable_change": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "profiles_path": {
+      "type": "string",
+      "description": "Path to the user device-profiles JSON (merged over bundled profiles; user profiles take precedence)."
+    },
+    "telemetry_threshold_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 60,
+      "default": 10,
+      "description": "Entities reporting faster than this use TelemetryWriter instead of domain events (Event Model §3.5)."
+    },
+    "route_health": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "failure_threshold": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3,
+          "description": "Consecutive command failures before UNREACHABLE status."
+        },
+        "max_failures_before_offline": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10,
+          "description": "Consecutive failures before availability transitions to UNAVAILABLE."
+        },
+        "weak_link_threshold_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 50,
+          "description": "Percentage of child routes failing before a router is flagged as a weak link."
+        },
+        "health_degraded_device_count": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3,
+          "description": "Number of unreachable devices before adapter health degrades."
+        }
+      }
+    },
+    "ezsp_config": {
+      "type": "object",
+      "description": "EZSP coordinator configuration overrides (advanced, EZSP only). Rejected values log zigbee.ezsp_config_rejected and fall back to coordinator defaults.",
+      "additionalProperties": {"type": "integer"}
+    }
+  }
+}
