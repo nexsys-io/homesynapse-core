@@ -25,6 +25,12 @@ import java.util.function.ToIntFunction;
  * 10 min (the active ping is the M9.4 ZCL read; silence alone never marks a
  * mains device offline).
  *
+ * <p><strong>Power posture (M9.4b §6.10 N-5):</strong> classification is
+ * fail-conservative — a device gets the battery posture UNLESS its ZCL Basic
+ * PowerSource value is a mains class ({@code 0x01} mains single-phase,
+ * {@code 0x02} mains 3-phase). UNKNOWN ({@code 0x00}) and every exotic class
+ * therefore inherit the 25 h passive window.
+ *
  * <p><strong>Restart initialization (M-1):</strong> the tracker initializes
  * each known device to its PERSISTED pre-restart availability (the cache's
  * {@code lastKnownAvailability} sidecar) and emits NO transition for it — a
@@ -39,8 +45,10 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
     static final Duration MAINS_PING_SILENCE = Duration.ofMinutes(10);
     /** Battery-powered passive offline timeout (Doc 08 §9). */
     static final Duration BATTERY_OFFLINE_SILENCE = Duration.ofHours(25);
-    /** ZCL PowerSource: battery. */
-    private static final int POWER_SOURCE_BATTERY = 3;
+    /** ZCL Basic PowerSource table: mains (single phase). */
+    private static final int POWER_SOURCE_MAINS_SINGLE_PHASE = 0x01;
+    /** ZCL Basic PowerSource table: mains (3 phase). */
+    private static final int POWER_SOURCE_MAINS_THREE_PHASE = 0x02;
 
     /** Availability transition sink (the availability_changed publish + persist). */
     interface TransitionListener {
@@ -167,14 +175,15 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
                 }
                 Duration silence = Duration.between(state.lastSeen, now);
                 IEEEAddress device = new IEEEAddress(entry.getKey());
-                boolean battery = powerSourceLookup.applyAsInt(device)
-                        == POWER_SOURCE_BATTERY;
-                if (battery) {
-                    if (silence.compareTo(BATTERY_OFFLINE_SILENCE) > 0) {
-                        timedOut.add(device);
+                // N-5: mains-membership test, not battery-equality — every
+                // non-mains value (UNKNOWN 0x00 included) takes the 25 h
+                // battery-conservative window.
+                if (isMainsPowered(powerSourceLookup.applyAsInt(device))) {
+                    if (silence.compareTo(MAINS_PING_SILENCE) > 0) {
+                        pingCandidates.add(device);
                     }
-                } else if (silence.compareTo(MAINS_PING_SILENCE) > 0) {
-                    pingCandidates.add(device);
+                } else if (silence.compareTo(BATTERY_OFFLINE_SILENCE) > 0) {
+                    timedOut.add(device);
                 }
             }
         } finally {
@@ -185,6 +194,22 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
                     AvailabilityReason.SILENCE_TIMEOUT);
         }
         return pingCandidates;
+    }
+
+    /**
+     * N-5 fail-conservative power posture: battery UNLESS the value is one of
+     * the ZCL Basic PowerSource table's mains classes ({@code 0x01} mains
+     * single-phase, {@code 0x02} mains 3-phase). UNKNOWN ({@code 0x00}) and
+     * every exotic class (DC source, emergency supplies) fall to the 25 h
+     * battery window — a possibly-sleepy device must never be false-offlined
+     * by the 10-min active-ping regime.
+     *
+     * @param powerSource the device's ZCL Basic PowerSource value
+     * @return {@code true} only for the mains classes
+     */
+    private static boolean isMainsPowered(int powerSource) {
+        return powerSource == POWER_SOURCE_MAINS_SINGLE_PHASE
+                || powerSource == POWER_SOURCE_MAINS_THREE_PHASE;
     }
 
     private void transition(IEEEAddress device, Instant timestamp,

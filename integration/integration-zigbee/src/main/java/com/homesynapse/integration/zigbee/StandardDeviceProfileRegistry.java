@@ -4,6 +4,9 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -31,6 +34,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * that never merge. A same-id registration replaces (the override channel);
  * duplicate ids within one document are the loader's error.
  *
+ * <p><strong>Match-time body failure (F-12):</strong> candidates materialize
+ * best-first outside the lock; an entry whose body fails to load at match time is
+ * that entry's no-match — one WARN names the profile, and the next candidate in
+ * the total order still matches. {@link #allProfiles()} keeps the full-parse
+ * contract: enumeration propagates the load error.
+ *
  * <p>Thread-safe ({@link ReentrantLock} only, LTD-11).
  *
  * @see ZigbeeProfileLoader
@@ -42,6 +51,9 @@ final class StandardDeviceProfileRegistry implements DeviceProfileRegistry {
     private static final int TIER_EXACT_MODEL = 1;
     private static final int TIER_MODEL_WILDCARD = 2;
     private static final int NO_MATCH = Integer.MAX_VALUE;
+
+    private static final Logger log =
+            LoggerFactory.getLogger(StandardDeviceProfileRegistry.class);
 
     private final ReentrantLock lock = new ReentrantLock();
     private final Map<String, ProfileEntry> byId = new LinkedHashMap<>();
@@ -107,6 +119,8 @@ final class StandardDeviceProfileRegistry implements DeviceProfileRegistry {
         }
         // The full-parse path by design: enumerating all profiles materializes
         // every body (outside the lock — materialization is entry-guarded).
+        // F-12 deliberately stops at findProfile: enumeration is full-truth,
+        // so a load failure here propagates.
         List<DeviceProfile> profiles = new ArrayList<>(snapshot.size());
         for (ProfileEntry entry : snapshot) {
             profiles.add(entry.materialize());
@@ -144,13 +158,25 @@ final class StandardDeviceProfileRegistry implements DeviceProfileRegistry {
         } finally {
             lock.unlock();
         }
-        return candidates.stream()
-                .min(Comparator
-                        .comparingInt(Candidate::tier)
-                        .thenComparingInt(c -> c.entry().source().rank())
-                        .thenComparing(c -> c.entry().priority(),
-                                Comparator.reverseOrder())
-                        .thenComparing(c -> c.entry().profileId()))
-                .map(candidate -> candidate.entry().materialize());
+        candidates.sort(Comparator
+                .comparingInt(Candidate::tier)
+                .thenComparingInt(c -> c.entry().source().rank())
+                .thenComparing(c -> c.entry().priority(),
+                        Comparator.reverseOrder())
+                .thenComparing(c -> c.entry().profileId()));
+        // F-12: materialize best-first, outside the lock. A body that fails to
+        // load at match time is THAT entry's no-match — one WARN, and the next
+        // candidate in the total order still matches; propagating would take
+        // down the whole match over one bad profile.
+        for (Candidate candidate : candidates) {
+            try {
+                return Optional.of(candidate.entry().materialize());
+            } catch (ProfileLoadException e) {
+                log.warn("zigbee.profile_body_unloadable: profile={} failed to "
+                                + "materialize at match time; treated as no-match: {}",
+                        candidate.entry().profileId(), e.getMessage());
+            }
+        }
+        return Optional.empty();
     }
 }

@@ -34,7 +34,10 @@ import java.util.Optional;
  *
  * <p><strong>IAS Zone (§3.12, tolerate-not-require):</strong> the CIE write is
  * ATTEMPTED and its outcome recorded as a device fact — never an interview or
- * adoption gate; {@code ZoneStatusChangeNotification} ingests regardless.
+ * adoption gate; {@code ZoneStatusChangeNotification} ingests regardless. The
+ * recorded fact DERIVES from the attempt (F-7b, M9.4b §6.4): the IAS path
+ * performs no verifying read-back, so the row records
+ * {@code READBACK_ONLY/NONE} — never {@code VERIFIED_REPORTS}.
  *
  * <p>The classifications are recorded {@link ReportingPostureFact} DEVICE FACTS
  * feeding the AMD-97 {@code confirmability} consumption at M9.4.
@@ -235,10 +238,16 @@ final class ReportingConfigurator {
                     + "tolerated; zone notifications ingest regardless",
                     device, endpoint);
         }
+        // F-7b (M9.4b §6.4): no bind/configure/read-back runs on the IAS path,
+        // so an ACKed CIE write is an attempt, never a verification — the fact
+        // records the matrix's unverified-delivery pair (the measured SNZB-03P
+        // is enrolled-but-silent); zone notifications ingest regardless (§3.12).
         return new ReportingPostureFact(device, endpoint,
                 IasZoneHandler.CLUSTER_ID, IasZoneHandler.ATTRIBUTE_ZONE_STATUS,
-                ReportsAuthoritative.VERIFIED_REPORTS, ReportingPosture.ON_CHANGE,
-                written ? "IAS CIE written; enrollment awaited as a device fact"
+                ReportsAuthoritative.READBACK_ONLY, ReportingPosture.NONE,
+                written ? "IAS CIE written and ACKed; reporting never "
+                        + "read-back-verified — enrollment awaited as a "
+                        + "device fact"
                         : "IAS CIE write failed; enrollment not achieved — "
                                 + "tolerated, never a gate");
     }

@@ -39,9 +39,11 @@ class StateQueryServiceTest {
     }
 
     @Test
-    @DisplayName("exactly 6 declared methods")
-    void exactlySixMethods() {
-        assertThat(StateQueryService.class.getDeclaredMethods()).hasSize(6);
+    @DisplayName("exactly 7 declared methods (5 queries + 2 materialized(...) factories)")
+    void exactlySevenMethods() {
+        // M9.4b §2.3 added the registry-carrying materialized(...) overload —
+        // the brightness_percent query-time decoration seam (Doc 08 §3.5).
+        assertThat(StateQueryService.class.getDeclaredMethods()).hasSize(7);
     }
 
     @Test

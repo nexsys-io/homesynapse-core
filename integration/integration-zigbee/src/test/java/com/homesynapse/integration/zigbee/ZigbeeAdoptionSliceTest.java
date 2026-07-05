@@ -18,7 +18,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -133,7 +137,8 @@ class ZigbeeAdoptionSliceTest {
         assertThat(entity.entityType()).isEqualTo(EntityType.BINARY_SENSOR);
         assertThat(entity.capabilities())
                 .extracting(c -> c.capabilityId())
-                .containsExactlyInAnyOrder("occupancy", "battery");
+                // + identify: the SNZB carries cluster 0x0003 (M9.4b §3.2, SD-3).
+                .containsExactlyInAnyOrder("occupancy", "battery", "identify");
         assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).toList()).hasSize(1);
         assertThat(slice.entityFor(SNZB, 1)).contains(entity.entityId());
     }
@@ -152,8 +157,9 @@ class ZigbeeAdoptionSliceTest {
         assertThat(entities.get(0).entityType()).isEqualTo(EntityType.LIGHT);
         assertThat(entities.get(0).capabilities())
                 .extracting(c -> c.capabilityId())
+                // + identify: the Hue carries cluster 0x0003 (M9.4b §3.2, SD-3).
                 .containsExactlyInAnyOrder("on_off", "brightness",
-                        "color_temperature");
+                        "color_temperature", "identify");
         assertThat(entities.get(0).endpointIndex()).isEqualTo(11);
     }
 
@@ -244,5 +250,105 @@ class ZigbeeAdoptionSliceTest {
         assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).toList()).hasSize(1);
         assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).toList())
                 .hasSize(2);
+    }
+
+    // ── M9.4b §6.5 (F-11) + §6.6 (N-8) + the F-8 hook seam ──────────────────
+
+    @Test
+    @DisplayName("§6.5 F-11: two racing adopts — exactly one claims; the loser gets the no-proposal ISE, no torn registry state")
+    void concurrentAdoptClaimsExactlyOnce() throws InterruptedException {
+        slice.onDeviceDiscovered(snzbInterview(),
+                MeasuredCorpusValues.SNZB_PROFILE_ID);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        List<ZigbeeAdoptionSlice.AdoptedDevice> adopted =
+                new CopyOnWriteArrayList<>();
+        List<IllegalStateException> rejected = new CopyOnWriteArrayList<>();
+        Runnable racer = () -> {
+            ready.countDown();
+            try {
+                start.await();
+                adopted.add(slice.adopt(SNZB));
+            } catch (IllegalStateException e) {
+                rejected.add(e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        Thread first = new Thread(racer, "adopt-racer-1");
+        Thread second = new Thread(racer, "adopt-racer-2");
+        first.start();
+        second.start();
+        ready.await();
+
+        start.countDown();
+        first.join();
+        second.join();
+
+        assertThat(adopted)
+                .as("exactly one racer claims the proposal")
+                .hasSize(1);
+        assertThat(rejected)
+                .as("the loser finds the proposal already claimed")
+                .hasSize(1);
+        assertThat(rejected.get(0)).hasMessageContaining("proposed");
+        assertThat(deviceRegistry.listAllDevices()).hasSize(1);
+        assertThat(entityRegistry
+                .listEntitiesByDevice(adopted.get(0).deviceId())).hasSize(1);
+        assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).toList())
+                .hasSize(1);
+    }
+
+    @Test
+    @DisplayName("§6.6 N-8: a 25 h old proposal is stale — adopt rejects naming device, age, and max; re-discovery re-offers")
+    void staleProposalRejectsUntilRediscovered() {
+        slice.onDeviceDiscovered(snzbInterview(),
+                MeasuredCorpusValues.SNZB_PROFILE_ID);
+        clock.advance(Duration.ofHours(25));
+
+        assertThatThrownBy(() -> slice.adopt(SNZB))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(SNZB.toHexString())
+                .hasMessageContaining("PT25H")
+                .hasMessageContaining(
+                        ZigbeeAdoptionSlice.PROPOSAL_MAX_AGE.toString());
+        assertThat(deviceRegistry.listAllDevices())
+                .as("a stale offer registers nothing")
+                .isEmpty();
+
+        // Re-discovery replaces the entry (the superseding put refreshes
+        // offeredAt) — adoption then succeeds.
+        slice.onDeviceDiscovered(snzbInterview(),
+                MeasuredCorpusValues.SNZB_PROFILE_ID);
+        ZigbeeAdoptionSlice.AdoptedDevice adopted = slice.adopt(SNZB);
+
+        assertThat(deviceRegistry.getDevice(adopted.deviceId())).isNotNull();
+        assertThat(slice.entityFor(SNZB, 1)).isPresent();
+    }
+
+    @Test
+    @DisplayName("the F-8 hook fires with the adopted IEEE on success — never on the ISE paths")
+    void onAdoptedHookFiresOnSuccessOnly() {
+        List<IEEEAddress> invalidated = new ArrayList<>();
+        slice.onAdopted(invalidated::add);
+
+        // Unproposed: the no-proposal ISE path fires nothing.
+        assertThatThrownBy(() -> slice.adopt(HUE))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(invalidated).isEmpty();
+
+        // Stale: the N-8 ISE path fires nothing.
+        slice.onDeviceDiscovered(snzbInterview(),
+                MeasuredCorpusValues.SNZB_PROFILE_ID);
+        clock.advance(Duration.ofHours(25));
+        assertThatThrownBy(() -> slice.adopt(SNZB))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(invalidated).isEmpty();
+
+        // Success: fires exactly once with the device IEEE.
+        slice.onDeviceDiscovered(snzbInterview(),
+                MeasuredCorpusValues.SNZB_PROFILE_ID);
+        slice.adopt(SNZB);
+        assertThat(invalidated).containsExactly(SNZB);
     }
 }

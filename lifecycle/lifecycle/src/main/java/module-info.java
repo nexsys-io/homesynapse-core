@@ -57,13 +57,16 @@ module com.homesynapse.lifecycle {
 
     // AB-3: the composition root assembles ConfigurationService (config),
     // the InMemory* device registries (device-model), and the automation_engine
-    // subscriber chain (automation). All three are referenced only INSIDE
-    // HomeSynapseCore/Main composition internals — no config/device/automation
-    // type appears on the lifecycle module's exported API — so each is a plain
+    // subscriber chain (automation). config/automation are referenced only
+    // INSIDE HomeSynapseCore/Main composition internals — no such type appears
+    // on the lifecycle module's exported API — so each is a plain
     // (non-transitive) requires ⇔ implementation(...) in build.gradle.kts.
     // All are gate-allowed (:lifecycle:.* -> :config:.* and -> :core:.*).
     requires com.homesynapse.config;
-    requires com.homesynapse.device;
+    // M9.4b (R4): DeviceRegistry appears on the PUBLIC 8-arg HomeSynapseCore
+    // ctor of an EXPORTED class -> transitive + api(...) per the M9.1
+    // lockstep rule.
+    requires transitive com.homesynapse.device;
     requires com.homesynapse.automation;
 
     // AB-3: HomeSynapseCore selects the platform HealthReporter implementation

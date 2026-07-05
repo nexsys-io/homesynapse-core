@@ -24,9 +24,19 @@ import java.util.Objects;
 final class IasZoneHandler extends ZigbeeClusterHandler {
 
     static final int CLUSTER_ID = 0x0500;
+    /** IAS attribute 0x0001: ZoneType (enum16) — the F-7a wire-learn source. */
+    static final int ATTRIBUTE_ZONE_TYPE = 0x0001;
     static final int ATTRIBUTE_ZONE_STATUS = 0x0002;
     /** zoneStatus bit 0: Alarm1, the primary alarm. */
     static final int ZONE_STATUS_ALARM1 = 0x0001;
+    /** ZCL8 §8.2.2.3: ZoneEnrollRequest, device → CIE (cluster-specific 0x01). */
+    static final int COMMAND_ZONE_ENROLL_REQUEST = 0x01;
+    /** ZCL8 §8.2.2.3: ZoneEnrollResponse, CIE → device (cluster-specific 0x00). */
+    static final int COMMAND_ZONE_ENROLL_RESPONSE = 0x00;
+    /** ZCL8 §8.2.2.3: enroll response code 0x00 = Success. */
+    static final int ENROLL_RESPONSE_SUCCESS = 0x00;
+    /** ZCL8 §8.2.2.3: the zone id the CIE assigns (single-zone table — zone 0). */
+    static final int ENROLL_ZONE_ID = 0x00;
 
     private final ZoneType zoneType;
 

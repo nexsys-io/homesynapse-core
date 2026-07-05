@@ -79,6 +79,7 @@ final class MaterializedStateQueryServiceTest {
                 stateStore,
                 () -> mode.get(),
                 () -> viewPosition.get(),
+                () -> null,   // no registry — brightness_percent decoration off (M9.4b §2.3)
                 FIXED_CLOCK);
     }
 

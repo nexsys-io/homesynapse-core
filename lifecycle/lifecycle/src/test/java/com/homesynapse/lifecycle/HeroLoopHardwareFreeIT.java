@@ -7,9 +7,6 @@ package com.homesynapse.lifecycle;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.homesynapse.device.Entity;
-import com.homesynapse.event.CausalContext;
-import com.homesynapse.event.CommandDispatchedEvent;
-import com.homesynapse.event.CommandIdempotency;
 import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.CommandResultEvent;
 import com.homesynapse.event.EventDraft;
@@ -23,13 +20,11 @@ import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.event.bus.SubscriberSnapshot;
-import com.homesynapse.integration.runtime.IntegrationIds;
 import com.homesynapse.integration.zigbee.ZigbeeHardwareFreeRig;
 import com.homesynapse.integration.zigbee.ZigbeeIntegrationFactory;
 import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.HomeId;
-import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.test.TestClock;
 
@@ -223,35 +218,29 @@ final class HeroLoopHardwareFreeIT {
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
-    @DisplayName("identify: dispatched to the NCP AND an immediate command_result(unconfirmed) "
-            + "with the profile's measured reason — and NEVER a state_confirmed (AMD-97-INV-01)")
+    @DisplayName("identify rides the REAL dispatch (SD-3): issued → dispatched → router → "
+            + "handler → byte-asserted Identify frame → immediate honest unconfirmed — "
+            + "and NEVER a state_confirmed (AMD-97-INV-01)")
     void unconfirmableIdentify_immediateHonestVerdict(@TempDir Path tempDir) throws Exception {
         bootAndAdopt(tempDir);
 
-        // identify names no classified capability, so Tier-1 dispatch validation
-        // cannot route it ("does not support command") — a genuine M9.4a gap flagged
-        // for the PM. The loop-level assertion drives the REAL router + REAL zigbee
-        // handler halves directly: publish the command pair the engine would have
-        // produced, chained exactly as the executor/dispatcher chain them.
-        IntegrationId zigbeeId =
-                IntegrationIds.deriveStable(ZigbeeIntegrationFactory.INTEGRATION_TYPE);
-        EventEnvelope issued = core.eventPublisher().publishRoot(new EventDraft(
-                EventTypes.COMMAND_ISSUED, 1, null, SubjectRef.entity(hueEntity),
-                EventPriority.NORMAL, EventOrigin.AUTOMATION,
-                new CommandIssuedEvent(hueEntity.value(), "identify", "{}", 5000,
-                        CommandIdempotency.NOT_IDEMPOTENT),
-                null, null));
-        core.eventPublisher().publish(new EventDraft(
-                EventTypes.COMMAND_DISPATCHED, 1, null, SubjectRef.entity(hueEntity),
-                EventPriority.DIAGNOSTIC, EventOrigin.AUTOMATION,
-                new CommandDispatchedEvent(hueEntity.value(), zigbeeId.value(), "{}"),
-                null, null),
-                CausalContext.chain(issued.causalContext().correlationId(),
-                        issued.eventId().value()));
+        // M9.4b §3 (the M9.4a interim retired): the §3.1 Identify capability makes
+        // identify issuable through the REAL Tier-1 validator — the engine's own
+        // manual automation drives the FULL path, no synthesized command pair.
+        fireManual("hero-identify");
+        EventEnvelope issued = awaitEnvelope(EventTypes.COMMAND_ISSUED,
+                event -> commandType(event).equals("identify"), "command_issued(identify)");
+        awaitEnvelope(EventTypes.COMMAND_DISPATCHED,
+                event -> event.causalContext().causationId()
+                        .equals(issued.eventId().value()),
+                "the REAL dispatch service routing identify");
 
         // Dispatched AND honestly unconfirmed — actuation is not gated (INV-SA-03).
         awaitTrue(() -> sentFrame(0x0003, 0x00).isPresent(),
                 "the Identify frame reaching the scripted NCP");
+        assertThat(sentFrame(0x0003, 0x00).orElseThrow().payload())
+                .as("identifyTime u16 LE — the 3 s adapter default")
+                .containsExactly(0x03, 0x00);
         EventEnvelope verdict = awaitEnvelope(EventTypes.COMMAND_RESULT,
                 event -> ((CommandResultEvent) event.payload()).outcome()
                         .equals("unconfirmed"),
@@ -262,9 +251,61 @@ final class HeroLoopHardwareFreeIT {
         assertThat(verdict.causalContext().causationId())
                 .as("N-6: the verdict chains from the command, never a root publish")
                 .isEqualTo(issued.eventId().value());
+        assertThat(verdict.causalContext().correlationId())
+                .as("the run's correlation reaches the verdict")
+                .isEqualTo(issued.causalContext().correlationId());
         assertThat(countEventsOfType(EventTypes.STATE_CONFIRMED))
                 .as("AMD-97-INV-01: an UNCONFIRMABLE command NEVER renders CONFIRMED")
                 .isZero();
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Step 8 — the SD-2 brightness honest-confirm leg (M9.4b §7.1)
+    // ════════════════════════════════════════════════════════════════════════
+
+    @Test
+    @DisplayName("set_brightness(50) → level-127 wire frame → level-127 report → honest "
+            + "state_confirmed → the query shows brightness=127 AND brightness_percent=50")
+    void brightness_percentCommandLevelDomain_honestConfirm(@TempDir Path tempDir)
+            throws Exception {
+        bootAndAdopt(tempDir);
+
+        fireManual("hero-brightness");
+        EventEnvelope issued = awaitEnvelope(EventTypes.COMMAND_ISSUED,
+                event -> commandType(event).equals("set_brightness"),
+                "command_issued(set_brightness 50)");
+        awaitTrue(() -> sentFrame(0x0008, 0x04).isPresent(),
+                "the Move to Level frame reaching the scripted NCP");
+        // round(50 × 254 / 100) = 127 — percent never rides the wire (SD-2).
+        assertThat(sentFrame(0x0008, 0x04).orElseThrow().payload()[0])
+                .isEqualTo((byte) 127);
+
+        // The device reports the LEVEL domain; the SD-2 rescaled expectation
+        // (WithinTolerance(127, 2)) confirms it — the F-3 false-fail class dead
+        // end-to-end.
+        rig.reportBrightnessLevel(127);
+        rig.deliverAndCycle();
+        EventEnvelope confirmed = awaitEnvelope(EventTypes.STATE_CONFIRMED,
+                event -> ((StateConfirmedEvent) event.payload()).commandEventId()
+                        .equals(issued.eventId()),
+                "state_confirmed for set_brightness");
+        StateConfirmedEvent confirmation = (StateConfirmedEvent) confirmed.payload();
+        assertThat(confirmation.attributeKey()).isEqualTo("brightness");
+        EventEnvelope report = findByEventId(confirmation.reportEventId()).orElseThrow();
+        assertThat(report.eventType()).isEqualTo(EventTypes.STATE_REPORTED);
+
+        // Doc 08 §3.5: the canonical 0-254 level materializes; the percent derives
+        // at QUERY time (M9.4b §2.3) — never stored, never an event.
+        awaitTrue(() -> core.stateQueryService().getState(hueEntity)
+                        .map(state -> state.attributes().get("brightness"))
+                        .isPresent(),
+                "the materialized brightness level");
+        var attributes = core.stateQueryService().getState(hueEntity)
+                .orElseThrow().attributes();
+        assertThat(attributes.get("brightness"))
+                .isEqualTo(new com.homesynapse.value.IntValue(127));
+        assertThat(attributes.get("brightness_percent"))
+                .isEqualTo(new com.homesynapse.value.IntValue(50));
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -397,6 +438,26 @@ final class HeroLoopHardwareFreeIT {
                           target:
                             label: "hero-light"
                           command: turn_on
+                    - name: "hero identify"
+                      slug: "hero-identify"
+                      triggers:
+                        - type: manual
+                      actions:
+                        - type: command
+                          target:
+                            label: "hero-light"
+                          command: identify
+                    - name: "hero brightness"
+                      slug: "hero-brightness"
+                      triggers:
+                        - type: manual
+                      actions:
+                        - type: command
+                          target:
+                            label: "hero-light"
+                          command: set_brightness
+                          parameters:
+                            level: 50
                 """;
         Path configDir = tempDir.resolve("config");
         Files.createDirectories(configDir);

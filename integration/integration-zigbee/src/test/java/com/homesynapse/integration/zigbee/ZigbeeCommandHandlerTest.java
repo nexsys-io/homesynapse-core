@@ -161,6 +161,50 @@ class ZigbeeCommandHandlerTest {
     }
 
     @Test
+    @DisplayName("SD-3 regression fence: identify with NO profile characterization renders "
+            + "EXACTLY ONE command_result(unconfirmed) with the generic recorded reason — "
+            + "never silence")
+    void uncharacterizedIdentify_neverSilent() {
+        // A second Hue adopted WITHOUT a profile match: matchedProfileId is null
+        // everywhere, so characterizationFor() is empty — the pre-M9.4b path
+        // dispatched and then fell SILENT (the fence gap). SD-3 (v18 beat 5,
+        // verbatim-pinned): "an issuable command whose policy is DISABLED but
+        // whose characterization is absent must NOT silently bypass."
+        IEEEAddress bare = new IEEEAddress(0x0017880109AB99EEL);
+        InterviewResult interview = new InterviewResult(bare, 0x1234,
+                new NodeDescriptor(1, 0x100B, 82, 142),
+                List.of(new EndpointDescriptor(MeasuredCorpusValues.HUE_ENDPOINT,
+                        0x0104, 0x010D,
+                        List.of(0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0008,
+                                0x0300, 0x1000, 0xFC01, 0xFC04),
+                        List.of(0x0019))),
+                "Signify Netherlands B.V.", "LCA017", 1, InterviewStatus.COMPLETE);
+        cache.recordInterview(interview, null);
+        slice.onDeviceDiscovered(interview, null);
+        EntityId bareEntity = slice.adopt(bare).entityIds()
+                .get(MeasuredCorpusValues.HUE_ENDPOINT);
+        CommandEnvelope command = envelope(bareEntity, "identify", Map.of());
+
+        handler.handle(command);
+
+        assertThat(sent).as("the fence renders a verdict AFTER actuation, never instead of it")
+                .hasSize(1);
+        List<EventEnvelope> published = publisher.ofType(EventTypes.COMMAND_RESULT).toList();
+        assertThat(published).hasSize(1);
+        CommandResultEvent result = (CommandResultEvent) published.get(0).payload();
+        assertThat(result.outcome()).isEqualTo("unconfirmed");
+        assertThat(result.failureReason())
+                .isNotBlank()
+                .contains("no confirmation surface exists for 'identify'");
+        assertThat(publisher.ofType(EventTypes.STATE_CONFIRMED).toList())
+                .as("AMD-97-INV-01: identify NEVER yields state_confirmed")
+                .isEmpty();
+        // N-6 chaining holds on the fence path too.
+        assertThat(published.get(0).causalContext().causationId())
+                .isEqualTo(command.commandEventId());
+    }
+
+    @Test
     @DisplayName("a CONFIRMABLE command never renders the unconfirmed verdict")
     void confirmable_noImmediateVerdict() {
         handler.handle(envelope(hueEntity, "set_color_temperature",

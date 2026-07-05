@@ -17,7 +17,7 @@ import java.util.Set;
  * Production factory for the standard (core-namespace) {@link Capability} set and its
  * aggregated attribute schemas (DP-K, AMD-51).
  *
- * <p>This is the compile-time-shaped catalogue of the fifteen standard capability records
+ * <p>This is the compile-time-shaped catalogue of the sixteen standard capability records
  * (the {@link Capability} sealed hierarchy minus {@link CustomCapability}). It is the
  * single source of truth for the standard {@link AttributeSchema}s, and exists because the
  * State Projection's typed change-detection comparator (AMD-51) needs a schema to
@@ -61,7 +61,7 @@ public final class StandardCapabilities {
     // ══════════════════════════════════════════════════════════════════
 
     /**
-     * Returns all fifteen standard capabilities with their realistic default schemas.
+     * Returns all sixteen standard capabilities with their realistic default schemas.
      *
      * @return an immutable list of the standard capabilities, never {@code null}
      */
@@ -81,7 +81,8 @@ public final class StandardCapabilities {
                 battery(),
                 deviceHealth(),
                 energyMeter(),
-                powerMeter());
+                powerMeter(),
+                identify());
     }
 
     /**
@@ -121,7 +122,7 @@ public final class StandardCapabilities {
     }
 
     // ══════════════════════════════════════════════════════════════════
-    // Standard Capability factory methods (15 records)
+    // Standard Capability factory methods (16 records)
     // ══════════════════════════════════════════════════════════════════
 
     // ── Actuator capabilities ────────────────────────────────────────
@@ -157,14 +158,21 @@ public final class StandardCapabilities {
     /**
      * Creates the standard {@link Brightness} capability.
      *
-     * <p>Attribute: {@code brightness} (int, 0–100, R/W/N). Command:
-     * {@code set_brightness}. Confirmation: TOLERANCE ±2.</p>
+     * <p>Attribute: {@code brightness} (int, canonical 0–254 — Doc 08 §3.5:
+     * "percentage derived at query time"; R/W/N). Command:
+     * {@code set_brightness} with a percent 0–100 {@code level} parameter (the
+     * user-facing domain). Confirmation: TOLERANCE ±2 in LEVEL units (Doc 08
+     * §392).</p>
      *
      * @return the standard Brightness capability
      */
     public static Brightness brightness() {
+        // SD-2 (M9.4b §2.1): the attribute is the CANONICAL 0-254 level domain —
+        // the 0-100 bounds contradicted the Locked Doc 08 §3.5 canonical and
+        // made confirmation compare a percent target against a level report
+        // (the F-3 false-fail class). The parameter below stays percent.
         Map<String, AttributeSchema> attrs = Map.of(
-                "brightness", intAttr("brightness", 0, 100, null,
+                "brightness", intAttr("brightness", 0, 254, null,
                         Set.of(Permission.READ, Permission.WRITE, Permission.NOTIFY)));
 
         ParameterSchema levelParam = new ParameterSchema(
@@ -178,6 +186,36 @@ public final class StandardCapabilities {
                 ConfirmationMode.TOLERANCE, List.of("brightness"), 2, 5000L);
 
         return new Brightness("brightness", 1, CORE_NAMESPACE, attrs, cmds, policy);
+    }
+
+    /**
+     * Creates the standard {@link Identify} capability (M9.4b §3.1, SD-3 —
+     * Doc 02 §3.8).
+     *
+     * <p>Attributes: NONE — identify has no state; nothing to confirm, by
+     * construction. Command: {@code identify} with an OPTIONAL {@code duration_s}
+     * parameter (0–300 s — a chosen sane cap on ZCL's u16 identifyTime; adapters
+     * default the duration when the parameter is absent). Confirmation: DISABLED
+     * at the capability root — the pending command ledger never tracks it
+     * (AMD-97-INV-01 structural); the issuing adapter owns the immediate honest
+     * verdict (SD-3, pinned: "an immediate rendered UNCONFIRMED verdict with
+     * recorded reason, not the silent DISABLED bypass; never-tracked and
+     * honestly-verdicted are different promises").</p>
+     *
+     * @return the standard Identify capability
+     */
+    public static Identify identify() {
+        Map<String, CommandDefinition> cmds = Map.of(
+                "identify", new CommandDefinition(
+                        "identify",
+                        List.of(new ParameterSchema(
+                                "duration_s", AttributeType.INT, 0, 300, false, 0, null)),
+                        0, List.of(), DEFAULT_TIMEOUT, IdempotencyClass.IDEMPOTENT));
+
+        ConfirmationPolicy policy = new ConfirmationPolicy(
+                ConfirmationMode.DISABLED, List.of(), null, 5000L);
+
+        return new Identify("identify", 1, CORE_NAMESPACE, Map.of(), cmds, policy);
     }
 
     /**

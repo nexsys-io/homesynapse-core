@@ -67,12 +67,13 @@ public final class Main {
         // home_id file if present, else mint one and persist it.
         HomeId homeId = resolveHomeId(configDir, clock);
 
-        // M9.4a §4.2 — the zigbee integration factory (DECIDE-04: constructed
-        // directly, never discovered). R4: the DeviceRegistry instance is
-        // app-constructed and passed on the factory ctor path — NOT an
-        // IntegrationContext component (the frozen 12). The M9.4a public path
-        // reports a permanent failure at initialize() (the serial transport binds
-        // at M9.4b) — honest FAILED-no-retry; boot continues (INV-RF-01).
+        // M9.4b §1 — the zigbee integration factory (constructed directly,
+        // never discovered — no ServiceLoader). R4 UNIFIED (AB-3 substrate,
+        // pm-handoff v18 beat 4): ONE app-constructed DeviceRegistry rides BOTH
+        // paths — the factory supplier below AND the 8-arg HomeSynapseCore ctor
+        // — so the registry the adapter adopts into IS the registry dispatch
+        // resolution reads. It is NOT an IntegrationContext component (the
+        // frozen 12); the ctor path carries it.
         Path zigbeeDataDir = baseDir.resolve("data").resolve("zigbee");
         Files.createDirectories(zigbeeDataDir);
         InMemoryDeviceRegistry zigbeeDeviceRegistry = new InMemoryDeviceRegistry();
@@ -83,9 +84,11 @@ public final class Main {
         // the payloadCipher(configDir, clock) adapter, flipping
         // SqlitePersistenceLifecycle's cipher-presence gate so encryption is
         // enabled for [identity, presence_personal] (Doc 15 §3.4, AMD-94).
+        // The 8th argument is the R4 registry unification (M9.4b §1).
         HomeSynapseCore core = new HomeSynapseCore(
                 dbPath, configDir, HomeSynapseConfig.HOME_DEFAULT, clock, homeId,
-                payloadCipher(configDir, clock), List.of(zigbeeFactory));
+                payloadCipher(configDir, clock), List.of(zigbeeFactory),
+                zigbeeDeviceRegistry);
         SystemLifecycleManager manager = core;
 
         CountDownLatch shutdownLatch = new CountDownLatch(1);

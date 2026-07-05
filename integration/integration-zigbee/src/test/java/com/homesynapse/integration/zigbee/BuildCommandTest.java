@@ -84,6 +84,26 @@ class BuildCommandTest {
     }
 
     @Test
+    @DisplayName("SD-2 alignment sweep: the wire level matches the ledger bridge's linear map "
+            + "within 1 for every percent 0-100")
+    void setBrightness_wireLevelAlignsWithTheDerivationBridge() {
+        // M9.4b §2.2 alignment pin (the zigbee half): the ledger's schema-driven
+        // rescale derives target = round(percent × 254 / 100) in the 0-254
+        // attribute domain; the wire level below must land within 1 of it — the
+        // ±2 confirmation tolerance absorbs the residual with margin. The
+        // automation half is DeriveOutcomeRescaleTest's sweep against the same
+        // literal map.
+        for (int percent = 0; percent <= 100; percent++) {
+            int wireLevel = level.buildCommand("set_brightness", Map.of("level", percent))
+                    .payload()[0] & 0xFF;
+            long bridgeTarget = Math.round(percent * 254 / 100.0);
+            assertThat(Math.abs(wireLevel - bridgeTarget))
+                    .as("percent %s: wire %s vs bridge %s", percent, wireLevel, bridgeTarget)
+                    .isLessThanOrEqualTo(1L);
+        }
+    }
+
+    @Test
     @DisplayName("transition_ms rounds to deciseconds (1500 ms → 15)")
     void transitionParameter_deciseconds() {
         ZclFrame frame = level.buildCommand("set_brightness",

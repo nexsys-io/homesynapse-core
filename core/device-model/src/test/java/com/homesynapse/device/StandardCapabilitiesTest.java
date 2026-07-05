@@ -23,10 +23,11 @@ import org.junit.jupiter.api.Test;
 class StandardCapabilitiesTest {
 
     @Test
-    @DisplayName("all() returns the 15 core-namespace standard capabilities (no CustomCapability)")
-    void allReturnsFifteenCoreCapabilities() {
+    @DisplayName("all() returns the 16 core-namespace standard capabilities (no CustomCapability)")
+    void allReturnsSixteenCoreCapabilities() {
+        // 15 originals + Identify (M9.4b §3.1, SD-3).
         List<Capability> all = StandardCapabilities.all();
-        assertThat(all).hasSize(15);
+        assertThat(all).hasSize(16);
         assertThat(all).noneMatch(c -> c instanceof CustomCapability);
         assertThat(all).allMatch(c -> "core".equals(c.namespace()));
     }
@@ -73,5 +74,33 @@ class StandardCapabilitiesTest {
         AttributeSchema sample = schemas.get("on");
         assertThatThrownBy(() -> schemas.put("injected", sample))
                 .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    @DisplayName("brightness attribute is canonical 0-254 (Doc 08 §3.5); the set_brightness "
+            + "parameter stays percent 0-100; tolerance 2 is LEVEL units (SD-2)")
+    void brightnessAttributeIsCanonicalLevelDomain() {
+        Brightness brightness = StandardCapabilities.brightness();
+
+        // Doc 08 §3.5 :206 pins "brightness (IntValue, 0-254; percentage derived
+        // at query time)" as CANONICAL — the attribute is the level domain.
+        AttributeSchema attr = brightness.attributeSchemas().get("brightness");
+        assertThat(attr.minimum()).isEqualTo(0);
+        assertThat(attr.maximum()).isEqualTo(254);
+
+        // The user-facing command parameter stays percent (the capability domain).
+        ParameterSchema level = brightness.commandDefinitions().get("set_brightness")
+                .parameters().get(0);
+        assertThat(level.parameterName()).isEqualTo("level");
+        assertThat(level.minimum()).isEqualTo(0);
+        assertThat(level.maximum()).isEqualTo(100);
+
+        // Doc 08 §392: "±2 of 128 ... account for rounding differences between
+        // the 0-254 ZCL range" — the tolerance is attribute-domain (level units).
+        ConfirmationPolicy policy = brightness.confirmationPolicy();
+        assertThat(policy.mode()).isEqualTo(ConfirmationMode.TOLERANCE);
+        assertThat(policy.authoritativeAttributes()).containsExactly("brightness");
+        assertThat(policy.defaultTolerance()).isEqualTo(2);
+        assertThat(policy.defaultTimeoutMs()).isEqualTo(5000L);
     }
 }

@@ -344,7 +344,7 @@ final class ZigbeeProfileLoader {
             JsonNode rules = entry.get("degradeRule");
             if (rules != null && rules.isArray()) {
                 for (JsonNode rule : rules) {
-                    degradeRules.add(DegradeRule.valueOf(rule.asText()));
+                    degradeRules.add(parseDegradeRule(rule.asText(), profileId));
                 }
             }
             result.add(new ConfirmationCharacterization(
@@ -363,6 +363,26 @@ final class ZigbeeProfileLoader {
                     optionalText(entry, "notes")));
         }
         return result;
+    }
+
+    private static DegradeRule parseDegradeRule(String text, String profileId) {
+        for (DegradeRule rule : DegradeRule.values()) {
+            if (rule.name().equals(text)) {
+                return rule;
+            }
+        }
+        // F-15: an unknown degrade rule fails THIS profile closed at the point the
+        // string is parsed (lazy materialization, §F) — dropping or defaulting it
+        // would let a future vocabulary addition change confirmation behavior
+        // without anyone noticing.
+        List<String> supported = new ArrayList<>();
+        for (DegradeRule rule : DegradeRule.values()) {
+            supported.add(rule.name());
+        }
+        throw new ProfileLoadException(
+                "Profile '" + profileId + "' carries unknown 'degradeRule' value '"
+                        + text + "'; supported: " + String.join(", ", supported)
+                        + " (unknown rule fails closed, F-15)");
     }
 
     // ── JSON field helpers ──────────────────────────────────────────────────

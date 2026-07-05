@@ -25,6 +25,10 @@ dependencies {
     implementation(libs.jackson.databind)
 
     testImplementation(project(":testing:test-support"))
+    // M9.4b §6.8 (F-12, TEST-SCOPE): the match-site catch is pinned by a
+    // one-WARN assertion — logback backs slf4j in this module's test tree only
+    // (ListAppender capture; no production dependency change).
+    testImplementation(libs.logback.classic)
 
     // M9.4a (TEST-SCOPE): the rig's public surface exposes TestClock (the byte
     // channel is clock-stepped), so the fixture dependency is api-scoped.

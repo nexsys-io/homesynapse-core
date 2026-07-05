@@ -28,6 +28,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -37,6 +39,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 /**
  * The Doc 02 §3.12 discovery/adoption slice, scoped INSIDE the zigbee ingestion
@@ -67,6 +70,8 @@ final class ZigbeeAdoptionSlice {
     static final String HARDWARE_NAMESPACE = "zigbee";
     /** The identity sentinel for PARTIAL interviews with unreadable Basic strings. */
     static final String UNKNOWN_IDENTITY = "unknown";
+    /** The stale-offer horizon (N-8, M9.4b §6.6): matches the sleepy-interview horizon. */
+    static final Duration PROPOSAL_MAX_AGE = Duration.ofHours(24);
 
     /** Stage-2 outcome of a discovery. */
     enum DiscoveryOutcome {
@@ -85,7 +90,8 @@ final class ZigbeeAdoptionSlice {
     record AdoptedDevice(DeviceId deviceId, Map<Integer, EntityId> entityIds) {
     }
 
-    private record Proposal(InterviewResult interview, String matchedProfileId) {
+    private record Proposal(InterviewResult interview, String matchedProfileId,
+            Instant offeredAt) {
     }
 
     private static final Logger log =
@@ -107,6 +113,8 @@ final class ZigbeeAdoptionSlice {
     private final Map<Long, Map<Integer, EntityId>> entitiesByIeee = new HashMap<>();
     private final Map<EntityId, EntityBinding> bindingsByEntity = new HashMap<>();
     private final Map<Long, String> profilesByIeee = new HashMap<>();
+    /** The F-8 invalidation listener; null until the adapter wires it. */
+    private Consumer<IEEEAddress> adoptionListener;
 
     /**
      * Creates the slice.
@@ -154,9 +162,13 @@ final class ZigbeeAdoptionSlice {
             relink(ieee, existing.get(), matchedProfileId);
             return DiscoveryOutcome.LINKED;
         }
+        Instant offeredAt = clock.instant();
         lock.lock();
         try {
-            proposals.put(ieee.value(), new Proposal(interview, matchedProfileId));
+            // N-8 (M9.4b §6.6): a superseding discovery REPLACES the entry —
+            // the put refreshes offeredAt, restarting the stale-offer horizon.
+            proposals.put(ieee.value(),
+                    new Proposal(interview, matchedProfileId, offeredAt));
         } finally {
             lock.unlock();
         }
@@ -188,20 +200,34 @@ final class ZigbeeAdoptionSlice {
      *
      * @param ieee the proposed device, never {@code null}
      * @return the adoption result
-     * @throws IllegalStateException if the device was never proposed
+     * @throws IllegalStateException if the device was never proposed, a
+     *         concurrent adoption already claimed the proposal, or the
+     *         proposal is older than {@link #PROPOSAL_MAX_AGE}
      */
     AdoptedDevice adopt(IEEEAddress ieee) {
         Objects.requireNonNull(ieee, "ieee");
         Proposal proposal;
         lock.lock();
         try {
-            proposal = proposals.get(ieee.value());
+            // F-11 (M9.4b §6.5): the remove IS the claim — atomic under the
+            // lock, so a racing second adopt() finds no proposal and gets the
+            // ISE below. A claimed proposal is never re-inserted on a
+            // downstream failure (stale below, registry throw): the device
+            // re-announces/re-interviews naturally, minting a fresh proposal.
+            proposal = proposals.remove(ieee.value());
         } finally {
             lock.unlock();
         }
         if (proposal == null) {
             throw new IllegalStateException("Device " + ieee + " has not been "
                     + "proposed; adoption requires a prior device_discovered");
+        }
+        Duration age = Duration.between(proposal.offeredAt(), clock.instant());
+        if (age.compareTo(PROPOSAL_MAX_AGE) > 0) {
+            throw new IllegalStateException("Proposal for device " + ieee
+                    + " is stale: offered " + age + " ago, maximum is "
+                    + PROPOSAL_MAX_AGE + "; adoption requires a fresh "
+                    + "device_discovered");
         }
         InterviewResult interview = proposal.interview();
 
@@ -260,6 +286,7 @@ final class ZigbeeAdoptionSlice {
             created.add(entityId);
         }
 
+        Consumer<IEEEAddress> listener;
         lock.lock();
         try {
             devicesByIeee.put(ieee.value(), deviceId);
@@ -269,9 +296,16 @@ final class ZigbeeAdoptionSlice {
             if (proposal.matchedProfileId() != null) {
                 profilesByIeee.put(ieee.value(), proposal.matchedProfileId());
             }
-            proposals.remove(ieee.value());
+            listener = adoptionListener;
         } finally {
             lock.unlock();
+        }
+        // F-8 (M9.4b): the invalidation hook fires OUTSIDE the lock (listener
+        // code must never nest under the slice lock) and BEFORE the
+        // device_adopted publish, so bus-driven consumers observe
+        // post-invalidation handler state.
+        if (listener != null) {
+            listener.accept(ieee);
         }
 
         if (!created.isEmpty()) {
@@ -289,6 +323,20 @@ final class ZigbeeAdoptionSlice {
         log.info("zigbee.device_adopted: device={} deviceId={} entities={}",
                 ieee, deviceId, entityIds.size());
         return new AdoptedDevice(deviceId, Map.copyOf(entityIds));
+    }
+
+    /**
+     * The F-8 handler-invalidation hook the adapter wires: {@code listener}
+     * fires with the device IEEE after each successful {@link #adopt}.
+     */
+    void onAdopted(Consumer<IEEEAddress> listener) {
+        Objects.requireNonNull(listener, "listener");
+        lock.lock();
+        try {
+            this.adoptionListener = listener;
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**

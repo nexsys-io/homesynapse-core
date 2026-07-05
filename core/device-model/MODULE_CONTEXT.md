@@ -1,4 +1,6 @@
-# device-model — `com.homesynapse.device` — 57 types (+3 AB-3 InMemory registry impls) — Entity/Device/Capability model, spatial Floor/Area aggregates, EntityRole UX-role axis, sealed hierarchies, registries, discovery pipeline
+# device-model — `com.homesynapse.device` — 58 types (+3 AB-3 InMemory registry impls) — Entity/Device/Capability model, spatial Floor/Area aggregates, EntityRole UX-role axis, sealed hierarchies, registries, discovery pipeline
+
+> **M9.4b (2026-07-04): +`Identify` (public capability record, SD-3 — public count 57→58; `Capability` permits 16→17, 16 records + `CustomCapability`) and the SD-2 brightness canonical root-correction.** (1) **`Identify`** (Doc 02 §3.8): issuable-but-inherently-unconfirmable — NO attributes (nothing to confirm, by construction); one `identify` command with an OPTIONAL `duration_s` param (INT 0–300, a chosen sane cap on ZCL's u16; adapters default it); `ConfirmationPolicy(DISABLED, [], null, 5000L)` at the capability ROOT so the ledger never tracks it (AMD-97-INV-01 structural) — the issuing adapter owns the immediate honest verdict (SD-3 pinned: "an immediate rendered UNCONFIRMED verdict with recorded reason, not the silent DISABLED bypass; never-tracked and honestly-verdicted are different promises"). Rides `StandardCapabilities.all()` (now sixteen) and `identify()`. Census deltas: `CapabilityTest` 17 permits/16 records; `StandardCapabilitiesTest` `hasSize(16)`. (2) **Brightness attribute is CANONICAL 0–254** (Doc 08 §3.5: "percentage derived at query time") — the 0–100 bounds contradicted the Locked canonical and made confirmation compare a percent target against a level report (the F-3 false-fail class). The `set_brightness` `level` PARAMETER stays percent 0–100 (the user-facing domain); the ±2 tolerance is LEVEL units (Doc 08 §392).
 
 > **AB-3 (2026-06-19): minimal production registry impls landed.** `InMemoryEntityRegistry` (9 methods), `InMemoryDeviceRegistry` (7), and `InMemoryAreaRegistry` (4, read-only) are the **MVP substrate** the composition root instantiates at app-bootstrap so the runtime boots zero-configuration (INV-CE-02). They are Map-backed and **start-empty**; Entity/Device use copy-on-write under a `ReentrantLock` (LTD-11, lock-free reads), Area is immutable-after-construction (read-only; a seed ctor exists for tests/future synthetic areas). They are deliberately minimal — **no AMD-44 capability-composition validation on `createEntity`, no Floor/EntityRole breadth, no cross-registry cascade** (`removeDevice` removes only the device record); the integration-backed SQLite registries (M9/M14, in `core:persistence`) supersede them. `FloorRegistry`/`CapabilityRegistry` were NOT implemented (verified: nothing in the automation chain references them — PD-2 contained-fold holds).
 
@@ -39,9 +41,9 @@ module com.homesynapse.device {
 
 | Type | Kind | Purpose | Key Details |
 |---|---|---|---|
-| `Capability` | sealed interface (permits 16 types) | Contract that capabilities implement — defines attributes, commands, and confirmation policy | Methods: `capabilityId()`, `version()`, `namespace()`, `attributeSchemas()` → `Map<String, AttributeSchema>`, `commandDefinitions()` → `Map<String, CommandDefinition>`, `confirmationPolicy()` → `ConfirmationPolicy`. |
+| `Capability` | sealed interface (permits 17 types — M9.4b added `Identify`) | Contract that capabilities implement — defines attributes, commands, and confirmation policy | Methods: `capabilityId()`, `version()`, `namespace()`, `attributeSchemas()` → `Map<String, AttributeSchema>`, `commandDefinitions()` → `Map<String, CommandDefinition>`, `confirmationPolicy()` → `ConfirmationPolicy`. |
 | `OnOff` | record implements `Capability` | Binary on/off control | Attribute: `on` (boolean). Commands: `turn_on`, `turn_off`, `toggle`. Confirmation: EXACT_MATCH. Required for LIGHT, SWITCH, PLUG. |
-| `Brightness` | record implements `Capability` | Brightness level control (0–100) | Attribute: `brightness` (int, 0–100). Command: `set_brightness(level)`. Confirmation: TOLERANCE (±2). Optional for LIGHT. |
+| `Brightness` | record implements `Capability` | Brightness level control (canonical 0–254, M9.4b/SD-2) | Attribute: `brightness` (int, 0–254 — Doc 08 §3.5; percentage derives at query time). Command: `set_brightness(level)` with a percent 0–100 param. Confirmation: TOLERANCE (±2 LEVEL units). Optional for LIGHT. |
 | `ColorTemperature` | record implements `Capability` | Color temperature control (Kelvin) | Attribute: `color_temp_kelvin` (int). Command: `set_color_temperature(kelvin)`. Confirmation: TOLERANCE (±50K). Optional for LIGHT. |
 | `TemperatureMeasurement` | record implements `Capability` | Ambient temperature sensing | Attribute: `temperature_c` (float). Read-only. Confirmation: DISABLED. For SENSOR. |
 | `HumidityMeasurement` | record implements `Capability` | Relative humidity sensing (0–100%) | Attribute: `humidity_pct` (float, 0–100). Read-only. Confirmation: DISABLED. For SENSOR. |
@@ -131,7 +133,7 @@ The `AttributeValue` sealed interface + its 8 variant records (`BooleanValue`, `
 |---|---|---|---|
 | `StandardCapabilities` | **public** final factory class | Production catalogue of the 15 standard (core-namespace) capabilities + their aggregated attribute schemas (DP-K) | `all()` → `List<Capability>` (the 15 standard records; **excludes** `CustomCapability`); `attributeSchemas()` → immutable `Map<String, AttributeSchema>` keyed by `attributeKey`, **fails fast** (`IllegalStateException`) if two standard capabilities declare the same key with different `AttributeType` (the AMD-51 resolver's global-consistency assumption; `power_w` is FLOAT in both `PowerMeasurement` and `PowerMeter`, so no conflict). Plus the 15 typed factory methods (`onOff()`…`powerMeter()`). **Construction logic lifted verbatim from `TestCapabilityFactory`**, which now delegates here (single source of truth, no duplication). Pure, no clock/I/O/locale — an immutable compile-time-shaped catalogue (the `QuantityValue.CATALOGUE` posture), NOT a runtime registry. **Seed for the future `CapabilityRegistry` implementation.** No standard attribute is `QUANTITY`/`ARRAY` at M4.0b-3 — all are `BOOLEAN`/`INT`/`FLOAT`/`ENUM`. |
 
-**Total: 57 public types + 1 package-info.java + 1 module-info.java = 59 Java files.** (M4.B-S2 / AMD-44 Stage 2 added 1 type: `EntityRole`. M4.B-S1 / AMD-44 Stage 1 added 4 types: `Floor`, `FloorRegistry`, `Area`, `AreaRegistry`. Was 52/54 after M4.0b-4a relocated the 10 value types — `AttributeValue` + 8 variants + `AttributeType` — to `com.homesynapse.value`.)
+**Total: 58 public types + 1 package-info.java + 1 module-info.java = 60 Java files.** (M9.4b added 1 type: `Identify`. M4.B-S2 / AMD-44 Stage 2 added 1 type: `EntityRole`. M4.B-S1 / AMD-44 Stage 1 added 4 types: `Floor`, `FloorRegistry`, `Area`, `AreaRegistry`. Was 52/54 after M4.0b-4a relocated the 10 value types — `AttributeValue` + 8 variants + `AttributeType` — to `com.homesynapse.value`.)
 
 ## Dependencies
 
@@ -189,6 +191,7 @@ sealed interface Capability
             IlluminanceMeasurement, PowerMeasurement,
             BinaryState, Contact, Motion, Occupancy,
             Battery, DeviceHealth, EnergyMeter, PowerMeter,
+            Identify,
             CustomCapability
 ```
 **Exhaustive switch pattern:**
@@ -278,7 +281,7 @@ switch (expectation) {
 
 **GOTCHA: `Entity.areaId` is nullable and inherits from Device.** If `Entity.areaId` is null, the entity inherits its area from its parent device (`Device.areaId`). If both are null, the entity has no area assignment. Do not assume a non-null area is always available.
 
-**GOTCHA: Capability count is 16, not 15.** The sealed interface permits 16 types: 15 standard records (OnOff, Brightness, ColorTemperature, TemperatureMeasurement, HumidityMeasurement, IlluminanceMeasurement, PowerMeasurement, BinaryState, Contact, Motion, Occupancy, Battery, DeviceHealth, EnergyMeter, PowerMeter) + 1 final class (CustomCapability). Exhaustive switches must have 16 branches.
+**GOTCHA: Capability count is 17, not 16 (M9.4b).** The sealed interface permits 17 types: 16 standard records (OnOff, Brightness, ColorTemperature, TemperatureMeasurement, HumidityMeasurement, IlluminanceMeasurement, PowerMeasurement, BinaryState, Contact, Motion, Occupancy, Battery, DeviceHealth, EnergyMeter, PowerMeter, Identify — M9.4b/SD-3) + 1 final class (CustomCapability). Exhaustive switches must have 17 branches.
 
 **GOTCHA: `EnergyMeter` attributes include `direction` (EnergyDirection enum) and `cumulative` (boolean).** These were Block G audit additions. The `direction` field distinguishes import (consumption) from export (solar/battery). The `cumulative` field indicates whether `energy_wh` resets on meter reset or accumulates forever. Do not omit these when implementing EnergyMeter-related logic.
 

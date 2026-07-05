@@ -4,8 +4,17 @@
  */
 package com.homesynapse.state;
 
+import com.homesynapse.device.AttributeSchema;
+import com.homesynapse.device.CapabilityInstance;
+import com.homesynapse.device.Entity;
+import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.platform.identity.EntityId;
+import com.homesynapse.value.AttributeValue;
+import com.homesynapse.value.IntValue;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -16,6 +25,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /**
  * Production {@link StateQueryService} backed by a live {@link StateStore}.
@@ -61,6 +71,18 @@ import java.util.function.LongSupplier;
  * {@code readinessSource.mode() != LIVE}. Consumers can use this to surface
  * a "catching up" UI affordance distinct from {@link #isReady()}'s boolean.</p>
  *
+ * <h2>Query-time brightness percent (Doc 08 §3.5, M9.4b §2.3)</h2>
+ *
+ * <p>The materialized {@code brightness} attribute is the CANONICAL 0–254
+ * level; Doc 08 §3.5 pins "percentage derived at query time". Every read path
+ * appends the derived {@code brightness_percent} key when the entity's
+ * brightness {@link AttributeSchema} (resolved via the injected
+ * {@link EntityRegistry} supplier — deferred to read time, so construction
+ * order never matters) carries numeric bounds and the materialized value is
+ * numeric. Derived at read, NEVER stored, NEVER an event. Every miss —
+ * registry absent, entity unknown, schema boundless, value null, degraded, or
+ * non-numeric — yields the undecorated result; the read path never throws.</p>
+ *
  * <h2>Thread safety</h2>
  *
  * <p>Fully thread-safe. All state is held by the injected {@link StateStore}
@@ -81,9 +103,26 @@ import java.util.function.LongSupplier;
  */
 final class MaterializedStateQueryService implements StateQueryService {
 
+    private static final Logger LOG =
+            LoggerFactory.getLogger(MaterializedStateQueryService.class);
+
+    /** The canonical attribute the percent derives from (Doc 08 §3.5). */
+    private static final String BRIGHTNESS_KEY = "brightness";
+
+    /** The derived read-only key (chosen name, snake_case attribute convention). */
+    private static final String BRIGHTNESS_PERCENT_KEY = "brightness_percent";
+
+    /**
+     * The registry-less supplier the 4-arg {@code StateQueryService.materialized}
+     * overload passes — decoration disabled. Lives here (not on the interface)
+     * so no synthetic lambda method lands on the interface's reflective surface.
+     */
+    static final Supplier<EntityRegistry> NO_REGISTRY = () -> null;
+
     private final StateStore stateStore;
     private final ReadinessSource readinessSource;
     private final LongSupplier viewPosition;
+    private final Supplier<EntityRegistry> entityRegistry;
     private final Clock clock;
 
     /**
@@ -96,6 +135,12 @@ final class MaterializedStateQueryService implements StateQueryService {
      *                       position; never {@code null}. The composition root
      *                       wires this to
      *                       {@link StateProjection#cursorPosition()}.
+     * @param entityRegistry supplier of the registry the brightness-percent
+     *                       decoration resolves attribute schemas from; the
+     *                       supplier itself is never {@code null} but MAY
+     *                       return {@code null} (no registry — decoration
+     *                       skipped). Deferred to read time so construction
+     *                       order never matters (M9.4b §2.3).
      * @param clock          injected clock used for staleness recomputation;
      *                       never {@code null} (DEC-M3-09 /
      *                       {@code NO_DIRECT_TIME_ACCESS})
@@ -104,17 +149,19 @@ final class MaterializedStateQueryService implements StateQueryService {
             StateStore stateStore,
             ReadinessSource readinessSource,
             LongSupplier viewPosition,
+            Supplier<EntityRegistry> entityRegistry,
             Clock clock) {
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore");
         this.readinessSource = Objects.requireNonNull(readinessSource, "readinessSource");
         this.viewPosition = Objects.requireNonNull(viewPosition, "viewPosition");
+        this.entityRegistry = Objects.requireNonNull(entityRegistry, "entityRegistry");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     @Override
     public Optional<EntityState> getState(EntityId entityId) {
         Objects.requireNonNull(entityId, "entityId");
-        return stateStore.get(entityId).map(this::recomputeStale);
+        return stateStore.get(entityId).map(this::readView);
     }
 
     @Override
@@ -126,7 +173,7 @@ final class MaterializedStateQueryService implements StateQueryService {
         // Map.copyOf rejects nulls and would defeat that contract.
         LinkedHashMap<EntityId, EntityState> result = new LinkedHashMap<>();
         for (EntityId id : entityIds) {
-            stateStore.get(id).ifPresent(state -> result.put(id, recomputeStale(state)));
+            stateStore.get(id).ifPresent(state -> result.put(id, readView(state)));
         }
         return Collections.unmodifiableMap(result);
     }
@@ -136,7 +183,7 @@ final class MaterializedStateQueryService implements StateQueryService {
         Map<EntityId, EntityState> all = stateStore.getAll();
         LinkedHashMap<EntityId, EntityState> recomputed = new LinkedHashMap<>(all.size());
         for (Map.Entry<EntityId, EntityState> entry : all.entrySet()) {
-            recomputed.put(entry.getKey(), recomputeStale(entry.getValue()));
+            recomputed.put(entry.getKey(), readView(entry.getValue()));
         }
         SubscriberMode mode = readinessSource.mode();
         return new StateSnapshot(
@@ -155,6 +202,14 @@ final class MaterializedStateQueryService implements StateQueryService {
     @Override
     public boolean isReady() {
         return readinessSource.mode() == SubscriberMode.LIVE;
+    }
+
+    /**
+     * The single per-result read projection: staleness recomputation followed
+     * by the query-time {@code brightness_percent} decoration (M9.4b §2.3).
+     */
+    private EntityState readView(EntityState state) {
+        return decorateBrightnessPercent(recomputeStale(state));
     }
 
     /**
@@ -179,5 +234,80 @@ final class MaterializedStateQueryService implements StateQueryService {
                 state.lastReported(),
                 state.staleAfter(),
                 derivedStale);
+    }
+
+    /**
+     * Appends the derived {@code brightness_percent} key (Doc 08 §3.5:
+     * "percentage derived at query time") when the entity's brightness
+     * {@link AttributeSchema} carries numeric bounds and the materialized
+     * value is numeric. Total by construction — every miss returns the
+     * undecorated input; a query service that fails a read over a weird
+     * schema would be worse than no percent, so the registry consultation
+     * additionally degrades (with a DEBUG) instead of propagating.
+     */
+    private EntityState decorateBrightnessPercent(EntityState state) {
+        Map<String, AttributeValue> attributes = state.attributes();
+        if (attributes == null || !attributes.containsKey(BRIGHTNESS_KEY)) {
+            return state;
+        }
+        AttributeValue value = attributes.get(BRIGHTNESS_KEY);
+        if (value == null || !(value.rawValue() instanceof Number number)) {
+            return state;   // never reported, degraded, or non-numeric — no decoration
+        }
+        AttributeSchema schema;
+        try {
+            schema = brightnessSchemaFor(state.entityId());
+        } catch (RuntimeException ex) {
+            LOG.debug("brightness_percent decoration skipped for {}: registry read failed ({})",
+                    state.entityId(), ex.getMessage());
+            return state;
+        }
+        if (schema == null || schema.minimum() == null || schema.maximum() == null) {
+            return state;
+        }
+        double min = schema.minimum().doubleValue();
+        double max = schema.maximum().doubleValue();
+        if (max == min) {
+            return state;   // degenerate span — never divide by zero
+        }
+        int percent = (int) Math.round((number.doubleValue() - min) * 100.0 / (max - min));
+        // Rebuild null-tolerantly: EntityState.attributes() may carry null values
+        // (schema-declared, never reported) — Map.copyOf would reject them.
+        LinkedHashMap<String, AttributeValue> decorated = new LinkedHashMap<>(attributes);
+        decorated.put(BRIGHTNESS_PERCENT_KEY, new IntValue(percent));
+        return new EntityState(
+                state.entityId(),
+                Collections.unmodifiableMap(decorated),
+                state.availability(),
+                state.stateVersion(),
+                state.lastChanged(),
+                state.lastUpdated(),
+                state.lastReported(),
+                state.staleAfter(),
+                state.stale());
+    }
+
+    /**
+     * Resolves the entity's brightness schema: the first capability instance
+     * whose attribute map contains the {@code brightness} key. {@code null}
+     * when the registry is absent, the entity is unknown, or no capability
+     * declares the attribute.
+     */
+    private AttributeSchema brightnessSchemaFor(EntityId entityId) {
+        EntityRegistry registry = entityRegistry.get();
+        if (registry == null) {
+            return null;
+        }
+        Optional<Entity> entity = registry.findEntity(entityId);
+        if (entity.isEmpty()) {
+            return null;
+        }
+        for (CapabilityInstance capability : entity.get().capabilities()) {
+            AttributeSchema schema = capability.attributes().get(BRIGHTNESS_KEY);
+            if (schema != null) {
+                return schema;
+            }
+        }
+        return null;
     }
 }

@@ -24,8 +24,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link CapabilityInstance} list ONCE, at adoption (INV-CE-04 — all protocol vocabulary
  * stays in this class; the core read paths are untouched). Values are consumed from the
  * BUNDLED {@code zigbee-profiles.json} via the real loader (P38 — never re-typed from
- * prose); the UNCONFIRMABLE arm is exercised synthetically because the bundled Hue
- * UNCONFIRMABLE entries (identify/effect) name no classified capability.
+ * prose). Since M9.4b §3.2 the classifier attaches the {@code identify} capability
+ * (cluster 0x0003), so the bundled Hue {@code identify} characterization MATCHES and
+ * installs; only {@code effect} (color_loop) still names no classified capability —
+ * the UNCONFIRMABLE mapping arm keeps its synthetic coverage.
  */
 @DisplayName("ConfirmationOverrideInstaller — adoption-installed per-device confirmation (DP-a)")
 class ConfirmationOverrideInstallerTest {
@@ -99,14 +101,21 @@ class ConfirmationOverrideInstallerTest {
     }
 
     @Test
-    @DisplayName("characterizations naming no classified capability (identify/effect) are skipped with a WARN, never a failure")
+    @DisplayName("a characterization naming no classified capability (effect) is skipped with "
+            + "a WARN, never a failure; identify now matches and installs (M9.4b §3.2)")
     void unknownCharacterizationIds_skippedTolerantly() {
         List<CapabilityInstance> tuned =
                 ConfirmationOverrideInstaller.apply(hueProfile, hueCapabilities);
 
         assertThat(tuned)
                 .extracting(CapabilityInstance::capabilityId)
-                .containsExactlyInAnyOrder("on_off", "brightness", "color_temperature");
+                .containsExactlyInAnyOrder("on_off", "brightness", "color_temperature",
+                        "identify");
+        // The bundled Hue identify characterization (UNCONFIRMABLE) installs the
+        // DISABLED never-tracked policy on the now-classified identify capability
+        // (idempotent — DISABLED is already the capability root; AMD-97-INV-01).
+        assertThat(byId(tuned, "identify").confirmation().mode())
+                .isEqualTo(ConfirmationMode.DISABLED);
     }
 
     @Test

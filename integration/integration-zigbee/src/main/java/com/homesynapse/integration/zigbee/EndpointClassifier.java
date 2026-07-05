@@ -61,8 +61,9 @@ final class EndpointClassifier {
         boolean hasOccupancy = in.contains(OccupancySensingHandler.CLUSTER_ID);
         boolean hasBattery = in.contains(PowerConfigurationHandler.CLUSTER_ID);
         boolean hasIasZone = in.contains(IasZoneHandler.CLUSTER_ID);
+        boolean hasIdentify = in.contains(ZigbeeCommandHandler.IDENTIFY_CLUSTER_ID);
 
-        return switch (descriptor.deviceTypeId()) {
+        Optional<Classification> classified = switch (descriptor.deviceTypeId()) {
             case DEVICE_TYPE_ON_OFF_LIGHT, DEVICE_TYPE_DIMMABLE_LIGHT,
                     DEVICE_TYPE_CT_LIGHT, DEVICE_TYPE_EXTENDED_COLOR_LIGHT ->
                     Optional.of(light(hasLevel, hasColor));
@@ -77,6 +78,17 @@ final class EndpointClassifier {
             default -> fallback(hasOnOff, hasLevel, hasColor, hasOccupancy,
                     hasIasZone, hasBattery);
         };
+        // SD-3 (M9.4b §3.2): cluster 0x0003 present ⇒ the entity is
+        // identify-issuable through the real Tier-1 validator. Post-processed so
+        // EVERY classification arm (device-type table AND fallback) gains it;
+        // 0x0003 alone never invents an entity (unmapped endpoints stay empty).
+        return hasIdentify ? classified.map(EndpointClassifier::withIdentify) : classified;
+    }
+
+    private static Classification withIdentify(Classification classification) {
+        List<CapabilityInstance> caps = new ArrayList<>(classification.capabilities());
+        caps.addAll(capabilities(StandardCapabilities.identify()));
+        return new Classification(classification.entityType(), caps);
     }
 
     private static Classification light(boolean hasLevel, boolean hasColor) {

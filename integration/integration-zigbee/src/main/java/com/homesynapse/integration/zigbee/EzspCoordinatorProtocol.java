@@ -131,6 +131,23 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      */
     static final int MAX_PENDING_CALLBACKS = 1024;
 
+    /**
+     * The EZSP {@code stackStatusHandler} callback frame id (bellows-derived;
+     * BENCH-VERIFY — synthetic-tested until silicon, the P22/F-1 discipline).
+     * M9.4b §5.3: form/resume returning OK does not mean the stack is up.
+     */
+    static final int FRAME_STACK_STATUS_HANDLER = 0x0019;
+
+    /**
+     * EmberStatus NETWORK_UP (0x90, v13 1-byte dialect; bellows-derived,
+     * BENCH-VERIFY). The {@code stackStatusHandler} payload byte that ends the
+     * §5.3 await — a radio we won't lie about (never-false-ALIVE).
+     */
+    static final int EMBER_NETWORK_UP = 0x90;
+
+    /** The §5.3 NETWORK_UP await window (chosen constant, M9.4b). */
+    static final long NETWORK_UP_TIMEOUT_MS = 10_000;
+
     /** EmberNetworkStatus JOINED_NETWORK (1 byte on every version — not widened). */
     static final int EMBER_NETWORK_STATUS_JOINED = 0x02;
     /** EmberStatus NOT_JOINED (v13 dialect; bench-verify at M9.4). */
@@ -144,15 +161,25 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
 
     /**
      * EmberInitialSecurityState bitmask for formation — the bellows/zigpy formation
-     * baseline (§3.13 step 5): HAVE_PRECONFIGURED_KEY (0x0100) | HAVE_NETWORK_KEY
-     * (0x0200) | TRUST_CENTER_GLOBAL_LINK_KEY (0x0004) | REQUIRE_ENCRYPTED_KEY
+     * baseline (§3.13 step 5) PLUS the hashed-TCLK mode: HAVE_PRECONFIGURED_KEY
+     * (0x0100) | HAVE_NETWORK_KEY (0x0200) | TRUST_CENTER_USES_HASHED_LINK_KEY
+     * (0x0084 — includes TRUST_CENTER_GLOBAL_LINK_KEY 0x0004) | REQUIRE_ENCRYPTED_KEY
      * (0x0800, joining devices must request the network key encrypted under the TC
      * link key) | NO_FRAME_COUNTER_RESET (0x1000, frame-counter continuity on
-     * re-form). The plaintext ZigBeeAlliance09 key is kept per §3.13 step 5; the
-     * hashed-TCLK mode (0x0084) bellows adds on EZSP &gt; 4 is deferred to the M9.4
-     * bench pass ([REVIEW] — security-posture election).
+     * re-form).
+     *
+     * <p><strong>The security-posture election is RULED</strong> (Nick, 2026-07-04,
+     * pm-handoff v18 beat 2 — SD-5, verbatim): "Elect hashed TCLK for the M9.4
+     * formation, and if the bench shows join instability attributable to it, drop to
+     * plain for Wave-1 with the reason recorded and a W2 row — evidence-first, one
+     * variable at a time, characterized before any user network exists rather than
+     * after." The fallback is a one-constant revert of this value to {@code 0x1B04}
+     * (plain), carried in the bench protocol — never a runtime branch. The
+     * preconfigured key stays the well-known ZigBeeAlliance09 (§3.13 step 5) — see
+     * the M9.4b completion report's bellows re-derivation note ([REVIEW]: bellows
+     * supplies a GENERATED random seed under {@code use_hashed_tclk}).</p>
      */
-    static final int INITIAL_SECURITY_BITMASK = 0x1B04;
+    static final int INITIAL_SECURITY_BITMASK = 0x1B84;
     /** The well-known Trust Center link key "ZigBeeAlliance09" (§3.13 step 5). */
     private static final byte[] TC_LINK_KEY = {
         0x5A, 0x69, 0x67, 0x42, 0x65, 0x65, 0x41, 0x6C,
@@ -385,6 +412,102 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
         lock.lock();
         try {
             return droppedCallbacks;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * The NETWORK_UP await (M9.4b §5.3): form/resume returning OK does not mean the
+     * stack is fully up — presenting a deaf radio as paired is the never-false-ALIVE
+     * class. Reads inbound frames under the pipeline lock until
+     * {@code stackStatusHandler} reports {@link #EMBER_NETWORK_UP} or the
+     * {@value #NETWORK_UP_TIMEOUT_MS} ms window closes; unrelated callbacks are
+     * preserved for ingestion. Both frame constants are BENCH-VERIFY
+     * (bellows-derived; synthetic-tested until silicon).
+     *
+     * @throws IllegalStateException on timeout — classifies TRANSIENT at the
+     *         supervisor (a stack that did not come up is retryable; a radio we
+     *         won't lie about)
+     */
+    void awaitNetworkUp() {
+        lock.lock();
+        try {
+            // The signal may ALREADY be buffered: a stackStatusHandler arriving
+            // during the resume exchanges (networkInit → getNetworkParameters) is
+            // enqueued by that command's own response loop — the await must not
+            // deafly re-read the transport past an answered radio.
+            if (pendingCallbacks.removeIf(frame ->
+                    frame.frameId() == FRAME_STACK_STATUS_HANDLER
+                            && frame.parameters().length >= 1
+                            && (frame.parameters()[0] & 0xFF) == EMBER_NETWORK_UP)) {
+                log.info("zigbee.network_up: stackStatusHandler reported "
+                        + "EMBER_NETWORK_UP (buffered)");
+                return;
+            }
+            Instant deadline = clock.instant().plusMillis(NETWORK_UP_TIMEOUT_MS);
+            while (true) {
+                long remaining =
+                        Duration.between(clock.instant(), deadline).toMillis();
+                if (remaining <= 0) {
+                    throw new IllegalStateException(String.format(
+                            "zigbee network did not report NETWORK_UP within %d ms",
+                            NETWORK_UP_TIMEOUT_MS));
+                }
+                Optional<EzspAshTransport.Inbound> inbound =
+                        transport.receiveDecoded(remaining);
+                if (inbound.isEmpty()) {
+                    continue;
+                }
+                EzspFrame frame = inbound.get().frame();
+                byte[] parameters = frame.parameters();
+                if (frame.frameId() == FRAME_STACK_STATUS_HANDLER
+                        && parameters.length >= 1
+                        && (parameters[0] & 0xFF) == EMBER_NETWORK_UP) {
+                    lastActivity = clock.instant();
+                    log.info("zigbee.network_up: stackStatusHandler reported "
+                            + "EMBER_NETWORK_UP");
+                    return;
+                }
+                enqueueCallbackLocked(frame);   // unrelated callback: kept for ingestion
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * The production inbound pump (M9.4b §5.1): unsolicited frames reach the protocol
+     * only while it reads (the single-in-flight pipeline), so the adapter's production
+     * cycle parks ON the serial read itself — the read IS the park (no sleep; the
+     * dedicated SERIAL platform thread blocks on the bounded read, LTD-01/W4).
+     * Collected callbacks feed the next ingestion drain. Skips silently when a command
+     * is in flight — that command's own response loop collects callbacks.
+     *
+     * @param maxWaitMillis the bounded read window (the cycle cadence)
+     */
+    void pumpInbound(long maxWaitMillis) {
+        if (lock.isHeldByCurrentThread() || !lock.tryLock()) {
+            return; // a command is in flight — its response loop collects callbacks
+        }
+        try {
+            if (negotiatedVersion <= 0) {
+                return;
+            }
+            Optional<EzspAshTransport.Inbound> inbound =
+                    transport.receiveDecoded(maxWaitMillis);
+            if (inbound.isEmpty()) {
+                return;
+            }
+            EzspFrame frame = inbound.get().frame();
+            if (frame.isCallback()) {
+                enqueueCallbackLocked(frame);
+                lastActivity = clock.instant();
+            } else {
+                log.warn("zigbee.stray_response_dropped: frameId=0x{} arrived with "
+                                + "no command in flight",
+                        Integer.toHexString(frame.frameId()));
+            }
         } finally {
             lock.unlock();
         }
@@ -1046,6 +1169,18 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
                     continue;
                 }
                 if (frame.frameId() == FRAME_SCAN_COMPLETE_HANDLER) {
+                    // N-4 (M9.4b §6.9): scanCompleteHandler carries [channel,
+                    // status] (bellows-derived) — a non-success completion was
+                    // silent; the scan map may be partial. WARN, never a throw
+                    // (channel selection degrades over what was measured).
+                    byte[] complete = frame.parameters();
+                    if (complete.length >= 2 && complete[1] != 0) {
+                        log.warn("zigbee.energy_scan_incomplete: channel={} "
+                                        + "status=0x{} — the scan ended non-success; "
+                                        + "selection proceeds over partial energy data",
+                                complete[0] & 0xFF,
+                                Integer.toHexString(complete[1] & 0xFF));
+                    }
                     lastActivity = clock.instant();
                     return energyByChannel;
                 }
@@ -1066,9 +1201,10 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
                     encodeNetworkParameters(channel, panId, extendedPanId),
                     DEFAULT_COMMAND_TIMEOUT_MILLIS);
             requireSuccess("formNetwork", formResponse);
-            // The EMBER_NETWORK_UP stackStatusHandler callback is deliberately not
-            // awaited in M9.2 (its frame ID is unpinned by the derivation pass);
-            // M9.4 bench acceptance hardens formation with the NETWORK_UP await.
+            // The EMBER_NETWORK_UP stackStatusHandler await is the CALLER'S step
+            // (M9.4b §5.3, awaitNetworkUp()): the adapter's run() awaits it after
+            // form/resume returns — not here, so the formation seam stays a pure
+            // command exchange (the seam's fakes never script callbacks).
         }
 
         @Override

@@ -40,12 +40,24 @@ import java.util.concurrent.locks.ReentrantLock;
  * {@link ZigbeeDeviceRecord} has no availability component; the FILE carries
  * the sidecar, tolerated-additively by this loader).
  *
- * <p>Thread-safe ({@link ReentrantLock} only, LTD-11).
+ * <p>Thread-safe ({@link ReentrantLock} only, LTD-11). Writes snapshot the
+ * serializable state under the lock and perform the file I/O outside it, so
+ * reads never block on a write's I/O; a failed write suppresses further
+ * attempts for {@link #WRITE_FAILURE_BACKOFF_MILLIS} (F-14).
  */
 final class ZigbeeDeviceCache {
 
     /** Writes debounce to at most one per this window (Doc 08 §3.14). */
     static final Duration WRITE_DEBOUNCE = Duration.ofSeconds(30);
+
+    /**
+     * A failed write suppresses further write attempts for this long.
+     * {@code maybeFlush()} runs every adapter cycle: without the backoff a
+     * broken target (full disk, revoked mount) turns each cycle into a fresh
+     * failed syscall plus a WARN — a log storm on a box that is already
+     * degraded (F-14, M9.4b §6.7).
+     */
+    static final long WRITE_FAILURE_BACKOFF_MILLIS = 60_000;
 
     private static final Logger log = LoggerFactory.getLogger(ZigbeeDeviceCache.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -59,6 +71,7 @@ final class ZigbeeDeviceCache {
 
     private boolean dirty;
     private Instant lastWrite;
+    private Instant writeSuppressedUntil;
 
     /**
      * Creates the cache, loading persisted state when the file exists.
@@ -246,10 +259,11 @@ final class ZigbeeDeviceCache {
     }
 
     /**
-     * Writes the cache if dirty and the debounce window elapsed (called each
-     * ingestion cycle).
+     * Writes the cache if dirty, the debounce window elapsed, and no write
+     * failure backoff is active (called each ingestion cycle).
      */
     void maybeFlush() {
+        WriteSnapshot snapshot;
         lock.lock();
         try {
             if (!dirty) {
@@ -261,20 +275,32 @@ final class ZigbeeDeviceCache {
                             .compareTo(WRITE_DEBOUNCE) < 0) {
                 return;
             }
-            writeLocked(now);
+            if (writeSuppressedUntil != null
+                    && now.isBefore(writeSuppressedUntil)) {
+                // F-14: a recent write failed — skip without touching the
+                // disk; the cycle calls this every pass and the backoff is
+                // what keeps a broken target from becoming a WARN storm.
+                return;
+            }
+            snapshot = snapshotLocked(now);
         } finally {
             lock.unlock();
         }
+        write(snapshot);
     }
 
     /** Writes the cache immediately (adapter shutdown). */
     void flush() {
+        WriteSnapshot snapshot;
         lock.lock();
         try {
-            writeLocked(clock.instant());
+            snapshot = snapshotLocked(clock.instant());
         } finally {
             lock.unlock();
         }
+        // F-14: flush() ignores the failure backoff — shutdown is the last
+        // chance to persist, and a single attempt cannot storm.
+        write(snapshot);
     }
 
     private void reindex(ZigbeeDeviceRecord previous, ZigbeeDeviceRecord updated) {
@@ -317,11 +343,61 @@ final class ZigbeeDeviceCache {
                 record.ieeeAddress().toHexString());
     }
 
-    private void writeLocked(Instant now) {
+    /**
+     * The consistent view a write serializes outside the lock (F-14): the
+     * records and boxed values are immutable, so the copied collections stay
+     * valid however long the file I/O takes.
+     */
+    private record WriteSnapshot(List<ZigbeeDeviceRecord> devices,
+            Map<Long, Boolean> availability) { }
+
+    private WriteSnapshot snapshotLocked(Instant now) {
+        // F-14: dirty clears at snapshot time — a mutation racing the file
+        // I/O re-dirties, and a failed write re-dirties, so no change is lost.
+        dirty = false;
+        lastWrite = now;
+        return new WriteSnapshot(List.copyOf(devices.values()),
+                Map.copyOf(lastKnownAvailability));
+    }
+
+    private void write(WriteSnapshot snapshot) {
+        // F-14: serialization and file I/O run outside the lock — reads never
+        // block on a write's I/O. Two racing writers each land a complete,
+        // valid file; last-writer-wins on the content is acceptable (an older
+        // snapshot landing last is corrected by the next dirty write).
+        try {
+            String json = toJson(snapshot);
+            Files.createDirectories(file.toAbsolutePath().getParent());
+            Files.writeString(file, json, StandardCharsets.UTF_8);
+            lock.lock();
+            try {
+                // The target proved writable — a still-armed backoff is stale.
+                writeSuppressedUntil = null;
+            } finally {
+                lock.unlock();
+            }
+        } catch (IOException e) {
+            // The cache is a warm-start optimization: a failed write degrades
+            // restart behavior, never live operation.
+            lock.lock();
+            try {
+                dirty = true;
+                writeSuppressedUntil = clock.instant()
+                        .plusMillis(WRITE_FAILURE_BACKOFF_MILLIS);
+            } finally {
+                lock.unlock();
+            }
+            log.warn("zigbee.device_cache_write_failed: {}: {}; writes "
+                            + "suppressed for {} ms", file, e.getMessage(),
+                    WRITE_FAILURE_BACKOFF_MILLIS);
+        }
+    }
+
+    private String toJson(WriteSnapshot snapshot) throws IOException {
         ObjectNode root = MAPPER.createObjectNode();
         root.put("version", 1);
         ArrayNode deviceArray = root.putArray("devices");
-        for (ZigbeeDeviceRecord record : devices.values()) {
+        for (ZigbeeDeviceRecord record : snapshot.devices()) {
             ObjectNode node = deviceArray.addObject();
             node.put("ieee", record.ieeeAddress().toHexString());
             node.put("networkAddress", record.networkAddress());
@@ -338,7 +414,7 @@ final class ZigbeeDeviceCache {
                 node.put("matchedProfileId", record.matchedProfileId());
             }
             Boolean availability =
-                    lastKnownAvailability.get(record.ieeeAddress().value());
+                    snapshot.availability().get(record.ieeeAddress().value());
             if (availability != null) {
                 node.put("lastKnownAvailability", availability);
             }
@@ -366,18 +442,7 @@ final class ZigbeeDeviceCache {
                 }
             }
         }
-        try {
-            Files.createDirectories(file.toAbsolutePath().getParent());
-            Files.writeString(file, MAPPER.writerWithDefaultPrettyPrinter()
-                    .writeValueAsString(root), StandardCharsets.UTF_8);
-            dirty = false;
-            lastWrite = now;
-        } catch (IOException e) {
-            // The cache is a warm-start optimization: a failed write degrades
-            // restart behavior, never live operation.
-            log.warn("zigbee.device_cache_write_failed: {}: {}", file,
-                    e.getMessage());
-        }
+        return MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(root);
     }
 
     private void load() {

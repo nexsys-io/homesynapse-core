@@ -16,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -28,8 +29,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link ZclIngestionUnit} tests: the drain → dedup → handler dispatch →
  * {@code state_reported} publish pipeline (§G bound-and-drain; the bound lives
  * at the protocol queue and is pinned in {@code EzspInterviewTest}), the
- * device-announce path, graceful unknown-cluster/unknown-sender handling, and
- * the IAS dual-path tolerate rule.
+ * device-announce path, graceful unknown-cluster/unknown-sender handling, the
+ * IAS dual-path tolerate rule, the F-4 dedup scope (0x0A only — the readback
+ * channel bypasses), the F-7a enroll/zone-type-learn paths, and the F-8
+ * handler-table invalidation.
  */
 class ZclIngestionUnitTest {
 
@@ -44,6 +47,10 @@ class ZclIngestionUnitTest {
     private Map<Long, EntityId> entities;
     private List<ZdoCodec.DeviceAnnounce> announces;
     private List<IEEEAddress> framesSeen;
+    private List<ZclFrame> sentFrames;
+    private List<Integer> sentTargets;
+    private boolean sendAccepted;
+    private ZoneType resolverZoneType;
     private ZclIngestionUnit ingestion;
 
     @BeforeEach
@@ -51,12 +58,16 @@ class ZclIngestionUnitTest {
         clock = TestClock.createDefault();
         publisher = new RecordingEventPublisher(clock);
         pendingFrames = new ArrayList<>();
-        dedup = new ReportDeduplicator();
+        dedup = new ReportDeduplicator(clock);
         entities = new HashMap<>();
         entities.put(entityKey(SNZB, 1),
                 EntityId.of(UlidFactory.generate(clock)));
         announces = new ArrayList<>();
         framesSeen = new ArrayList<>();
+        sentFrames = new ArrayList<>();
+        sentTargets = new ArrayList<>();
+        sendAccepted = true;
+        resolverZoneType = ZoneType.MOTION;
 
         ZclIngestionUnit.DeviceResolver resolver =
                 new ZclIngestionUnit.DeviceResolver() {
@@ -76,7 +87,7 @@ class ZclIngestionUnitTest {
 
                     @Override
                     public ZoneType zoneTypeFor(IEEEAddress device) {
-                        return ZoneType.MOTION;
+                        return resolverZoneType;
                     }
                 };
         ZclIngestionUnit.IngestionListener listener =
@@ -96,7 +107,11 @@ class ZclIngestionUnitTest {
             List<EzspFrame> drained = List.copyOf(pendingFrames);
             pendingFrames.clear();
             return drained;
-        }, resolver, listener, dedup, publisher, clock);
+        }, resolver, listener, dedup, publisher, clock, (frame, networkAddress) -> {
+            sentFrames.add(frame);
+            sentTargets.add(networkAddress);
+            return sendAccepted;
+        });
     }
 
     private static long entityKey(IEEEAddress device, int endpoint) {
@@ -164,17 +179,7 @@ class ZclIngestionUnitTest {
                 new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x18, 0x01});
         ingestion.processCycle();
 
-        byte[] announce = new byte[12];
-        announce[0] = 0x07;
-        announce[1] = (byte) (SNZB_NWK & 0xFF);
-        announce[2] = (byte) (SNZB_NWK >> 8);
-        long ieee = SNZB.value();
-        for (int i = 0; i < 8; i++) {
-            announce[3 + i] = (byte) (ieee >> (8 * i));
-        }
-        announce[11] = (byte) 0x80;
-        pendingFrames.add(incomingFrame(0x0000, ZdoCodec.CLUSTER_DEVICE_ANNOUNCE,
-                0, SNZB_NWK, announce));
+        pendingFrames.add(announceFrame());
         // Post-power-cycle the TSN restarts: the same-looking frame is genuine.
         enqueueReport(SNZB_NWK, 1, 0x0406,
                 new byte[] {0x18, 0x2B, 0x0A, 0x00, 0x00, 0x18, 0x01});
@@ -246,6 +251,217 @@ class ZclIngestionUnitTest {
         ingestion.processCycle();
 
         assertThat(publisher.published()).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("F-4: a same-payload consecutive-TSN repeat outside the twin window publishes")
+    void periodicRepeatOutsideWindowPublishes() {
+        enqueueReport(SNZB_NWK, 1, 0x0406,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x18, 0x01});
+        ingestion.processCycle();
+
+        // The periodic-reporting scale — far past DEDUP_WINDOW_MS.
+        clock.advance(Duration.ofMinutes(5));
+        enqueueReport(SNZB_NWK, 1, 0x0406,
+                new byte[] {0x18, 0x2B, 0x0A, 0x00, 0x00, 0x18, 0x01});
+        ingestion.processCycle();
+
+        assertThat(publisher.published())
+                .as("an unchanged periodic report is a genuine observation, "
+                        + "never the F-4 false-drop")
+                .hasSize(2);
+    }
+
+    @Test
+    @DisplayName("F-4: a readback byte-identical to a prior report is never eaten "
+            + "(the VERIFY channel bypasses dedup)")
+    void readbackByteIdenticalToReportNeverEaten() {
+        // The report's command payload [00 00 00 18 01] decodes to NO 0x0A
+        // records (data type 0x00 is unknown) but IS recorded by dedup.
+        enqueueReport(SNZB_NWK, 1, 0x0406,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x00, 0x18, 0x01});
+        // The BYTE-IDENTICAL payload on the consecutive TSN, as an 0x01
+        // record stream, is a valid readback: attr 0x0000, status SUCCESS,
+        // type 0x18, value 0x01 — the pre-F-4 dedup would have dropped it.
+        enqueueReport(SNZB_NWK, 1, 0x0406,
+                new byte[] {0x18, 0x2B, 0x01, 0x00, 0x00, 0x00, 0x18, 0x01});
+
+        ingestion.processCycle();
+
+        assertThat(publisher.published()).hasSize(1);
+        StateReportedEvent payload =
+                (StateReportedEvent) publisher.published().get(0).payload();
+        assertThat(payload.attributeKey()).isEqualTo("occupied");
+        assertThat(payload.value()).isEqualTo("true");
+    }
+
+    @Test
+    @DisplayName("F-4: identical consecutive-TSN readbacks BOTH publish")
+    void readbackTwinsBothPublish() {
+        enqueueReport(SNZB_NWK, 1, 0x0406,
+                new byte[] {0x18, 0x2A, 0x01, 0x00, 0x00, 0x00, 0x18, 0x01});
+        enqueueReport(SNZB_NWK, 1, 0x0406,
+                new byte[] {0x18, 0x2B, 0x01, 0x00, 0x00, 0x00, 0x18, 0x01});
+
+        ingestion.processCycle();
+
+        assertThat(publisher.published()).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("F-7a: a ZoneEnrollRequest is answered with ZoneEnrollResponse "
+            + "[success, zoneId 0] at the requester's endpoint/address")
+    void zoneEnrollRequestAnswered() {
+        // Cluster-specific frame: fc 0x19, tsn, cmd 0x01 (ZoneEnrollRequest),
+        // zoneType 0x0015 LE, manufacturerCode 0x0000 LE.
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x01, 0x15, 0x00, 0x00, 0x00});
+
+        ingestion.processCycle();
+
+        assertThat(sentFrames).hasSize(1);
+        ZclFrame response = sentFrames.get(0);
+        assertThat(response.clusterId()).isEqualTo(0x0500);
+        assertThat(response.commandId())
+                .isEqualTo(IasZoneHandler.COMMAND_ZONE_ENROLL_RESPONSE);
+        assertThat(response.isClusterSpecific()).isTrue();
+        assertThat(response.destinationEndpoint()).isEqualTo(1);
+        assertThat(response.payload())
+                .as("ZCL8 §8.2.2.3: [enrollResponseCode=Success, zoneId=0]")
+                .containsExactly(0x00, 0x00);
+        assertThat(sentTargets).containsExactly(SNZB_NWK);
+        assertThat(publisher.published()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("F-7a: a rejected enroll-response send is logged and the cycle continues")
+    void zoneEnrollSendRejectionContinues() {
+        sendAccepted = false;
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x01, 0x15, 0x00, 0x00, 0x00});
+        enqueueReport(SNZB_NWK, 1, 0x0406,
+                new byte[] {0x18, 0x2B, 0x0A, 0x00, 0x00, 0x18, 0x01});
+
+        ingestion.processCycle();
+
+        assertThat(sentFrames).hasSize(1);
+        assertThat(publisher.published())
+                .as("the occupancy report behind the failed send still lands")
+                .hasSize(1);
+    }
+
+    @Test
+    @DisplayName("F-7a/F-8: a learned ZoneType outranks the resolver default and "
+            + "rebuilds the handler table")
+    void zoneTypeLearnRebuildsHandlers() {
+        // The table builds under the resolver's MOTION default.
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x00, 0x21, 0x00, 0x00, 0x01, 0x00, 0x00});
+        ingestion.processCycle();
+        assertThat(lastReportedKey()).isEqualTo("detected");
+
+        // ZoneType 0x0015 (CONTACT) observed via Report-Attributes (enum16 0x31).
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x18, 0x2C, 0x0A, 0x01, 0x00, 0x31, 0x15, 0x00});
+        // The next notification normalizes under the LEARNED type.
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2D, 0x00, 0x21, 0x00, 0x00, 0x01, 0x00, 0x00});
+        ingestion.processCycle();
+
+        assertThat(lastReportedKey()).isEqualTo("open");
+    }
+
+    @Test
+    @DisplayName("F-7a: ZoneType learns from the readback channel too")
+    void zoneTypeLearnsFromReadAttributesResponse() {
+        // Read-response record: attr 0x0001, status SUCCESS, enum16, 0x0015.
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x18, 0x2A, 0x01, 0x01, 0x00, 0x00, 0x31, 0x15, 0x00});
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2B, 0x00, 0x21, 0x00, 0x00, 0x01, 0x00, 0x00});
+
+        ingestion.processCycle();
+
+        assertThat(lastReportedKey()).isEqualTo("open");
+    }
+
+    @Test
+    @DisplayName("F-7a: an unknown ZoneType value is ignored — the resolver default stands")
+    void unknownZoneTypeIgnored() {
+        enqueueReport(SNZB_NWK, 1, 0x0500, new byte[] {0x18, 0x2A, 0x0A, 0x01,
+                0x00, 0x31, (byte) 0x99, (byte) 0x99});
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2B, 0x00, 0x21, 0x00, 0x00, 0x01, 0x00, 0x00});
+
+        ingestion.processCycle();
+
+        assertThat(lastReportedKey()).isEqualTo("detected");
+    }
+
+    @Test
+    @DisplayName("F-8: a device announce invalidates the handler table — the rebuild "
+            + "sees current zone-type truth")
+    void announceInvalidatesHandlerTable() {
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x00, 0x21, 0x00, 0x00, 0x01, 0x00, 0x00});
+        ingestion.processCycle();
+        assertThat(lastReportedKey()).isEqualTo("detected");
+
+        // The adoption layer's truth changes; the cached table must not
+        // outlive the next invalidation event.
+        resolverZoneType = ZoneType.CONTACT;
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2B, 0x00, 0x21, 0x00, 0x00, 0x01, 0x00, 0x00});
+        ingestion.processCycle();
+        assertThat(lastReportedKey())
+                .as("the table is cached until an invalidation event")
+                .isEqualTo("detected");
+
+        pendingFrames.add(announceFrame());
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2C, 0x00, 0x21, 0x00, 0x00, 0x01, 0x00, 0x00});
+        ingestion.processCycle();
+
+        assertThat(lastReportedKey()).isEqualTo("open");
+    }
+
+    @Test
+    @DisplayName("F-8: invalidateHandlers drops the table for the adapter's "
+            + "adoption-completion hook")
+    void invalidateHandlersRebuildsOnNextFrame() {
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x00, 0x21, 0x00, 0x00, 0x01, 0x00, 0x00});
+        ingestion.processCycle();
+        assertThat(lastReportedKey()).isEqualTo("detected");
+
+        resolverZoneType = ZoneType.CONTACT;
+        ingestion.invalidateHandlers(SNZB);
+
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2B, 0x00, 0x21, 0x00, 0x00, 0x01, 0x00, 0x00});
+        ingestion.processCycle();
+
+        assertThat(lastReportedKey()).isEqualTo("open");
+    }
+
+    private String lastReportedKey() {
+        List<EventEnvelope> published = publisher.published();
+        return ((StateReportedEvent) published.get(published.size() - 1)
+                .payload()).attributeKey();
+    }
+
+    private static EzspFrame announceFrame() {
+        byte[] announce = new byte[12];
+        announce[0] = 0x07;
+        announce[1] = (byte) (SNZB_NWK & 0xFF);
+        announce[2] = (byte) (SNZB_NWK >> 8);
+        long ieee = SNZB.value();
+        for (int i = 0; i < 8; i++) {
+            announce[3 + i] = (byte) (ieee >> (8 * i));
+        }
+        announce[11] = (byte) 0x80;
+        return incomingFrame(0x0000, ZdoCodec.CLUSTER_DEVICE_ANNOUNCE, 0,
+                SNZB_NWK, announce);
     }
 
     private static EzspFrame incomingFrame(int profile, int cluster, int srcEp,

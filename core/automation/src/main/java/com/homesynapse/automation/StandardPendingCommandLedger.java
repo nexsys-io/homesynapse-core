@@ -19,6 +19,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
 import com.homesynapse.device.AnyChange;
+import com.homesynapse.device.AttributeSchema;
 import com.homesynapse.device.CapabilityInstance;
 import com.homesynapse.device.CommandDefinition;
 import com.homesynapse.device.ConfirmationMode;
@@ -157,6 +158,17 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
      * — it is named here so the disposition guard in {@code onCommandResult} recognizes it.
      */
     private static final String OUTCOME_UNCONFIRMED = "unconfirmed";
+
+    /**
+     * The {@code command_result.outcome} the dispatch service writes for a Tier-1
+     * validation rejection (SD-4 / M9.4b §4 — found un-guarded at grounding). An
+     * {@code invalid} result reports a command that was NEVER issued into the dispatch
+     * pipeline — redelivery must never terminal-match a tracked sibling via the
+     * (entity, command) fallback (the F-2 loop-back class). Package-private so the
+     * membership test cross-pins it against
+     * {@code StandardCommandDispatchService.OUTCOME_INVALID} — the two cannot drift.
+     */
+    static final String OUTCOME_INVALID = "invalid";
 
     private final EventPublisher publisher;
     private final EntityRegistry entityRegistry;
@@ -375,11 +387,13 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
      */
     private void onCommandResult(EventEnvelope event, CommandResultEvent result) {
         if (isDispositionOutcome(result.outcome())) {
-            // The ledger's own dispositions (superseded / expired_on_restart) and the
-            // adapter's immediate honest verdict (unconfirmed, AMD-97) are terminal REPORTS
-            // about an already-concluded command, not adapter rejections of an in-flight one
-            // — redelivery must never terminal-match a newer tracked entry on the same
-            // (entity, command) key (the F-2 loop-back guard).
+            // The ledger's own dispositions (superseded / expired_on_restart), the
+            // adapter's immediate honest verdict (unconfirmed, AMD-97), and the dispatch
+            // service's Tier-1 rejection (invalid, SD-4) are terminal REPORTS about a
+            // command that is already concluded or never entered dispatch — not adapter
+            // rejections of an in-flight one. Redelivery must never terminal-match a
+            // newer tracked entry on the same (entity, command) key (the F-2 loop-back
+            // guard).
             return;
         }
         EntityId target = EntityId.of(result.targetEntityRef());
@@ -751,6 +765,9 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
      * The derived outcome's {@code timeoutMs} carries the policy default for the record's
      * completeness but is NOT the deadline source — the {@code command_issued} timeout arm
      * is (a single timeout source per path; two would be a wrong-verdict generator).
+     * A TOLERANCE target is rescaled from the parameter domain into the attribute domain
+     * when both schemas carry differing numeric bounds (SD-2, M9.4b §2.2 —
+     * {@link #rescaleToAttributeDomain}); equal or missing bounds take the identity leg.
      */
     Optional<ExpectedOutcome> deriveOutcome(CommandDefinition definition,
             CapabilityInstance instance, CommandIssuedEvent issued) {
@@ -801,8 +818,12 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
                         target, parameter.parameterName(), commandType);
                 return Optional.empty();
             }
+            // SD-2 (M9.4b §2.2): the target must live in the domain the device
+            // REPORTS (the attribute schema), not the domain the user commands.
+            double rescaled = rescaleToAttributeDomain(number.doubleValue(),
+                    parameter, instance.attributes().get(attribute));
             return Optional.of(new ExpectedOutcome(attribute,
-                    new WithinTolerance(number.doubleValue(),
+                    new WithinTolerance(rescaled,
                             confirmation.defaultTolerance().doubleValue()),
                     confirmation.defaultTimeoutMs()));
         }
@@ -817,6 +838,38 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
     }
 
     /**
+     * The GENERIC param-domain &rarr; attribute-domain linear rescale (SD-2, Nick 2026-07-04
+     * v18 beat 5 / M9.4b §2.2): when BOTH the sourced {@link ParameterSchema} and the target
+     * {@link AttributeSchema} carry non-null numeric bounds AND the bounds differ, the decoded
+     * value maps linearly into the attribute domain (double math, rounded to nearest). Any
+     * missing bound, equal bounds, an unschematized attribute, or a degenerate parameter span
+     * takes the identity leg — the pre-M9.4b behavior, byte-identical. Schema-driven and
+     * protocol-agnostic: zero ZCL knowledge in core (LTD-17 / INV-CE-04). The TOLERANCE band
+     * itself is NEVER rescaled — {@code ConfirmationPolicy.defaultTolerance} is
+     * attribute-domain by contract (Doc 08 §392: &plusmn;2 in LEVEL units).
+     */
+    private static double rescaleToAttributeDomain(double decoded, ParameterSchema parameter,
+            AttributeSchema attributeSchema) {
+        if (attributeSchema == null
+                || parameter.minimum() == null || parameter.maximum() == null
+                || attributeSchema.minimum() == null || attributeSchema.maximum() == null) {
+            return decoded;
+        }
+        double paramMin = parameter.minimum().doubleValue();
+        double paramMax = parameter.maximum().doubleValue();
+        double attrMin = attributeSchema.minimum().doubleValue();
+        double attrMax = attributeSchema.maximum().doubleValue();
+        if (paramMin == attrMin && paramMax == attrMax) {
+            return decoded;     // equal bounds — identity (the set_color_temperature leg)
+        }
+        if (paramMax == paramMin) {
+            return decoded;     // degenerate parameter span — never divide by zero
+        }
+        return Math.round(attrMin
+                + (decoded - paramMin) * (attrMax - attrMin) / (paramMax - paramMin));
+    }
+
+    /**
      * Outcomes that are dispositions — terminal reports the ledger or an adapter already
      * rendered about a concluded command — as opposed to adapter rejections of an in-flight
      * one. {@code onCommandResult} must never terminal-match them (the F-2 loop-back guard).
@@ -824,7 +877,8 @@ final class StandardPendingCommandLedger implements PendingCommandLedger, Subscr
     private static boolean isDispositionOutcome(String outcome) {
         return OUTCOME_SUPERSEDED.equals(outcome)
                 || OUTCOME_EXPIRED_ON_RESTART.equals(outcome)
-                || OUTCOME_UNCONFIRMED.equals(outcome);
+                || OUTCOME_UNCONFIRMED.equals(outcome)
+                || OUTCOME_INVALID.equals(outcome);
     }
 
     // ── Publication builders ────────────────────────────────────────────────

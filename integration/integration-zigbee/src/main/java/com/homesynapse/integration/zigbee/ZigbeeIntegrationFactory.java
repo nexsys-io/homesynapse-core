@@ -36,13 +36,13 @@ import java.util.function.Supplier;
  * {@link Clock} (NO_DIRECT_TIME_ACCESS — the frozen 12-component context carries
  * no clock).
  *
- * <p><strong>The transport seam (M9.4a):</strong> the byte-channel supplier is
+ * <p><strong>The transport seam:</strong> the byte-channel supplier is
  * package-private-injectable so the hardware-free gates run the REAL adapter code
- * over a scripted NCP. The public constructor leaves it unbound — the real
- * serial-port orchestration (probe/locator/port config) is fenced to M9.4b, and an
- * unbound transport surfaces as a {@link PermanentIntegrationException} at
- * {@code initialize()} (honest FAILED-no-retry; a deaf radio that looks paired is
- * a lying system).</p>
+ * over a scripted NCP (driven mode). The public constructor builds the PRODUCTION
+ * path (M9.4b §5.1): the adapter locates the coordinator port at {@code run()}
+ * (the {@code integrations.zigbee.serial_port} key, else the VID:PID locator —
+ * never descriptor strings, AMD-96/E2), probes it, and binds the real jSerialComm
+ * channel. jSerialComm types stay interior to this module (D-M92-1).</p>
  *
  * <p>Thread-safe: the factory holds immutable wiring inputs only.</p>
  */
@@ -58,9 +58,9 @@ public final class ZigbeeIntegrationFactory implements ZigbeeAdapterFactory {
     private volatile ZigbeeIntegrationAdapter lastCreated;
 
     /**
-     * Creates the production factory. The serial transport itself binds at M9.4b —
-     * an adapter created from this constructor reports a permanent failure at
-     * {@code initialize()} rather than pretending to run (never-false-ALIVE).
+     * Creates the production factory (M9.4b §5.1): adapters locate, probe, and bind
+     * the real serial coordinator at {@code run()} (port location is I/O and never
+     * runs at {@code initialize()} — INV-RF-03).
      *
      * @param deviceRegistry supplies the device registry (the adoption slice's IEEE
      *        dedup surface — R4). A supplier because the registry the composition
@@ -137,8 +137,18 @@ public final class ZigbeeIntegrationFactory implements ZigbeeAdapterFactory {
                     "The device-registry supplier resolved null at create(); the "
                             + "composition root must bind the registry before Phase 6");
         }
-        ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
-                context, registry, dataDirectory, clock, channelOpener);
+        // Driven mode (injected channel — the rig) vs production mode (§5.1): the
+        // real enumerator + jSerialComm channel opener bind HERE, keeping
+        // jSerialComm types interior to this module (D-M92-1).
+        ZigbeeIntegrationAdapter adapter = channelOpener != null
+                ? new ZigbeeIntegrationAdapter(
+                        context, registry, dataDirectory, clock, channelOpener)
+                : new ZigbeeIntegrationAdapter(
+                        context, registry, dataDirectory, clock, null,
+                        new JSerialCommPortEnumerator(),
+                        candidate -> JSerialCommByteChannel.open(
+                                com.fazecast.jSerialComm.SerialPort.getCommPort(
+                                        candidate.systemPath())));
         lastCreated = adapter;
         return adapter;
     }

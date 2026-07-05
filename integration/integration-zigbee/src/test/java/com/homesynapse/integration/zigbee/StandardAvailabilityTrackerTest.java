@@ -22,7 +22,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * §8.1 M-1 restart initialization): power-source-aware silence timeouts,
  * transition listener firing, and the planned-restart rule — initialization
  * from persisted pre-restart state emits NO false unavailable→available
- * transitions.
+ * transitions. The M9.4b §6.10 N-5 posture pins: battery UNLESS the ZCL Basic
+ * PowerSource value is a mains class (0x01/0x02) — UNKNOWN (0x00) and exotic
+ * values get the 25 h battery-conservative window, never the 10-min
+ * active-ping regime.
  */
 class StandardAvailabilityTrackerTest {
 
@@ -30,6 +33,12 @@ class StandardAvailabilityTrackerTest {
             new IEEEAddress(0x00124B0012345678L);
     private static final IEEEAddress MAINS_DEVICE =
             new IEEEAddress(0x0017880109AB12CDL);
+    private static final IEEEAddress THREE_PHASE_DEVICE =
+            new IEEEAddress(0x00158D0001AB34EFL);
+    private static final IEEEAddress DC_DEVICE =
+            new IEEEAddress(0x00124B00AA55AA55L);
+    private static final IEEEAddress UNKNOWN_DEVICE =
+            new IEEEAddress(0x8CF681FFFE12AB34L);
 
     private TestClock clock;
     private Map<Long, Integer> powerSources;
@@ -40,8 +49,12 @@ class StandardAvailabilityTrackerTest {
     void setUp() {
         clock = TestClock.createDefault();
         powerSources = new HashMap<>();
-        powerSources.put(BATTERY_DEVICE.value(), 3); // ZCL battery
-        powerSources.put(MAINS_DEVICE.value(), 1);   // ZCL mains single phase
+        // ZCL Basic PowerSource table values (N-5: only 0x01/0x02 are mains).
+        powerSources.put(BATTERY_DEVICE.value(), 0x03);     // battery
+        powerSources.put(MAINS_DEVICE.value(), 0x01);       // mains single phase
+        powerSources.put(THREE_PHASE_DEVICE.value(), 0x02); // mains 3 phase
+        powerSources.put(DC_DEVICE.value(), 0x04);          // DC source
+        powerSources.put(UNKNOWN_DEVICE.value(), 0x00);     // unknown
         transitions = new ArrayList<>();
     }
 
@@ -107,7 +120,9 @@ class StandardAvailabilityTrackerTest {
         transitions.clear();
 
         clock.advance(Duration.ofHours(24));
-        tracker.evaluateTimeouts();
+        assertThat(tracker.evaluateTimeouts())
+                .as("N-5: battery devices never enter the active-ping regime")
+                .isEmpty();
         assertThat(tracker.isAvailable(BATTERY_DEVICE))
                 .as("24 h is within the 25 h battery window")
                 .isTrue();
@@ -137,6 +152,65 @@ class StandardAvailabilityTrackerTest {
                 .as("the active ping (M9.4 ZCL read) decides; silence alone "
                         + "does not mark mains devices offline")
                 .isTrue();
+    }
+
+    @Test
+    @DisplayName("N-5: mains 3-phase (0x02) gets the mains ping posture")
+    void threePhaseMainsYieldsPingCandidate() {
+        createTracker(Map.of());
+        tracker.recordFrame(THREE_PHASE_DEVICE, clock.instant());
+        transitions.clear();
+
+        clock.advance(Duration.ofMinutes(11));
+
+        assertThat(tracker.evaluateTimeouts())
+                .containsExactly(THREE_PHASE_DEVICE);
+        assertThat(tracker.isAvailable(THREE_PHASE_DEVICE)).isTrue();
+    }
+
+    @Test
+    @DisplayName("N-5: UNKNOWN power source (0x00) gets the 25 h battery-conservative window")
+    void unknownPowerSourceIsBatteryConservative() {
+        createTracker(Map.of());
+        tracker.recordFrame(UNKNOWN_DEVICE, clock.instant());
+        transitions.clear();
+
+        clock.advance(Duration.ofMinutes(11));
+        assertThat(tracker.evaluateTimeouts())
+                .as("a possibly-sleepy device must never be false-offlined "
+                        + "by the 10-min active-ping regime")
+                .isEmpty();
+        assertThat(tracker.isAvailable(UNKNOWN_DEVICE)).isTrue();
+
+        clock.advance(Duration.ofHours(26));
+        tracker.evaluateTimeouts();
+
+        assertThat(tracker.isAvailable(UNKNOWN_DEVICE)).isFalse();
+        assertThat(tracker.lastReason(UNKNOWN_DEVICE))
+                .isEqualTo(AvailabilityReason.SILENCE_TIMEOUT);
+        assertThat(transitions).containsExactly(
+                UNKNOWN_DEVICE.toHexString() + ":false");
+    }
+
+    @Test
+    @DisplayName("N-5: an exotic power source (0x04 DC) falls to battery-conservative")
+    void dcPowerSourceIsBatteryConservative() {
+        createTracker(Map.of());
+        tracker.recordFrame(DC_DEVICE, clock.instant());
+        transitions.clear();
+
+        clock.advance(Duration.ofMinutes(11));
+        assertThat(tracker.evaluateTimeouts())
+                .as("battery posture UNLESS mains — not battery-equality")
+                .isEmpty();
+        assertThat(tracker.isAvailable(DC_DEVICE)).isTrue();
+
+        clock.advance(Duration.ofHours(26));
+        tracker.evaluateTimeouts();
+
+        assertThat(tracker.isAvailable(DC_DEVICE)).isFalse();
+        assertThat(tracker.lastReason(DC_DEVICE))
+                .isEqualTo(AvailabilityReason.SILENCE_TIMEOUT);
     }
 
     @Test

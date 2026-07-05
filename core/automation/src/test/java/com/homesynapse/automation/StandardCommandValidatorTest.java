@@ -63,4 +63,33 @@ class StandardCommandValidatorTest {
         assertThat(result.valid()).isFalse();
         assertThat(result.reason()).contains("does not exist");
     }
+
+    @Test
+    @DisplayName("SD-3: an entity carrying the Identify capability accepts 'identify' through "
+            + "the REAL Tier-1 floor — issuable, zero validator change")
+    void identifyCapability_makesIdentifyIssuable() {
+        EntityId light = AutomationTestSupport.entityId();
+        Entity entity = AutomationTestSupport.entityWith(light,
+                AutomationTestSupport.deviceId(), StandardCapabilities.identify());
+        StandardCommandValidator withIdentify = new StandardCommandValidator(
+                new AutomationTestSupport.StubEntityRegistry(List.of(entity)));
+
+        assertThat(withIdentify.validate(light, "identify", Map.of()).valid()).isTrue();
+    }
+
+    @Test
+    @DisplayName("SD-3: 'color_loop' stays NON-issuable in Wave-1 — no core effects vocabulary "
+            + "(the deliberate scope line)")
+    void colorLoop_staysInvalid() {
+        EntityId light = AutomationTestSupport.entityId();
+        Entity entity = AutomationTestSupport.entityWith(light,
+                AutomationTestSupport.deviceId(), StandardCapabilities.identify());
+        StandardCommandValidator withIdentify = new StandardCommandValidator(
+                new AutomationTestSupport.StubEntityRegistry(List.of(entity)));
+
+        ValidationResult result = withIdentify.validate(light, "color_loop", Map.of());
+
+        assertThat(result.valid()).isFalse();
+        assertThat(result.reason()).contains("color_loop");
+    }
 }

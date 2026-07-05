@@ -9,9 +9,12 @@ import java.util.Map;
 /**
  * Standard capability for brightness level control.
  *
- * <p>Provides an integer attribute ({@code brightness}, range 0–100) and a
- * {@code set_brightness} command. Confirmation uses {@link ConfirmationMode#TOLERANCE}
- * with ±2 tolerance to account for device rounding.</p>
+ * <p>Provides an integer attribute ({@code brightness}, canonical range 0–254
+ * per Doc 08 §3.5 — the percentage is derived at query time, never stored) and
+ * a {@code set_brightness} command whose {@code level} parameter is percent
+ * 0–100 (the user-facing domain). Confirmation uses
+ * {@link ConfirmationMode#TOLERANCE} with ±2 tolerance in LEVEL units (Doc 08
+ * §392) to account for device rounding.</p>
  *
  * <p>Optional for entity type {@link EntityType#LIGHT}. Typically paired with
  * {@link OnOff}.</p>

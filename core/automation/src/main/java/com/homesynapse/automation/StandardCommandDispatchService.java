@@ -89,6 +89,15 @@ public final class StandardCommandDispatchService implements CommandDispatchServ
     /** {@code command_dispatched} carries no protocol metadata yet (filled by the adapter). */
     private static final String NO_PROTOCOL_METADATA = "{}";
 
+    /**
+     * The {@code command_result.outcome} for a Tier-1 validation rejection — a report
+     * about a command that never entered the dispatch pipeline. A DISPOSITION: the
+     * ledger's {@code onCommandResult} guard skips it (SD-4 / M9.4b §4 — the F-2
+     * loop-back class found live at grounding); package-private so the membership
+     * test cross-pins it against the ledger's constant.
+     */
+    static final String OUTCOME_INVALID = "invalid";
+
     private final EntityRegistry entityRegistry;
     private final DeviceRegistry deviceRegistry;
     private final CommandValidator commandValidator;
@@ -186,7 +195,7 @@ public final class StandardCommandDispatchService implements CommandDispatchServ
         CommandValidator.ValidationResult validation =
                 commandValidator.validate(targetRef, commandName, parameters);
         if (!validation.valid()) {
-            publishResult(targetRef, commandName, "invalid", validation.reason(), cause);
+            publishResult(targetRef, commandName, OUTCOME_INVALID, validation.reason(), cause);
             return;
         }
         publishDispatched(targetRef, integration.get(), cause);

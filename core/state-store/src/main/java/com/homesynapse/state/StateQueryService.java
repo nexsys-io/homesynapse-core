@@ -4,6 +4,7 @@
  */
 package com.homesynapse.state;
 
+import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.platform.identity.EntityId;
 
 import java.time.Clock;
@@ -11,6 +12,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /**
  * Read-only query interface for the materialized entity state view.
@@ -168,7 +170,44 @@ public interface StateQueryService {
             ReadinessSource readinessSource,
             LongSupplier viewPosition,
             Clock clock) {
+        // The no-registry constant lives on the impl class: a lambda here would
+        // compile to a synthetic interface method and break the reflective
+        // shape lock (StateQueryServiceTest pins the declared-method count).
+        return materialized(stateStore, readinessSource, viewPosition,
+                MaterializedStateQueryService.NO_REGISTRY, clock);
+    }
+
+    /**
+     * Factory overload carrying the entity-registry seam for the query-time
+     * {@code brightness_percent} decoration (M9.4b §2.3, Doc 08 §3.5:
+     * "percentage derived at query time").
+     *
+     * <p>The registry arrives as a {@link Supplier} so its consultation is
+     * deferred to READ time — the composition root can wire
+     * {@code () -> entityRegistry} before the registry field is assigned
+     * (construction-order-safe). A supplier returning {@code null} disables
+     * the decoration (the 4-arg overload's behavior); every decoration miss
+     * yields the undecorated result — the read path never throws.</p>
+     *
+     * @param stateStore     the materialized state store; never {@code null}
+     * @param readinessSource the source of subscriber lifecycle mode; never {@code null}
+     * @param viewPosition   supplier of the projection's current cursor
+     *                       position; never {@code null}
+     * @param entityRegistry supplier of the registry attribute schemas resolve
+     *                       from; the supplier is never {@code null} but may
+     *                       return {@code null} (decoration skipped)
+     * @param clock          injected clock for staleness recomputation;
+     *                       never {@code null}
+     * @return a new {@link StateQueryService} backed by the given collaborators
+     * @since 1.0
+     */
+    static StateQueryService materialized(
+            StateStore stateStore,
+            ReadinessSource readinessSource,
+            LongSupplier viewPosition,
+            Supplier<EntityRegistry> entityRegistry,
+            Clock clock) {
         return new MaterializedStateQueryService(
-                stateStore, readinessSource, viewPosition, clock);
+                stateStore, readinessSource, viewPosition, entityRegistry, clock);
     }
 }

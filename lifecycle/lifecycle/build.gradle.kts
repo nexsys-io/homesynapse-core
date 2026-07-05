@@ -10,12 +10,16 @@ dependencies {
     api(project(":platform:platform-api"))
     implementation(project(":config:configuration"))
 
-    // AB-3: the composition root assembles the device registries (InMemory*),
-    // the automation_engine subscriber chain, and selects the platform
-    // HealthReporter impl. `implementation` scope — none of these modules' types
-    // appear on the lifecycle module's exported API (composition internals only),
-    // matching the non-transitive `requires` directives in module-info.java.
-    implementation(project(":core:device-model"))
+    // M9.4b (R4): DeviceRegistry appears on the PUBLIC 8-arg HomeSynapseCore
+    // ctor of an EXPORTED class — `api` scope in lockstep with the
+    // `requires transitive com.homesynapse.device` promotion (the M9.1 rule).
+    api(project(":core:device-model"))
+
+    // AB-3: the composition root assembles the automation_engine subscriber
+    // chain and selects the platform HealthReporter impl. `implementation`
+    // scope — none of these modules' types appear on the lifecycle module's
+    // exported API (composition internals only), matching the non-transitive
+    // `requires` directives in module-info.java.
     implementation(project(":core:automation"))
     implementation(project(":platform:platform-systemd"))
 

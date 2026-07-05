@@ -22,6 +22,7 @@ import java.time.Clock;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The zigbee {@link CommandHandler} (Doc 08 §3.10 steps 3–7, M9.4a §3.3): identity
@@ -70,6 +71,16 @@ final class ZigbeeCommandHandler implements CommandHandler {
     static final int IDENTIFY_CLUSTER_ID = 0x0003;
     static final int COMMAND_IDENTIFY = 0x00;
     private static final int DEFAULT_IDENTIFY_SECONDS = 3;
+
+    /**
+     * Commands with NO reporting surface on any device — adapter-side protocol
+     * knowledge (INV-CE-04: this set never leaves the adapter). When such a
+     * command dispatches and the matched profile carries no characterization for
+     * it, the SD-3 fence renders the generic immediate {@code unconfirmed}
+     * verdict — never silence (M9.4b §3.3).
+     */
+    private static final Set<String> INHERENTLY_UNCONFIRMABLE =
+            Set.of("identify", "color_loop");
 
     /**
      * Adapter-side command → characterization-capability vocabulary (INV-CE-04:
@@ -165,11 +176,24 @@ final class ZigbeeCommandHandler implements CommandHandler {
 
         // The Doc 02 §3.8 "reason recorded" half: UNCONFIRMABLE renders the honest
         // immediate verdict AFTER actuation; CONFIRMABLE publishes nothing — the
-        // confirmation window owns the outcome.
-        characterizationFor(record.get(), ieee, command.commandName())
-                .filter(c -> c.confirmability() == Confirmability.UNCONFIRMABLE)
-                .ifPresent(c -> publishResult(command, "unconfirmed",
-                        EventPriority.NORMAL, unconfirmableReason(c)));
+        // confirmation window owns the outcome. SD-3 (v18 beat 5, the M9.4b §3.3
+        // regression fence): "an issuable command whose policy is DISABLED but
+        // whose characterization is absent must NOT silently bypass" — an
+        // inherently-unconfirmable command with NO characterization renders the
+        // generic honest verdict instead of silence ("never-tracked and
+        // honestly-verdicted are different promises").
+        Optional<ConfirmationCharacterization> characterization =
+                characterizationFor(record.get(), ieee, command.commandName());
+        if (characterization.isPresent()) {
+            characterization
+                    .filter(c -> c.confirmability() == Confirmability.UNCONFIRMABLE)
+                    .ifPresent(c -> publishResult(command, "unconfirmed",
+                            EventPriority.NORMAL, unconfirmableReason(c)));
+        } else if (INHERENTLY_UNCONFIRMABLE.contains(command.commandName())) {
+            publishResult(command, "unconfirmed", EventPriority.NORMAL,
+                    "no confirmation surface exists for '" + command.commandName()
+                            + "'; the command was issued and is not tracked");
+        }
     }
 
     /** Builds the protocol frame for a command (adapter vocabulary — INV-CE-04). */

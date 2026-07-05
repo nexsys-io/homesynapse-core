@@ -17,8 +17,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@link ZigbeeProfileLoader} tests: the loader-owned {@code schemaVersion}
  * discipline (§H — unknown major fail-closed, unknown minor tolerated-additive),
  * the namespace-collision rule (§C — duplicate ids within a load are a loader
- * error), the index-first shape (§F — bodies parse lazily, on match), and the
- * bundled-corpus round-trip including the AMD-97 {@code confirmation[]} block.
+ * error), the index-first shape (§F — bodies parse lazily, on match), the
+ * fail-closed {@code degradeRule} vocabulary (F-15 — an unknown rule fails that
+ * profile, naming field + profileId), and the bundled-corpus round-trip including
+ * the AMD-97 {@code confirmation[]} block.
  */
 class ZigbeeProfileLoaderTest {
 
@@ -172,6 +174,81 @@ class ZigbeeProfileLoaderTest {
             assertThatThrownBy(() -> loader.parse(json, ProfileSource.USER))
                     .isInstanceOf(ProfileLoadException.class)
                     .hasMessageContaining("telepathy");
+        }
+    }
+
+    @Nested
+    @DisplayName("confirmation degradeRule vocabulary (F-15 — unknown values fail closed)")
+    class DegradeRuleVocabulary {
+
+        private String confirmationProfile(String profileId, String degradeRulesJson) {
+            return """
+                    {
+                      "profileId": "%s",
+                      "matches": [{"type": "exact_model",
+                                   "manufacturer": "Acme", "model": "X1"}],
+                      "category": "STANDARD_ZCL",
+                      "confirmation": [
+                        {
+                          "capability": "on_off",
+                          "confirmationMode": "EXACT_MATCH",
+                          "authoritativeAttribute": "OnOff/0x0000",
+                          "reportsAuthoritative": "VERIFIED_REPORTS",
+                          "reportingPosture": "ON_CHANGE",
+                          "confirmability": "CONFIRMABLE",
+                          "recommendedTimeoutMs": 5000,
+                          "degradeRule": [%s]
+                        }
+                      ]
+                    }
+                    """.formatted(profileId, degradeRulesJson);
+        }
+
+        @Test
+        @DisplayName("an unknown degradeRule value fails THAT profile closed, naming field + profileId")
+        void unknownDegradeRuleFailsClosed() {
+            String json = wrap(confirmationProfile("bad_degrade_profile",
+                    "\"NO_REPORT_TIMEOUT_TO_UNCONFIRMED\", \"RETRY_UNTIL_HEARD\""));
+
+            ProfileEntry entry = loader.parse(json, ProfileSource.USER).get(0);
+
+            assertThatThrownBy(entry::materialize)
+                    .isInstanceOf(ProfileLoadException.class)
+                    .hasMessageContaining("degradeRule")
+                    .hasMessageContaining("bad_degrade_profile")
+                    .hasMessageContaining("RETRY_UNTIL_HEARD");
+        }
+
+        @Test
+        @DisplayName("sibling profiles in the same document still load (per-profile granularity, the §F shape)")
+        void siblingProfilesStillLoad() {
+            String json = wrap(confirmationProfile("bad_degrade_profile",
+                    "\"RETRY_UNTIL_HEARD\"")
+                    + "," + MINIMAL_PROFILE.formatted("healthy_sibling"));
+
+            List<ProfileEntry> entries = loader.parse(json, ProfileSource.USER);
+
+            assertThat(entries).hasSize(2);
+            assertThat(entries.get(1).materialize().profileId())
+                    .isEqualTo("healthy_sibling");
+            assertThatThrownBy(entries.get(0)::materialize)
+                    .isInstanceOf(ProfileLoadException.class)
+                    .hasMessageContaining("bad_degrade_profile");
+        }
+
+        @Test
+        @DisplayName("the ratified four-value vocabulary round-trips unchanged")
+        void ratifiedVocabularyRoundTrips() {
+            String json = wrap(confirmationProfile("known_rules_profile",
+                    "\"NO_REPORT_TIMEOUT_TO_UNCONFIRMED\", \"NACK_TO_FAILED\", "
+                            + "\"IMMEDIATE_UNCONFIRMED\", "
+                            + "\"CONFIRM_FROM_CACHE_OR_READBACK\""));
+
+            DeviceProfile profile =
+                    loader.parse(json, ProfileSource.USER).get(0).materialize();
+
+            assertThat(profile.confirmation().get(0).degradeRule())
+                    .containsExactlyInAnyOrder(DegradeRule.values());
         }
     }
 

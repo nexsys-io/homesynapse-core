@@ -76,7 +76,6 @@ public final class ZigbeeHardwareFreeRig {
 
     private final TestClock clock;
     private final FakeNcp ncp = new FakeNcp();
-    private final FakeSerialByteChannel channel;
     private final ZigbeeIntegrationFactory factory;
     private final Deque<byte[]> queuedCallbacks = new ArrayDeque<>();
     /** Lock-free (LTD-11): the command executor writes, the gate thread reads. */
@@ -86,13 +85,19 @@ public final class ZigbeeHardwareFreeRig {
     public ZigbeeHardwareFreeRig(TestClock clock, Supplier<DeviceRegistry> deviceRegistry,
             Path dataDirectory) {
         this.clock = Objects.requireNonNull(clock, "clock");
-        this.channel = new FakeSerialByteChannel(clock);
-        channel.onWrite(ncp);
         ncp.onEzspCommand(this::handleCommand);
+        // A FRESH channel per open, all over the ONE scripted NCP (whose RST
+        // handler resets its ASH numbering): a supervisor restartIntegration
+        // re-creates the adapter and re-opens the transport — a single closed
+        // channel instance would leave the restarted session deaf (M9.4b §7.3).
         this.factory = new ZigbeeIntegrationFactory(
                 Objects.requireNonNull(deviceRegistry, "deviceRegistry"),
                 Objects.requireNonNull(dataDirectory, "dataDirectory"),
-                clock, arg -> channel);
+                clock, arg -> {
+                    FakeSerialByteChannel fresh = new FakeSerialByteChannel(clock);
+                    fresh.onWrite(ncp);
+                    return fresh;
+                });
     }
 
     /** The factory to pass into the composition root's factory list. */
@@ -139,6 +144,12 @@ public final class ZigbeeHardwareFreeRig {
         queuedCallbacks.add(report(HUE, 0x0300,
                 attributeRecord(0x0007, 0x21, new byte[] {
                         (byte) (mireds & 0xFF), (byte) ((mireds >> 8) & 0xFF)})));
+    }
+
+    /** Queues a Hue CurrentLevel report ({@code uint8} 0-254 — the SD-2 canonical domain). */
+    public void reportBrightnessLevel(int level) {
+        queuedCallbacks.add(report(HUE, 0x0008,
+                attributeRecord(0x0000, 0x20, new byte[] {(byte) level})));
     }
 
     /**

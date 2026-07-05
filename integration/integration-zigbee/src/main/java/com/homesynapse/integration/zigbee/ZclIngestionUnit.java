@@ -43,8 +43,16 @@ import java.util.function.Supplier;
  * senders, and unadopted endpoints are skipped with structured logs — never
  * ingestion failures.
  *
+ * <p>Dedup guards ONLY the unsolicited 0x0A report channel (F-4, M9.4b §6.1);
+ * the 0x01 Read-Attributes-Response — the readback/VERIFY channel, AMD-97
+ * caveat 1's confirm path — bypasses it entirely. IAS Zone (0x0500) devices
+ * are enrolled on request (ZoneEnrollRequest → ZoneEnrollResponse, F-7a) and
+ * their wire-observed ZoneType outranks the resolver's default; the per-device
+ * handler table invalidates on announce and on a zone-type change (F-8).
+ *
  * <p>Thread-safe for the intended single-cycle-driver use: the per-device
- * handler table is confined to the cycle thread.
+ * handler table and the learned zone-type map are confined to the cycle
+ * thread.
  *
  * @see ReportDeduplicator
  * @see ClusterHandlers
@@ -103,7 +111,15 @@ final class ZclIngestionUnit {
         void onFrame(IEEEAddress device);
     }
 
+    /** Sends one ZCL frame; {@code true} = the NCP accepted it (the F-7a response seam). */
+    interface ZclFrameSender {
+        boolean send(ZclFrame frame, int networkAddress);
+    }
+
     private static final Logger log = LoggerFactory.getLogger(ZclIngestionUnit.class);
+
+    /** The coordinator's application endpoint (the adapter-wide EP-1 convention). */
+    private static final int COORDINATOR_ENDPOINT = 1;
 
     private final Supplier<List<EzspFrame>> callbackDrain;
     private final DeviceResolver resolver;
@@ -111,8 +127,12 @@ final class ZclIngestionUnit {
     private final ReportDeduplicator deduplicator;
     private final EventPublisher publisher;
     private final Clock clock;
+    private final ZclFrameSender frameSender;
     private final Map<Long, Map<Integer, ZigbeeClusterHandler>> handlersByDevice =
             new HashMap<>();
+    // F-7a: wire-learned IAS zone types by IEEE — consulted before the
+    // resolver's default when the handler table builds.
+    private final Map<Long, ZoneType> learnedZoneTypes = new HashMap<>();
 
     /**
      * Creates the ingestion unit.
@@ -123,17 +143,20 @@ final class ZclIngestionUnit {
      * @param deduplicator the measured-contract deduplicator, never {@code null}
      * @param publisher the event publisher from the integration context, never {@code null}
      * @param clock the time source, never {@code null}
+     * @param frameSender the outbound ZCL send surface for protocol-mandated
+     *        responses (the F-7a ZoneEnrollResponse), never {@code null}
      */
     ZclIngestionUnit(Supplier<List<EzspFrame>> callbackDrain,
             DeviceResolver resolver, IngestionListener listener,
             ReportDeduplicator deduplicator, EventPublisher publisher,
-            Clock clock) {
+            Clock clock, ZclFrameSender frameSender) {
         this.callbackDrain = Objects.requireNonNull(callbackDrain, "callbackDrain");
         this.resolver = Objects.requireNonNull(resolver, "resolver");
         this.listener = Objects.requireNonNull(listener, "listener");
         this.deduplicator = Objects.requireNonNull(deduplicator, "deduplicator");
         this.publisher = Objects.requireNonNull(publisher, "publisher");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.frameSender = Objects.requireNonNull(frameSender, "frameSender");
     }
 
     /**
@@ -180,6 +203,9 @@ final class ZclIngestionUnit {
         // TSN state from before the power-cycle is stale truth (the measured
         // reset-on-rejoin rule).
         deduplicator.clearDevice(announce.ieeeAddress());
+        // F-8: the handler table is stale for the same reason the dedup scope
+        // is — a rejoin can follow a re-pair that changed the zone-type truth.
+        invalidateHandlers(announce.ieeeAddress());
         listener.onFrame(announce.ieeeAddress());
         listener.onDeviceAnnounce(announce);
         log.info("zigbee.device_announce: device={} nwk=0x{}",
@@ -199,17 +225,25 @@ final class ZclIngestionUnit {
         ZclCodec.ZclHeader header = parsed.get();
         // Dedup on the COMMAND PAYLOAD (the attribute records), not the whole
         // frame: the measured twins differ only in their header TSN byte.
-        byte[] commandPayload = java.util.Arrays.copyOfRange(zcl,
-                header.payloadOffset(), zcl.length);
-        if (deduplicator.isDuplicate(device, message.sourceEndpoint(),
-                message.clusterId(), header.transactionSequence(),
-                commandPayload)) {
-            log.debug("zigbee.ingestion_duplicate: device={} endpoint={} "
-                            + "cluster=0x{} tsn={}",
-                    device, message.sourceEndpoint(),
-                    Integer.toHexString(message.clusterId()),
-                    header.transactionSequence());
-            return;
+        // Scope (F-4): ONLY the unsolicited 0x0A report channel — the measured
+        // ×2 twins live there; the 0x01 Read-Attributes-Response is the
+        // readback/VERIFY channel (AMD-97 caveat 1's confirm path), where a
+        // frame byte-identical to a prior report is a deliberate second
+        // observation, never a twin.
+        if (!header.clusterSpecific()
+                && header.commandId() == ZclCodec.COMMAND_REPORT_ATTRIBUTES) {
+            byte[] commandPayload = java.util.Arrays.copyOfRange(zcl,
+                    header.payloadOffset(), zcl.length);
+            if (deduplicator.isDuplicate(device, message.sourceEndpoint(),
+                    message.clusterId(), header.transactionSequence(),
+                    commandPayload)) {
+                log.debug("zigbee.ingestion_duplicate: device={} endpoint={} "
+                                + "cluster=0x{} tsn={}",
+                        device, message.sourceEndpoint(),
+                        Integer.toHexString(message.clusterId()),
+                        header.transactionSequence());
+                return;
+            }
         }
 
         List<NormalizedAttribute> normalized;
@@ -223,6 +257,11 @@ final class ZclIngestionUnit {
                                     header.payloadOffset())
                             : ZclCodec.parseReadAttributesResponse(zcl,
                                     header.payloadOffset());
+            if (message.clusterId() == IasZoneHandler.CLUSTER_ID) {
+                // F-7a: learn the wire-observed ZoneType BEFORE the handler
+                // lookup so this frame's own dispatch already sees the truth.
+                learnZoneType(device, attributes);
+            }
             ZigbeeClusterHandler handler =
                     handlersFor(device).get(message.clusterId());
             if (handler == null) {
@@ -245,6 +284,12 @@ final class ZclIngestionUnit {
                     handlersFor(device).get(IasZoneHandler.CLUSTER_ID);
             normalized = handler.normalizeZoneStatus(message.sourceEndpoint(),
                     zoneStatus);
+        } else if (header.clusterSpecific()
+                && message.clusterId() == IasZoneHandler.CLUSTER_ID
+                && header.commandId()
+                        == IasZoneHandler.COMMAND_ZONE_ENROLL_REQUEST) {
+            respondZoneEnroll(device, message);
+            return;
         } else {
             return;
         }
@@ -295,9 +340,95 @@ final class ZclIngestionUnit {
                 : EventOrigin.PHYSICAL;
     }
 
+    /**
+     * ZCL8 §8.2.2.3: the CIE answers ZoneEnrollRequest with ZoneEnrollResponse
+     * — enrollment is GRANTED unconditionally (§3.12 tolerate-not-require:
+     * enrollment is a device fact the CIE acknowledges, never an ingestion
+     * gate). A rejected send is logged and dropped — the device re-requests or
+     * auto-enrolls (F-7a).
+     */
+    private void respondZoneEnroll(IEEEAddress device,
+            EzspIncomingMessage message) {
+        ZclFrame response = new ZclFrame(COORDINATOR_ENDPOINT,
+                message.sourceEndpoint(), IasZoneHandler.CLUSTER_ID,
+                IasZoneHandler.COMMAND_ZONE_ENROLL_RESPONSE, true, 0,
+                new byte[] {IasZoneHandler.ENROLL_RESPONSE_SUCCESS,
+                        IasZoneHandler.ENROLL_ZONE_ID});
+        if (frameSender.send(response, message.sender())) {
+            log.info("zigbee.ias_zone_enrolled: device={} endpoint={} zoneId={}",
+                    device, message.sourceEndpoint(),
+                    IasZoneHandler.ENROLL_ZONE_ID);
+        } else {
+            log.warn("zigbee.ias_enroll_response_rejected: device={} nwk=0x{}; "
+                            + "the NCP refused the ZoneEnrollResponse — the "
+                            + "device re-requests or auto-enrolls",
+                    device, Integer.toHexString(message.sender()));
+        }
+    }
+
+    /**
+     * F-7a: the wire-observed ZoneType (IAS attribute 0x0001) outranks the
+     * resolver's adoption-time default — the sensor itself is the authority on
+     * what it is. A learn that CHANGES the effective type invalidates the
+     * device's handler table (F-8) so subsequent frames normalize under the
+     * new type; unknown zone-type values never learn (the tolerate default
+     * stands).
+     */
+    private void learnZoneType(IEEEAddress device,
+            Map<Integer, Object> attributes) {
+        Object value = attributes.get(IasZoneHandler.ATTRIBUTE_ZONE_TYPE);
+        if (!(value instanceof Long zclId)) {
+            return;
+        }
+        ZoneType learned = null;
+        for (ZoneType candidate : ZoneType.values()) {
+            if (candidate.zclId() == zclId) {
+                learned = candidate;
+                break;
+            }
+        }
+        if (learned == null) {
+            log.debug("zigbee.ias_zone_type_unknown: device={} zclId=0x{}; "
+                    + "ignored", device, Long.toHexString(zclId));
+            return;
+        }
+        ZoneType previous = effectiveZoneType(device);
+        learnedZoneTypes.put(device.value(), learned);
+        if (learned != previous) {
+            // F-8: the cached table was built under the previous type — drop
+            // it so the rebuild picks up the learned truth.
+            invalidateHandlers(device);
+            log.info("zigbee.ias_zone_type_learned: device={} zoneType={} "
+                    + "(was {})", device, learned, previous);
+        }
+    }
+
+    /**
+     * Drops the device's cluster-handler table so the next frame rebuilds it
+     * with current zone-type truth (F-8) — invoked on device-announce, on a
+     * zone-type learn that changes the effective type, and by the adapter's
+     * adoption-completion hook.
+     *
+     * @param device the device whose table is stale, never {@code null}
+     */
+    void invalidateHandlers(IEEEAddress device) {
+        Objects.requireNonNull(device, "device");
+        handlersByDevice.remove(device.value());
+    }
+
     private Map<Integer, ZigbeeClusterHandler> handlersFor(IEEEAddress device) {
         return handlersByDevice.computeIfAbsent(device.value(),
                 key -> ClusterHandlers.forDevice(device, clock,
-                        resolver.zoneTypeFor(device)));
+                        effectiveZoneType(device)));
+    }
+
+    /**
+     * The F-7a precedence: a wire-learned zone type beats the resolver's
+     * default ({@link ZoneType#MOTION} stays the unenrolled fallback, inside
+     * the resolver).
+     */
+    private ZoneType effectiveZoneType(IEEEAddress device) {
+        ZoneType learned = learnedZoneTypes.get(device.value());
+        return learned != null ? learned : resolver.zoneTypeFor(device);
     }
 }

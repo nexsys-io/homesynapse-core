@@ -10,6 +10,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -21,7 +22,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link ZigbeeDeviceCache} tests (Doc 08 §3.14): announce/interview/frame
  * lifecycle updates, the NWK→IEEE index the ingestion resolves through, the
  * 30 s write debounce, shutdown flush, and the JSON round-trip including the
- * persisted availability sidecar (§8.1 M-1 restart-init input).
+ * persisted availability sidecar (§8.1 M-1 restart-init input). F-14 pins the
+ * write-failure backoff: a failed write arms a 60 s suppression, reads stay
+ * live through it, and shutdown {@code flush()} still attempts.
  */
 class ZigbeeDeviceCacheTest {
 
@@ -181,5 +184,99 @@ class ZigbeeDeviceCacheTest {
         assertThat(cache.device(SNZB).orElseThrow().networkAddress())
                 .isEqualTo(0x6B9A);
         assertThat(cache.deviceForNetworkAddress(0x6B9A)).contains(SNZB);
+    }
+
+    private Path blockedTarget() {
+        return tempDir.resolve("blocked").resolve("zigbee-devices.json");
+    }
+
+    /**
+     * Builds a cache whose write target is unwritable: the target's parent
+     * path exists as a regular FILE, so the write path's
+     * {@code createDirectories} fails with a real {@code IOException} on
+     * every platform (no I/O seam exists — F-14 exercises the production
+     * write path directly).
+     */
+    private ZigbeeDeviceCache blockedCache() throws IOException {
+        Files.createFile(tempDir.resolve("blocked"));
+        return new ZigbeeDeviceCache(blockedTarget(), clock);
+    }
+
+    /** Removes the blocking file so the target directory becomes creatable. */
+    private void unblockTarget() throws IOException {
+        Files.delete(tempDir.resolve("blocked"));
+    }
+
+    @Test
+    @DisplayName("F-14: a failed write arms the backoff and recovers after it expires")
+    void failedWriteRecoversAfterBackoff() throws IOException {
+        ZigbeeDeviceCache blocked = blockedCache();
+        blocked.recordAnnounce(SNZB, 0x6B9A);
+
+        blocked.maybeFlush();
+        assertThat(Files.exists(blockedTarget()))
+                .as("the write against the blocked target fails")
+                .isFalse();
+
+        unblockTarget();
+        clock.advance(Duration.ofMillis(
+                ZigbeeDeviceCache.WRITE_FAILURE_BACKOFF_MILLIS));
+        blocked.maybeFlush();
+
+        assertThat(Files.exists(blockedTarget())).isTrue();
+        ZigbeeDeviceCache reloaded = new ZigbeeDeviceCache(blockedTarget(), clock);
+        assertThat(reloaded.device(SNZB))
+                .as("the failed snapshot was re-dirtied, never lost")
+                .isPresent();
+    }
+
+    @Test
+    @DisplayName("F-14: the backoff suppresses the next write until the full 60 s pass")
+    void backoffSuppressesUntilExpiry() throws IOException {
+        ZigbeeDeviceCache blocked = blockedCache();
+        blocked.recordAnnounce(SNZB, 0x6B9A);
+        blocked.maybeFlush();
+        unblockTarget();
+
+        clock.advance(Duration.ofMillis(
+                ZigbeeDeviceCache.WRITE_FAILURE_BACKOFF_MILLIS - 1));
+        blocked.maybeFlush();
+        assertThat(Files.exists(blockedTarget()))
+                .as("one millisecond before expiry the write stays suppressed")
+                .isFalse();
+
+        clock.advance(Duration.ofMillis(1));
+        blocked.maybeFlush();
+        assertThat(Files.exists(blockedTarget())).isTrue();
+    }
+
+    @Test
+    @DisplayName("F-14: reads succeed between a failed write and recovery")
+    void readsSucceedDuringBackoff() throws IOException {
+        ZigbeeDeviceCache blocked = blockedCache();
+        blocked.recordAnnounce(SNZB, 0x6B9A);
+        blocked.setAvailability(SNZB, true);
+        blocked.maybeFlush();
+
+        assertThat(blocked.device(SNZB)).isPresent();
+        assertThat(blocked.all()).hasSize(1);
+        assertThat(blocked.deviceForNetworkAddress(0x6B9A)).contains(SNZB);
+        assertThat(blocked.lastKnownAvailability(SNZB)).contains(true);
+    }
+
+    @Test
+    @DisplayName("F-14: shutdown flush() attempts the write inside the backoff window")
+    void flushBypassesBackoff() throws IOException {
+        ZigbeeDeviceCache blocked = blockedCache();
+        blocked.recordAnnounce(SNZB, 0x6B9A);
+        blocked.maybeFlush();
+        unblockTarget();
+
+        blocked.flush();
+
+        assertThat(Files.exists(blockedTarget()))
+                .as("shutdown is the last persistence chance; the backoff "
+                        + "guards the cycle path, never the shutdown flush")
+                .isTrue();
     }
 }

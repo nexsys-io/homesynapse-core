@@ -96,7 +96,8 @@ class ExpectationDerivationTest {
     // ── the two unlocked TOLERANCE legs (P35 — StandardCapabilities untouched) ─
 
     @Test
-    @DisplayName("set_brightness(level=72) derives WithinTolerance(72, 2) on brightness and confirms boundary-inclusive at 74")
+    @DisplayName("set_brightness(level=72) derives WithinTolerance(183, 2) — the SD-2 rescaled "
+            + "level-domain target — and confirms boundary-inclusive at 185")
     void setBrightness_derivesTolerance_confirmsInclusiveBand() {
         Entity entity = AutomationTestSupport.entityWith(entityId, deviceId,
                 StandardCapabilities.brightness());
@@ -108,15 +109,18 @@ class ExpectationDerivationTest {
 
         PendingCommand tracked = ledger.getCommand(issued.eventId()).orElseThrow();
         assertThat(tracked.targetAttribute()).isEqualTo("brightness");
-        assertThat(tracked.expectation()).isEqualTo(new WithinTolerance(72, 2));
+        // M9.4b §2.2 (SD-2): param [0,100] → attribute [0,254] rescale —
+        // round(72 × 254 / 100) = round(182.88) = 183. The device reports the
+        // LEVEL domain, so the target must live there too (the F-3 leg).
+        assertThat(tracked.expectation()).isEqualTo(new WithinTolerance(183, 2));
 
-        ledger.onEvent(reported("brightness", "74"));   // |74 − 72| = 2 ≤ 2 — inclusive edge
+        ledger.onEvent(reported("brightness", "185"));  // |185 − 183| = 2 ≤ 2 — inclusive edge
 
         assertThat(publisher.countOfType(EventTypes.STATE_CONFIRMED)).isEqualTo(1);
     }
 
     @Test
-    @DisplayName("a report outside the band (75 for target 72 ± 2) does not confirm — the entry is retained")
+    @DisplayName("a report outside the band (186 for target 183 ± 2) does not confirm — the entry is retained")
     void setBrightness_reportOutsideBand_notConfirmed() {
         Entity entity = AutomationTestSupport.entityWith(entityId, deviceId,
                 StandardCapabilities.brightness());
@@ -124,7 +128,7 @@ class ExpectationDerivationTest {
                 ledgerFor(entity, parameters -> Map.of("level", 72));
 
         ledger.onEvent(command("set_brightness", "{\"level\":72}"));
-        ledger.onEvent(reported("brightness", "75"));   // |75 − 72| = 3 > 2
+        ledger.onEvent(reported("brightness", "186"));  // |186 − 183| = 3 > 2
 
         assertThat(publisher.countOfType(EventTypes.STATE_CONFIRMED)).isZero();
         assertThat(ledger.pendingCount()).isEqualTo(1);

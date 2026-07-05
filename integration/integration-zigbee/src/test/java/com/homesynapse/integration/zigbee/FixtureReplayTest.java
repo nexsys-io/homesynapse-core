@@ -69,7 +69,7 @@ class FixtureReplayTest {
                 new IntegrationId(UlidFactory.generate(clock)),
                 new InMemoryDeviceRegistry(), new InMemoryEntityRegistry(),
                 registry, publisher, clock);
-        deduplicator = new ReportDeduplicator();
+        deduplicator = new ReportDeduplicator(clock);
         pendingFrames = new ArrayList<>();
         ingestion = new ZclIngestionUnit(() -> {
             List<EzspFrame> drained = List.copyOf(pendingFrames);
@@ -106,7 +106,7 @@ class FixtureReplayTest {
             @Override
             public void onFrame(IEEEAddress device) {
             }
-        }, deduplicator, publisher, clock);
+        }, deduplicator, publisher, clock, (frame, networkAddress) -> true);
     }
 
     private static InterviewResult snzbInterview() {

@@ -4,9 +4,16 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Optional;
@@ -17,8 +24,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * {@link StandardDeviceProfileRegistry} resolution tests: the Doc 18 §3.5(d)
  * precedence ({@code Fingerprint > ExactModel > ModelWildcard}), user-over-bundled
- * at equal rank (§I), the explicit priority tiebreak, and the deterministic
- * profileId total order.
+ * at equal rank (§I), the explicit priority tiebreak, the deterministic
+ * profileId total order, and the F-12 match-site catch (a body-load failure at
+ * match time is that entry's no-match — one WARN naming the profile, siblings
+ * still match).
  */
 class StandardDeviceProfileRegistryTest {
 
@@ -260,6 +269,148 @@ class StandardDeviceProfileRegistryTest {
             assertThat(registry.allProfiles()).hasSize(1);
             assertThat(registry.findProfile("eWeLink", "SNZB-03P").orElseThrow()
                     .category()).isEqualTo(DeviceCategory.MINOR_QUIRKS);
+        }
+    }
+
+    @Nested
+    @DisplayName("match-time body failure (F-12 — no-match, one WARN, siblings still match)")
+    class MatchTimeBodyFailure {
+
+        private static final String CORRUPT_BODY_PROFILE = """
+                {
+                  "profileId": "%s",
+                  "matches": [{"type": "exact_model",
+                               "manufacturer": "Acme", "model": "X1"}],
+                  "category": "NOT_A_REAL_CATEGORY"
+                }
+                """;
+
+        private ListAppender<ILoggingEvent> logCapture;
+
+        @BeforeEach
+        void attachLogCapture() {
+            logCapture = new ListAppender<>();
+            logCapture.start();
+            registryLogger().addAppender(logCapture);
+        }
+
+        @AfterEach
+        void detachLogCapture() {
+            registryLogger().detachAppender(logCapture);
+        }
+
+        private Logger registryLogger() {
+            return (Logger) LoggerFactory
+                    .getLogger(StandardDeviceProfileRegistry.class);
+        }
+
+        private List<ILoggingEvent> warns() {
+            return logCapture.list.stream()
+                    .filter(event -> event.getLevel() == Level.WARN)
+                    .toList();
+        }
+
+        @Test
+        @DisplayName("a corrupt-body winner is a no-match with ONE WARN; the healthy sibling still matches")
+        void corruptWinnerFallsToHealthySibling() {
+            // aaa_corrupt wins the total order (equal tier/source/priority,
+            // profileId ascending) — its body failure must fall to the sibling,
+            // never take down the whole match.
+            load(CORRUPT_BODY_PROFILE.formatted("aaa_corrupt") + ","
+                    + """
+                    {
+                      "profileId": "zzz_healthy",
+                      "matches": [{"type": "exact_model",
+                                   "manufacturer": "Acme", "model": "X1"}],
+                      "category": "STANDARD_ZCL"
+                    }
+                    """, ProfileSource.BUNDLED);
+
+            Optional<DeviceProfile> match = registry.findProfile("Acme", "X1");
+
+            assertThat(match).isPresent();
+            assertThat(match.get().profileId()).isEqualTo("zzz_healthy");
+            assertThat(warns()).hasSize(1);
+            assertThat(warns().get(0).getFormattedMessage())
+                    .contains("aaa_corrupt");
+        }
+
+        @Test
+        @DisplayName("a corrupt body with no sibling yields empty with ONE WARN naming the profileId")
+        void corruptOnlyYieldsEmpty() {
+            load(CORRUPT_BODY_PROFILE.formatted("only_corrupt"),
+                    ProfileSource.BUNDLED);
+
+            assertThat(registry.findProfile("Acme", "X1")).isEmpty();
+            assertThat(warns()).hasSize(1);
+            assertThat(warns().get(0).getFormattedMessage())
+                    .contains("only_corrupt");
+        }
+
+        @Test
+        @DisplayName("an unknown degradeRule (F-15) surfacing at match time degrades to no-match (F-12)")
+        void unknownDegradeRuleAtMatchTime() {
+            load("""
+                    {
+                      "profileId": "aaa_bad_vocabulary",
+                      "matches": [{"type": "exact_model",
+                                   "manufacturer": "Acme", "model": "X1"}],
+                      "category": "STANDARD_ZCL",
+                      "confirmation": [
+                        {
+                          "capability": "on_off",
+                          "confirmationMode": "EXACT_MATCH",
+                          "reportsAuthoritative": "VERIFIED_REPORTS",
+                          "reportingPosture": "ON_CHANGE",
+                          "confirmability": "CONFIRMABLE",
+                          "recommendedTimeoutMs": 5000,
+                          "degradeRule": ["RETRY_UNTIL_HEARD"]
+                        }
+                      ]
+                    },
+                    {
+                      "profileId": "zzz_healthy",
+                      "matches": [{"type": "exact_model",
+                                   "manufacturer": "Acme", "model": "X1"}],
+                      "category": "STANDARD_ZCL"
+                    }
+                    """, ProfileSource.BUNDLED);
+
+            Optional<DeviceProfile> match = registry.findProfile("Acme", "X1");
+
+            assertThat(match).isPresent();
+            assertThat(match.get().profileId()).isEqualTo("zzz_healthy");
+            assertThat(warns()).hasSize(1);
+            assertThat(warns().get(0).getFormattedMessage())
+                    .contains("aaa_bad_vocabulary")
+                    .contains("degradeRule");
+        }
+
+        @Test
+        @DisplayName("the interview path shares the catch: a corrupt winner falls to the sibling")
+        void interviewPathSharesCatch() {
+            load("""
+                    {
+                      "profileId": "aaa_corrupt",
+                      "matches": [{"type": "exact_model",
+                                   "manufacturer": "eWeLink", "model": "SNZB-03P"}],
+                      "category": "NOT_A_REAL_CATEGORY"
+                    },
+                    {
+                      "profileId": "zzz_healthy",
+                      "matches": [{"type": "exact_model",
+                                   "manufacturer": "eWeLink", "model": "SNZB-03P"}],
+                      "category": "STANDARD_ZCL"
+                    }
+                    """, ProfileSource.BUNDLED);
+
+            Optional<DeviceProfile> match = registry.findProfile(snzbInterview());
+
+            assertThat(match).isPresent();
+            assertThat(match.get().profileId()).isEqualTo("zzz_healthy");
+            assertThat(warns()).hasSize(1);
+            assertThat(warns().get(0).getFormattedMessage())
+                    .contains("aaa_corrupt");
         }
     }
 

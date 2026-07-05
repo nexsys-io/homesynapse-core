@@ -223,6 +223,15 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
      */
     private final List<IntegrationFactory> integrationFactories;
 
+    /**
+     * The device registry Phase 3.1 installs as {@link #deviceRegistry} (M9.4b
+     * §1, R4 — pm-handoff v18 beat 4). Constructor-injected so the composition
+     * root owns registry identity: the integration-factory path and the core's
+     * dispatch resolution index the SAME instance. The 7-arg constructor
+     * self-constructs one, keeping every existing caller behavior-identical.
+     */
+    private final DeviceRegistry providedDeviceRegistry;
+
     // ── Phase / health state (callable from any thread at any time) ─────────
     private volatile LifecyclePhase phase = LifecyclePhase.BOOTSTRAP;
     private final Map<String, SubsystemState> subsystems = new ConcurrentHashMap<>();
@@ -306,11 +315,11 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     }
 
     /**
-     * Constructs a composition root — the M9.1 canonical form: the at-rest
+     * Constructs a composition root — the M9.1 form: the at-rest
      * payload-encryption seam (Doc 15 §3.8) plus the integration factory list
-     * Phase 6 hosts (DP-7). The 5-arg and 6-arg forms delegate here (the
-     * AB-3/AB-4 delegation-chain style), so every existing caller compiles
-     * unchanged.
+     * Phase 6 hosts (DP-7). Delegates to the 8-arg canonical form with a
+     * self-constructed device registry, so every existing caller compiles
+     * unchanged and behaves identically (the AB-3/AB-4 delegation-chain style).
      *
      * @param dbPath               full path to the SQLite database file; never
      *                             {@code null}
@@ -334,6 +343,45 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                            HomeId homeId,
                            PayloadCipher payloadCipher,
                            List<IntegrationFactory> integrationFactories) {
+        this(dbPath, configDir, config, clock, homeId, payloadCipher,
+                integrationFactories, new InMemoryDeviceRegistry());
+    }
+
+    /**
+     * Constructs a composition root — the M9.4b canonical form (§1, R4): the
+     * composition root owns device-registry identity, so the integration
+     * factories and the core index the SAME truth (dispatch resolution reads
+     * the core's registry — a split-brain registry pair would misroute every
+     * entity&rarr;device&rarr;integration resolution once a real transport
+     * binds). The 5/6/7-arg forms delegate here.
+     *
+     * @param dbPath               full path to the SQLite database file; never
+     *                             {@code null}
+     * @param configDir            the configuration directory; never {@code null}
+     * @param config               consolidated runtime configuration; never
+     *                             {@code null}
+     * @param clock                injected clock; never {@code null}
+     * @param homeId               home identity for this installation; never
+     *                             {@code null}
+     * @param payloadCipher        the at-rest cipher adapter, or {@code null} to
+     *                             leave at-rest payload encryption inert
+     * @param integrationFactories the integration factories Phase 6 starts
+     *                             (DECIDE-04 — assembled explicitly by the
+     *                             caller); never {@code null}, may be empty
+     *                             (Phase 6 skipped)
+     * @param deviceRegistry       the device registry Phase 3.1 installs — the
+     *                             ONE instance both the core and any
+     *                             registry-consuming integration factory index
+     *                             (R4); never {@code null}
+     */
+    public HomeSynapseCore(Path dbPath,
+                           Path configDir,
+                           HomeSynapseConfig config,
+                           Clock clock,
+                           HomeId homeId,
+                           PayloadCipher payloadCipher,
+                           List<IntegrationFactory> integrationFactories,
+                           DeviceRegistry deviceRegistry) {
         this.dbPath = Objects.requireNonNull(dbPath, "dbPath");
         this.configDir = Objects.requireNonNull(configDir, "configDir");
         this.config = Objects.requireNonNull(config, "config");
@@ -342,6 +390,8 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         this.payloadCipher = payloadCipher;
         this.integrationFactories = List.copyOf(
                 Objects.requireNonNull(integrationFactories, "integrationFactories"));
+        this.providedDeviceRegistry =
+                Objects.requireNonNull(deviceRegistry, "deviceRegistry");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -452,10 +502,13 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         setPhase(LifecyclePhase.CORE_DOMAIN);
 
         // Step 3.1 — device registries (populated before the projection processes
-        // device-subject events; AB-3 starts them empty, INV-CE-02).
+        // device-subject events; AB-3 starts them empty, INV-CE-02). The device
+        // registry is the ctor-injected instance (M9.4b §1, R4): the composition
+        // root passes the SAME instance to registry-consuming integration
+        // factories, so dispatch resolution and adapter adoption index one truth.
         Instant deviceStart = clock.instant();
         this.entityRegistry = new InMemoryEntityRegistry();
-        this.deviceRegistry = new InMemoryDeviceRegistry();
+        this.deviceRegistry = providedDeviceRegistry;
         this.areaRegistry = new InMemoryAreaRegistry();
         recordSubsystem("device-model", LifecyclePhase.CORE_DOMAIN, deviceStart);
 
@@ -500,8 +553,12 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 persistenceFactory.writeQueueDepthSupplier(),
                 clock, 5_000, 10_000, 5, healthSignalHandler);
         this.scheduler = new SharedScheduler(rateLimit, healthCheck);
+        // M9.4b §2.3: the registry-carrying overload — brightness_percent derives
+        // at query time from the entity's attribute schema (Doc 08 §3.5); the
+        // supplier defers the registry read to query time (construction-order-safe).
         this.stateQueryService = StateQueryService.materialized(
-                persistenceFactory.stateStore(), this, stateProjection::cursorPosition, clock);
+                persistenceFactory.stateStore(), this, stateProjection::cursorPosition,
+                () -> entityRegistry, clock);
         recordSubsystem("state-store", LifecyclePhase.CORE_DOMAIN, stateStart);
 
         // The catch-up ordering invariant: the automation engine must not

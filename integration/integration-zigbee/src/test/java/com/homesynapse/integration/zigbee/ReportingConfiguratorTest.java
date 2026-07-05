@@ -21,8 +21,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link ReportingConfigurator} tests (Doc 08 §3.7 + AMD-96): the
  * bind → configure → VERIFY read-back sequence, the first-class ACK-lies
  * downgrade, per-capability posture classification, the Xiaomi
- * {@code configure_reporting} skip, the IAS CIE tolerate-path, and
- * re-apply-on-rejoin.
+ * {@code configure_reporting} skip, the IAS CIE tolerate-path with the F-7b
+ * (M9.4b §6.4) honest posture derivation, and re-apply-on-rejoin.
  */
 class ReportingConfiguratorTest {
 
@@ -232,7 +232,59 @@ class ReportingConfiguratorTest {
         assertThat(facts)
                 .as("a failed enrollment still yields a fact, never an abort")
                 .isNotEmpty();
+        // F-7b reconciliation: the failed attempt records the truthful
+        // attempted-tolerated pair — the pre-fold row claimed
+        // VERIFIED_REPORTS/ON_CHANGE here without any read-back.
+        assertThat(facts.get(0).reportsAuthoritative())
+                .isEqualTo(ReportsAuthoritative.READBACK_ONLY);
+        assertThat(facts.get(0).reportingPosture())
+                .isEqualTo(ReportingPosture.NONE);
         assertThat(facts.get(0).note()).contains("enroll");
+    }
+
+    @Test
+    @DisplayName("IAS Zone F-7b: an ACKed CIE write without read-back records READBACK_ONLY/NONE, never VERIFIED_REPORTS")
+    void iasAckedCieWriteDoesNotOverclaim() {
+        List<ReportingPostureFact> facts = configurator.configureDevice(DEVICE,
+                List.of(endpoint(0x0500)), null);
+
+        assertThat(ops.calls)
+                .as("the IAS path issues the CIE write and NOTHING else — no "
+                        + "read-back exists to verify against")
+                .containsExactly("cie:1");
+        assertThat(facts).hasSize(1);
+        assertThat(facts.get(0).reportsAuthoritative())
+                .as("F-7b: an ACK is an attempt, not a verification")
+                .isEqualTo(ReportsAuthoritative.READBACK_ONLY);
+        assertThat(facts.get(0).reportingPosture())
+                .isEqualTo(ReportingPosture.NONE);
+        assertThat(facts.get(0).note()).contains("read-back");
+    }
+
+    @Test
+    @DisplayName("IAS Zone F-7b: the honest IAS row leaves a genuinely verified cluster at VERIFIED_REPORTS")
+    void iasHonestyDoesNotTouchVerifiedRows() {
+        ops.readbacks.put(0x0406,
+                new ReportingOps.ReportingConfigRecord(0, 3600, 0));
+
+        List<ReportingPostureFact> facts = configurator.configureDevice(DEVICE,
+                List.of(endpoint(0x0500, 0x0406)), null);
+
+        assertThat(facts).hasSize(2);
+        ReportingPostureFact ias = facts.stream()
+                .filter(fact -> fact.clusterId() == 0x0500)
+                .findFirst().orElseThrow();
+        ReportingPostureFact occupancy = facts.stream()
+                .filter(fact -> fact.clusterId() == 0x0406)
+                .findFirst().orElseThrow();
+        assertThat(ias.reportsAuthoritative())
+                .isEqualTo(ReportsAuthoritative.READBACK_ONLY);
+        assertThat(occupancy.reportsAuthoritative())
+                .as("a genuinely verified read-back still records "
+                        + "VERIFIED_REPORTS")
+                .isEqualTo(ReportsAuthoritative.VERIFIED_REPORTS);
+        assertThat(occupancy.reportingPosture())
+                .isEqualTo(ReportingPosture.ON_CHANGE);
     }
 
     @Test

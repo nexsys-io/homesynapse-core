@@ -22,13 +22,14 @@ class CapabilityTest {
     }
 
     @Test
-    @DisplayName("exactly 16 permitted subtypes (15 standard records + CustomCapability)")
-    void exactlySixteenPermits() {
-        assertThat(Capability.class.getPermittedSubclasses()).hasSize(16);
+    @DisplayName("exactly 17 permitted subtypes (16 standard records + CustomCapability)")
+    void exactlySeventeenPermits() {
+        // M9.4b §3.1 (SD-3): Identify joined the sealed set.
+        assertThat(Capability.class.getPermittedSubclasses()).hasSize(17);
     }
 
     @Test
-    @DisplayName("all 16 permitted subtypes are present")
+    @DisplayName("all 17 permitted subtypes are present")
     void allPermittedSubtypes() {
         Class<?>[] permitted = Capability.class.getPermittedSubclasses();
         assertThat(permitted).extracting(Class::getSimpleName)
@@ -38,7 +39,7 @@ class CapabilityTest {
                         "IlluminanceMeasurement", "PowerMeasurement",
                         "BinaryState", "Contact", "Motion", "Occupancy",
                         "Battery", "DeviceHealth",
-                        "EnergyMeter", "PowerMeter",
+                        "EnergyMeter", "PowerMeter", "Identify",
                         "CustomCapability");
     }
 
@@ -49,13 +50,13 @@ class CapabilityTest {
     }
 
     @Test
-    @DisplayName("15 standard permits are records")
+    @DisplayName("16 standard permits are records")
     void standardPermitsAreRecords() {
         Class<?>[] permitted = Capability.class.getPermittedSubclasses();
         long recordCount = java.util.Arrays.stream(permitted)
                 .filter(Class::isRecord)
                 .count();
-        assertThat(recordCount).isEqualTo(15);
+        assertThat(recordCount).isEqualTo(16);
     }
 
     @Test

@@ -11,7 +11,7 @@ import java.util.Map;
  *
  * <p>A capability defines a typed behavioral contract: the attributes a device
  * reports, the commands it accepts, and the confirmation policy for verifying
- * command execution. Standard capabilities form a sealed set of 15 records
+ * command execution. Standard capabilities form a sealed set of 16 records
  * enabling exhaustive {@code switch} expressions for type-safe dispatch.
  * Runtime-registered capabilities are represented by {@link CustomCapability}.</p>
  *
@@ -30,6 +30,7 @@ public sealed interface Capability permits
         BinaryState, Contact, Motion, Occupancy,
         Battery, DeviceHealth,
         EnergyMeter, PowerMeter,
+        Identify,
         CustomCapability {
 
     /**

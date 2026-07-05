@@ -385,10 +385,11 @@ class EzspProtocolTest {
         assertThat(security).isNotNull();
         byte[] struct = extendedParameters(security);
         assertThat(struct).hasSize(43);
-        // Bitmask 0x1B04 LE (HAVE_PRECONFIGURED_KEY | HAVE_NETWORK_KEY |
-        // TRUST_CENTER_GLOBAL_LINK_KEY | REQUIRE_ENCRYPTED_KEY |
-        // NO_FRAME_COUNTER_RESET — the bellows formation baseline).
-        assertThat(struct[0]).isEqualTo((byte) 0x04); // bitmask LE low
+        // Bitmask 0x1B84 LE (HAVE_PRECONFIGURED_KEY | HAVE_NETWORK_KEY |
+        // TRUST_CENTER_USES_HASHED_LINK_KEY 0x0084 | REQUIRE_ENCRYPTED_KEY |
+        // NO_FRAME_COUNTER_RESET) — the SD-5 hashed-TCLK election (M9.4b §5.4;
+        // the bench-protocol fallback is a one-constant revert to 0x1B04).
+        assertThat(struct[0]).isEqualTo((byte) 0x84); // bitmask LE low
         assertThat(struct[1]).isEqualTo((byte) 0x1B); // bitmask LE high
         // Independent ZigBeeAlliance09 ASCII literal — deliberately NOT the
         // production constant, so a corrupted constant cannot self-confirm.
@@ -440,6 +441,82 @@ class EzspProtocolTest {
         store.seed(params);
 
         protocol.resumeNetwork(); // default handler reports a matching network
+    }
+
+    // ------------------------------------------------------------------
+    // NETWORK_UP await (M9.4b §5.3) — both arms, scripted
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("§5.3: a scripted stackStatusHandler(EMBER_NETWORK_UP) ends the await")
+    void awaitNetworkUp_scriptedStackStatus_proceeds() {
+        connect(13);
+        ncp.onEzspCommand(command -> {
+            if (!isLegacyVersion(command) && frameIdOf(command) == 0x0005) {
+                // The nop response PLUS the stackStatusHandler callback (0x0019,
+                // EmberStatus 0x90 NETWORK_UP — bench-verify constants): the
+                // callback stays buffered until awaitNetworkUp() reads it.
+                return List.of(
+                        extendedResponse(command[0] & 0xFF, 0x0005, new byte[0]),
+                        new byte[] {0x00, (byte) 0x90, 0x01, 0x19, 0x00, (byte) 0x90});
+            }
+            return defaultHandler(command);
+        });
+        startSessionOrFail();
+        protocol.ping();   // pumps the scripted callback into the channel buffer
+
+        protocol.awaitNetworkUp();   // consumes it — no throw, no timeout
+
+        assertThat(protocol.drainPendingCallbacks())
+                .as("the stackStatus frame is the await's, never ingestion's")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("§5.3: a withheld NETWORK_UP times out with the TRANSIENT-class ISE "
+            + "(clock-stepped — the fake channel advances the injected clock)")
+    void awaitNetworkUp_withheld_timesOut() {
+        connect(13);
+        startSessionOrFail();
+
+        assertThatThrownBy(() -> protocol.awaitNetworkUp())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("NETWORK_UP")
+                .hasMessageContaining("10000");
+    }
+
+    @Test
+    @DisplayName("N-4 (§6.9): a non-success scanComplete still returns the collected "
+            + "energy data — formation proceeds over the partial scan (WARN-only)")
+    void energyScan_nonSuccessCompletion_partialDataStillUsed() {
+        connect(13);
+        startSessionOrFail();
+        ncp.onEzspCommand(command -> {
+            if (!isLegacyVersion(command) && frameIdOf(command) == 0x001A) {
+                List<byte[]> frames = new ArrayList<>();
+                frames.add(extendedResponse(command[0] & 0xFF, 0x001A, statusBytes(0)));
+                for (int channel = 11; channel <= 26; channel++) {
+                    int rssi = channel == 20 ? -95 : -60;
+                    frames.add(new byte[] {
+                        0x00, (byte) 0x90, 0x01, 0x48, 0x00,
+                        (byte) channel, (byte) rssi
+                    });
+                }
+                // scanCompleteHandler [channel, status] with a NON-success status:
+                // the N-4 WARN fires; the collected map is still returned.
+                frames.add(new byte[] {
+                    0x00, (byte) 0x90, 0x01, 0x1C, 0x00, 0x1A, 0x01
+                });
+                return frames;
+            }
+            return defaultHandler(command);
+        });
+
+        NetworkParameters formed = protocol.formNetworkAutomatically();
+
+        assertThat(formed.channel())
+                .as("selection proceeds over the partial energy data")
+                .isEqualTo(20);
     }
 
     // resumeNetwork_restored_v14WideStatus was DELETED at M9.4a (format #12 declared
