@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
@@ -59,6 +60,22 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     static final String SERIAL_PORT_KEY = "serial_port";
 
     /**
+     * The {@code integrations.zigbee} config key naming the permit-join window
+     * duration in seconds (M9.4-PJ — the headless/bench operator path). Conservative
+     * default is LAW: an ABSENT key opens NOTHING; the schema's {@code default: 120}
+     * is documentation-side and never auto-opens a join window.
+     */
+    static final String PERMIT_JOIN_DURATION_KEY = "permit_join_duration";
+
+    /**
+     * The permit-join window clamp bounds (M9.4-PJ; the schema validates upstream —
+     * the clamp is the defensive floor/ceiling so a configured value never trips the
+     * protocol's own range throw). Max 254 per the Zigbee spec.
+     */
+    static final int PERMIT_JOIN_MIN_SECONDS = 1;
+    static final int PERMIT_JOIN_MAX_SECONDS = 254;
+
+    /**
      * The production cycle cadence (chosen constant, §5.1): the inbound pump's
      * bounded read IS the park (the SERIAL platform thread blocks on the read —
      * no sleep, LTD-01/W4); while unhealthy, the latch-await park below stays
@@ -100,6 +117,13 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     private PortWatchdog watchdog;
     private volatile SerialByteChannel productionChannel;
     private PortIdentity portIdentity;
+    /**
+     * The permit-join window close instant (M9.4-PJ), or {@code null} when no
+     * window is open. Written once by {@link #openPermitJoinWindow()} on the
+     * production {@code run()} thread; read by {@link #isPermitJoinActive()} from
+     * query threads — {@code volatile} for cross-thread visibility.
+     */
+    private volatile Instant permitJoinDeadline;
 
     /**
      * The canonical constructor. Exactly one transport source is bound:
@@ -199,6 +223,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         protocol.awaitNetworkUp();
         log.info("zigbee.production_session_started: port={} protocolVersion={}",
                 port.systemPath(), protocol.negotiatedVersion());
+        openPermitJoinWindow();   // M9.4-PJ: the operator/bench join window (production only)
         productionLoop();
     }
 
@@ -254,7 +279,12 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
 
     @Override
     public boolean isPermitJoinActive() {
-        return false;   // the permit-join surface binds with the REST path (post-M9.4a)
+        // Never-false-ALIVE: the honest clock-based window — never claims open when
+        // closed. Null deadline (no window ever opened) reads false. The REST
+        // permit-join surface remains the future UI mechanism (M9.4-PJ does not
+        // preempt it).
+        Instant deadline = permitJoinDeadline;
+        return deadline != null && clock.instant().isBefore(deadline);
     }
 
     // ── The driven cycle (§G — M9.4a: gates own the cadence) ───────────────
@@ -348,6 +378,45 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
             log.info("zigbee.network_formed: channel={} panId=0x{}",
                     formed.channel(), Integer.toHexString(formed.panId()));
         }
+    }
+
+    /**
+     * Opens the permit-join window from the operator config key
+     * ({@code integrations.zigbee.permit_join_duration}) — the headless/bench
+     * operator path (M9.4-PJ), production mode ONLY, called once after
+     * {@code NETWORK_UP} and before the watchdog-armed cycle loop.
+     *
+     * <p>Conservative default is LAW: an ABSENT key opens NOTHING (the schema's
+     * documentation-side default never auto-opens a window). A present value is
+     * clamped to [{@value #PERMIT_JOIN_MIN_SECONDS}, {@value #PERMIT_JOIN_MAX_SECONDS}]
+     * (an out-of-range value logs one WARN and proceeds with the clamp), the
+     * coordinator window is opened ONCE, and the real close instant is recorded so
+     * {@link #isPermitJoinActive()} never claims open past close (never-false-ALIVE).
+     * The deadline is recorded only AFTER the frame is accepted — a rejected open
+     * leaves the window honestly closed.
+     *
+     * <p>A restart naturally re-opens the window while the key is present — the
+     * designed bench semantic (the operator removes the key to stop re-opening on
+     * boot). This is never called from {@code initialize()} (INV-RF-03) nor from the
+     * M9.4a driven/test cadence ({@link #runCycleOnce()}); a watchdog reopen does not
+     * renew the window (reopen &ne; boot).
+     */
+    void openPermitJoinWindow() {
+        Optional<Integer> configured =
+                context.configAccess().getInt(PERMIT_JOIN_DURATION_KEY);
+        if (configured.isEmpty()) {
+            return;   // conservative default: no key ⇒ the window NEVER opens
+        }
+        int requested = configured.get();
+        int duration = Math.max(PERMIT_JOIN_MIN_SECONDS,
+                Math.min(PERMIT_JOIN_MAX_SECONDS, requested));
+        if (duration != requested) {
+            log.warn("zigbee.permit_join_clamped: configured={} clamped={}",
+                    requested, duration);
+        }
+        protocol.permitJoin(duration);
+        permitJoinDeadline = clock.instant().plusSeconds(duration);
+        log.info("zigbee.permit_join_opened: duration={}s", duration);
     }
 
     /**

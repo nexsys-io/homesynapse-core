@@ -409,6 +409,23 @@ M9.4b makes the adapter REAL-WORLD-OPERABLE: production port location/probe/sess
 
 ---
 
+## M9.4-PJ Implementation — Permit-Join Config Wiring (2026-07-06)
+
+M9.4-PJ wires the already-schema'd `integrations.zigbee.permit_join_duration` key to `CoordinatorProtocol.permitJoin(int)` — the headless/bench operator path for the M9.4 "join two devices" step. Before this WU there was NO production caller of `permitJoin` (reachable only from unit tests). Type delta: ZERO (no new types). Change: 1 main file + 1 new test file; zero module-info/build.gradle/schema/dependency/event diffs. The REST permit-join surface remains the future UI mechanism — this does not preempt it.
+
+### M9.4-PJ Behavior Deltas (existing types)
+
+- **`ZigbeeIntegrationAdapter` — permit-join binding (M9.4-PJ):** NEW constant `PERMIT_JOIN_DURATION_KEY = "permit_join_duration"` (beside `SERIAL_PORT_KEY`) + clamp bounds `PERMIT_JOIN_MIN_SECONDS=1`/`PERMIT_JOIN_MAX_SECONDS=254`. NEW package-private `openPermitJoinWindow()` is called from PRODUCTION `run()` ONLY — after `awaitNetworkUp()` + the `production_session_started` log, before `productionLoop()`. Conservative default is LAW: an ABSENT key opens NOTHING (the schema's `default: 120` is documentation-side; the adapter never auto-opens). A present value is clamped to [1,254] (out-of-range logs ONE WARN `zigbee.permit_join_clamped: configured={} clamped={}` and proceeds — the adapter clamps FIRST so a configured value never reaches the protocol's own `permitJoin` range throw), `protocol.permitJoin(n)` fires ONCE, and `permitJoinDeadline` (a NEW `volatile Instant`) is recorded AFTER acceptance (a rejected open leaves the window honestly closed); INFO `zigbee.permit_join_opened: duration={}s`. NOT called from `initialize()` (INV-RF-03) nor from the M9.4a driven cadence (`runCycleOnce()`); a watchdog `attemptReopen()` does NOT renew the window (reopen ≠ boot — the ONE deliberate PIE catch there is untouched). A restart re-opens the window while the key is present — the designed bench semantic (remove the key to stop re-opening on boot).
+- **`isPermitJoinActive()` — REALIZED (was the M9.4a `return false` stub):** now `permitJoinDeadline != null && clock.instant().isBefore(deadline)` (volatile read into a local; written on the production run thread, read from query threads — never-false-ALIVE: never claims open past close). The public `ZigbeeAdapter` signature is unchanged.
+
+### M9.4-PJ Gotchas
+
+- **The ONE-frame rule is the designed bench semantic:** `openPermitJoinWindow()` sends at most one `permitJoin` per boot; a restart naturally re-opens while the key is present. Stopping the re-open is an operator action (remove the key), not a code branch.
+- **Production `run()` is not driven end-to-end by any unit test** — `run()` blocks on `productionLoop()`/`stopSignal.await()`. `ZigbeePermitJoinTest` drives the production ladder via the package-private seams (the `ZigbeeProductionTransportTest` idiom: `resolvePort`→`bindTransport`→`startSession`→`resumeOrForm`→`awaitNetworkUp`) then calls `openPermitJoinWindow()` directly; the call-site placement in `run()` rests on inspection, not a live test.
+- **Log-capture:** the clamp WARN is asserted via the `ListAppender` idiom (the `StandardDeviceProfileRegistryTest`/F-12 pattern; `logback.classic` is test-scoped only).
+
+---
+
 ## Phase 3 Cross-Module Context
 
 *Added 2026-04-11 (Alignment Pass #2). Phase 3 implementation is active — M2.5 `SqliteEventStore` landed 2026-04-11 (commit `5279e7a`), next milestone M2.6 + M2.7 (combined) pending from Nick.*
