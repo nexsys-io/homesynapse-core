@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,13 +50,15 @@ import java.util.function.Predicate;
  * width seam stays, D-M92-4). The version truth is the negotiation response at
  * stack init, never an external registry (AMD-96/E6).
  *
- * <p><strong>Scope (D-M92-6, updated M9.4a):</strong> {@code formNetwork}/
+ * <p><strong>Scope (D-M92-6, updated M9.4a/M9.4-TCJ):</strong> {@code formNetwork}/
  * {@code resumeNetwork}/{@code permitJoin}/{@code ping} (M9.2), {@code interview}
  * (M9.3 — one attempt per call; retry/sleepy orchestration is
- * {@link PendingInterviewQueue}'s), and {@code sendZclFrame} (M9.4a — the command
- * write path over the bench-proven v13 unicast) are implemented;
- * {@code topologyScan} (post-M9.4 §3.11 unit) remains stubbed with
- * {@link UnsupportedOperationException} naming the completing milestone.
+ * {@link PendingInterviewQueue}'s), {@code sendZclFrame} (M9.4a — the command
+ * write path over the bench-proven v13 unicast), and
+ * {@code enablePreconfiguredKeyJoins} (M9.4-TCJ — the window-open Trust Center
+ * join enablement) are implemented; {@code topologyScan} (post-M9.4 §3.11 unit)
+ * remains stubbed with {@link UnsupportedOperationException} naming the
+ * completing milestone.
  *
  * <p>Thread-safe ({@link ReentrantLock} only, LTD-11): callers are virtual threads;
  * the lock also guards the NOT-thread-safe transport underneath. The watchdog
@@ -147,6 +150,60 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
 
     /** The §5.3 NETWORK_UP await window (chosen constant, M9.4b). */
     static final long NETWORK_UP_TIMEOUT_MS = 10_000;
+
+    // ── M9.4-TCJ §A: Trust Center join enablement (BENCH-VERIFY block) ──────
+    // Frame ids, policy decisions, and callback layouts below are bellows-derived
+    // and synthetic-tested until silicon (the 0x0019/0x90 precedent): a wrong
+    // constant NAKs honestly at window-open or leaves a join stalled, and the
+    // correction fed back from the bench is a one-constant/one-layout edit.
+
+    /** EZSP {@code setPolicy} (UG100; bellows commands.py). */
+    static final int FRAME_SET_POLICY = 0x0055;
+    /** EzspPolicyId TRUST_CENTER_POLICY. */
+    static final int POLICY_TRUST_CENTER = 0x00;
+    /** EzspPolicyId TC_KEY_REQUEST_POLICY. */
+    static final int POLICY_TC_KEY_REQUEST = 0x09;
+    /**
+     * EzspDecisionBitmask ALLOW_JOINS (0x0001) | ALLOW_UNSECURED_REJOINS (0x0002)
+     * — the bellows/ZHA trust-center posture that admits preconfigured-key joins
+     * (v8 widened the setPolicy decision to u16 LE). BENCH-VERIFY the exact
+     * decision value.
+     */
+    static final int DECISION_ALLOW_PRECONFIGURED_KEY_JOINS = 0x0003;
+    /**
+     * EzspDecisionId ALLOW_TC_KEY_REQUESTS_AND_SEND_CURRENT_KEY (0x51) — bellows
+     * sets it alongside the TC policy so a joiner can fetch the TC link key.
+     * BENCH-VERIFY whether the frozen v13 stack needs it; the exchange is
+     * isolated behind the enablement seam and drops as a one-line edit.
+     */
+    static final int DECISION_ALLOW_TC_KEY_REQUESTS = 0x51;
+    /**
+     * EZSP {@code importTransientKey} — the EmberZNet 7.x/v13 security-manager
+     * frame: EUI64[8] + KeyData[16] + flags u8. BENCH-VERIFY: if the frozen
+     * stack answers only the legacy {@code addTransientLinkKey} (0x00AF —
+     * EUI64[8] + KeyData[16], no flags byte), this id + the trailing flags byte
+     * are the one-layout correction.
+     */
+    static final int FRAME_IMPORT_TRANSIENT_KEY = 0x0111;
+    /** sl_zb_sec_man_flags_t NONE. */
+    static final int TRANSIENT_KEY_FLAGS_NONE = 0x00;
+
+    /** EZSP {@code trustCenterJoinHandler} callback (bellows-derived, BENCH-VERIFY). */
+    static final int FRAME_TRUST_CENTER_JOIN_HANDLER = 0x0024;
+    /** EZSP {@code childJoinHandler} callback (bellows-derived, BENCH-VERIFY). */
+    static final int FRAME_CHILD_JOIN_HANDLER = 0x0023;
+
+    // EmberDeviceUpdate — the 0x0024 status byte (bellows-derived, BENCH-VERIFY).
+    static final int DEVICE_UPDATE_SECURED_REJOIN = 0x00;
+    static final int DEVICE_UPDATE_UNSECURED_JOIN = 0x01;
+    static final int DEVICE_UPDATE_DEVICE_LEFT = 0x02;
+    static final int DEVICE_UPDATE_UNSECURED_REJOIN = 0x03;
+
+    // EmberJoinDecision — the 0x0024 policyDecision byte (bellows-derived).
+    static final int JOIN_DECISION_USE_PRECONFIGURED_KEY = 0x00;
+    static final int JOIN_DECISION_SEND_KEY_IN_CLEAR = 0x01;
+    static final int JOIN_DECISION_DENY_JOIN = 0x02;
+    static final int JOIN_DECISION_NO_ACTION = 0x03;
 
     /** EmberNetworkStatus JOINED_NETWORK (1 byte on every version — not widened). */
     static final int EMBER_NETWORK_STATUS_JOINED = 0x02;
@@ -561,6 +618,26 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
         }
     }
 
+    /**
+     * §3.13 first-run formation on an operator-pinned channel (M9.4-TCJ §B): the
+     * energy scan is skipped and the network forms directly on {@code channel};
+     * identity generation, key custody, and persistence are unchanged. The adapter
+     * calls this when {@code integrations.zigbee.channel} is set and no stored
+     * parameters exist; the resume path never consults the pin.
+     *
+     * @param channel the operator-pinned RF channel (11–26)
+     * @return the formed network's parameters (persisted)
+     */
+    NetworkParameters formNetworkAutomatically(int channel) {
+        lock.lock();
+        try {
+            requireNegotiated();
+            return formation.form(channel);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     @Override
     public void resumeNetwork() {
         try {
@@ -606,6 +683,183 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
         EzspFrame response = execute(FRAME_PERMIT_JOINING,
                 new byte[] {(byte) durationSeconds}, DEFAULT_COMMAND_TIMEOUT_MILLIS);
         requireSuccess("permitJoining", response);
+    }
+
+    /**
+     * M9.4-TCJ §A.1 — the join-side realization of the RULED hashed-TCLK posture
+     * (SD-5, v18 beat-2; this is not a re-opened election): sets the Trust Center
+     * join policy (+ the TC key-request policy), then installs the well-known
+     * {@link #TC_LINK_KEY} as a wildcard-partnered TRANSIENT key — the standard
+     * Z3.0 centralized-join enablement every coordinator (ZHA/bellows included)
+     * performs. The adapter calls this at window-open, BEFORE
+     * {@link #permitJoin(int)}; a watchdog reopen never re-runs it (reopen &ne;
+     * boot — the enablement is atomic-per-window).
+     *
+     * <p>Every exchange is {@code requireSuccess}-fenced: a stack that rejects
+     * the enablement surfaces honestly (TRANSIENT &rarr; supervisor backoff),
+     * never a silent half-open window. §A.3 hygiene: the transient key carries
+     * the stack's own bounded lifetime (EmberZNet transient keys self-expire,
+     * expected to cover the 254 s window max — BENCH-VERIFY on silicon; no
+     * auto-expiry would make a clear-on-window-close the follow-up correction).
+     * The key material is never logged (INV-SE-03).
+     */
+    @Override
+    public void enablePreconfiguredKeyJoins() {
+        EzspFrame joinPolicy = execute(FRAME_SET_POLICY,
+                encodePolicy(POLICY_TRUST_CENTER,
+                        DECISION_ALLOW_PRECONFIGURED_KEY_JOINS),
+                DEFAULT_COMMAND_TIMEOUT_MILLIS);
+        requireSuccess("setPolicy(trustCenterPolicy)", joinPolicy);
+        EzspFrame keyRequestPolicy = execute(FRAME_SET_POLICY,
+                encodePolicy(POLICY_TC_KEY_REQUEST, DECISION_ALLOW_TC_KEY_REQUESTS),
+                DEFAULT_COMMAND_TIMEOUT_MILLIS);
+        requireSuccess("setPolicy(tcKeyRequestPolicy)", keyRequestPolicy);
+
+        byte[] parameters = new byte[25];
+        Arrays.fill(parameters, 0, 8, (byte) 0xFF);   // wildcard partner EUI64
+        System.arraycopy(TC_LINK_KEY, 0, parameters, 8, 16);
+        parameters[24] = (byte) TRANSIENT_KEY_FLAGS_NONE;
+        EzspFrame transientKey = execute(FRAME_IMPORT_TRANSIENT_KEY, parameters,
+                DEFAULT_COMMAND_TIMEOUT_MILLIS);
+        requireSuccess("importTransientKey", transientKey);
+        log.info("zigbee.tc_joins_enabled: join policy set; wildcard well-known "
+                + "transient link key installed (stack-bounded lifetime — expected "
+                + "to self-expire with the join window)");
+    }
+
+    /** Encodes one setPolicy exchange: policyId u8 + decision u16 LE (v8+ width). */
+    private static byte[] encodePolicy(int policyId, int decision) {
+        return new byte[] {(byte) policyId, (byte) (decision & 0xFF),
+                (byte) ((decision >> 8) & 0xFF)};
+    }
+
+    /**
+     * The parsed {@code trustCenterJoinHandler} (0x0024) callback — join-side
+     * OBSERVABILITY only (M9.4-TCJ §A.2): the ingestion logs it and synthesizes
+     * NOTHING; adoption stays Device_annce-gated. Layout (bellows-derived,
+     * BENCH-VERIFY): newNodeId u16 LE, newNodeEui64 u64 LE, status u8
+     * (EmberDeviceUpdate), policyDecision u8 (EmberJoinDecision),
+     * parentOfNewNodeId u16 LE.
+     *
+     * @param newNodeId the joiner's 16-bit network address
+     * @param newNodeEui64 the joiner's IEEE address, never {@code null}
+     * @param status the EmberDeviceUpdate status byte
+     * @param policyDecision the EmberJoinDecision the Trust Center applied
+     * @param parentNodeId the 16-bit network address of the joiner's parent
+     */
+    record TrustCenterJoin(int newNodeId, IEEEAddress newNodeEui64, int status,
+            int policyDecision, int parentNodeId) {
+
+        /**
+         * Parses the callback parameters.
+         *
+         * @param parameters the raw callback parameters, never {@code null}
+         * @return the parsed join, or empty when the payload is too short
+         */
+        static Optional<TrustCenterJoin> parse(byte[] parameters) {
+            if (parameters.length < 14) {
+                return Optional.empty();
+            }
+            int nodeId = (parameters[0] & 0xFF) | ((parameters[1] & 0xFF) << 8);
+            long eui64 = 0;
+            for (int i = 0; i < 8; i++) {
+                eui64 |= (long) (parameters[2 + i] & 0xFF) << (8 * i);
+            }
+            int status = parameters[10] & 0xFF;
+            int decision = parameters[11] & 0xFF;
+            int parent = (parameters[12] & 0xFF) | ((parameters[13] & 0xFF) << 8);
+            return Optional.of(new TrustCenterJoin(nodeId,
+                    new IEEEAddress(eui64), status, decision, parent));
+        }
+
+        /** True when the status reports the device LEFT the network. */
+        boolean deviceLeft() {
+            return status == DEVICE_UPDATE_DEVICE_LEFT;
+        }
+
+        /** True when the Trust Center denied the join. */
+        boolean denied() {
+            return policyDecision == JOIN_DECISION_DENY_JOIN;
+        }
+
+        /** True for a known join/rejoin status the Trust Center did not deny. */
+        boolean joinStarted() {
+            return !denied() && (status == DEVICE_UPDATE_SECURED_REJOIN
+                    || status == DEVICE_UPDATE_UNSECURED_JOIN
+                    || status == DEVICE_UPDATE_UNSECURED_REJOIN);
+        }
+
+        /** The status byte's vocabulary name, or its hex when unknown. */
+        String statusName() {
+            return switch (status) {
+                case DEVICE_UPDATE_SECURED_REJOIN -> "SECURED_REJOIN";
+                case DEVICE_UPDATE_UNSECURED_JOIN -> "UNSECURED_JOIN";
+                case DEVICE_UPDATE_DEVICE_LEFT -> "DEVICE_LEFT";
+                case DEVICE_UPDATE_UNSECURED_REJOIN -> "UNSECURED_REJOIN";
+                default -> "0x" + Integer.toHexString(status);
+            };
+        }
+
+        /** The decision byte's vocabulary name, or its hex when unknown. */
+        String decisionName() {
+            return switch (policyDecision) {
+                case JOIN_DECISION_USE_PRECONFIGURED_KEY -> "USE_PRECONFIGURED_KEY";
+                case JOIN_DECISION_SEND_KEY_IN_CLEAR -> "SEND_KEY_IN_CLEAR";
+                case JOIN_DECISION_DENY_JOIN -> "DENY_JOIN";
+                case JOIN_DECISION_NO_ACTION -> "NO_ACTION";
+                default -> "0x" + Integer.toHexString(policyDecision);
+            };
+        }
+    }
+
+    /**
+     * The parsed {@code childJoinHandler} (0x0023) callback — the coordinator's
+     * own end-device children (e.g. a sleepy sensor joining directly). Same
+     * §A.2 contract: log-only observability, never a synthesis path. Layout
+     * (bellows-derived, BENCH-VERIFY): index u8, joining u8 (bool), childId
+     * u16 LE, childEui64 u64 LE, childType u8 (EmberNodeType).
+     *
+     * @param index the child table index
+     * @param joining {@code true} on join, {@code false} on leave
+     * @param childId the child's 16-bit network address
+     * @param childEui64 the child's IEEE address, never {@code null}
+     * @param childType the EmberNodeType byte
+     */
+    record ChildJoin(int index, boolean joining, int childId,
+            IEEEAddress childEui64, int childType) {
+
+        /**
+         * Parses the callback parameters.
+         *
+         * @param parameters the raw callback parameters, never {@code null}
+         * @return the parsed child join, or empty when the payload is too short
+         */
+        static Optional<ChildJoin> parse(byte[] parameters) {
+            if (parameters.length < 13) {
+                return Optional.empty();
+            }
+            int index = parameters[0] & 0xFF;
+            boolean joining = parameters[1] != 0;
+            int childId = (parameters[2] & 0xFF) | ((parameters[3] & 0xFF) << 8);
+            long eui64 = 0;
+            for (int i = 0; i < 8; i++) {
+                eui64 |= (long) (parameters[4 + i] & 0xFF) << (8 * i);
+            }
+            int childType = parameters[12] & 0xFF;
+            return Optional.of(new ChildJoin(index, joining, childId,
+                    new IEEEAddress(eui64), childType));
+        }
+
+        /** The EmberNodeType byte's vocabulary name, or its hex when unknown. */
+        String typeName() {
+            return switch (childType) {
+                case 0x01 -> "COORDINATOR";
+                case 0x02 -> "ROUTER";
+                case 0x03 -> "END_DEVICE";
+                case 0x04 -> "SLEEPY_END_DEVICE";
+                default -> "0x" + Integer.toHexString(childType);
+            };
+        }
     }
 
     @Override

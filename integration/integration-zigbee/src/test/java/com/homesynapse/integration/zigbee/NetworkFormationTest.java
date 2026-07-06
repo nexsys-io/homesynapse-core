@@ -19,11 +19,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@link NetworkFormation} tests (§3.13, D-M92-7): form→store→resume round-trip,
- * the two-tier channel preference order, the INV-SE-03 key-custody assertions, and
- * the mismatch path. Log capture is unavailable in this module (no logging binding —
- * the M9.1 T15 precedent), so custody is asserted on every OBSERVABLE surface: the
- * recording store holds the key; no exception message and no {@code toString()}
- * carries it; the coordinator ops seam is the only other legal recipient.
+ * the two-tier channel preference order, the pinned-channel formation (M9.4-TCJ
+ * §B), the INV-SE-03 key-custody assertions, and the mismatch path. This class
+ * predates the module's test-scoped logback binding (M9.4b) and stays log-free by
+ * design: custody is asserted on every OBSERVABLE surface — the recording store
+ * holds the key; no exception message and no {@code toString()} carries it; the
+ * coordinator ops seam is the only other legal recipient. The
+ * {@code zigbee.channel_pinned} INFO is asserted at the adapter level
+ * ({@link ZigbeeChannelPinTest}).
  */
 class NetworkFormationTest {
 
@@ -85,6 +88,40 @@ class NetworkFormationTest {
 
         // 20 and 11 are unmeasured (treated quiet); 20 precedes 11 in the tier.
         assertThat(formation.selectChannel(energy)).isEqualTo(20);
+    }
+
+    // ------------------------------------------------------------------
+    // Pinned-channel formation (M9.4-TCJ §B)
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("form(pinnedChannel) forms directly on the pinned channel — the "
+            + "energy scan never runs, identity and custody are unchanged")
+    void form_pinnedChannel_skipsScan() {
+        NetworkParameters formed = formation.form(20);
+
+        assertThat(ops.scanCalls).as("the energy scan is skipped").isZero();
+        assertThat(ops.formedChannel).isEqualTo(20);
+        assertThat(formed.channel()).isEqualTo(20);
+        assertThat(store.load()).as("the pinned formation persists").contains(formed);
+        assertThat(store.storedKey(KEY_REF))
+                .as("key custody is the shared form path's").isNotNull().hasSize(16);
+    }
+
+    @Test
+    @DisplayName("form(pinnedChannel) rejects a channel outside 11-26 before any "
+            + "coordinator I/O (the adapter validates first; this is the defensive floor)")
+    void form_pinnedChannel_outOfRange_rejected() {
+        assertThatThrownBy(() -> formation.form(10))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("11-26");
+        assertThatThrownBy(() -> formation.form(27))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("11-26");
+
+        assertThat(ops.scanCalls).isZero();
+        assertThat(ops.formedChannel).as("no formation was attempted").isEqualTo(-1);
+        assertThat(store.load()).isEmpty();
     }
 
     // ------------------------------------------------------------------
@@ -272,6 +309,7 @@ class NetworkFormationTest {
         byte[] receivedKey;
         int formedChannel = -1;
         int formedPanId = -1;
+        int scanCalls;
 
         private FakeCoordinatorOps() {
             for (int channel = 11; channel <= 26; channel++) {
@@ -281,6 +319,7 @@ class NetworkFormationTest {
 
         @Override
         public Map<Integer, Integer> energyScan(List<Integer> channels) {
+            scanCalls++;
             return scanResult;
         }
 

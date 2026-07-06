@@ -28,7 +28,6 @@ import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -41,25 +40,26 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * M9.4-PJ — permit-join config wiring: the headless/bench operator path from the
- * already-schema'd {@code integrations.zigbee.permit_join_duration} key to
- * {@link CoordinatorProtocol#permitJoin(int)}.
+ * M9.4-TCJ §B — channel-pin config wiring: the already-schema'd
+ * {@code integrations.zigbee.channel} key (11–26) into the FIRST-formation path.
  *
- * <p>The north star is never-false-ALIVE extended to the join window: the window
- * opens ONLY in production mode, ONLY when the operator set the key, ONCE per boot,
- * and {@link ZigbeeIntegrationAdapter#isPermitJoinActive()} reflects the real
- * clock-based window — never open when closed. The scripted NCP already answers
- * frame {@code 0x0022} (permitJoining) through the shared default handler, so these
- * tests drive the production ladder over the {@link FakeNcp} and byte-assert the
- * emitted frame (the {@link ZigbeeProductionTransportTest} idiom).
+ * <p>A present, in-range key forms directly on that channel — the energy scan never
+ * runs and the pin is logged ({@code zigbee.channel_pinned}); an absent key leaves
+ * the §3.13 energy-scan two-tier selection unchanged; an out-of-range value logs one
+ * WARN and falls back to the scan (the schema validates upstream — the guard is the
+ * defensive floor). The resume path is untouched: a formed network resumes on its
+ * STORED channel regardless of the configured pin (RESUME-never-re-form is LAW).
+ * Same scripted-NCP production-ladder idiom as {@link ZigbeePermitJoinTest}.
  */
-@DisplayName("ZigbeeIntegrationAdapter — permit-join config wiring (M9.4-PJ)")
-class ZigbeePermitJoinTest {
+@DisplayName("ZigbeeIntegrationAdapter — channel-pin config wiring (M9.4-TCJ §B)")
+class ZigbeeChannelPinTest {
 
     private static final int FRAME_START_SCAN = 0x001A;
     private static final int FRAME_FORM_NETWORK = 0x001E;
     private static final int FRAME_SET_INITIAL_SECURITY_STATE = 0x0068;
     private static final int FRAME_NETWORK_INIT = 0x0017;
+    private static final int FRAME_NETWORK_STATE = 0x0018;
+    private static final int FRAME_GET_NETWORK_PARAMETERS = 0x0028;
     private static final int FRAME_PERMIT_JOINING = 0x0022;
 
     @TempDir
@@ -67,138 +67,120 @@ class ZigbeePermitJoinTest {
 
     private TestClock clock;
     private RecordingEventPublisher publisher;
-    private ListAppender<ILoggingEvent> logCapture;
+    private ListAppender<ILoggingEvent> adapterLogCapture;
+    private ListAppender<ILoggingEvent> formationLogCapture;
 
     @BeforeEach
     void setUp() {
         clock = TestClock.createDefault();
         publisher = new RecordingEventPublisher(clock);
-        logCapture = new ListAppender<>();
-        logCapture.start();
-        adapterLogger().addAppender(logCapture);
+        adapterLogCapture = new ListAppender<>();
+        adapterLogCapture.start();
+        adapterLogger().addAppender(adapterLogCapture);
+        formationLogCapture = new ListAppender<>();
+        formationLogCapture.start();
+        formationLogger().addAppender(formationLogCapture);
     }
 
     @AfterEach
     void tearDown() {
-        adapterLogger().detachAppender(logCapture);
+        adapterLogger().detachAppender(adapterLogCapture);
+        formationLogger().detachAppender(formationLogCapture);
     }
 
-    // ── §4.1 key present ⇒ ONE frame AFTER network-up, none before ──────────
+    // ── §B.1 key present ⇒ pinned formation, zero energy scans ──────────────
 
     @Test
-    @DisplayName("§4.1: a present key opens the window ONCE after network-up — exactly one "
-            + "0x0022 frame carrying the configured duration, none emitted during boot")
-    void keyPresent_opensWindowOnce_afterNetworkUp() throws Exception {
+    @DisplayName("§B.1: a present in-range key forms directly on that channel — zero "
+            + "0x001A energy-scan frames, the 0x001E frame carries the pinned channel, "
+            + "and the pin is logged")
+    void channelPresent_formsPinned_noEnergyScan() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, 200);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, 20);
 
-        assertThat(countFrames(ncp, FRAME_PERMIT_JOINING))
-                .as("no permit-join frame is emitted during boot, before the window opens")
+        assertThat(countFrames(ncp, FRAME_START_SCAN))
+                .as("the energy scan never runs when the channel is pinned")
                 .isZero();
-
-        adapter.openPermitJoinWindow();
-
-        List<byte[]> joins = framesWithId(ncp, FRAME_PERMIT_JOINING);
-        assertThat(joins).as("exactly one permit-join frame after network-up").hasSize(1);
-        assertThat(joins.get(0)[5]).as("the duration byte rides the frame")
-                .isEqualTo((byte) 200);
-        assertThat(adapter.isPermitJoinActive()).as("the window is open").isTrue();
+        List<byte[]> forms = framesWithId(ncp, FRAME_FORM_NETWORK);
+        assertThat(forms).as("exactly one formation").hasSize(1);
+        assertThat(forms.get(0)[16])
+                .as("the pinned channel rides the formNetwork struct (offset 11)")
+                .isEqualTo((byte) 20);
+        assertThat(adapter.networkParameters().channel()).isEqualTo(20);
+        assertThat(pinnedInfos())
+                .as("the pin is logged once")
+                .containsExactly("zigbee.channel_pinned: channel=20");
     }
 
-    // ── §4.2 key absent ⇒ zero frames across the whole boot ─────────────────
+    // ── §B.2 key absent ⇒ the energy-scan selection is unchanged ────────────
 
     @Test
-    @DisplayName("§4.2: an absent key opens nothing — zero 0x0022 frames across the whole "
-            + "production boot (conservative default is LAW)")
-    void keyAbsent_neverOpens() throws Exception {
+    @DisplayName("§B.2: an absent key runs the §3.13 energy scan exactly as today — "
+            + "one 0x001A frame, the scan-selected channel forms, no pin log")
+    void channelAbsent_energyScanSelects() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
 
-        adapter.openPermitJoinWindow();
-
-        assertThat(countFrames(ncp, FRAME_PERMIT_JOINING))
-                .as("no key ⇒ no permit-join frame ever")
-                .isZero();
-        assertThat(adapter.isPermitJoinActive()).as("the window stays closed").isFalse();
+        assertThat(countFrames(ncp, FRAME_START_SCAN))
+                .as("the energy scan runs on the unpinned form path")
+                .isEqualTo(1);
+        // The scripted scan reports channel 20 quietest among the primaries.
+        assertThat(adapter.networkParameters().channel()).isEqualTo(20);
+        assertThat(pinnedInfos()).as("no pin was configured").isEmpty();
     }
 
-    // ── §4.3 out-of-range ⇒ clamp to 254 + ONE WARN ────────────────────────
+    // ── §B.3 out-of-range ⇒ one WARN, the energy scan still selects ─────────
 
     @Test
-    @DisplayName("§4.3: an out-of-range key (999) is clamped to 254 with ONE WARN, and the "
-            + "clamped duration rides the frame (never the protocol's own range throw)")
-    void keyOutOfRange_clampsToMax_withWarn() throws Exception {
+    @DisplayName("§B.3: an out-of-range key (27) is ignored with ONE WARN and the "
+            + "energy scan selects the channel (never the NetworkParameters range throw)")
+    void channelOutOfRange_ignoredWithWarn_energyScanRuns() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, 999);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, 27);
 
-        adapter.openPermitJoinWindow();
-
-        List<byte[]> joins = framesWithId(ncp, FRAME_PERMIT_JOINING);
-        assertThat(joins).as("exactly one permit-join frame").hasSize(1);
-        assertThat(joins.get(0)[5]).as("the clamped duration byte")
-                .isEqualTo((byte) 254);
-        assertThat(clampWarns())
-                .as("exactly one clamp WARN naming configured + clamped")
-                .containsExactly("zigbee.permit_join_clamped: configured=999 clamped=254");
-        assertThat(adapter.isPermitJoinActive()).isTrue();
+        assertThat(countFrames(ncp, FRAME_START_SCAN)).isEqualTo(1);
+        assertThat(adapter.networkParameters().channel()).isEqualTo(20);
+        assertThat(pinIgnoredWarns())
+                .as("exactly one WARN naming the ignored value and the valid range")
+                .containsExactly("zigbee.channel_pin_ignored: configured=27 "
+                        + "range=11-26; the energy scan selects the channel");
+        assertThat(pinnedInfos()).isEmpty();
     }
 
-    // ── §4.4 honest window state (clock-based) ─────────────────────────────
+    // ── §B.4 resume untouched ⇒ the stored channel wins over the pin ────────
 
     @Test
-    @DisplayName("§4.4: isPermitJoinActive reflects the real clock window — false before open, "
-            + "true inside, false once the clock passes the deadline")
-    void isPermitJoinActive_reflectsClockWindow() throws Exception {
-        FakeNcp ncp = new FakeNcp();
-        ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, 200);
+    @DisplayName("§B.4: the resume path never reads the pin — a network formed on "
+            + "channel 20 resumes on 20 with a channel=25 key configured, zero scans, "
+            + "zero re-formations")
+    void resumeUntouched_storedChannelWins() throws Exception {
+        FakeNcp formingNcp = new FakeNcp();
+        formingNcp.onEzspCommand(command -> formationHandler(formingNcp, command));
+        ZigbeeIntegrationAdapter first = bootProduction(formingNcp, 20);
+        NetworkParameters formed = first.networkParameters();
+        assertThat(formed.channel()).isEqualTo(20);
 
-        assertThat(adapter.isPermitJoinActive()).as("closed before open").isFalse();
+        FakeNcp resumingNcp = new FakeNcp();
+        resumingNcp.onEzspCommand(
+                command -> resumeHandler(resumingNcp, command, formed));
+        ZigbeeIntegrationAdapter second = bootProduction(resumingNcp, 25);
 
-        adapter.openPermitJoinWindow();
-        assertThat(adapter.isPermitJoinActive()).as("open at t0").isTrue();
-
-        clock.advance(Duration.ofSeconds(199));
-        assertThat(adapter.isPermitJoinActive())
-                .as("still open one second before the deadline").isTrue();
-
-        clock.advance(Duration.ofSeconds(1));
-        assertThat(adapter.isPermitJoinActive())
-                .as("closed once the clock reaches the deadline").isFalse();
+        assertThat(countFrames(resumingNcp, FRAME_START_SCAN))
+                .as("resume never scans").isZero();
+        assertThat(countFrames(resumingNcp, FRAME_FORM_NETWORK))
+                .as("resume never re-forms").isZero();
+        assertThat(second.networkParameters().channel())
+                .as("the stored channel outranks the configured pin")
+                .isEqualTo(20);
+        assertThat(pinnedInfos())
+                .as("the pin log belongs to the FIRST formation only")
+                .containsExactly("zigbee.channel_pinned: channel=20");
     }
 
-    // ── §4.5 driven mode is untouched (the M9.4a hero substrate) ────────────
-
-    @Test
-    @DisplayName("§4.5: the M9.4a driven cadence never opens the window even with the key set "
-            + "— runCycleOnce() is untouched, so the window never opens")
-    void drivenMode_neverOpensWindow() throws Exception {
-        FakeNcp ncp = new FakeNcp();
-        ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        FakeSerialByteChannel channel = channelOver(ncp);
-        // Driven mode: an injected channel opener selects the M9.4a rig path; the
-        // key is set to prove it is production-only — the driven cadence ignores it.
-        ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
-                context(configAccess(null, 200)), new InMemoryDeviceRegistry(),
-                tempDir, clock, ignored -> channel);
-        adapter.initialize();
-
-        assertThat(adapter.isPermitJoinActive()).isFalse();
-        adapter.runCycleOnce();
-        adapter.runCycleOnce();
-
-        assertThat(adapter.isPermitJoinActive())
-                .as("the driven cadence never opens permit-join — the M9.4a substrate is untouched")
-                .isFalse();
-        assertThat(countFrames(ncp, FRAME_PERMIT_JOINING))
-                .as("zero 0x0022 frames across the driven cadence")
-                .isZero();
-    }
-
-    // ── harness ─────────────────────────────────────────────────────────────
+    // ── harness (the ZigbeePermitJoinTest production-ladder idiom) ──────────
 
     private static PortCandidate coordinatorCandidate() {
         return new PortCandidate("/dev/ttyUSB7",
@@ -221,13 +203,13 @@ class ZigbeePermitJoinTest {
                 null, null, null, null, null);
     }
 
-    /** Boots a production adapter through the full §5.1 ladder to a formed network. */
-    private ZigbeeIntegrationAdapter bootProduction(FakeNcp ncp, String serialPort,
-            Integer permitJoinDuration) throws Exception {
+    /** Boots a production adapter through the full §5.1 ladder over {@code tempDir}. */
+    private ZigbeeIntegrationAdapter bootProduction(FakeNcp ncp, Integer channelPin)
+            throws Exception {
         Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
         channels.push(channelOver(ncp));
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
-                context(configAccess(serialPort, permitJoinDuration)),
+                context(configAccess(channelPin)),
                 new InMemoryDeviceRegistry(), tempDir, clock, null,
                 () -> List.of(coordinatorCandidate()),
                 candidate -> channels.pop());
@@ -240,7 +222,7 @@ class ZigbeePermitJoinTest {
         return adapter;
     }
 
-    // ── scripted NCP (v13 dialect — the form path only) ─────────────────────
+    // ── scripted NCP (v13 dialect) ──────────────────────────────────────────
 
     /** Formation-capable handler: scan + form + the NETWORK_UP callback. */
     private List<byte[]> formationHandler(FakeNcp ncp, byte[] command) {
@@ -272,25 +254,53 @@ class ZigbeePermitJoinTest {
         };
     }
 
+    /** Resume-capable handler: networkInit restores; parameters echo the stored net. */
+    private List<byte[]> resumeHandler(FakeNcp ncp, byte[] command,
+            NetworkParameters stored) {
+        if (isLegacyVersion(command)) {
+            return List.of(new byte[] {
+                command[0], (byte) 0x80, 0x00, 13, 0x02, 0x30, 0x74
+            });
+        }
+        int seq = command[0] & 0xFF;
+        return switch (frameIdOf(command)) {
+            case FRAME_NETWORK_INIT -> List.of(
+                    extendedResponse(seq, FRAME_NETWORK_INIT, new byte[] {0x00}),
+                    // NETWORK_UP rides the restore — the §5.3 await consumes it.
+                    new byte[] {0x00, (byte) 0x90, 0x01, 0x19, 0x00, (byte) 0x90});
+            case FRAME_NETWORK_STATE -> List.of(
+                    extendedResponse(seq, FRAME_NETWORK_STATE, new byte[] {0x02}));
+            case FRAME_GET_NETWORK_PARAMETERS -> List.of(extendedResponse(seq,
+                    FRAME_GET_NETWORK_PARAMETERS, networkParametersResponse(stored)));
+            default -> defaultResponses(seq, command);
+        };
+    }
+
+    /** The v13 getNetworkParameters response: status + nodeType + the 20-byte struct. */
+    private static byte[] networkParametersResponse(NetworkParameters stored) {
+        byte[] p = new byte[22];
+        p[0] = 0x00;   // EmberStatus SUCCESS
+        p[1] = 0x01;   // nodeType: coordinator
+        for (int i = 0; i < 8; i++) {
+            p[2 + i] = (byte) ((stored.extendedPanId() >> (8 * i)) & 0xFF);
+        }
+        p[10] = (byte) (stored.panId() & 0xFF);
+        p[11] = (byte) ((stored.panId() >> 8) & 0xFF);
+        p[12] = 8;     // radioTxPower
+        p[13] = (byte) stored.channel();
+        // joinMethod, nwkManagerId, nwkUpdateId, channel mask: zeros.
+        return p;
+    }
+
     private List<byte[]> defaultResponses(int seq, byte[] command) {
-        int frameId = frameIdOf(command);
-        // M9.4-TCJ §A: window-open now runs setPolicy ×2 + importTransientKey
-        // BEFORE the 0x0022 — answer them so the ladder reaches the join frame
-        // (ZigbeeTrustCenterJoinTest owns the enablement assertions).
-        if (frameId == EzspCoordinatorProtocol.FRAME_SET_POLICY) {
-            return List.of(extendedResponse(seq, frameId, new byte[] {0x00}));
-        }
-        if (frameId == EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY) {
-            return List.of(extendedResponse(seq, frameId,
-                    new byte[] {0x00, 0x00, 0x00, 0x00}));
-        }
-        return switch (frameId) {
+        return switch (frameIdOf(command)) {
             case 0x0005 -> List.of(extendedResponse(seq, 0x0005, new byte[0]));
             case FRAME_NETWORK_INIT, FRAME_FORM_NETWORK, FRAME_PERMIT_JOINING,
                     FRAME_SET_INITIAL_SECURITY_STATE ->
                     List.of(extendedResponse(seq, frameIdOf(command),
                             new byte[] {0x00}));
-            case 0x0018 -> List.of(extendedResponse(seq, 0x0018, new byte[] {0x02}));
+            case FRAME_NETWORK_STATE -> List.of(
+                    extendedResponse(seq, FRAME_NETWORK_STATE, new byte[] {0x02}));
             default -> List.of();
         };
     }
@@ -331,11 +341,19 @@ class ZigbeePermitJoinTest {
         return framesWithId(ncp, frameId).size();
     }
 
-    private List<String> clampWarns() {
-        return logCapture.list.stream()
+    private List<String> pinnedInfos() {
+        return formationLogCapture.list.stream()
+                .filter(event -> event.getLevel() == Level.INFO)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith("zigbee.channel_pinned"))
+                .toList();
+    }
+
+    private List<String> pinIgnoredWarns() {
+        return adapterLogCapture.list.stream()
                 .filter(event -> event.getLevel() == Level.WARN)
                 .map(ILoggingEvent::getFormattedMessage)
-                .filter(message -> message.startsWith("zigbee.permit_join_clamped"))
+                .filter(message -> message.startsWith("zigbee.channel_pin_ignored"))
                 .toList();
     }
 
@@ -343,10 +361,13 @@ class ZigbeePermitJoinTest {
         return (Logger) LoggerFactory.getLogger(ZigbeeIntegrationAdapter.class);
     }
 
+    private static Logger formationLogger() {
+        return (Logger) LoggerFactory.getLogger(NetworkFormation.class);
+    }
+
     // ── inert context stubs (the adapter never touches these paths here) ────
 
-    private static ConfigurationAccess configAccess(String serialPort,
-            Integer permitJoinDuration) {
+    private static ConfigurationAccess configAccess(Integer channelPin) {
         return new ConfigurationAccess() {
             @Override
             public Map<String, Object> getConfig() {
@@ -355,15 +376,13 @@ class ZigbeePermitJoinTest {
 
             @Override
             public Optional<String> getString(String key) {
-                return ZigbeeIntegrationAdapter.SERIAL_PORT_KEY.equals(key)
-                        ? Optional.ofNullable(serialPort)
-                        : Optional.empty();
+                return Optional.empty();
             }
 
             @Override
             public Optional<Integer> getInt(String key) {
-                return ZigbeeIntegrationAdapter.PERMIT_JOIN_DURATION_KEY.equals(key)
-                        ? Optional.ofNullable(permitJoinDuration)
+                return ZigbeeIntegrationAdapter.CHANNEL_KEY.equals(key)
+                        ? Optional.ofNullable(channelPin)
                         : Optional.empty();
             }
 

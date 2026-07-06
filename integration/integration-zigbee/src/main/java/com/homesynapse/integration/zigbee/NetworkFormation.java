@@ -158,7 +158,31 @@ final class NetworkFormation {
      */
     NetworkParameters form() {
         Map<Integer, Integer> energy = ops.energyScan(allChannels());
-        int channel = selectChannel(energy);
+        return formWithFreshIdentity(selectChannel(energy));
+    }
+
+    /**
+     * First-run formation on an operator-pinned channel (M9.4-TCJ §B): the energy
+     * scan never runs — operator intent outranks measurement — and PAN identity,
+     * key custody, and persistence ride the shared {@link #form(NetworkParameters)}
+     * path unchanged. The resume path never consults the pin: a formed network
+     * resumes on its STORED channel regardless.
+     *
+     * @param pinnedChannel the operator-configured RF channel (11–26)
+     * @return the formed network's parameters (also persisted)
+     * @throws IllegalArgumentException if the channel is outside 11–26 (the adapter
+     *                                  validates first; this is the defensive floor)
+     */
+    NetworkParameters form(int pinnedChannel) {
+        if (pinnedChannel < 11 || pinnedChannel > 26) {
+            throw new IllegalArgumentException(
+                    "pinnedChannel must be 11-26, got " + pinnedChannel);
+        }
+        log.info("zigbee.channel_pinned: channel={}", pinnedChannel);
+        return formWithFreshIdentity(pinnedChannel);
+    }
+
+    private NetworkParameters formWithFreshIdentity(int channel) {
         int panId = 1 + random.nextInt(0xFFFE); // 0x0001–0xFFFE: never broadcast/zero
         long extendedPanId = nonZeroRandomLong();
         return form(new NetworkParameters(channel, panId, extendedPanId,

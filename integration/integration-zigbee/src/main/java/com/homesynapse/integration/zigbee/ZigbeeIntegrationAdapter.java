@@ -76,6 +76,24 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     static final int PERMIT_JOIN_MAX_SECONDS = 254;
 
     /**
+     * The {@code integrations.zigbee} config key pinning the RF channel for FIRST
+     * formation (M9.4-TCJ §B; schema'd 11–26). Read only on the form path: a
+     * present, in-range value forms directly on that channel (the energy scan never
+     * runs); an absent key leaves the §3.13 energy-scan selection unchanged. The
+     * resume path never reads it — a formed network resumes on its STORED channel
+     * regardless (RESUME-never-re-form).
+     */
+    static final String CHANNEL_KEY = "channel";
+
+    /**
+     * The Zigbee 2.4 GHz RF channel bounds (schema-mirrored; the schema validates
+     * upstream — the guard is the defensive floor so a configured value never trips
+     * the {@code NetworkParameters} range throw).
+     */
+    static final int CHANNEL_MIN = 11;
+    static final int CHANNEL_MAX = 26;
+
+    /**
      * The production cycle cadence (chosen constant, §5.1): the inbound pump's
      * bounded read IS the park (the SERIAL platform thread blocks on the read —
      * no sleep, LTD-01/W4); while unhealthy, the latch-await park below stays
@@ -374,10 +392,32 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
             log.info("zigbee.network_resumed: channel={} panId=0x{}",
                     resumed.channel(), Integer.toHexString(resumed.panId()));
         } else {
-            NetworkParameters formed = protocol.formNetworkAutomatically();
+            NetworkParameters formed = formNetwork();
             log.info("zigbee.network_formed: channel={} panId=0x{}",
                     formed.channel(), Integer.toHexString(formed.panId()));
         }
+    }
+
+    /**
+     * First-run formation honoring the operator channel pin (M9.4-TCJ §B): a
+     * present, in-range {@code integrations.zigbee.channel} key forms directly on
+     * that channel (the energy scan never runs); an out-of-range value logs ONE
+     * WARN and falls back to the scan — the schema validates upstream, so the
+     * guard is the defensive floor, never the {@code NetworkParameters} range
+     * throw; an absent key runs the §3.13 energy-scan selection unchanged.
+     */
+    private NetworkParameters formNetwork() {
+        Optional<Integer> pinned = context.configAccess().getInt(CHANNEL_KEY);
+        if (pinned.isPresent()) {
+            int channel = pinned.get();
+            if (channel >= CHANNEL_MIN && channel <= CHANNEL_MAX) {
+                return protocol.formNetworkAutomatically(channel);
+            }
+            log.warn("zigbee.channel_pin_ignored: configured={} range={}-{}; the "
+                            + "energy scan selects the channel",
+                    channel, CHANNEL_MIN, CHANNEL_MAX);
+        }
+        return protocol.formNetworkAutomatically();
     }
 
     /**
@@ -399,7 +439,15 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
      * designed bench semantic (the operator removes the key to stop re-opening on
      * boot). This is never called from {@code initialize()} (INV-RF-03) nor from the
      * M9.4a driven/test cadence ({@link #runCycleOnce()}); a watchdog reopen does not
-     * renew the window (reopen &ne; boot).
+     * renew the window (reopen &ne; boot) — and therefore never re-runs the join
+     * enablement either (M9.4-TCJ: enablement is atomic-per-window).
+     *
+     * <p>M9.4-TCJ §A.1: the Trust Center join enablement (policy &rarr; transient
+     * well-known key) runs BEFORE the {@code permitJoin} frame — a MAC window
+     * without the key-exchange enablement admits no Zigbee 3.0 device. Enablement
+     * rides the same key: an absent key enables nothing. A rejected enablement
+     * propagates BEFORE the window opens, so a failed enablement never leaves a
+     * half-open door and the deadline stays unset (never-false-ALIVE).
      */
     void openPermitJoinWindow() {
         Optional<Integer> configured =
@@ -414,6 +462,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
             log.warn("zigbee.permit_join_clamped: configured={} clamped={}",
                     requested, duration);
         }
+        protocol.enablePreconfiguredKeyJoins();   // §A.1: policy → transient key
         protocol.permitJoin(duration);
         permitJoinDeadline = clock.instant().plusSeconds(duration);
         log.info("zigbee.permit_join_opened: duration={}s", duration);

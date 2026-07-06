@@ -43,6 +43,12 @@ import java.util.function.Supplier;
  * senders, and unadopted endpoints are skipped with structured logs — never
  * ingestion failures.
  *
+ * <p>M9.4-TCJ §A.2: {@code trustCenterJoinHandler} (0x0024) and
+ * {@code childJoinHandler} (0x0023) callbacks are routed to LOG-ONLY handlers —
+ * honest join observability (including failed joins, which never announce).
+ * Adoption/interview remain triggered ONLY by Device_annce; the join handlers
+ * never synthesize a device, an interview, or an event.
+ *
  * <p>Dedup guards ONLY the unsolicited 0x0A report channel (F-4, M9.4b §6.1);
  * the 0x01 Read-Attributes-Response — the readback/VERIFY channel, AMD-97
  * caveat 1's confirm path — bypasses it entirely. IAS Zone (0x0500) devices
@@ -162,16 +168,86 @@ final class ZclIngestionUnit {
     /**
      * Runs one ingestion pass: drains the callback queue and processes every
      * frame. The §G contract: this runs FIRST in the adapter's cycle, before
-     * interview/reporting work touches the live NCP.
+     * interview/reporting work touches the live NCP. The drain has exactly ONE
+     * consumer (this loop) — the M9.4-TCJ join callbacks are routed HERE, never
+     * through a second drain that would steal frames from ingestion.
      */
     void processCycle() {
         for (EzspFrame frame : callbackDrain.get()) {
-            if (frame.frameId()
-                    != EzspCoordinatorProtocol.FRAME_INCOMING_MESSAGE_HANDLER) {
+            int frameId = frame.frameId();
+            if (frameId == EzspCoordinatorProtocol.FRAME_TRUST_CENTER_JOIN_HANDLER) {
+                handleTrustCenterJoin(frame);
+                continue;
+            }
+            if (frameId == EzspCoordinatorProtocol.FRAME_CHILD_JOIN_HANDLER) {
+                handleChildJoin(frame);
+                continue;
+            }
+            if (frameId != EzspCoordinatorProtocol.FRAME_INCOMING_MESSAGE_HANDLER) {
                 continue;
             }
             EzspIncomingMessage.parse(frame.parameters())
                     .ifPresent(this::route);
+        }
+    }
+
+    /**
+     * M9.4-TCJ §A.2 — {@code trustCenterJoinHandler} (0x0024) observability.
+     * <strong>THE PIN:</strong> adoption/interview remain triggered ONLY by
+     * Device_annce ({@link #handleAnnounce}); this handler NEVER creates a
+     * device, NEVER schedules an interview, NEVER feeds availability, and NEVER
+     * publishes an event — it renders join outcomes visible, including the
+     * failed joins that never announce. A device that fails key exchange must
+     * never render as joined.
+     */
+    private void handleTrustCenterJoin(EzspFrame frame) {
+        Optional<EzspCoordinatorProtocol.TrustCenterJoin> parsed =
+                EzspCoordinatorProtocol.TrustCenterJoin.parse(frame.parameters());
+        if (parsed.isEmpty()) {
+            log.debug("zigbee.tc_join_malformed: {} parameter bytes; dropped",
+                    frame.parameters().length);
+            return;
+        }
+        EzspCoordinatorProtocol.TrustCenterJoin join = parsed.get();
+        if (join.deviceLeft()) {
+            log.info("zigbee.device_left: device={} nwk=0x{}",
+                    join.newNodeEui64(), Integer.toHexString(join.newNodeId()));
+            return;
+        }
+        if (join.joinStarted()) {
+            log.info("zigbee.device_join: device={} nwk=0x{} status={} decision={}",
+                    join.newNodeEui64(), Integer.toHexString(join.newNodeId()),
+                    join.statusName(), join.decisionName());
+            return;
+        }
+        // DENY_JOIN or an unknown status: honest failed-join surfacing — the
+        // observability the escalation asked for, never a device.
+        log.warn("zigbee.device_join_failed: device={} status={} decision={}",
+                join.newNodeEui64(), join.statusName(), join.decisionName());
+    }
+
+    /**
+     * M9.4-TCJ §A.2 — {@code childJoinHandler} (0x0023) observability for the
+     * coordinator's own end-device children. Same never-synthesize rule as
+     * {@link #handleTrustCenterJoin}.
+     */
+    private void handleChildJoin(EzspFrame frame) {
+        Optional<EzspCoordinatorProtocol.ChildJoin> parsed =
+                EzspCoordinatorProtocol.ChildJoin.parse(frame.parameters());
+        if (parsed.isEmpty()) {
+            log.debug("zigbee.child_join_malformed: {} parameter bytes; dropped",
+                    frame.parameters().length);
+            return;
+        }
+        EzspCoordinatorProtocol.ChildJoin child = parsed.get();
+        if (child.joining()) {
+            log.info("zigbee.child_join: child={} nwk=0x{} type={}",
+                    child.childEui64(), Integer.toHexString(child.childId()),
+                    child.typeName());
+        } else {
+            log.info("zigbee.child_left: child={} nwk=0x{} type={}",
+                    child.childEui64(), Integer.toHexString(child.childId()),
+                    child.typeName());
         }
     }
 

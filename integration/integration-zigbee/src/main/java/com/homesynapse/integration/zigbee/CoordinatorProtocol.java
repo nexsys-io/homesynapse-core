@@ -55,6 +55,25 @@ public interface CoordinatorProtocol {
     void permitJoin(int durationSeconds);
 
     /**
+     * Enables joins that use the preconfigured well-known Trust Center link key for
+     * the upcoming pairing window (M9.4-TCJ §A.1): sets the coordinator's join
+     * policy and installs the well-known key as a wildcard-partnered TRANSIENT
+     * credential, so a joining Zigbee 3.0 device can complete the initial APS key
+     * exchange and receive the network key.
+     *
+     * <p>Call BEFORE {@link #permitJoin(int)}: the MAC association window alone
+     * admits no Zigbee 3.0 device — without this enablement the key exchange never
+     * completes, the device never announces, and adoption never fires. The
+     * transient credential is bounded to the coordinator stack's transient-key
+     * lifetime; it never persists as a standing credential.
+     *
+     * <p>A coordinator that rejects the enablement surfaces the failure to the
+     * caller — the pairing window must NOT be opened over a half-enabled join
+     * surface (never-false-ALIVE).
+     */
+    void enablePreconfiguredKeyJoins();
+
+    /**
      * Sends a ZCL frame to the target device.
      *
      * @param frame the ZCL frame to send, never {@code null}
