@@ -78,7 +78,9 @@ class EzspProtocolTest {
 
         assertThat(protocol.negotiatedVersion()).isEqualTo(13);
         List<byte[]> commands = ncp.receivedEzspCommands();
-        assertThat(commands).hasSize(1); // matched: no renegotiation
+        // Matched: no renegotiation — exactly one version exchange (the M9.4-NCFG
+        // config batch follows it on every session start).
+        assertThat(countLegacyVersionFrames()).isEqualTo(1);
         byte[] first = commands.get(0);
         assertThat(first[1]).isEqualTo((byte) 0x00); // legacy frame control
         assertThat(first[2]).isEqualTo((byte) 0x00); // legacy frame ID = version
@@ -141,9 +143,12 @@ class EzspProtocolTest {
         connect(13);
 
         startSessionOrFail();
+        int commandsAfterFirst = ncp.receivedEzspCommands().size();
         startSessionOrFail();
 
-        assertThat(ncp.receivedEzspCommands()).hasSize(1);
+        // The no-op second start adds NOTHING: negotiation and the M9.4-NCFG
+        // config prelude both run exactly once per session (G-NCFG6).
+        assertThat(ncp.receivedEzspCommands()).hasSize(commandsAfterFirst);
     }
 
     @Test
@@ -152,7 +157,7 @@ class EzspProtocolTest {
     void resetSession_enablesRenegotiation() {
         connect(13);
         startSessionOrFail();
-        assertThat(ncp.receivedEzspCommands()).hasSize(1);
+        assertThat(countLegacyVersionFrames()).isEqualTo(1);
 
         // The real reopen flow: transport closed and reopened (fresh ASH handshake,
         // decode back in legacy mode), THEN the protocol session resets.
@@ -169,7 +174,7 @@ class EzspProtocolTest {
         // …and startSession renegotiates from scratch (a second version exchange).
         startSessionOrFail();
         assertThat(protocol.negotiatedVersion()).isEqualTo(13);
-        assertThat(ncp.receivedEzspCommands()).hasSize(2);
+        assertThat(countLegacyVersionFrames()).isEqualTo(2);
         assertThat(protocol.ping()).isTrue();
     }
 
@@ -237,7 +242,7 @@ class EzspProtocolTest {
 
         assertThat(successes.get()).isEqualTo(8);
         assertThat(ncp.overlapDetected()).isFalse();
-        assertThat(ncp.receivedEzspCommands()).hasSize(1 + 8); // version + 8 nops
+        assertThat(countCommands(0x0005)).isEqualTo(8); // all 8 nops correlated
     }
 
     @Test
@@ -787,6 +792,12 @@ class EzspProtocolTest {
     private long countCommands(int frameId) {
         return ncp.receivedEzspCommands().stream()
                 .filter(c -> !isLegacyVersion(c) && frameIdOf(c) == frameId)
+                .count();
+    }
+
+    private long countLegacyVersionFrames() {
+        return ncp.receivedEzspCommands().stream()
+                .filter(EzspProtocolTest::isLegacyVersion)
                 .count();
     }
 }

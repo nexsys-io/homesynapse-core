@@ -205,6 +205,56 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     static final int JOIN_DECISION_DENY_JOIN = 0x02;
     static final int JOIN_DECISION_NO_ACTION = 0x03;
 
+    // ── M9.4-NCFG §1: NCP session configuration (BENCH-VERIFY block) ────────
+    // Config ids and values below are bellows/UG100-derived and synthetic-tested
+    // until silicon (the 0x0019/0x90 precedent): the NCP resets to firmware
+    // defaults on every launch and is configured by NO ONE unless the host writes
+    // this batch before stack-up; the §1.2 read-back measures what the frozen v13
+    // stack actually applied, and a correction fed back from the bench is a
+    // one-constant edit fixing code and tests together.
+
+    /** EZSP {@code setConfigurationValue}: configId u8 + value u16 LE → status. */
+    static final int FRAME_SET_CONFIGURATION_VALUE = 0x0053;
+    /** EZSP {@code getConfigurationValue}: configId u8 → status + value u16 LE. */
+    static final int FRAME_GET_CONFIGURATION_VALUE = 0x0052;
+
+    // REQUIRED configuration (§2): a NAK or read-back mismatch is honest failure —
+    // a coordinator that cannot surface joins must never open the join window.
+    /** EzspConfigId STACK_PROFILE — the beacon-compatibility candidate. */
+    static final int CONFIG_STACK_PROFILE = 0x0C;
+    /** ZigBee PRO (profile 2): Z3.0 devices ignore a non-PRO beacon outright. */
+    static final int STACK_PROFILE_ZIGBEE_PRO = 2;
+    /** EzspConfigId SECURITY_LEVEL. */
+    static final int CONFIG_SECURITY_LEVEL = 0x0D;
+    /** Standard Z3.0 APS security (believed firmware-default; pinned explicitly). */
+    static final int SECURITY_LEVEL_Z30_STANDARD = 5;
+    /** EzspConfigId APPLICATION_ZDO_FLAGS — the Device_annce delivery candidate. */
+    static final int CONFIG_APPLICATION_ZDO_FLAGS = 0x2A;
+    /**
+     * EzspZdoConfigurationFlags APP_RECEIVES_SUPPORTED_ZDO_REQUESTS (0x0001) |
+     * APP_HANDLES_UNSUPPORTED_ZDO_REQUESTS (0x0002) — host-side ZDO delivery.
+     */
+    static final int ZDO_FLAGS_RECEIVE_AND_HANDLE_UNSUPPORTED = 0x0003;
+
+    // SUPPORTING configuration (§2): best-effort sizing — 7.4.x firmware
+    // self-manages some of these and legitimately rejects (e.g. packet buffers);
+    // a NAK logs ONE WARN (zigbee.ncp_config_skipped) and the batch continues.
+    static final int CONFIG_KEY_TABLE_SIZE = 0x1E;
+    static final int KEY_TABLE_SIZE_VALUE = 12;
+    static final int CONFIG_ADDRESS_TABLE_SIZE = 0x02;
+    static final int ADDRESS_TABLE_SIZE_VALUE = 16;
+    static final int CONFIG_TRUST_CENTER_ADDRESS_CACHE_SIZE = 0x38;
+    static final int TRUST_CENTER_ADDRESS_CACHE_SIZE_VALUE = 2;
+    static final int CONFIG_MAX_END_DEVICE_CHILDREN = 0x11;
+    static final int MAX_END_DEVICE_CHILDREN_VALUE = 32;
+    /** The sleepy-child parent-buffer window in ms (the SNZB-03P leg). */
+    static final int CONFIG_INDIRECT_TRANSMISSION_TIMEOUT = 0x12;
+    static final int INDIRECT_TRANSMISSION_TIMEOUT_VALUE = 7680;
+    static final int CONFIG_PACKET_BUFFER_COUNT = 0x01;
+    static final int PACKET_BUFFER_COUNT_VALUE = 64;
+    static final int CONFIG_MULTICAST_TABLE_SIZE = 0x06;
+    static final int MULTICAST_TABLE_SIZE_VALUE = 16;
+
     /** EmberNetworkStatus JOINED_NETWORK (1 byte on every version — not widened). */
     static final int EMBER_NETWORK_STATUS_JOINED = 0x02;
     /** EmberStatus NOT_JOINED (v13 dialect; bench-verify at M9.4). */
@@ -301,12 +351,23 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
 
     /**
      * Runs version negotiation — exactly once per session, before any other command
-     * (W8: always the legacy frame format). Applies the AMD-96 tiered acceptance band
-     * and pins the codec variant for the session.
+     * (W8: always the legacy frame format) — then the M9.4-NCFG configuration
+     * prelude ({@link #configureNcp()}): the NCP resets to firmware defaults on
+     * every launch, so every REAL session start (fresh boot AND watchdog reopen —
+     * both reset the NCP) writes the §2 config batch here, before any
+     * {@code networkInit}/{@code formNetwork} can run. Applies the AMD-96 tiered
+     * acceptance band and pins the codec variant for the session. A no-op call on
+     * an already-negotiated session never re-writes config (G-NCFG6);
+     * {@link #resetSession()} makes the next call re-negotiate AND re-configure.
      *
      * @throws PermanentIntegrationException if the negotiated version is below 8 or
      *                                       above the supported band
      * @throws EzspCommandTimeoutException if the NCP does not answer
+     * @throws EzspCommandException if the NCP rejects a REQUIRED configuration
+     *                              write or read — honest failure; the join window
+     *                              never opens over a misconfigured stack
+     * @throws IllegalStateException if a REQUIRED configuration read-back reports
+     *                               a value other than the one written
      */
     void startSession() throws PermanentIntegrationException {
         lock.lock();
@@ -355,9 +416,136 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
             log.info("EZSP session negotiated: protocolVersion={} stackType={} "
                             + "stackVersion=0x{}", ncpVersion, first.stackType(),
                     Integer.toHexString(first.stackVersion()));
+            configureNcp();
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * M9.4-NCFG §1 — the NCP session-configuration prelude. Bench iteration 1
+     * proved the M9.4-TCJ enablement silicon-accepted yet joins produced total
+     * silence: the NCP had reset to firmware defaults (resetCode=0xb) and was
+     * never configured, while every reference host stack (bellows/ZHA) writes a
+     * config batch before stack-up. Runs inside the {@link #startSession()}
+     * post-negotiation block under the pipeline lock, before the caller can reach
+     * {@code networkInit}/{@code formNetwork} — memory/stack configuration must
+     * precede stack-up.
+     *
+     * <p>§1.1: REQUIRED values first — an honest failure precedes the best-effort
+     * tail; the window must not open over a stack that cannot surface joins
+     * (never-false-ALIVE). The SUPPORTING tail is best-effort: a NAK logs ONE
+     * WARN ({@code zigbee.ncp_config_skipped}) and continues — 7.4.x firmware
+     * self-manages some of these and legitimately rejects.
+     *
+     * <p>§1.2: the read-back is the decisive instrument — the three REQUIRED ids
+     * are read back and ONE INFO ({@code zigbee.ncp_configured}) logs the values
+     * THE NCP REPORTS, never the values sent: the accepted-but-not-applied hole
+     * closed, the next bench log a measurement. A mismatch fails honestly like a
+     * write NAK. No key material is involved (INV-SE-03 trivially holds).
+     *
+     * @throws EzspCommandException if the NCP rejects a REQUIRED write or read
+     * @throws IllegalStateException if a REQUIRED read-back mismatches the
+     *                               written value
+     */
+    private void configureNcp() {
+        writeRequiredConfigLocked("STACK_PROFILE", CONFIG_STACK_PROFILE,
+                STACK_PROFILE_ZIGBEE_PRO);
+        writeRequiredConfigLocked("SECURITY_LEVEL", CONFIG_SECURITY_LEVEL,
+                SECURITY_LEVEL_Z30_STANDARD);
+        writeRequiredConfigLocked("APPLICATION_ZDO_FLAGS",
+                CONFIG_APPLICATION_ZDO_FLAGS,
+                ZDO_FLAGS_RECEIVE_AND_HANDLE_UNSUPPORTED);
+        writeSupportingConfigLocked(CONFIG_KEY_TABLE_SIZE, KEY_TABLE_SIZE_VALUE);
+        writeSupportingConfigLocked(CONFIG_ADDRESS_TABLE_SIZE,
+                ADDRESS_TABLE_SIZE_VALUE);
+        writeSupportingConfigLocked(CONFIG_TRUST_CENTER_ADDRESS_CACHE_SIZE,
+                TRUST_CENTER_ADDRESS_CACHE_SIZE_VALUE);
+        writeSupportingConfigLocked(CONFIG_MAX_END_DEVICE_CHILDREN,
+                MAX_END_DEVICE_CHILDREN_VALUE);
+        writeSupportingConfigLocked(CONFIG_INDIRECT_TRANSMISSION_TIMEOUT,
+                INDIRECT_TRANSMISSION_TIMEOUT_VALUE);
+        writeSupportingConfigLocked(CONFIG_PACKET_BUFFER_COUNT,
+                PACKET_BUFFER_COUNT_VALUE);
+        writeSupportingConfigLocked(CONFIG_MULTICAST_TABLE_SIZE,
+                MULTICAST_TABLE_SIZE_VALUE);
+        int stackProfile = readBackRequiredConfigLocked("STACK_PROFILE",
+                CONFIG_STACK_PROFILE, STACK_PROFILE_ZIGBEE_PRO);
+        int securityLevel = readBackRequiredConfigLocked("SECURITY_LEVEL",
+                CONFIG_SECURITY_LEVEL, SECURITY_LEVEL_Z30_STANDARD);
+        int zdoFlags = readBackRequiredConfigLocked("APPLICATION_ZDO_FLAGS",
+                CONFIG_APPLICATION_ZDO_FLAGS,
+                ZDO_FLAGS_RECEIVE_AND_HANDLE_UNSUPPORTED);
+        log.info("zigbee.ncp_configured: zdo_flags=0x{} stack_profile={} "
+                        + "security_level={}", Integer.toHexString(zdoFlags),
+                stackProfile, securityLevel);
+    }
+
+    /** One REQUIRED write (§2): a NAK is honest failure, never a silent default. */
+    private void writeRequiredConfigLocked(String name, int configId, int value) {
+        int status = setConfigurationValueLocked(configId, value);
+        if (status != 0) {
+            log.warn("zigbee.ncp_config_rejected: id=0x{} status=0x{}",
+                    Integer.toHexString(configId), Integer.toHexString(status));
+            throw new EzspCommandException(String.format(
+                    "setConfigurationValue(%s) rejected by the coordinator: "
+                            + "status=0x%X", name, status), status);
+        }
+    }
+
+    /** One SUPPORTING write (§2): best-effort — a NAK WARNs once and continues. */
+    private void writeSupportingConfigLocked(int configId, int value) {
+        int status = setConfigurationValueLocked(configId, value);
+        if (status != 0) {
+            log.warn("zigbee.ncp_config_skipped: id=0x{} status=0x{}",
+                    Integer.toHexString(configId), Integer.toHexString(status));
+        }
+    }
+
+    /** Sends one {@code setConfigurationValue} (configId u8 + value u16 LE). */
+    private int setConfigurationValueLocked(int configId, int value) {
+        EzspFrame response = executeLocked(FRAME_SET_CONFIGURATION_VALUE,
+                new byte[] {(byte) configId, (byte) (value & 0xFF),
+                        (byte) ((value >> 8) & 0xFF)},
+                DEFAULT_COMMAND_TIMEOUT_MILLIS);
+        return codec.decodeStatus(response.parameters(), 0);
+    }
+
+    /**
+     * The §1.2 read-back instrument: returns the value THE NCP REPORTS for a
+     * REQUIRED config id, failing honestly when the read is rejected or the
+     * reported value mismatches what was written.
+     */
+    private int readBackRequiredConfigLocked(String name, int configId, int wrote) {
+        EzspFrame response = executeLocked(FRAME_GET_CONFIGURATION_VALUE,
+                new byte[] {(byte) configId}, DEFAULT_COMMAND_TIMEOUT_MILLIS);
+        byte[] parameters = response.parameters();
+        int status = codec.decodeStatus(parameters, 0);
+        if (status != 0) {
+            log.warn("zigbee.ncp_config_rejected: id=0x{} status=0x{}",
+                    Integer.toHexString(configId), Integer.toHexString(status));
+            throw new EzspCommandException(String.format(
+                    "getConfigurationValue(%s) rejected by the coordinator: "
+                            + "status=0x%X", name, status), status);
+        }
+        int offset = codec.statusWidthBytes();
+        if (parameters.length < offset + 2) {
+            throw new EzspFormatException(
+                    "getConfigurationValue response too short: "
+                            + parameters.length + " bytes, expected "
+                            + (offset + 2));
+        }
+        int read = (parameters[offset] & 0xFF)
+                | ((parameters[offset + 1] & 0xFF) << 8);
+        if (read != wrote) {
+            log.warn("zigbee.ncp_config_readback_mismatch: id=0x{} wrote={} read={}",
+                    Integer.toHexString(configId), wrote, read);
+            throw new IllegalStateException(String.format(
+                    "NCP configuration %s (id 0x%X) read back %d after writing %d; "
+                            + "the coordinator accepted the write without applying "
+                            + "it", name, configId, read, wrote));
+        }
+        return read;
     }
 
     /** Returns the negotiated protocol version, or {@code -1} before negotiation. */

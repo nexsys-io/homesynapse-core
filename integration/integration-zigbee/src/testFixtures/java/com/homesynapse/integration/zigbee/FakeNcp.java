@@ -5,7 +5,9 @@
 package com.homesynapse.integration.zigbee;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 
 /**
@@ -19,11 +21,21 @@ import java.util.function.Function;
  * 0); output frames are each wrapped by the fake NCP into properly numbered ASH DATA
  * frames. A {@code null} return simulates NCP silence (the timeout path — the fake
  * channel advances the test clock).
+ *
+ * <p><strong>Built-in configuration model (M9.4-NCFG):</strong> when the handler
+ * returns an EMPTY list (no script for the frame), the fake NCP answers
+ * {@code setConfigurationValue} (0x0053) with status SUCCESS — remembering the
+ * written value — and {@code getConfigurationValue} (0x0052) with status SUCCESS
+ * plus the last-written value u16 LE, so read-backs echo writes. An explicit
+ * scripted response (e.g. a NAK) always wins, and a {@code null} return still
+ * simulates silence. An RST clears the stored values — the real NCP resets to
+ * firmware defaults on every launch.
  */
 final class FakeNcp implements Function<byte[], List<byte[]>> {
 
     private final AshFrameAccumulator accumulator = new AshFrameAccumulator();
     private final List<byte[]> receivedEzspCommands = new ArrayList<>();
+    private final Map<Integer, Integer> configValues = new HashMap<>();
 
     private Function<byte[], List<byte[]>> ezspHandler;
     private int ncpFrameNumber; // our next outbound DATA frame number
@@ -74,6 +86,7 @@ final class FakeNcp implements Function<byte[], List<byte[]>> {
                 case AshFrame.Rst rst -> {
                     ncpFrameNumber = 0;
                     hostNext = 0;
+                    configValues.clear();   // an NCP reset restores firmware defaults
                     responses.add(AshCodec.emit(
                             new AshFrame.RstAck(0x02, rstackResetCode)));
                 }
@@ -92,6 +105,11 @@ final class FakeNcp implements Function<byte[], List<byte[]>> {
                         receivedEzspCommands.add(command);
                         if (ezspHandler != null) {
                             List<byte[]> ezspFrames = ezspHandler.apply(command);
+                            if (ezspFrames != null && ezspFrames.isEmpty()) {
+                                // Unscripted frame: the built-in config model may
+                                // answer (M9.4-NCFG); anything else stays silent.
+                                ezspFrames = builtInConfigResponse(command);
+                            }
                             if (ezspFrames != null) {
                                 for (byte[] ezsp : ezspFrames) {
                                     responses.add(AshCodec.emit(new AshFrame.Data(
@@ -119,5 +137,44 @@ final class FakeNcp implements Function<byte[], List<byte[]>> {
             }
         }
         return responses;
+    }
+
+    /**
+     * The built-in NCP configuration model (M9.4-NCFG): answers unscripted
+     * {@code setConfigurationValue}/{@code getConfigurationValue} extended
+     * commands, echoing writes on read-back the way a live NCP that applied
+     * them would. Returns {@code null} for every other frame (silence).
+     */
+    private List<byte[]> builtInConfigResponse(byte[] command) {
+        if (command.length < 5) {
+            return null;   // the legacy version frame is never a config command
+        }
+        int frameId = (command[3] & 0xFF) | ((command[4] & 0xFF) << 8);
+        int seq = command[0] & 0xFF;
+        if (frameId == EzspCoordinatorProtocol.FRAME_SET_CONFIGURATION_VALUE
+                && command.length >= 8) {
+            configValues.put(command[5] & 0xFF,
+                    (command[6] & 0xFF) | ((command[7] & 0xFF) << 8));
+            return List.of(extendedResponse(seq, frameId, new byte[] {0x00}));
+        }
+        if (frameId == EzspCoordinatorProtocol.FRAME_GET_CONFIGURATION_VALUE
+                && command.length >= 6) {
+            int value = configValues.getOrDefault(command[5] & 0xFF, 0);
+            return List.of(extendedResponse(seq, frameId, new byte[] {
+                    0x00, (byte) (value & 0xFF), (byte) ((value >> 8) & 0xFF)}));
+        }
+        return null;
+    }
+
+    /** One extended-format (v8+) EZSP response frame. */
+    private static byte[] extendedResponse(int seq, int frameId, byte[] parameters) {
+        byte[] frame = new byte[5 + parameters.length];
+        frame[0] = (byte) seq;
+        frame[1] = (byte) 0x80;
+        frame[2] = 0x01;
+        frame[3] = (byte) (frameId & 0xFF);
+        frame[4] = (byte) ((frameId >> 8) & 0xFF);
+        System.arraycopy(parameters, 0, frame, 5, parameters.length);
+        return frame;
     }
 }
