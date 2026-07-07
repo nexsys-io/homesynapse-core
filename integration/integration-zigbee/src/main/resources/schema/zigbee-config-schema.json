@@ -30,6 +30,11 @@
       "default": 120,
       "description": "Permit join default duration in seconds (Zigbee spec maximum 254)."
     },
+    "adopt_devices": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "IEEE addresses the user accepts for adoption ('0x' + 16 hex chars, the log's own rendering). A listed device adopts when a fresh proposal completes its interview; absent or empty, proposals wait and nothing adopts. Malformed entries are skipped with a warning."
+    },
     "watchdog_interval_seconds": {
       "type": "integer",
       "minimum": 10,

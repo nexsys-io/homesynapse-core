@@ -16,9 +16,13 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 /**
  * The zigbee {@link ZigbeeAdapter} (M9.4a §4.1 minimal composition; M9.4b §5 real
@@ -94,6 +98,25 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     static final int CHANNEL_MAX = 26;
 
     /**
+     * The {@code integrations.zigbee} config key listing the IEEE addresses the
+     * user ACCEPTS for adoption (M9.4-ADP — Doc 02 §3.12 Stage 3 realized as
+     * config-declared consent, the Tier-1 headless surface). Adoption fires only
+     * when a discovery mints a FRESH proposal for a listed device whose interview
+     * is COMPLETE; Stage-2 re-links of already-adopted devices stay automatic
+     * (consent is first-adoption-only). Conservative default is LAW: an absent or
+     * empty list adopts NOTHING — proposals sit, honestly logged.
+     */
+    static final String ADOPT_DEVICES_KEY = "adopt_devices";
+
+    /**
+     * The accept-list entry shape: the log's own IEEE rendering — an optional
+     * {@code 0x}/{@code 0X} prefix and exactly 16 hex characters, any case
+     * (normalized to the raw 64-bit value before compare).
+     */
+    private static final Pattern ADOPT_ENTRY_SHAPE =
+            Pattern.compile("(?:0[xX])?[0-9a-fA-F]{16}");
+
+    /**
      * The production cycle cadence (chosen constant, §5.1): the inbound pump's
      * bounded read IS the park (the SERIAL platform thread blocks on the read —
      * no sleep, LTD-01/W4); while unhealthy, the latch-await park below stays
@@ -135,6 +158,11 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     private PortWatchdog watchdog;
     private volatile SerialByteChannel productionChannel;
     private PortIdentity portIdentity;
+    /**
+     * The normalized {@link #ADOPT_DEVICES_KEY} accept list (raw IEEE values),
+     * read once at {@link #initialize()}; empty means nothing ever adopts.
+     */
+    private Set<Long> adoptAcceptList = Set.of();
     /**
      * The permit-join window close instant (M9.4-PJ), or {@code null} when no
      * window is open. Written once by {@link #openPermitJoinWindow()} on the
@@ -191,6 +219,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         adoption = new ZigbeeAdoptionSlice(context.integrationId(), deviceRegistry,
                 context.entityRegistry(), profileRegistry, context.eventPublisher(),
                 clock);
+        adoptAcceptList = readAdoptAcceptList();
         // Driven mode rides the injected opener; production mode reuses the probe
         // channel (§5.1 — never a double-open): the opener returns the channel
         // bindTransport() already opened and probed.
@@ -562,12 +591,68 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
                     .map(DeviceProfile::profileId).orElse(null);
             cache.recordInterview(interview, matchedProfileId);
             interviewQueue.complete(ieee);
-            adoption.onDeviceDiscovered(interview, matchedProfileId);
+            ZigbeeAdoptionSlice.DiscoveryOutcome outcome =
+                    adoption.onDeviceDiscovered(interview, matchedProfileId);
+            adoptIfAccepted(interview, outcome);
         } catch (RuntimeException failure) {
             log.warn("zigbee.interview_failed: device={}: {}", ieee,
                     failure.getMessage());
             interviewQueue.recordFailure(ieee);
         }
+    }
+
+    /**
+     * The M9.4-ADP acceptance gate (Doc 02 §3.12 Stage 3): a FRESH proposal for
+     * a config-listed device with a COMPLETE interview adopts immediately, on
+     * this ingestion thread. A LINKED outcome never adopts — the Stage-2 re-link
+     * creates no proposal and needs no consent (first-adoption-only); the guard
+     * is outcome-driven, never exception-driven. An unlisted device's proposal
+     * sits silently (the conservative default); a listed device stalled PARTIAL
+     * is loud — the operator listed it expecting adoption, and a later
+     * re-announce re-interviews and re-proposes. An {@code adopt()} failure
+     * propagates to the cycle's existing interview error handling (one WARN
+     * naming the device; the ingestion loop survives).
+     */
+    private void adoptIfAccepted(InterviewResult interview,
+            ZigbeeAdoptionSlice.DiscoveryOutcome outcome) {
+        if (outcome != ZigbeeAdoptionSlice.DiscoveryOutcome.PROPOSED
+                || !adoptAcceptList.contains(interview.ieeeAddress().value())) {
+            return;
+        }
+        if (interview.interviewStatus() != InterviewStatus.COMPLETE) {
+            log.warn("zigbee.proposal_incomplete_not_adopted: device={} status={}",
+                    interview.ieeeAddress(), interview.interviewStatus());
+            return;
+        }
+        log.info("zigbee.proposal_accepted: device={} source=config",
+                interview.ieeeAddress());
+        adoption.adopt(interview.ieeeAddress());
+    }
+
+    /**
+     * Reads {@link #ADOPT_DEVICES_KEY} once at initialize (the permit-join
+     * pattern). The list is user input: a malformed entry logs ONE WARN and is
+     * skipped, never failing the boot; an absent key (or a non-list value — the
+     * schema validates upstream) reads as empty, so nothing ever adopts.
+     * Device identities are user data: never logged at INFO here (the one
+     * DEBUG line carries a count only).
+     */
+    private Set<Long> readAdoptAcceptList() {
+        Object configured = context.configAccess().getConfig().get(ADOPT_DEVICES_KEY);
+        if (!(configured instanceof List<?> entries)) {
+            return Set.of();
+        }
+        Set<Long> accepted = new HashSet<>();
+        for (Object entry : entries) {
+            if (entry instanceof String text
+                    && ADOPT_ENTRY_SHAPE.matcher(text).matches()) {
+                accepted.add(IEEEAddress.fromHexString(text).value());
+            } else {
+                log.warn("zigbee.adopt_list_entry_invalid: value={}", entry);
+            }
+        }
+        log.debug("zigbee.adopt_list_loaded: entries={}", accepted.size());
+        return Set.copyOf(accepted);
     }
 
     /** NWK→IEEE and entity resolution over the cache + adoption slice. */
