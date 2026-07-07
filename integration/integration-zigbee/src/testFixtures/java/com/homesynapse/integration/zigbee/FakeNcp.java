@@ -30,8 +30,17 @@ import java.util.function.Function;
  * scripted response (e.g. a NAK) always wins, and a {@code null} return still
  * simulates silence. An RST clears the stored values — the real NCP resets to
  * firmware defaults on every launch.
+ *
+ * <p><strong>M9.4-RPT widening (declared):</strong> the built-in additionally
+ * answers an unscripted {@code getEui64} (0x0026) with
+ * {@link #COORDINATOR_EUI64} — the reporting binding fetches the coordinator
+ * EUI64 before every Bind_req, and every shared-fixture session must have one.
+ * Nothing else widened; scripted responses still win.
  */
 final class FakeNcp implements Function<byte[], List<byte[]>> {
+
+    /** The fake NCP's own EUI64 (the getEui64 built-in answer; chip-constant). */
+    static final long COORDINATOR_EUI64 = 0x00124B00A1B2C3D4L;
 
     private final AshFrameAccumulator accumulator = new AshFrameAccumulator();
     private final List<byte[]> receivedEzspCommands = new ArrayList<>();
@@ -140,10 +149,12 @@ final class FakeNcp implements Function<byte[], List<byte[]>> {
     }
 
     /**
-     * The built-in NCP configuration model (M9.4-NCFG): answers unscripted
-     * {@code setConfigurationValue}/{@code getConfigurationValue} extended
-     * commands, echoing writes on read-back the way a live NCP that applied
-     * them would. Returns {@code null} for every other frame (silence).
+     * The built-in NCP model (M9.4-NCFG; getEui64 widened M9.4-RPT): answers
+     * unscripted {@code setConfigurationValue}/{@code getConfigurationValue}
+     * extended commands — echoing writes on read-back the way a live NCP that
+     * applied them would — and {@code getEui64} with the chip-constant
+     * {@link #COORDINATOR_EUI64}. Returns {@code null} for every other frame
+     * (silence).
      */
     private List<byte[]> builtInConfigResponse(byte[] command) {
         if (command.length < 5) {
@@ -162,6 +173,13 @@ final class FakeNcp implements Function<byte[], List<byte[]>> {
             int value = configValues.getOrDefault(command[5] & 0xFF, 0);
             return List.of(extendedResponse(seq, frameId, new byte[] {
                     0x00, (byte) (value & 0xFF), (byte) ((value >> 8) & 0xFF)}));
+        }
+        if (frameId == EzspCoordinatorProtocol.FRAME_GET_EUI64) {
+            byte[] eui64 = new byte[8];
+            for (int i = 0; i < 8; i++) {
+                eui64[i] = (byte) (COORDINATOR_EUI64 >> (8 * i));
+            }
+            return List.of(extendedResponse(seq, frameId, eui64));
         }
         return null;
     }

@@ -183,6 +183,11 @@ final class ZclIngestionUnit {
                 handleChildJoin(frame);
                 continue;
             }
+            if (frameId == EzspCoordinatorProtocol
+                    .FRAME_ZIGBEE_KEY_ESTABLISHMENT_HANDLER) {
+                handleKeyEstablishment(frame);
+                continue;
+            }
             if (frameId != EzspCoordinatorProtocol.FRAME_INCOMING_MESSAGE_HANDLER) {
                 continue;
             }
@@ -249,6 +254,33 @@ final class ZclIngestionUnit {
                     child.childEui64(), Integer.toHexString(child.childId()),
                     child.typeName());
         }
+    }
+
+    /**
+     * M9.4-RPT §B — {@code zigbeeKeyEstablishmentHandler} (0x009B)
+     * observability, the OBS-2 discriminator instrument: if a device's
+     * post-join leave is the TCLK-update class, THIS line shows it.
+     * <strong>THE PIN:</strong> the same never-synthesize rule as
+     * {@link #handleTrustCenterJoin} — this handler NEVER creates a device,
+     * NEVER schedules an interview, NEVER publishes an event, and NEVER alters
+     * adoption or availability. Pure observability.
+     */
+    private void handleKeyEstablishment(EzspFrame frame) {
+        Optional<EzspCoordinatorProtocol.KeyEstablishment> parsed =
+                EzspCoordinatorProtocol.KeyEstablishment.parse(frame.parameters());
+        if (parsed.isEmpty()) {
+            log.debug("zigbee.key_establishment_malformed: {} parameter bytes; "
+                    + "dropped", frame.parameters().length);
+            return;
+        }
+        EzspCoordinatorProtocol.KeyEstablishment key = parsed.get();
+        if (key.established()) {
+            log.info("zigbee.key_established: device={} status={}",
+                    key.partner(), key.statusName());
+            return;
+        }
+        log.warn("zigbee.key_establishment_failed: device={} status={}",
+                key.partner(), key.statusName());
     }
 
     private void route(EzspIncomingMessage message) {

@@ -4,10 +4,13 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import com.homesynapse.device.CapabilityInstance;
 import com.homesynapse.device.DeviceRegistry;
+import com.homesynapse.device.Entity;
 import com.homesynapse.integration.CommandHandler;
 import com.homesynapse.integration.IntegrationContext;
 import com.homesynapse.integration.PermanentIntegrationException;
+import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,6 +22,7 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.function.Function;
@@ -153,6 +157,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     private PendingInterviewQueue interviewQueue;
     private ZclIngestionUnit ingestion;
     private ZigbeeCommandHandler commandHandler;
+    private ReportingConfigurator reporting;
     private NetworkParameterStore parameterStore;
     private PortLocator portLocator;
     private PortWatchdog watchdog;
@@ -239,6 +244,11 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         commandHandler = new ZigbeeCommandHandler(adoption, cache, profileRegistry,
                 protocol::sendZclFrame, protocol::lookupNetworkAddress,
                 context.eventPublisher(), clock);
+        // M9.4-RPT §1/§2: the reporting configurator over its real EZSP binding
+        // (cache-first address resolution — fresh from recordInterview at every
+        // drive site; the protocol lookup is the fallback).
+        reporting = new ReportingConfigurator(
+                new EzspReportingOps(protocol, this::cachedNetworkAddress));
         if (channelOpener == null) {
             portLocator = new PortLocator(portEnumerator);
             watchdog = new PortWatchdog(clock, this::attemptReopen);
@@ -587,13 +597,15 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     private void interviewDevice(IEEEAddress ieee) {
         try {
             InterviewResult interview = protocol.interview(ieee);
-            String matchedProfileId = profileRegistry.findProfile(interview)
-                    .map(DeviceProfile::profileId).orElse(null);
+            DeviceProfile matchedProfile = profileRegistry.findProfile(interview)
+                    .orElse(null);
+            String matchedProfileId =
+                    matchedProfile == null ? null : matchedProfile.profileId();
             cache.recordInterview(interview, matchedProfileId);
             interviewQueue.complete(ieee);
             ZigbeeAdoptionSlice.DiscoveryOutcome outcome =
                     adoption.onDeviceDiscovered(interview, matchedProfileId);
-            adoptIfAccepted(interview, outcome);
+            adoptIfAccepted(interview, outcome, matchedProfile);
         } catch (RuntimeException failure) {
             log.warn("zigbee.interview_failed: device={}: {}", ieee,
                     failure.getMessage());
@@ -602,21 +614,30 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     }
 
     /**
-     * The M9.4-ADP acceptance gate (Doc 02 §3.12 Stage 3): a FRESH proposal for
-     * a config-listed device with a COMPLETE interview adopts immediately, on
-     * this ingestion thread. A LINKED outcome never adopts — the Stage-2 re-link
-     * creates no proposal and needs no consent (first-adoption-only); the guard
-     * is outcome-driven, never exception-driven. An unlisted device's proposal
-     * sits silently (the conservative default); a listed device stalled PARTIAL
-     * is loud — the operator listed it expecting adoption, and a later
-     * re-announce re-interviews and re-proposes. An {@code adopt()} failure
-     * propagates to the cycle's existing interview error handling (one WARN
-     * naming the device; the ingestion loop survives).
+     * The M9.4-ADP acceptance gate (Doc 02 §3.12 Stage 3) + the M9.4-RPT §2
+     * reporting drive: a FRESH proposal for a config-listed device with a
+     * COMPLETE interview adopts immediately, on this ingestion thread, and the
+     * completed adoption drives {@code configureDevice}; a LINKED outcome never
+     * adopts — the Stage-2 re-link creates no proposal and needs no consent
+     * (first-adoption-only); the guard is outcome-driven, never
+     * exception-driven — but a re-link DOES drive {@code onRejoin} (the
+     * power-cycle re-announce is the measured reporting-config-wipe class).
+     * Both drive arms run AFTER the adoption/re-link bookkeeping completes and
+     * NEVER gate it (Doc 02 §3.12 staging — outcomes are recorded posture, not
+     * failures). An unlisted device's proposal sits silently (the conservative
+     * default); a listed device stalled PARTIAL is loud — the operator listed
+     * it expecting adoption, and a later re-announce re-interviews and
+     * re-proposes. An {@code adopt()} failure propagates to the cycle's
+     * existing interview error handling (one WARN naming the device; the
+     * ingestion loop survives — and skips the drive: nothing was adopted).
      */
     private void adoptIfAccepted(InterviewResult interview,
-            ZigbeeAdoptionSlice.DiscoveryOutcome outcome) {
-        if (outcome != ZigbeeAdoptionSlice.DiscoveryOutcome.PROPOSED
-                || !adoptAcceptList.contains(interview.ieeeAddress().value())) {
+            ZigbeeAdoptionSlice.DiscoveryOutcome outcome, DeviceProfile profile) {
+        if (outcome == ZigbeeAdoptionSlice.DiscoveryOutcome.LINKED) {
+            driveReporting(interview, profile, true);
+            return;
+        }
+        if (!adoptAcceptList.contains(interview.ieeeAddress().value())) {
             return;
         }
         if (interview.interviewStatus() != InterviewStatus.COMPLETE) {
@@ -627,6 +648,80 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         log.info("zigbee.proposal_accepted: device={} source=config",
                 interview.ieeeAddress());
         adoption.adopt(interview.ieeeAddress());
+        driveReporting(interview, profile, false);
+    }
+
+    /**
+     * The M9.4-RPT §2 adoption-path drive: configures reporting for the freshly
+     * adopted / re-linked device (synchronous, same ingestion thread), emits
+     * the per-device positive-evidence INFO (the anti-vacuous mandate — the
+     * next bench log is measurement, not absence-of-failure), and routes the
+     * measured facts into the installed confirmation surface (§3). Reporting
+     * outcomes NEVER gate or fail the adopt/re-link: the ops seam returns
+     * typed results, and an abnormal throw (a dying transport mid-drive)
+     * degrades to ONE WARN — the device stays adopted, the loop survives.
+     */
+    private void driveReporting(InterviewResult interview, DeviceProfile profile,
+            boolean rejoin) {
+        IEEEAddress ieee = interview.ieeeAddress();
+        try {
+            List<ReportingPostureFact> facts = rejoin
+                    ? reporting.onRejoin(ieee, interview.endpoints(), profile)
+                    : reporting.configureDevice(ieee, interview.endpoints(),
+                            profile);
+            long verified = facts.stream()
+                    .filter(ConfirmationOverrideInstaller::verifiedFact)
+                    .count();
+            log.info("zigbee.reporting_configured: device={} clusters={} "
+                            + "verified={} degraded={}",
+                    ieee, facts.size(), verified, facts.size() - verified);
+            applyPostureRouting(ieee, facts);
+        } catch (RuntimeException failure) {
+            log.warn("zigbee.reporting_drive_failed: device={}: {}", ieee,
+                    failure.getMessage());
+        }
+    }
+
+    /**
+     * The M9.4-RPT §3 posture routing: overlays the drive's measured facts onto
+     * every installed entity of the device (the install-time
+     * never-false-CONFIRMED fence), re-registering an entity only when a
+     * capability actually downgraded — the {@code reinstallOverrides}
+     * update-if-differs shape.
+     */
+    private void applyPostureRouting(IEEEAddress ieee,
+            List<ReportingPostureFact> facts) {
+        Optional<DeviceId> deviceId = adoption.deviceIdFor(ieee);
+        if (deviceId.isEmpty()) {
+            return;   // defensive: no registered device — nothing installed
+        }
+        for (Entity entity : context.entityRegistry()
+                .listEntitiesByDevice(deviceId.get())) {
+            List<CapabilityInstance> routed =
+                    ConfirmationOverrideInstaller.applyPostureFacts(ieee,
+                            entity.endpointIndex(), facts, entity.capabilities());
+            if (!routed.equals(entity.capabilities())) {
+                context.entityRegistry().updateEntity(new Entity(
+                        entity.entityId(), entity.entitySlug(),
+                        entity.entityType(), entity.displayName(),
+                        entity.deviceId(), entity.endpointIndex(),
+                        entity.areaId(), entity.enabled(), entity.labels(),
+                        routed, entity.entityRole(), entity.createdAt()));
+            }
+        }
+    }
+
+    /**
+     * The cache-first network-address view the reporting binding resolves
+     * through (empty on a miss or the F-6 unknown sentinel — the protocol
+     * lookup is the binding's fallback).
+     */
+    private OptionalInt cachedNetworkAddress(IEEEAddress ieee) {
+        return cache.device(ieee)
+                .filter(record -> record.networkAddress()
+                        != ZigbeeDeviceCache.NETWORK_ADDRESS_UNKNOWN)
+                .map(record -> OptionalInt.of(record.networkAddress()))
+                .orElse(OptionalInt.empty());
     }
 
     /**

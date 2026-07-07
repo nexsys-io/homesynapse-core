@@ -255,6 +255,33 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     static final int CONFIG_MULTICAST_TABLE_SIZE = 0x06;
     static final int MULTICAST_TABLE_SIZE_VALUE = 16;
 
+    // ── M9.4-RPT: reporting binding + §B observability (BENCH-VERIFY block) ─
+    // Frame ids and the 0x009B layout/status vocabulary below are
+    // bellows-derived and synthetic-tested until silicon (the 0x0019/0x90
+    // precedent): a correction fed back from the bench is a one-constant edit
+    // fixing code and tests together. The ZDO/ZCL command ids the reporting
+    // binding rides live in EzspReportingOps's own BENCH-VERIFY block.
+
+    /** EZSP {@code getEui64}: no parameters → the NCP's EUI64, 8 bytes LE. */
+    static final int FRAME_GET_EUI64 = 0x0026;
+
+    /**
+     * EZSP {@code zigbeeKeyEstablishmentHandler} callback: partner EUI64 (8 LE)
+     * + EmberKeyStatus u8 (§B — the OBS-2 discriminator instrument).
+     */
+    static final int FRAME_ZIGBEE_KEY_ESTABLISHMENT_HANDLER = 0x009B;
+
+    // EmberKeyStatus — the 0x009B status byte (bellows-derived, BENCH-VERIFY).
+    static final int KEY_STATUS_APP_LINK_KEY_ESTABLISHED = 0x01;
+    static final int KEY_STATUS_TRUST_CENTER_LINK_KEY_ESTABLISHED = 0x03;
+    static final int KEY_STATUS_KEY_ESTABLISHMENT_TIMEOUT = 0x04;
+    static final int KEY_STATUS_KEY_TABLE_FULL = 0x05;
+    static final int KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT = 0x32;
+    static final int KEY_STATUS_TC_REQUESTER_VERIFY_KEY_FAILURE = 0x33;
+    static final int KEY_STATUS_TC_REQUESTER_VERIFY_KEY_SUCCESS = 0x34;
+    static final int KEY_STATUS_VERIFY_LINK_KEY_FAILURE = 0x64;
+    static final int KEY_STATUS_VERIFY_LINK_KEY_SUCCESS = 0x65;
+
     /** EmberNetworkStatus JOINED_NETWORK (1 byte on every version — not widened). */
     static final int EMBER_NETWORK_STATUS_JOINED = 0x02;
     /** EmberStatus NOT_JOINED (v13 dialect; bench-verify at M9.4). */
@@ -317,6 +344,13 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     private Instant lastActivity;
     private int keepaliveMisses;
     private long droppedCallbacks;
+    /**
+     * The NCP's own EUI64, fetched once per session (M9.4-RPT — the Bind_req
+     * destination address); {@code null} until first read, cleared on
+     * {@link #resetSession()} (a reopen may land on a different stick — the
+     * PortLocator multi-identical-dongle limitation).
+     */
+    private Long cachedEui64;
 
     /**
      * Creates the protocol facade. Performs no I/O (INV-RF-03).
@@ -585,6 +619,7 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
             sequence = 0;
             keepaliveMisses = 0;
             pendingCallbacks.clear();
+            cachedEui64 = null;
         } finally {
             lock.unlock();
         }
@@ -1050,6 +1085,63 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
         }
     }
 
+    /**
+     * The parsed {@code zigbeeKeyEstablishmentHandler} (0x009B) callback —
+     * M9.4-RPT §B, the OBS-2 discriminator instrument. Layout (BENCH-VERIFY):
+     * partner EUI64 (8 bytes LE) + EmberKeyStatus (u8).
+     *
+     * @param partner the key-exchange partner
+     * @param status the EmberKeyStatus byte
+     */
+    record KeyEstablishment(IEEEAddress partner, int status) {
+
+        /** Parses the 0x009B parameters; empty when too short. */
+        static Optional<KeyEstablishment> parse(byte[] parameters) {
+            if (parameters.length < 9) {
+                return Optional.empty();
+            }
+            long eui64 = 0;
+            for (int i = 0; i < 8; i++) {
+                eui64 |= (long) (parameters[i] & 0xFF) << (8 * i);
+            }
+            int status = parameters[8] & 0xFF;
+            return Optional.of(new KeyEstablishment(
+                    new IEEEAddress(eui64), status));
+        }
+
+        /** True for the success-class statuses (a key genuinely established). */
+        boolean established() {
+            return status == KEY_STATUS_APP_LINK_KEY_ESTABLISHED
+                    || status == KEY_STATUS_TRUST_CENTER_LINK_KEY_ESTABLISHED
+                    || status == KEY_STATUS_TC_REQUESTER_VERIFY_KEY_SUCCESS
+                    || status == KEY_STATUS_VERIFY_LINK_KEY_SUCCESS;
+        }
+
+        /** The EmberKeyStatus vocabulary name, or its hex when unknown. */
+        String statusName() {
+            return switch (status) {
+                case KEY_STATUS_APP_LINK_KEY_ESTABLISHED ->
+                        "APP_LINK_KEY_ESTABLISHED";
+                case KEY_STATUS_TRUST_CENTER_LINK_KEY_ESTABLISHED ->
+                        "TRUST_CENTER_LINK_KEY_ESTABLISHED";
+                case KEY_STATUS_KEY_ESTABLISHMENT_TIMEOUT ->
+                        "KEY_ESTABLISHMENT_TIMEOUT";
+                case KEY_STATUS_KEY_TABLE_FULL -> "KEY_TABLE_FULL";
+                case KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT ->
+                        "TC_REQUESTER_VERIFY_KEY_TIMEOUT";
+                case KEY_STATUS_TC_REQUESTER_VERIFY_KEY_FAILURE ->
+                        "TC_REQUESTER_VERIFY_KEY_FAILURE";
+                case KEY_STATUS_TC_REQUESTER_VERIFY_KEY_SUCCESS ->
+                        "TC_REQUESTER_VERIFY_KEY_SUCCESS";
+                case KEY_STATUS_VERIFY_LINK_KEY_FAILURE ->
+                        "VERIFY_LINK_KEY_FAILURE";
+                case KEY_STATUS_VERIFY_LINK_KEY_SUCCESS ->
+                        "VERIFY_LINK_KEY_SUCCESS";
+                default -> "0x" + Integer.toHexString(status);
+            };
+        }
+    }
+
     @Override
     public void sendZclFrame(ZclFrame frame, IEEEAddress target) {
         Objects.requireNonNull(frame, "frame");
@@ -1427,6 +1519,131 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
         return zdoSequence;
     }
 
+    // ── M9.4-RPT: the reporting-binding exchange seams (package-private) ────
+
+    /**
+     * The NCP's own EUI64 (the Bind_req destination address), fetched via
+     * {@code getEui64} (0x0026) once per session and cached — the chip MAC
+     * never changes mid-session; {@link #resetSession()} clears the cache
+     * because a watchdog reopen may land on a different stick.
+     *
+     * @return the coordinator EUI64 as a raw long (LE-decoded)
+     * @throws EzspCommandTimeoutException when the NCP does not answer —
+     *         {@link EzspReportingOps} converts it to a typed failure result
+     */
+    long coordinatorEui64() {
+        lock.lock();
+        try {
+            requireNegotiated();
+            if (cachedEui64 != null) {
+                return cachedEui64;
+            }
+            EzspFrame response = executeLocked(FRAME_GET_EUI64, NO_PARAMETERS,
+                    DEFAULT_COMMAND_TIMEOUT_MILLIS);
+            byte[] parameters = response.parameters();
+            if (parameters.length < 8) {
+                throw new EzspFormatException("getEui64 response too short: "
+                        + parameters.length + " bytes, expected 8");
+            }
+            long eui64 = 0;
+            for (int i = 0; i < 8; i++) {
+                eui64 |= (long) (parameters[i] & 0xFF) << (8 * i);
+            }
+            cachedEui64 = eui64;
+            return eui64;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * One ZDO request/response exchange (M9.4-RPT — the reporting binding's
+     * Bind_req seam; the interview ops delegate here): sends the encoded body
+     * as a ZDO unicast (profile 0, endpoints 0) and awaits the tsn-matched
+     * response cluster. Mirrors the interview path's locked pattern byte for
+     * byte; every non-matching callback is preserved for the ingestion drain.
+     *
+     * @param networkAddress the target's 16-bit network address
+     * @param requestCluster the ZDO request cluster id
+     * @param responseCluster the ZDO response cluster id
+     * @param requestForTsn encodes the request body for an allocated tsn
+     * @param timeoutMillis the exchange deadline
+     * @return the response message ([tsn][body…]), or empty on NCP rejection
+     *         or await timeout
+     * @throws EzspCommandTimeoutException when the {@code sendUnicast} command
+     *         itself goes unanswered — callers convert to their typed failure
+     */
+    Optional<byte[]> zdoUnicastExchange(int networkAddress, int requestCluster,
+            int responseCluster, IntFunction<byte[]> requestForTsn,
+            long timeoutMillis) {
+        lock.lock();
+        try {
+            requireNegotiated();
+            Instant deadline = clock.instant().plusMillis(timeoutMillis);
+            int tsn = nextZdoSequenceLocked();
+            byte[] request = requestForTsn.apply(tsn);
+            if (!sendUnicastLocked(networkAddress, ZDO_PROFILE_ID,
+                    requestCluster, 0, 0, tsn, request)) {
+                return Optional.empty();
+            }
+            return awaitIncomingLocked(ZDO_PROFILE_ID, responseCluster,
+                    message -> message.length > 0
+                            && (message[0] & 0xFF) == tsn,
+                    deadline);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * One ZCL GLOBAL request/response exchange (M9.4-RPT — Configure
+     * Reporting 0x06 / Read Reporting Configuration 0x08 / the IAS CIE write):
+     * encodes the 3-byte global header ([fc 0x00][tsn][commandId]) + payload,
+     * rides {@link #sendUnicastLocked} on the HA profile from the coordinator
+     * endpoint, and awaits the tsn-matched global response command. Mirrors
+     * the interview Basic-read pattern.
+     *
+     * @param networkAddress the target's 16-bit network address
+     * @param endpoint the target endpoint
+     * @param clusterId the cluster
+     * @param commandId the ZCL global command id to send
+     * @param payload the command payload (after the ZCL header)
+     * @param responseCommandId the ZCL global response command id to await
+     * @param timeoutMillis the exchange deadline
+     * @return the full response message (header + payload), or empty on NCP
+     *         rejection or await timeout
+     * @throws EzspCommandTimeoutException when the {@code sendUnicast} command
+     *         itself goes unanswered — callers convert to their typed failure
+     */
+    Optional<byte[]> zclGlobalExchange(int networkAddress, int endpoint,
+            int clusterId, int commandId, byte[] payload, int responseCommandId,
+            long timeoutMillis) {
+        lock.lock();
+        try {
+            requireNegotiated();
+            Instant deadline = clock.instant().plusMillis(timeoutMillis);
+            int tsn = nextZdoSequenceLocked();
+            byte[] zcl = new byte[3 + payload.length];
+            zcl[0] = 0x00;                      // global, client-to-server
+            zcl[1] = (byte) tsn;
+            zcl[2] = (byte) commandId;
+            System.arraycopy(payload, 0, zcl, 3, payload.length);
+            if (!sendUnicastLocked(networkAddress, HA_PROFILE_ID, clusterId, 1,
+                    endpoint, tsn, zcl)) {
+                return Optional.empty();
+            }
+            return awaitIncomingLocked(HA_PROFILE_ID, clusterId, message -> {
+                Optional<ZclCodec.ZclHeader> header = ZclCodec.parseHeader(message);
+                return header.isPresent()
+                        && !header.get().clusterSpecific()
+                        && header.get().commandId() == responseCommandId
+                        && header.get().transactionSequence() == tsn;
+            }, deadline);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /**
      * The {@link InterviewOps} binding over the EZSP pipeline (Doc 08 §3.4
      * steps 2–5). Each step is one lock-scoped ZDO/ZCL exchange: the lock is
@@ -1508,28 +1725,18 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
         private Optional<byte[]> zdoExchange(int networkAddress, int requestCluster,
                 int responseCluster, IntFunction<byte[]> requestForTsn,
                 long timeoutMillis) {
-            lock.lock();
             try {
-                requireNegotiated();
-                Instant deadline = clock.instant().plusMillis(timeoutMillis);
-                int tsn = nextZdoSequenceLocked();
-                byte[] request = requestForTsn.apply(tsn);
-                if (!sendUnicastLocked(networkAddress, ZDO_PROFILE_ID,
-                        requestCluster, 0, 0, tsn, request)) {
-                    return Optional.empty();
-                }
-                return awaitIncomingLocked(ZDO_PROFILE_ID, responseCluster,
-                        message -> message.length > 0
-                                && (message[0] & 0xFF) == tsn,
-                        deadline);
+                // The exchange itself is the outer class's M9.4-RPT seam
+                // (byte-identical hoist); the interview-specific timeout WARN
+                // stays here — the reporting binding renders its own results.
+                return zdoUnicastExchange(networkAddress, requestCluster,
+                        responseCluster, requestForTsn, timeoutMillis);
             } catch (EzspCommandTimeoutException e) {
                 log.warn("zigbee.interview_step_timeout: ZDO cluster=0x{} "
                                 + "nwk=0x{}: {}",
                         Integer.toHexString(requestCluster),
                         Integer.toHexString(networkAddress), e.getMessage());
                 return Optional.empty();
-            } finally {
-                lock.unlock();
             }
         }
 

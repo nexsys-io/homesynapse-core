@@ -51,11 +51,43 @@ import java.util.Objects;
  *
  * <p>Records are immutable — instances are reconstructed with untouched components
  * copied verbatim; {@code featureMap} stays as built (0 — the N-10 note).</p>
+ *
+ * <p><strong>M9.4-RPT §3 — the measured-posture routing:</strong>
+ * {@link #applyPostureFacts} consumes the reporting drive's
+ * {@link ReportingPostureFact} rows and enforces never-false-CONFIRMED at
+ * INSTALL time (AMD-97-INV-01): a capability whose confirmation rides
+ * authoritative reports stays fully report-confirmable only where the covering
+ * cluster's posture is read-back VERIFIED. The ratified AMD-95/AMD-97 mapping
+ * (Doc 08 §3.6): a {@code NONE}-class fact (the attribute is absent) is the
+ * UNCONFIRMABLE class → {@code ConfirmationMode.DISABLED} with the reason
+ * recorded (the WARN + the fact — never silent optimism); every other
+ * non-verified fact (readback-only, sleepy timeout, ACK-lies, no-configure
+ * skip) is the BEST_EFFORT class → the tracking machinery is KEPT (a
+ * {@code CONFIRMED} only ever renders on genuine report evidence — Register
+ * §51) and the re-rating is ONE loud WARN naming device + cluster + posture.
+ * Never-tracked and honestly-verdicted remain different promises.</p>
  */
 final class ConfirmationOverrideInstaller {
 
     private static final Logger log =
             LoggerFactory.getLogger(ConfirmationOverrideInstaller.class);
+
+    /**
+     * The covering cluster per report-confirmable capability (adapter-side
+     * protocol knowledge, INV-CE-04): the cluster whose reporting posture
+     * governs whether the capability's authoritative reports actually flow.
+     * Mirrors the {@code EndpointClassifier} attachment sources; a capability
+     * absent here (a future vocabulary row) is left untouched by the routing —
+     * grow this table with the classifier's.
+     */
+    private static final Map<String, Integer> COVERING_CLUSTER_BY_CAPABILITY =
+            Map.of(
+                    "on_off", OnOffHandler.CLUSTER_ID,
+                    "brightness", LevelControlHandler.CLUSTER_ID,
+                    "color_temperature", ColorControlHandler.CLUSTER_ID,
+                    "occupancy", OccupancySensingHandler.CLUSTER_ID,
+                    "battery", PowerConfigurationHandler.CLUSTER_ID,
+                    "motion", IasZoneHandler.CLUSTER_ID);
 
     private ConfirmationOverrideInstaller() {
         // Static mapping table — no instantiation.
@@ -133,5 +165,88 @@ final class ConfirmationOverrideInstaller {
         return new CapabilityInstance(instance.capabilityId(), instance.version(),
                 instance.namespace(), instance.featureMap(), instance.attributes(),
                 commands, policy);
+    }
+
+    // ── M9.4-RPT §3: the measured-posture routing ────────────────────────────
+
+    /**
+     * Routes one entity's measured posture facts into its installed
+     * confirmation surface (the install-time never-false-CONFIRMED fence).
+     *
+     * @param device the driven device (WARN attribution), never {@code null}
+     * @param endpoint the entity's protocol endpoint (facts are per-endpoint)
+     * @param facts the drive's recorded posture facts, never {@code null}
+     * @param capabilities the entity's installed capability instances, never
+     *        {@code null}
+     * @return the routed list; the SAME data when nothing downgrades
+     */
+    static List<CapabilityInstance> applyPostureFacts(IEEEAddress device,
+            int endpoint, List<ReportingPostureFact> facts,
+            List<CapabilityInstance> capabilities) {
+        Objects.requireNonNull(device, "device");
+        Objects.requireNonNull(facts, "facts");
+        Objects.requireNonNull(capabilities, "capabilities");
+        List<CapabilityInstance> routed = new ArrayList<>(capabilities.size());
+        for (CapabilityInstance instance : capabilities) {
+            routed.add(routeOne(device, endpoint, facts, instance));
+        }
+        return List.copyOf(routed);
+    }
+
+    /**
+     * True for the strict read-back-VERIFIED fact class — the ONLY rung the
+     * configurator mints unremarkable ({@code note == null}): configure
+     * accepted AND the read-back matched. Every noted fact (sleepy timeout,
+     * readback-only, ACK-lies, skip) is measurement-degraded, whatever its
+     * {@code reportsAuthoritative} label (the M9.4-RPT §3 "VERIFIED" reading).
+     */
+    static boolean verifiedFact(ReportingPostureFact fact) {
+        return fact.reportsAuthoritative() == ReportsAuthoritative.VERIFIED_REPORTS
+                && fact.note() == null;
+    }
+
+    private static CapabilityInstance routeOne(IEEEAddress device, int endpoint,
+            List<ReportingPostureFact> facts, CapabilityInstance instance) {
+        ConfirmationPolicy policy = instance.confirmation();
+        if (policy.mode() == ConfirmationMode.DISABLED
+                || policy.authoritativeAttributes().isEmpty()) {
+            return instance;    // nothing rides reports — nothing to fence
+        }
+        Integer coveringCluster =
+                COVERING_CLUSTER_BY_CAPABILITY.get(instance.capabilityId());
+        if (coveringCluster == null) {
+            return instance;    // outside the routed vocabulary — untouched
+        }
+        ReportingPostureFact fact = facts.stream()
+                .filter(f -> f.endpoint() == endpoint
+                        && f.clusterId() == coveringCluster)
+                .findFirst()
+                .orElse(null);
+        if (fact == null || verifiedFact(fact)) {
+            return instance;    // unmeasured cluster row, or verified — stands
+        }
+        if (fact.reportsAuthoritative() == ReportsAuthoritative.NONE) {
+            // The UNCONFIRMABLE class: the authoritative attribute is absent —
+            // tracking would be structural noise; DISABLED with the reason
+            // recorded (this WARN + the fact), the AMD-97-INV-01 fence.
+            log.warn("zigbee.confirmation_downgraded: device={} capability={} "
+                            + "cluster=0x{} posture={}/{} outcome=disabled",
+                    device, instance.capabilityId(),
+                    Integer.toHexString(fact.clusterId()),
+                    fact.reportsAuthoritative(), fact.reportingPosture());
+            return withPolicy(instance, instance.commands(),
+                    new ConfirmationPolicy(ConfirmationMode.DISABLED, List.of(),
+                            null, policy.defaultTimeoutMs()));
+        }
+        // The BEST_EFFORT class (readback-only / sleepy / ACK-lies / skip): the
+        // tracking machinery stays — CONFIRMED only ever renders on genuine
+        // report evidence, and an unanswered window renders the honest
+        // UNCONFIRMED — but the re-rating is loud.
+        log.warn("zigbee.confirmation_downgraded: device={} capability={} "
+                        + "cluster=0x{} posture={}/{} outcome=best_effort",
+                device, instance.capabilityId(),
+                Integer.toHexString(fact.clusterId()),
+                fact.reportsAuthoritative(), fact.reportingPosture());
+        return instance;
     }
 }
