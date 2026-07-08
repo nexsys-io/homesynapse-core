@@ -527,6 +527,23 @@ M9.4-KEY closes the join arc's last code gap bench iteration 4 measured: the SNZ
 
 ---
 
+## M9.4-KEYb Implementation — §B Progress-Status Reclassification (2026-07-08)
+
+M9.4-KEYb adds the missing middle class to the §B 0x009B classifier bench iteration 5a exposed: a healthy Z3.0 TCLK exchange emits in-flight PROGRESS callbacks first — measured `key_establishment_failed: status=TC_RESPONDED_TO_KEY_REQUEST` (0x06) 0.26 s BEFORE the genuine `key_established: TC_REQUESTER_VERIFY_KEY_SUCCESS` (0x34) — so the M9.4-KEY binary `established()`/else split (designed off iteration-4's failure-only evidence) rendered every healthy join a false failure the §51 honesty greps would inherit. Three-way now: established → INFO (unchanged) / **progress → DEBUG** / everything else → WARN (unchanged). 3 code files + this file, all integration-zigbee; ZERO module-info/build.gradle.kts/`libs.versions.toml`/schema/event-mint/public-surface diffs.
+
+### M9.4-KEYb Behavior Deltas (existing types)
+
+- **`EzspCoordinatorProtocol.KeyEstablishment.progress()` (§1, NEW beside `established()`):** true for exactly the RULED set **{0x06 TC_RESPONDED_TO_KEY_REQUEST, 0x07 TC_APP_KEY_SENT_TO_REQUESTER, 0x0C TC_RECEIVED_FIRST_APP_KEY_REQUEST}** (Nick's ruling 2026-07-08 — the set widens by silicon evidence + a ruling, never by drift). `established()` BYTE-UNTOUCHED (success class stays exactly {0x01,0x03,0x34,0x65}); `statusName()` and the KEY_STATUS constants untouched; NO new constants (all three names existed since M9.4-KEY).
+- **`ZclIngestionUnit.handleKeyEstablishment` (§2, the middle arm):** between the established-INFO arm and the failure-WARN fallthrough: `progress()` ⇒ ONE DEBUG `zigbee.key_establishment_progress: device={} status={}` — invisible at the bench's INFO root, so a healthy exchange's INFO stream shows exactly ONE `key_established` and ZERO `key_establishment_failed`. The INFO/WARN tokens FROZEN (the runbook/§51 greps bind them); `KEY_STATUS_NONE` (0x00) and every other non-established, non-progress byte stays in the loud WARN bucket. THE PIN unchanged (never a device/interview/event/registry change) and re-asserted on every new test.
+- **Tests:** `ZigbeeKeyEstablishmentTest` +4 (11 total): T-KB1 the healthy iteration-5a sequence 0x06→0x34 (exactly ONE `key_established` INFO, ZERO failures, the 0x06 DEBUG progress line asserted verbatim); T-KB2 each ruled status alone (DEBUG with the right name; zero WARN, zero `key_established`); T-KB3 0x11 + 0x33 still WARN verbatim (the else-bucket survives the new arm; T-K2 untouched-and-green stays the regression pin); T-KB4 the `progress()` truth table — the ruled three by RAW VALUE and by name, false for all four established statuses + representative failures + an unknown byte. Red-first staged: tests + `progress()` only (no §2 arm) → T-KB1/T-KB2 failed on the DEBUG-presence assertion (0x06 fell to WARN); T-KB3/T-KB4 green by design.
+
+### M9.4-KEYb Gotchas
+
+- **DEBUG-line assertions are level-gated:** logback filters below the logger's effective level (test-tree root = INFO per `logback-test.xml`) BEFORE appenders run — a `ListAppender` attached to the logger NEVER sees a DEBUG line unless the test sets the logger to DEBUG explicitly and restores after (`getLevel()` returns the logger's OWN level — null here = inherited — and `setLevel(null)` restores inheritance). Assert the DEBUG line's PRESENCE, never just WARN-absence: absence-only assertions on a filtered level pass vacuously (the vacuous-VERIFY class).
+- **Silicon confirmation piggybacks on the next fresh join** (no dedicated bench iteration): the join's INFO stream must show exactly one `key_established` and zero `key_establishment_failed` — verify opportunistically at 5b/acceptance-run intake.
+
+---
+
 ## Phase 3 Cross-Module Context
 
 *Added 2026-04-11 (Alignment Pass #2). Phase 3 implementation is active — M2.5 `SqliteEventStore` landed 2026-04-11 (commit `5279e7a`), next milestone M2.6 + M2.7 (combined) pending from Nick.*

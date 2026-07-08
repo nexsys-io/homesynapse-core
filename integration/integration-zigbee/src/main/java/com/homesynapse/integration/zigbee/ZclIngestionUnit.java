@@ -279,6 +279,11 @@ final class ZclIngestionUnit {
                     key.partner(), key.statusName());
             return;
         }
+        if (key.progress()) {
+            log.debug("zigbee.key_establishment_progress: device={} status={}",
+                    key.partner(), key.statusName());
+            return;
+        }
         log.warn("zigbee.key_establishment_failed: device={} status={}",
                 key.partner(), key.statusName());
     }

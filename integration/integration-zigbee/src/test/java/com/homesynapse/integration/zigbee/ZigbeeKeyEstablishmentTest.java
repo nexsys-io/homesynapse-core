@@ -54,6 +54,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code statusName()} (T-K1/T-K2/T-K4): iteration 4 measured
  * {@code status=0x11} ×3 before the BDB leave — the verified decode is
  * TC_REJECTED_APP_KEY_REQUEST, and every future 0x009B line self-decodes.
+ *
+ * <p>M9.4-KEYb adds the ruled progress middle class (T-KB1–T-KB4): iteration
+ * 5a measured a healthy exchange emitting TC_RESPONDED_TO_KEY_REQUEST (0x06)
+ * 0.26 s BEFORE the genuine TC_REQUESTER_VERIFY_KEY_SUCCESS — progress logged
+ * as failure was a false verdict in the instrument. {0x06, 0x07, 0x0C} render
+ * DEBUG {@code zigbee.key_establishment_progress}; the INFO/WARN tokens stay
+ * frozen (the §51 greps bind them).
  */
 @DisplayName("ZclIngestionUnit — key-establishment observability (M9.4-RPT §B)")
 class ZigbeeKeyEstablishmentTest {
@@ -299,6 +306,145 @@ class ZigbeeKeyEstablishmentTest {
         }
     }
 
+    // ── M9.4-KEYb: the progress middle class (T-KB1–T-KB4) ──────────────────
+
+    @Test
+    @DisplayName("T-KB1: the healthy iteration-5a sequence (0x06 then 0x34) logs "
+            + "exactly ONE key_established and ZERO failures — the 0x06 renders "
+            + "as the DEBUG progress line (and THE PIN holds)")
+    void healthyExchange_progressAtDebug_oneInfoZeroWarn() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::formationHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+
+        // logback filters below the logger's effective level (root INFO in the
+        // test tree) BEFORE appenders run — without the explicit DEBUG the
+        // progress assertion passes vacuously on an empty capture.
+        Level previous = ingestionLogger().getLevel();
+        ingestionLogger().setLevel(Level.DEBUG);
+        try {
+            deliver(adapter, keyEstablishmentCallback(PARTNER_IEEE,
+                    EzspCoordinatorProtocol.KEY_STATUS_TC_RESPONDED_TO_KEY_REQUEST));
+            deliver(adapter, keyEstablishmentCallback(PARTNER_IEEE,
+                    EzspCoordinatorProtocol
+                            .KEY_STATUS_TC_REQUESTER_VERIFY_KEY_SUCCESS));
+        } finally {
+            ingestionLogger().setLevel(previous);
+        }
+
+        // PRESENCE at DEBUG, not just WARN-absence — the vacuous-VERIFY guard.
+        assertThat(ingestionMessages(Level.DEBUG,
+                "zigbee.key_establishment_progress"))
+                .containsExactly("zigbee.key_establishment_progress: device="
+                        + PARTNER_HEX + " status=TC_RESPONDED_TO_KEY_REQUEST");
+        assertThat(ingestionMessages(Level.INFO, "zigbee.key_established"))
+                .containsExactly("zigbee.key_established: device=" + PARTNER_HEX
+                        + " status=TC_REQUESTER_VERIFY_KEY_SUCCESS");
+        assertThat(ingestionMessages(Level.WARN, "zigbee.key_establishment_failed"))
+                .isEmpty();
+        assertPin(adapter, ncp);
+    }
+
+    @Test
+    @DisplayName("T-KB2: each ruled progress status renders its DEBUG line — "
+            + "never a WARN, never a key_established (and THE PIN holds)")
+    void progressStatuses_debugOnly_neverWarnNeverInfo() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::formationHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+
+        Level previous = ingestionLogger().getLevel();
+        ingestionLogger().setLevel(Level.DEBUG);
+        try {
+            deliver(adapter, keyEstablishmentCallback(PARTNER_IEEE,
+                    EzspCoordinatorProtocol.KEY_STATUS_TC_RESPONDED_TO_KEY_REQUEST));
+            deliver(adapter, keyEstablishmentCallback(PARTNER_IEEE,
+                    EzspCoordinatorProtocol.KEY_STATUS_TC_APP_KEY_SENT_TO_REQUESTER));
+            deliver(adapter, keyEstablishmentCallback(PARTNER_IEEE,
+                    EzspCoordinatorProtocol
+                            .KEY_STATUS_TC_RECEIVED_FIRST_APP_KEY_REQUEST));
+        } finally {
+            ingestionLogger().setLevel(previous);
+        }
+
+        // PRESENCE at DEBUG with the right name for each — never vacuous.
+        assertThat(ingestionMessages(Level.DEBUG,
+                "zigbee.key_establishment_progress"))
+                .containsExactly(
+                        "zigbee.key_establishment_progress: device=" + PARTNER_HEX
+                                + " status=TC_RESPONDED_TO_KEY_REQUEST",
+                        "zigbee.key_establishment_progress: device=" + PARTNER_HEX
+                                + " status=TC_APP_KEY_SENT_TO_REQUESTER",
+                        "zigbee.key_establishment_progress: device=" + PARTNER_HEX
+                                + " status=TC_RECEIVED_FIRST_APP_KEY_REQUEST");
+        assertThat(ingestionMessages(Level.WARN, "zigbee.key_establishment_failed"))
+                .isEmpty();
+        assertThat(ingestionMessages(Level.INFO, "zigbee.key_established"))
+                .isEmpty();
+        assertPin(adapter, ncp);
+    }
+
+    @Test
+    @DisplayName("T-KB3: failure statuses still WARN verbatim after the progress "
+            + "arm — the else-bucket survives (and THE PIN holds)")
+    void failureStatuses_stillWarnVerbatim_elseBucketSurvives() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::formationHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+
+        deliver(adapter, keyEstablishmentCallback(PARTNER_IEEE,
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REJECTED_APP_KEY_REQUEST));
+        deliver(adapter, keyEstablishmentCallback(PARTNER_IEEE,
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_VERIFY_KEY_FAILURE));
+
+        assertThat(ingestionMessages(Level.WARN, "zigbee.key_establishment_failed"))
+                .containsExactly(
+                        "zigbee.key_establishment_failed: device=" + PARTNER_HEX
+                                + " status=TC_REJECTED_APP_KEY_REQUEST",
+                        "zigbee.key_establishment_failed: device=" + PARTNER_HEX
+                                + " status=TC_REQUESTER_VERIFY_KEY_FAILURE");
+        assertThat(ingestionMessages(Level.INFO, "zigbee.key_established")).isEmpty();
+        assertPin(adapter, ncp);
+    }
+
+    @Test
+    @DisplayName("T-KB4: progress() is exactly the ruled three — by RAW VALUE and "
+            + "by name; false for every success status and representative failures")
+    void progress_exactlyTheRuledThree() {
+        // The ruled set pinned by raw value (the 0x11 lesson: symbolic binding
+        // alone passes wrong-but-consistent).
+        assertThat(progress(0x06)).isTrue();
+        assertThat(progress(0x07)).isTrue();
+        assertThat(progress(0x0C)).isTrue();
+        assertThat(progress(EzspCoordinatorProtocol
+                .KEY_STATUS_TC_RESPONDED_TO_KEY_REQUEST)).isTrue();
+        assertThat(progress(EzspCoordinatorProtocol
+                .KEY_STATUS_TC_APP_KEY_SENT_TO_REQUESTER)).isTrue();
+        assertThat(progress(EzspCoordinatorProtocol
+                .KEY_STATUS_TC_RECEIVED_FIRST_APP_KEY_REQUEST)).isTrue();
+
+        int[] nonProgress = {
+            EzspCoordinatorProtocol.KEY_STATUS_APP_LINK_KEY_ESTABLISHED,
+            EzspCoordinatorProtocol.KEY_STATUS_TRUST_CENTER_LINK_KEY_ESTABLISHED,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_VERIFY_KEY_SUCCESS,
+            EzspCoordinatorProtocol.KEY_STATUS_VERIFY_LINK_KEY_SUCCESS,
+            EzspCoordinatorProtocol.KEY_STATUS_NONE,
+            EzspCoordinatorProtocol.KEY_STATUS_KEY_ESTABLISHMENT_TIMEOUT,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_RESPONSE_TO_KEY_REQUEST_FAILED,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_REJECTED_APP_KEY_REQUEST,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_VERIFY_KEY_FAILURE,
+            EzspCoordinatorProtocol.KEY_STATUS_TRUST_CENTER_IS_PRE_R21,
+            0x77,
+        };
+        for (int status : nonProgress) {
+            assertThat(progress(status))
+                    .as("0x%02x is not the ruled progress class — the set widens "
+                            + "by silicon evidence and a ruling, never by drift",
+                            status)
+                    .isFalse();
+        }
+    }
+
     /** Record-level decode probe — the nested record is same-package reachable. */
     private static String statusName(int status) {
         return new EzspCoordinatorProtocol.KeyEstablishment(
@@ -308,6 +454,11 @@ class ZigbeeKeyEstablishmentTest {
     private static boolean established(int status) {
         return new EzspCoordinatorProtocol.KeyEstablishment(
                 new IEEEAddress(PARTNER_IEEE), status).established();
+    }
+
+    private static boolean progress(int status) {
+        return new EzspCoordinatorProtocol.KeyEstablishment(
+                new IEEEAddress(PARTNER_IEEE), status).progress();
     }
 
     /**

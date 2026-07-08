@@ -1155,6 +1155,20 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
         }
 
         /**
+         * True for the benign in-flight progress statuses — the TC mid-exchange
+         * (responded / key sent / first-of-two received). Iteration 5a measured
+         * a healthy TCLK exchange emitting TC_RESPONDED_TO_KEY_REQUEST 0.26 s
+         * before the genuine success; logging progress as failure is a false
+         * verdict the §51 honesty greps would inherit. Ruled set (2026-07-08):
+         * exactly these three.
+         */
+        boolean progress() {
+            return status == KEY_STATUS_TC_RESPONDED_TO_KEY_REQUEST
+                    || status == KEY_STATUS_TC_APP_KEY_SENT_TO_REQUESTER
+                    || status == KEY_STATUS_TC_RECEIVED_FIRST_APP_KEY_REQUEST;
+        }
+
+        /**
          * The EmberKeyStatus vocabulary name, or its hex when unknown. The full
          * bellows vocabulary folded at M9.4-KEY (names sans the KEY_STATUS_
          * prefix); the hex fallback stays — honesty for genuinely unknown bytes.
