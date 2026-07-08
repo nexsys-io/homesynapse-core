@@ -161,8 +161,19 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     static final int FRAME_SET_POLICY = 0x0055;
     /** EzspPolicyId TRUST_CENTER_POLICY. */
     static final int POLICY_TRUST_CENTER = 0x00;
-    /** EzspPolicyId TC_KEY_REQUEST_POLICY. */
-    static final int POLICY_TC_KEY_REQUEST = 0x09;
+    /**
+     * EzspPolicyId TC_KEY_REQUEST_POLICY (0x05) — governs how the TC answers a
+     * joiner's TCLK key request (the Z3.0 BDB update leg). VERIFIED against
+     * GSDK 4.4.5 {@code ezsp-enum.h} (= EmberZNet 7.4.5, the frozen bench
+     * stack) and bellows {@code EZSP_POLICIES_SHARED}. The original 0x09 was
+     * TC_REJOINS_USING_WELL_KNOWN_KEY_POLICY — writing the allow decision there
+     * left THIS policy at its firmware default (deny-class), so the TC rejected
+     * every TCLK-update request (iteration 4: {@code key_establishment_failed}
+     * {@code status=0x11} ×3 at ~5 s cadence → BDB leave at +18.8 s).
+     * BENCH-VERIFY: silicon confirmation = iteration 5a
+     * ({@code key_established} + the device stays).
+     */
+    static final int POLICY_TC_KEY_REQUEST = 0x05;
     /**
      * EzspDecisionBitmask ALLOW_JOINS (0x0001) | ALLOW_UNSECURED_REJOINS (0x0002)
      * — the bellows/ZHA trust-center posture that admits preconfigured-key joins
@@ -171,10 +182,14 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      */
     static final int DECISION_ALLOW_PRECONFIGURED_KEY_JOINS = 0x0003;
     /**
-     * EzspDecisionId ALLOW_TC_KEY_REQUESTS_AND_SEND_CURRENT_KEY (0x51) — bellows
-     * sets it alongside the TC policy so a joiner can fetch the TC link key.
-     * BENCH-VERIFY whether the frozen v13 stack needs it; the exchange is
-     * isolated behind the enablement seam and drops as a one-line edit.
+     * EzspDecisionId ALLOW_TC_KEY_REQUESTS_AND_SEND_CURRENT_KEY (0x51) — the
+     * bellows default for TC_KEY_REQUEST_POLICY ({@code EZSP_POLICIES_SHARED};
+     * verified against GSDK 4.4.5 {@code ezsp-enum.h}). RESOLVED on iteration-4
+     * silicon: the exchange is load-bearing — the Z3.0 TCLK update fails
+     * without it — and the measured defect was the policy id it was written to
+     * ({@link #POLICY_TC_KEY_REQUEST}'s original 0x09 mis-map), never this
+     * decision value. With hashed-TCLK formation the send-current path is the
+     * reference behavior (0x52 generate-new is NOT the A/B baseline).
      */
     static final int DECISION_ALLOW_TC_KEY_REQUESTS = 0x51;
     /**
@@ -271,11 +286,33 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      */
     static final int FRAME_ZIGBEE_KEY_ESTABLISHMENT_HANDLER = 0x009B;
 
-    // EmberKeyStatus — the 0x009B status byte (bellows-derived, BENCH-VERIFY).
+    // EmberKeyStatus — the 0x009B status byte (bellows types/named.py VERBATIM,
+    // BENCH-VERIFY). M9.4-KEY folded the full vocabulary so every 0x009B log
+    // line self-decodes — the 0x00/0x02/0x06–0x13/0x1E names previously
+    // rendered as raw hex (iteration 4 logged the undecoded status=0x11).
+    /** Bellows names this member KEY_STATUS_NONE itself — no added prefix here. */
+    static final int KEY_STATUS_NONE = 0x00;
     static final int KEY_STATUS_APP_LINK_KEY_ESTABLISHED = 0x01;
+    static final int KEY_STATUS_APP_MASTER_KEY_ESTABLISHED = 0x02;
     static final int KEY_STATUS_TRUST_CENTER_LINK_KEY_ESTABLISHED = 0x03;
     static final int KEY_STATUS_KEY_ESTABLISHMENT_TIMEOUT = 0x04;
     static final int KEY_STATUS_KEY_TABLE_FULL = 0x05;
+    static final int KEY_STATUS_TC_RESPONDED_TO_KEY_REQUEST = 0x06;
+    static final int KEY_STATUS_TC_APP_KEY_SENT_TO_REQUESTER = 0x07;
+    static final int KEY_STATUS_TC_RESPONSE_TO_KEY_REQUEST_FAILED = 0x08;
+    static final int KEY_STATUS_TC_REQUEST_KEY_TYPE_NOT_SUPPORTED = 0x09;
+    static final int KEY_STATUS_TC_NO_LINK_KEY_FOR_REQUESTER = 0x0A;
+    static final int KEY_STATUS_TC_REQUESTER_EUI64_UNKNOWN = 0x0B;
+    static final int KEY_STATUS_TC_RECEIVED_FIRST_APP_KEY_REQUEST = 0x0C;
+    static final int KEY_STATUS_TC_TIMEOUT_WAITING_FOR_SECOND_APP_KEY_REQUEST = 0x0D;
+    static final int KEY_STATUS_TC_NON_MATCHING_APP_KEY_REQUEST_RECEIVED = 0x0E;
+    static final int KEY_STATUS_TC_FAILED_TO_SEND_APP_KEYS = 0x0F;
+    static final int KEY_STATUS_TC_FAILED_TO_STORE_APP_KEY_REQUEST = 0x10;
+    /** The iteration-4 measured leave cause: the TC refused the Z3.0 TCLK update. */
+    static final int KEY_STATUS_TC_REJECTED_APP_KEY_REQUEST = 0x11;
+    static final int KEY_STATUS_TC_FAILED_TO_GENERATE_NEW_KEY = 0x12;
+    static final int KEY_STATUS_TC_FAILED_TO_SEND_TC_KEY = 0x13;
+    static final int KEY_STATUS_TRUST_CENTER_IS_PRE_R21 = 0x1E;
     static final int KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT = 0x32;
     static final int KEY_STATUS_TC_REQUESTER_VERIFY_KEY_FAILURE = 0x33;
     static final int KEY_STATUS_TC_REQUESTER_VERIFY_KEY_SUCCESS = 0x34;
@@ -1117,16 +1154,53 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
                     || status == KEY_STATUS_VERIFY_LINK_KEY_SUCCESS;
         }
 
-        /** The EmberKeyStatus vocabulary name, or its hex when unknown. */
+        /**
+         * The EmberKeyStatus vocabulary name, or its hex when unknown. The full
+         * bellows vocabulary folded at M9.4-KEY (names sans the KEY_STATUS_
+         * prefix); the hex fallback stays — honesty for genuinely unknown bytes.
+         */
         String statusName() {
             return switch (status) {
+                case KEY_STATUS_NONE -> "NONE";
                 case KEY_STATUS_APP_LINK_KEY_ESTABLISHED ->
                         "APP_LINK_KEY_ESTABLISHED";
+                case KEY_STATUS_APP_MASTER_KEY_ESTABLISHED ->
+                        "APP_MASTER_KEY_ESTABLISHED";
                 case KEY_STATUS_TRUST_CENTER_LINK_KEY_ESTABLISHED ->
                         "TRUST_CENTER_LINK_KEY_ESTABLISHED";
                 case KEY_STATUS_KEY_ESTABLISHMENT_TIMEOUT ->
                         "KEY_ESTABLISHMENT_TIMEOUT";
                 case KEY_STATUS_KEY_TABLE_FULL -> "KEY_TABLE_FULL";
+                case KEY_STATUS_TC_RESPONDED_TO_KEY_REQUEST ->
+                        "TC_RESPONDED_TO_KEY_REQUEST";
+                case KEY_STATUS_TC_APP_KEY_SENT_TO_REQUESTER ->
+                        "TC_APP_KEY_SENT_TO_REQUESTER";
+                case KEY_STATUS_TC_RESPONSE_TO_KEY_REQUEST_FAILED ->
+                        "TC_RESPONSE_TO_KEY_REQUEST_FAILED";
+                case KEY_STATUS_TC_REQUEST_KEY_TYPE_NOT_SUPPORTED ->
+                        "TC_REQUEST_KEY_TYPE_NOT_SUPPORTED";
+                case KEY_STATUS_TC_NO_LINK_KEY_FOR_REQUESTER ->
+                        "TC_NO_LINK_KEY_FOR_REQUESTER";
+                case KEY_STATUS_TC_REQUESTER_EUI64_UNKNOWN ->
+                        "TC_REQUESTER_EUI64_UNKNOWN";
+                case KEY_STATUS_TC_RECEIVED_FIRST_APP_KEY_REQUEST ->
+                        "TC_RECEIVED_FIRST_APP_KEY_REQUEST";
+                case KEY_STATUS_TC_TIMEOUT_WAITING_FOR_SECOND_APP_KEY_REQUEST ->
+                        "TC_TIMEOUT_WAITING_FOR_SECOND_APP_KEY_REQUEST";
+                case KEY_STATUS_TC_NON_MATCHING_APP_KEY_REQUEST_RECEIVED ->
+                        "TC_NON_MATCHING_APP_KEY_REQUEST_RECEIVED";
+                case KEY_STATUS_TC_FAILED_TO_SEND_APP_KEYS ->
+                        "TC_FAILED_TO_SEND_APP_KEYS";
+                case KEY_STATUS_TC_FAILED_TO_STORE_APP_KEY_REQUEST ->
+                        "TC_FAILED_TO_STORE_APP_KEY_REQUEST";
+                case KEY_STATUS_TC_REJECTED_APP_KEY_REQUEST ->
+                        "TC_REJECTED_APP_KEY_REQUEST";
+                case KEY_STATUS_TC_FAILED_TO_GENERATE_NEW_KEY ->
+                        "TC_FAILED_TO_GENERATE_NEW_KEY";
+                case KEY_STATUS_TC_FAILED_TO_SEND_TC_KEY ->
+                        "TC_FAILED_TO_SEND_TC_KEY";
+                case KEY_STATUS_TRUST_CENTER_IS_PRE_R21 ->
+                        "TRUST_CENTER_IS_PRE_R21";
                 case KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT ->
                         "TC_REQUESTER_VERIFY_KEY_TIMEOUT";
                 case KEY_STATUS_TC_REQUESTER_VERIFY_KEY_FAILURE ->

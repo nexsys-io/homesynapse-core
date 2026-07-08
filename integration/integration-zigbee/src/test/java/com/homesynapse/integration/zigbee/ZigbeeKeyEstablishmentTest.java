@@ -49,6 +49,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * device, never schedules an interview, never publishes an event, never alters
  * adoption/availability — pure observability, the M9.4-TCJ 0x0024/0x0023
  * precedent.
+ *
+ * <p>M9.4-KEY folds the full bellows EmberKeyStatus vocabulary into
+ * {@code statusName()} (T-K1/T-K2/T-K4): iteration 4 measured
+ * {@code status=0x11} ×3 before the BDB leave — the verified decode is
+ * TC_REJECTED_APP_KEY_REQUEST, and every future 0x009B line self-decodes.
  */
 @DisplayName("ZclIngestionUnit — key-establishment observability (M9.4-RPT §B)")
 class ZigbeeKeyEstablishmentTest {
@@ -161,6 +166,148 @@ class ZigbeeKeyEstablishmentTest {
         assertThat(ingestionMessages(Level.WARN, "zigbee.key_establishment_failed"))
                 .isEmpty();
         assertPin(adapter, ncp);
+    }
+
+    // ── M9.4-KEY: the EmberKeyStatus vocabulary fold (T-K1/T-K2/T-K4) ───────
+
+    @Test
+    @DisplayName("T-K2: the iteration-4 signature now self-decodes — a 0x11 failure "
+            + "WARNs status=TC_REJECTED_APP_KEY_REQUEST (and THE PIN holds)")
+    void rejectedTclkUpdateRequest_warnsWithDecodedName() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::formationHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+
+        deliver(adapter, keyEstablishmentCallback(PARTNER_IEEE,
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REJECTED_APP_KEY_REQUEST));
+
+        assertThat(ingestionMessages(Level.WARN, "zigbee.key_establishment_failed"))
+                .containsExactly("zigbee.key_establishment_failed: device="
+                        + PARTNER_HEX + " status=TC_REJECTED_APP_KEY_REQUEST");
+        assertThat(ingestionMessages(Level.INFO, "zigbee.key_established")).isEmpty();
+        assertPin(adapter, ncp);
+    }
+
+    @Test
+    @DisplayName("T-K1: the folded vocabulary decodes bellows-verbatim — the measured "
+            + "0x11 byte by VALUE, every folded constant by name, and an unmapped "
+            + "byte still renders honest hex")
+    void statusName_foldedVocabulary_selfDecodes() {
+        // The iteration-4 MEASURED byte pins its verified decode by value —
+        // silicon truth, not a symbolic-consistency pass.
+        assertThat(statusName(0x11)).isEqualTo("TC_REJECTED_APP_KEY_REQUEST");
+
+        assertThat(statusName(EzspCoordinatorProtocol.KEY_STATUS_NONE))
+                .isEqualTo("NONE");
+        assertThat(statusName(
+                EzspCoordinatorProtocol.KEY_STATUS_APP_MASTER_KEY_ESTABLISHED))
+                .isEqualTo("APP_MASTER_KEY_ESTABLISHED");
+        assertThat(statusName(
+                EzspCoordinatorProtocol.KEY_STATUS_TC_RESPONDED_TO_KEY_REQUEST))
+                .isEqualTo("TC_RESPONDED_TO_KEY_REQUEST");
+        assertThat(statusName(
+                EzspCoordinatorProtocol.KEY_STATUS_TC_APP_KEY_SENT_TO_REQUESTER))
+                .isEqualTo("TC_APP_KEY_SENT_TO_REQUESTER");
+        assertThat(statusName(EzspCoordinatorProtocol
+                .KEY_STATUS_TC_RESPONSE_TO_KEY_REQUEST_FAILED))
+                .isEqualTo("TC_RESPONSE_TO_KEY_REQUEST_FAILED");
+        assertThat(statusName(EzspCoordinatorProtocol
+                .KEY_STATUS_TC_REQUEST_KEY_TYPE_NOT_SUPPORTED))
+                .isEqualTo("TC_REQUEST_KEY_TYPE_NOT_SUPPORTED");
+        assertThat(statusName(
+                EzspCoordinatorProtocol.KEY_STATUS_TC_NO_LINK_KEY_FOR_REQUESTER))
+                .isEqualTo("TC_NO_LINK_KEY_FOR_REQUESTER");
+        assertThat(statusName(
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_EUI64_UNKNOWN))
+                .isEqualTo("TC_REQUESTER_EUI64_UNKNOWN");
+        assertThat(statusName(EzspCoordinatorProtocol
+                .KEY_STATUS_TC_RECEIVED_FIRST_APP_KEY_REQUEST))
+                .isEqualTo("TC_RECEIVED_FIRST_APP_KEY_REQUEST");
+        assertThat(statusName(EzspCoordinatorProtocol
+                .KEY_STATUS_TC_TIMEOUT_WAITING_FOR_SECOND_APP_KEY_REQUEST))
+                .isEqualTo("TC_TIMEOUT_WAITING_FOR_SECOND_APP_KEY_REQUEST");
+        assertThat(statusName(EzspCoordinatorProtocol
+                .KEY_STATUS_TC_NON_MATCHING_APP_KEY_REQUEST_RECEIVED))
+                .isEqualTo("TC_NON_MATCHING_APP_KEY_REQUEST_RECEIVED");
+        assertThat(statusName(
+                EzspCoordinatorProtocol.KEY_STATUS_TC_FAILED_TO_SEND_APP_KEYS))
+                .isEqualTo("TC_FAILED_TO_SEND_APP_KEYS");
+        assertThat(statusName(EzspCoordinatorProtocol
+                .KEY_STATUS_TC_FAILED_TO_STORE_APP_KEY_REQUEST))
+                .isEqualTo("TC_FAILED_TO_STORE_APP_KEY_REQUEST");
+        assertThat(statusName(
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REJECTED_APP_KEY_REQUEST))
+                .isEqualTo("TC_REJECTED_APP_KEY_REQUEST");
+        assertThat(statusName(
+                EzspCoordinatorProtocol.KEY_STATUS_TC_FAILED_TO_GENERATE_NEW_KEY))
+                .isEqualTo("TC_FAILED_TO_GENERATE_NEW_KEY");
+        assertThat(statusName(
+                EzspCoordinatorProtocol.KEY_STATUS_TC_FAILED_TO_SEND_TC_KEY))
+                .isEqualTo("TC_FAILED_TO_SEND_TC_KEY");
+        assertThat(statusName(
+                EzspCoordinatorProtocol.KEY_STATUS_TRUST_CENTER_IS_PRE_R21))
+                .isEqualTo("TRUST_CENTER_IS_PRE_R21");
+
+        // A genuinely unknown byte keeps the honest hex fallback.
+        assertThat(statusName(0x2B)).isEqualTo("0x2b");
+    }
+
+    @Test
+    @DisplayName("T-K4: established() is byte-untouched — exactly the four success "
+            + "statuses; the folded vocabulary is all non-success")
+    void established_successSetUnchanged_foldAllNonSuccess() {
+        assertThat(established(
+                EzspCoordinatorProtocol.KEY_STATUS_APP_LINK_KEY_ESTABLISHED))
+                .isTrue();
+        assertThat(established(EzspCoordinatorProtocol
+                .KEY_STATUS_TRUST_CENTER_LINK_KEY_ESTABLISHED))
+                .isTrue();
+        assertThat(established(EzspCoordinatorProtocol
+                .KEY_STATUS_TC_REQUESTER_VERIFY_KEY_SUCCESS))
+                .isTrue();
+        assertThat(established(
+                EzspCoordinatorProtocol.KEY_STATUS_VERIFY_LINK_KEY_SUCCESS))
+                .isTrue();
+
+        int[] foldedNonSuccess = {
+            EzspCoordinatorProtocol.KEY_STATUS_NONE,
+            EzspCoordinatorProtocol.KEY_STATUS_APP_MASTER_KEY_ESTABLISHED,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_RESPONDED_TO_KEY_REQUEST,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_APP_KEY_SENT_TO_REQUESTER,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_RESPONSE_TO_KEY_REQUEST_FAILED,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_REQUEST_KEY_TYPE_NOT_SUPPORTED,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_NO_LINK_KEY_FOR_REQUESTER,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_EUI64_UNKNOWN,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_RECEIVED_FIRST_APP_KEY_REQUEST,
+            EzspCoordinatorProtocol
+                    .KEY_STATUS_TC_TIMEOUT_WAITING_FOR_SECOND_APP_KEY_REQUEST,
+            EzspCoordinatorProtocol
+                    .KEY_STATUS_TC_NON_MATCHING_APP_KEY_REQUEST_RECEIVED,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_FAILED_TO_SEND_APP_KEYS,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_FAILED_TO_STORE_APP_KEY_REQUEST,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_REJECTED_APP_KEY_REQUEST,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_FAILED_TO_GENERATE_NEW_KEY,
+            EzspCoordinatorProtocol.KEY_STATUS_TC_FAILED_TO_SEND_TC_KEY,
+            EzspCoordinatorProtocol.KEY_STATUS_TRUST_CENTER_IS_PRE_R21,
+        };
+        for (int status : foldedNonSuccess) {
+            assertThat(established(status))
+                    .as("0x%02x must stay non-success — a rejected-then-left device "
+                            + "rendering key_established would be a lie in the "
+                            + "instrument itself", status)
+                    .isFalse();
+        }
+    }
+
+    /** Record-level decode probe — the nested record is same-package reachable. */
+    private static String statusName(int status) {
+        return new EzspCoordinatorProtocol.KeyEstablishment(
+                new IEEEAddress(PARTNER_IEEE), status).statusName();
+    }
+
+    private static boolean established(int status) {
+        return new EzspCoordinatorProtocol.KeyEstablishment(
+                new IEEEAddress(PARTNER_IEEE), status).established();
     }
 
     /**
