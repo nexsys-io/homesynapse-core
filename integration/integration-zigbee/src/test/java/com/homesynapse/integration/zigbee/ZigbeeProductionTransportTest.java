@@ -7,6 +7,7 @@ package com.homesynapse.integration.zigbee;
 import com.homesynapse.config.ConfigurationAccess;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
 import com.homesynapse.integration.PermanentIntegrationException;
@@ -94,6 +95,8 @@ class ZigbeeProductionTransportTest {
                 unusedHealthReporter(), configAccess(configuredPort),
                 null, null, null, null, null);
         return new ZigbeeIntegrationAdapter(context, new InMemoryDeviceRegistry(),
+                new RegistryProjection(new InMemoryDeviceRegistry(),
+                        new InMemoryEntityRegistry()),
                 tempDir, clock, null,
                 () -> enumerated,
                 candidate -> {

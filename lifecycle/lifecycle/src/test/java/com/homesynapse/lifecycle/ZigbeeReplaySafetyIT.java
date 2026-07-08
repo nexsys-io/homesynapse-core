@@ -91,6 +91,7 @@ final class ZigbeeReplaySafetyIT {
         writeConfig(tempDir);
         seedPriorZigbeeRun(tempDir.resolve("homesynapse-events.db"));
         rig = new ZigbeeHardwareFreeRig(clock, () -> core.deviceRegistry(),
+                () -> core.registryProjection(),
                 tempDir.resolve("zigbee"));
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"),

@@ -11,6 +11,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.config.ConfigurationAccess;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
 import com.homesynapse.platform.identity.EntityId;
@@ -183,6 +184,8 @@ class ZigbeePermitJoinTest {
         // key is set to prove it is production-only — the driven cadence ignores it.
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
                 context(configAccess(null, 200)), new InMemoryDeviceRegistry(),
+                new RegistryProjection(new InMemoryDeviceRegistry(),
+                        new InMemoryEntityRegistry()),
                 tempDir, clock, ignored -> channel);
         adapter.initialize();
 
@@ -228,7 +231,10 @@ class ZigbeePermitJoinTest {
         channels.push(channelOver(ncp));
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
                 context(configAccess(serialPort, permitJoinDuration)),
-                new InMemoryDeviceRegistry(), tempDir, clock, null,
+                new InMemoryDeviceRegistry(),
+                new RegistryProjection(new InMemoryDeviceRegistry(),
+                        new InMemoryEntityRegistry()),
+                tempDir, clock, null,
                 () -> List.of(coordinatorCandidate()),
                 candidate -> channels.pop());
         adapter.initialize();

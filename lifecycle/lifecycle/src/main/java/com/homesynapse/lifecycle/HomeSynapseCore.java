@@ -40,6 +40,7 @@ import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.device.InMemoryAreaRegistry;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.device.StandardCapabilities;
 import com.homesynapse.event.ConfigErrorEvent;
 import com.homesynapse.event.DomainEvent;
@@ -261,6 +262,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     private EntityRegistry entityRegistry;
     private DeviceRegistry deviceRegistry;
     private AreaRegistry areaRegistry;
+    private RegistryProjection registryProjection;
     private StandardAutomationRegistry automationRegistry;
     private StandardTriggerEvaluator triggerEvaluator;
     private RunManager runManager;
@@ -510,6 +512,22 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         this.entityRegistry = new InMemoryEntityRegistry();
         this.deviceRegistry = providedDeviceRegistry;
         this.areaRegistry = new InMemoryAreaRegistry();
+        // AMD-99 / REG-INV-1: the registries are projections of the event log.
+        // The projection is THE single apply path (every registry mutation flows
+        // through it -- the REGISTRY_MUTATION_ONLY_VIA_PROJECTION rule enforces
+        // this); its bus subscriber rebuilds both registries by replaying the
+        // registration/removal events. Because the in-memory registries start
+        // empty every boot, the subscriber's checkpoint RESETS TO 0 BEFORE
+        // subscribeRuntime (the bus reads the checkpoint at registration; 0 means
+        // start-of-log per the CheckpointStore contract).
+        this.registryProjection = new RegistryProjection(deviceRegistry, entityRegistry);
+        persistenceFactory.checkpointStore()
+                .writeCheckpoint(RegistryProjectionSubscriber.SUBSCRIBER_ID, 0L);
+        eventBus.subscribeRuntime(
+                new SubscriberInfo(RegistryProjectionSubscriber.SUBSCRIBER_ID,
+                        RegistryProjectionSubscriber.subscriptionFilter(), false),
+                new RegistryProjectionSubscriber(
+                        registryProjection, deviceRegistry, entityRegistry));
         recordSubsystem("device-model", LifecyclePhase.CORE_DOMAIN, deviceStart);
 
         // Step 3.2 — state store + projection (REPLAY → LIVE) + query service.
@@ -563,8 +581,12 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
 
         // The catch-up ordering invariant: the automation engine must not
         // evaluate against partially-replayed state. Gate the automation_engine
-        // subscribe on the state projection reaching LIVE.
+        // subscribe on the state projection reaching LIVE. The registry
+        // projection must ALSO be caught up to the log head before automation
+        // definitions bind entity refs (AMD-99 §5, carry-list C3) -- the ONE
+        // sanctioned composition-root addition of the DUR WU.
         awaitProjectionLive();
+        awaitRegistryProjectionLive();
 
         // Step 3.4 — automation engine (trigger subscriber). The definition-load
         // glue rides the composition root (FIX-07: the core:automation -> config
@@ -1102,7 +1124,8 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             }
             if (eventBus != null) {
                 // Reverse registration order: integration router (Phase 6, registered last)
-                // -> ledger (3.4c) -> dispatch (3.4b) -> automation (3.4) -> projection (3.2).
+                // -> ledger (3.4c) -> dispatch (3.4b) -> automation (3.4) -> projection (3.2)
+                // -> registry projection (3.1, AMD-99).
                 // unsubscribe(...) closes each runtime's per-subscriber read connection — the
                 // pending_command_ledger's is the M7.3-reverted leak; the M9.1 router holds
                 // the same single resource, so its teardown leads the chain (symmetry is the
@@ -1114,6 +1137,10 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 eventBus.unsubscribe(CommandDispatchAssembly.SUBSCRIBER_ID);
                 eventBus.unsubscribe(AUTOMATION_SUBSCRIBER_ID);
                 eventBus.unsubscribe(PROJECTION_SUBSCRIBER_ID);
+                // The registry projection (AMD-99) registered FIRST (Step 3.1),
+                // so its teardown closes the reverse chain (paired teardown; the
+                // abandon branch drops it via the bulk eventBus.abandon()).
+                eventBus.unsubscribe(RegistryProjectionSubscriber.SUBSCRIBER_ID);
             }
             // Paired teardown for the integration spine (M9.1): the adapters stop AFTER the
             // router unsubscribed (no new dispatches can reach a stopping adapter) and BEFORE
@@ -1210,6 +1237,42 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 .orElse(SubscriberMode.COLD);
     }
 
+    /**
+     * Blocks until the registry-projection subscriber reaches {@code LIVE} --
+     * the {@link #awaitProjectionLive()} sibling (AMD-99 §5): the registries
+     * must be caught up to the log head before integrations resume and before
+     * automation definitions bind entity refs.
+     */
+    private void awaitRegistryProjectionLive() {
+        final int maxPolls = 1_500; // ~30s at 20ms
+        for (int i = 0; i < maxPolls; i++) {
+            if (registryProjectionMode() == SubscriberMode.LIVE) {
+                return;
+            }
+            try {
+                Thread.sleep(20L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                        "interrupted while awaiting registry-projection LIVE", e);
+            }
+        }
+        throw new IllegalStateException(
+                "registry projection did not reach LIVE within ~30s during startup");
+    }
+
+    private SubscriberMode registryProjectionMode() {
+        if (eventBus == null) {
+            return SubscriberMode.COLD;
+        }
+        return eventBus.subscribers().stream()
+                .filter(s -> RegistryProjectionSubscriber.SUBSCRIBER_ID
+                        .equals(s.subscriberId()))
+                .findFirst()
+                .map(SubscriberSnapshot::mode)
+                .orElse(SubscriberMode.COLD);
+    }
+
     private String buildHealthStatusLine() {
         int entities = (entityRegistry != null) ? entityRegistry.listAllEntities().size() : 0;
         int automations = (automationRegistry != null) ? automationRegistry.getAll().size() : 0;
@@ -1285,6 +1348,21 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                             + "subsystem is not assembled yet");
         }
         registry.registerIntegrationSchema(integrationType, schemaJson);
+    }
+
+    /**
+     * The AMD-99 registry projection -- THE single registry-apply path
+     * (REG-INV-1). PUBLIC and deliberately unguarded by {@code requireStarted}:
+     * the zigbee factory's {@code Supplier<RegistryProjection>} resolves it at
+     * {@code create(...)} time, which runs DURING {@code start()} Phase 6
+     * (after Phase 3 constructed it, before {@code started} is set) -- the
+     * M9.4b R4 deviceRegistry injection path applied to the projection.
+     *
+     * @return the registry projection (or {@code null} before start() reaches
+     *         Phase 3 Step 3.1)
+     */
+    public RegistryProjection registryProjection() {
+        return registryProjection;
     }
 
     /** @return the schema registry (or {@code null} before start). */

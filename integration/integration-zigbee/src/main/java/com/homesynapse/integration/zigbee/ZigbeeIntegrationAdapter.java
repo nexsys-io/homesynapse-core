@@ -5,8 +5,19 @@
 package com.homesynapse.integration.zigbee;
 
 import com.homesynapse.device.CapabilityInstance;
+import com.homesynapse.device.Device;
 import com.homesynapse.device.DeviceRegistry;
 import com.homesynapse.device.Entity;
+import com.homesynapse.device.HardwareIdentifier;
+import com.homesynapse.device.RegistryEventMapper;
+import com.homesynapse.device.RegistryProjection;
+import com.homesynapse.event.EntityRegisteredEvent;
+import com.homesynapse.event.EventDraft;
+import com.homesynapse.event.EventOrigin;
+import com.homesynapse.event.EventPriority;
+import com.homesynapse.event.EventTypes;
+import com.homesynapse.event.SequenceConflictException;
+import com.homesynapse.event.SubjectRef;
 import com.homesynapse.integration.CommandHandler;
 import com.homesynapse.integration.IntegrationContext;
 import com.homesynapse.integration.PermanentIntegrationException;
@@ -142,6 +153,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
 
     private final IntegrationContext context;
     private final DeviceRegistry deviceRegistry;
+    private final RegistryProjection registryProjection;
     private final Path dataDirectory;
     private final Clock clock;
     private final Function<Object, SerialByteChannel> channelOpener;
@@ -183,12 +195,14 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
      * select PRODUCTION mode (§5.1).
      */
     ZigbeeIntegrationAdapter(IntegrationContext context, DeviceRegistry deviceRegistry,
+            RegistryProjection registryProjection,
             Path dataDirectory, Clock clock,
             Function<Object, SerialByteChannel> channelOpener,
             PortLocator.PortEnumerator portEnumerator,
             PortChannelOpener portChannelOpener) {
         this.context = context;
         this.deviceRegistry = deviceRegistry;
+        this.registryProjection = registryProjection;
         this.dataDirectory = dataDirectory;
         this.clock = clock;
         this.channelOpener = channelOpener;
@@ -198,9 +212,11 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
 
     /** The M9.4a driven-mode shape (the rig path) — behavior-identical. */
     ZigbeeIntegrationAdapter(IntegrationContext context, DeviceRegistry deviceRegistry,
+            RegistryProjection registryProjection,
             Path dataDirectory, Clock clock,
             Function<Object, SerialByteChannel> channelOpener) {
-        this(context, deviceRegistry, dataDirectory, clock, channelOpener, null, null);
+        this(context, deviceRegistry, registryProjection, dataDirectory, clock,
+                channelOpener, null, null);
     }
 
     // ── IntegrationAdapter lifecycle ────────────────────────────────────────
@@ -222,9 +238,16 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         cache = new ZigbeeDeviceCache(
                 dataDirectory.resolve("zigbee-devices.json"), clock);
         adoption = new ZigbeeAdoptionSlice(context.integrationId(), deviceRegistry,
-                context.entityRegistry(), profileRegistry, context.eventPublisher(),
-                clock);
+                context.entityRegistry(), registryProjection, profileRegistry,
+                context.eventPublisher(), clock);
         adoptAcceptList = readAdoptAcceptList();
+        // DP-6 (AMD-99 §3 boundary note): the adapter-local IEEE->id / entity /
+        // binding maps rebuild FROM the projection-rebuilt registries (Phase 3
+        // caught them up to the log head before Phase 6 started this adapter) —
+        // never from private events. This is what makes ingestion and the pin-2
+        // re-link arm work immediately post-restart; the announce-time
+        // findByHardwareIdentifier fork then takes the LINKED arm naturally.
+        rehydrateAdoptionMaps();
         // Driven mode rides the injected opener; production mode reuses the probe
         // channel (§5.1 — never a double-open): the opener returns the channel
         // bindTransport() already opened and probed.
@@ -686,8 +709,12 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
      * The M9.4-RPT §3 posture routing: overlays the drive's measured facts onto
      * every installed entity of the device (the install-time
      * never-false-CONFIRMED fence), re-registering an entity only when a
-     * capability actually downgraded — the {@code reinstallOverrides}
-     * update-if-differs shape.
+     * capability actually downgraded — the update-if-differs shape. Post-DUR
+     * (AMD-99 F1 / DP-4) the update rides an idempotent {@code entity_registered}
+     * RE-EMIT applied through the {@link RegistryProjection} — never a direct
+     * {@code updateEntity} (REG-INV-1): publish first (durable — write-ahead),
+     * apply second; a publish conflict skips the apply and degrades to ONE WARN
+     * (the next drive re-measures; posture routing never gates the re-link).
      */
     private void applyPostureRouting(IEEEAddress ieee,
             List<ReportingPostureFact> facts) {
@@ -701,14 +728,63 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
                     ConfirmationOverrideInstaller.applyPostureFacts(ieee,
                             entity.endpointIndex(), facts, entity.capabilities());
             if (!routed.equals(entity.capabilities())) {
-                context.entityRegistry().updateEntity(new Entity(
-                        entity.entityId(), entity.entitySlug(),
-                        entity.entityType(), entity.displayName(),
-                        entity.deviceId(), entity.endpointIndex(),
-                        entity.areaId(), entity.enabled(), entity.labels(),
-                        routed, entity.entityRole(), entity.createdAt()));
+                EntityRegisteredEvent reEmit = RegistryEventMapper.toPayload(
+                        new Entity(
+                                entity.entityId(), entity.entitySlug(),
+                                entity.entityType(), entity.displayName(),
+                                entity.deviceId(), entity.endpointIndex(),
+                                entity.areaId(), entity.enabled(), entity.labels(),
+                                routed, entity.entityRole(), entity.createdAt()));
+                try {
+                    context.eventPublisher().publishRoot(new EventDraft(
+                            EventTypes.ENTITY_REGISTERED, 1, clock.instant(),
+                            SubjectRef.entity(entity.entityId()),
+                            EventPriority.NORMAL, EventOrigin.INTEGRATION,
+                            reEmit, null, null));
+                } catch (SequenceConflictException conflict) {
+                    log.warn("zigbee.posture_reemit_conflict: entity={}: {} — the "
+                                    + "registry keeps the pre-routing posture; the "
+                                    + "next drive re-measures",
+                            entity.entityId(), conflict.getMessage());
+                    continue;   // write-ahead: never apply an unpersisted re-emit
+                }
+                registryProjection.applyEntityRegistered(reEmit);
             }
         }
+    }
+
+    /**
+     * DP-6 startup rehydration (AMD-99 §3 boundary note): enumerates the
+     * registry devices this adapter owns (matching {@code integrationId} and
+     * carrying a {@code zigbee} hardware identifier) and re-links each —
+     * rebuilding the slice's IEEE&rarr;id / entity / binding maps from the
+     * Phase-3-rebuilt registry view. The matched profile id comes from the
+     * adapter-local {@code zigbee-devices.json} cache (already
+     * restart-persistent), or {@code null} when the cache carries none.
+     */
+    private void rehydrateAdoptionMaps() {
+        int rehydrated = 0;
+        for (Device device : deviceRegistry.listAllDevices()) {
+            if (!context.integrationId().equals(device.integrationId())) {
+                continue;
+            }
+            Optional<HardwareIdentifier> zigbeeIdentity =
+                    device.hardwareIdentifiers().stream()
+                            .filter(id -> ZigbeeAdoptionSlice.HARDWARE_NAMESPACE
+                                    .equals(id.namespace()))
+                            .findFirst();
+            if (zigbeeIdentity.isEmpty()) {
+                continue;
+            }
+            IEEEAddress ieee =
+                    IEEEAddress.fromHexString(zigbeeIdentity.get().value());
+            String matchedProfileId = cache.device(ieee)
+                    .map(ZigbeeDeviceRecord::matchedProfileId)
+                    .orElse(null);
+            adoption.relink(ieee, device, matchedProfileId);
+            rehydrated++;
+        }
+        log.debug("zigbee.adoption_maps_rehydrated: devices={}", rehydrated);
     }
 
     /**

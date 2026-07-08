@@ -43,9 +43,10 @@ import java.util.function.Predicate;
  * mid-confirmation-window must never double-actuate (the adapter never re-sends
  * — AMD-90-INV-01's no-autonomous-retry extends across restarts), the in-flight
  * window must resolve HONESTLY (timeout, never a phantom re-fire), and the
- * post-restart re-announce → re-link path must RE-INSTALL the adoption tuning
- * (DP-a pin 2, proven at the E2E level: the measured 15 s Hue CT window is
- * visible on the NEXT {@code command_issued.confirmationTimeoutMs}).
+ * post-restart re-announce → re-link path must still carry the adoption tuning
+ * (DP-a pin 2, post-DUR/AMD-99: the tuning PERSISTS in the projection-backed
+ * registry — relink no longer re-installs anything; the measured 15 s Hue CT
+ * window is visible on the NEXT {@code command_issued.confirmationTimeoutMs}).
  */
 @DisplayName("RestartHonestyIT — restartIntegration: no double-actuation, honest window, "
         + "pin-2 re-install (M9.4b §7.3)")
@@ -102,8 +103,9 @@ final class RestartHonestyIT {
                 "the honest confirmation timeout across the restart");
         assertThat(countEventsOfType(EventTypes.STATE_CONFIRMED)).isZero();
 
-        // Post-restart re-announce → re-link (IEEE match, LINKED — no re-adoption)
-        // → DP-a pin 2 re-installs the profile tuning on the SAME entity.
+        // Post-restart re-announce → re-link (IEEE match, LINKED — no re-adoption).
+        // DP-a pin 2, post-DUR: the tuning persists in the projection-backed
+        // registry on the SAME entity — relink rebuilds maps only (AMD-99 DP-4).
         rig.announce(ZigbeeHardwareFreeRig.HUE_IEEE);
         rig.deliverAndCycle();
         awaitTrue(() -> countEventsOfType(EventTypes.AVAILABILITY_CHANGED) >= 1L,
@@ -129,6 +131,7 @@ final class RestartHonestyIT {
         clock = TestClock.createDefault();
         writeConfig(tempDir);
         rig = new ZigbeeHardwareFreeRig(clock, () -> core.deviceRegistry(),
+                () -> core.registryProjection(),
                 tempDir.resolve("zigbee"));
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"),

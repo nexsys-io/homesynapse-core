@@ -10,11 +10,16 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.config.ConfigurationAccess;
 import com.homesynapse.device.Device;
+import com.homesynapse.device.Entity;
+import com.homesynapse.device.EntityType;
+import com.homesynapse.device.HardwareIdentifier;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
+import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.UlidFactory;
@@ -90,6 +95,7 @@ class ZigbeeConfigAcceptedAdoptionTest {
 
     private TestClock clock;
     private RecordingEventPublisher publisher;
+    private IntegrationId integrationId;
     private InMemoryDeviceRegistry deviceRegistry;
     private InMemoryEntityRegistry entityRegistry;
     private ListAppender<ILoggingEvent> adapterLogCapture;
@@ -104,6 +110,7 @@ class ZigbeeConfigAcceptedAdoptionTest {
     void setUp() {
         clock = TestClock.createDefault();
         publisher = new RecordingEventPublisher(clock);
+        integrationId = new IntegrationId(UlidFactory.generate(clock));
         deviceRegistry = new InMemoryDeviceRegistry();
         entityRegistry = new InMemoryEntityRegistry();
         adapterLogCapture = new ListAppender<>();
@@ -322,6 +329,45 @@ class ZigbeeConfigAcceptedAdoptionTest {
                 .as("the WARN fired for the PARTIAL round only").hasSize(1);
     }
 
+    // ── M9.5-DUR (AMD-99) — DP-6 startup rehydration ────────────────────────
+
+    @Test
+    @DisplayName("DP-6: adapter start over pre-populated registries rehydrates the "
+            + "maps — entityFor/deviceIdFor/bindingFor resolve WITHOUT an announce")
+    void rehydrationRebuildsAdapterMapsFromTheRegistries() throws Exception {
+        // Pre-populate the registries the way the Phase-3 projection rebuild
+        // leaves them (test fixture: direct writes are test-tree-only).
+        IEEEAddress ieee = new IEEEAddress(SNZB_IEEE);
+        DeviceId deviceId = new DeviceId(UlidFactory.generate(clock));
+        EntityId entityId = EntityId.of(UlidFactory.generate(clock));
+        deviceRegistry.createDevice(new Device(
+                deviceId, "zigbee-00124b0012345678", "eWeLink SNZB-03P",
+                "eWeLink", "SNZB-03P", null, null, null, integrationId,
+                null, null, List.of(),
+                Set.of(new HardwareIdentifier("zigbee", ieee.toHexString())),
+                clock.instant()));
+        entityRegistry.createEntity(new Entity(
+                entityId, "zigbee-00124b0012345678-ep1", EntityType.BINARY_SENSOR,
+                "eWeLink SNZB-03P", deviceId, 1, null, true, List.of(), List.of(),
+                clock.instant()));
+
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::adoptionHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+
+        assertThat(adapter.adoptionSlice().deviceIdFor(ieee))
+                .as("the IEEE->deviceId map rehydrated from the registry view")
+                .contains(deviceId);
+        assertThat(adapter.adoptionSlice().entityFor(ieee, 1))
+                .as("ingestion resolution works with NO announce delivered")
+                .contains(entityId);
+        assertThat(adapter.adoptionSlice().bindingFor(entityId))
+                .contains(new ZigbeeAdoptionSlice.EntityBinding(ieee, 1));
+        assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).count())
+                .as("rehydration re-links; it never adopts")
+                .isZero();
+    }
+
     // ── harness (the ZigbeeTrustCenterJoinTest production-ladder idiom) ─────
 
     private static PortCandidate coordinatorCandidate() {
@@ -339,7 +385,7 @@ class ZigbeeConfigAcceptedAdoptionTest {
 
     private IntegrationContext context(ConfigurationAccess configAccess) {
         return new IntegrationContext(
-                new IntegrationId(UlidFactory.generate(clock)), "zigbee", publisher,
+                integrationId, "zigbee", publisher,
                 entityRegistry, unusedQueryService(),
                 unusedHealthReporter(), configAccess,
                 null, null, null, null, null);
@@ -352,7 +398,9 @@ class ZigbeeConfigAcceptedAdoptionTest {
         channels.push(channelOver(ncp));
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
                 context(configAccess(adoptDevices)),
-                deviceRegistry, tempDir, clock, null,
+                deviceRegistry,
+                new RegistryProjection(deviceRegistry, entityRegistry),
+                tempDir, clock, null,
                 () -> List.of(coordinatorCandidate()),
                 candidate -> channels.pop());
         adapter.initialize();

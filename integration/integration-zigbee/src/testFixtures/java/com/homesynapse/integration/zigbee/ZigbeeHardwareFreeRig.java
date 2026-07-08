@@ -5,6 +5,7 @@
 package com.homesynapse.integration.zigbee;
 
 import com.homesynapse.device.DeviceRegistry;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.test.TestClock;
 
@@ -83,7 +84,7 @@ public final class ZigbeeHardwareFreeRig {
     private int reportTsn = 0x40;
 
     public ZigbeeHardwareFreeRig(TestClock clock, Supplier<DeviceRegistry> deviceRegistry,
-            Path dataDirectory) {
+            Supplier<RegistryProjection> registryProjection, Path dataDirectory) {
         this.clock = Objects.requireNonNull(clock, "clock");
         ncp.onEzspCommand(this::handleCommand);
         // A FRESH channel per open, all over the ONE scripted NCP (whose RST
@@ -92,6 +93,7 @@ public final class ZigbeeHardwareFreeRig {
         // channel instance would leave the restarted session deaf (M9.4b §7.3).
         this.factory = new ZigbeeIntegrationFactory(
                 Objects.requireNonNull(deviceRegistry, "deviceRegistry"),
+                Objects.requireNonNull(registryProjection, "registryProjection"),
                 Objects.requireNonNull(dataDirectory, "dataDirectory"),
                 clock, arg -> {
                     FakeSerialByteChannel fresh = new FakeSerialByteChannel(clock);

@@ -9,7 +9,11 @@ import com.homesynapse.device.Entity;
 import com.homesynapse.device.EntityType;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
+import com.homesynapse.device.RegistryEventMapper;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.event.DeviceDiscoveredEvent;
+import com.homesynapse.event.DeviceRegisteredEvent;
+import com.homesynapse.event.EntityRegisteredEvent;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.UlidFactory;
@@ -57,7 +61,9 @@ class ZigbeeAdoptionSliceTest {
         profileRegistry.register(new ZigbeeProfileLoader().loadBundled());
         slice = new ZigbeeAdoptionSlice(
                 new IntegrationId(UlidFactory.generate(clock)),
-                deviceRegistry, entityRegistry, profileRegistry, publisher, clock);
+                deviceRegistry, entityRegistry,
+                new RegistryProjection(deviceRegistry, entityRegistry),
+                profileRegistry, publisher, clock);
     }
 
     private static InterviewResult snzbInterview() {
@@ -221,8 +227,8 @@ class ZigbeeAdoptionSliceTest {
     }
 
     @Test
-    @DisplayName("§2.3 (DP-a pin 2): the re-link path re-installs overrides from the matched profile id")
-    void relinkReinstallsOverrides() {
+    @DisplayName("DP-4 (AMD-99): re-link never mutates the registry — the maps still rebuild")
+    void relinkNeverMutatesTheRegistry() {
         // Adopt WITHOUT a profile match: standard defaults land (CT window 5000 ms).
         slice.onDeviceDiscovered(hueInterview(), null);
         ZigbeeAdoptionSlice.AdoptedDevice adopted = slice.adopt(HUE);
@@ -233,23 +239,82 @@ class ZigbeeAdoptionSliceTest {
                 .findFirst().orElseThrow().confirmation().defaultTimeoutMs())
                 .isEqualTo(5000L);
 
-        // Re-pairing rediscovers WITH the match: relink must re-install the tuning.
+        // Re-pairing rediscovers WITH the match. Post-DUR the re-link rebuilds
+        // the adapter maps only: a profile-file change silently mutating the
+        // registries is exactly what REG-INV-1 bans — the adoption-time tuning
+        // persists via replay, and a genuine capability change rides an
+        // entity_registered re-emit from a real re-interview (future work).
         slice.onDeviceDiscovered(hueInterview(),
                 MeasuredCorpusValues.HUE_PROFILE_ID);
 
         Entity afterRelink = entityRegistry
                 .listEntitiesByDevice(adopted.deviceId()).get(0);
-        assertThat(afterRelink.capabilities().stream()
-                .filter(c -> c.capabilityId().equals("color_temperature"))
-                .findFirst().orElseThrow().confirmation().defaultTimeoutMs())
-                .isEqualTo(15000L);
-        // Idempotent: a second re-link with the same profile changes nothing further,
-        // publishes availability only, and never a new adoption event.
+        assertThat(afterRelink)
+                .as("the registry-held entity is byte-identical across the re-link")
+                .isEqualTo(beforeRelink);
+        assertThat(slice.entityFor(HUE, 11))
+                .as("the adapter maps still rebuild on re-link")
+                .contains(beforeRelink.entityId());
+        assertThat(slice.deviceIdFor(HUE)).contains(adopted.deviceId());
+        assertThat(slice.matchedProfileIdFor(HUE))
+                .as("the re-matched profile id is recorded for the command path")
+                .contains(MeasuredCorpusValues.HUE_PROFILE_ID);
+        // A second re-link stays idempotent: availability only, never a new
+        // adoption event, never a registry write.
         slice.onDeviceDiscovered(hueInterview(),
                 MeasuredCorpusValues.HUE_PROFILE_ID);
         assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).toList()).hasSize(1);
         assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).toList())
                 .hasSize(2);
+        assertThat(entityRegistry.listEntitiesByDevice(adopted.deviceId()).get(0))
+                .isEqualTo(beforeRelink);
+    }
+
+    // ── M9.5-DUR (AMD-99) — the DP-3 emission contract ──────────────────────
+
+    @Test
+    @DisplayName("DP-3: adopt() publishes device_registered, then entity_registered per "
+            + "entity, then device_adopted LAST — full-fidelity payloads")
+    void adoptEmitsRegistrationFactsInCausalOrder() {
+        slice.onDeviceDiscovered(hueInterview(),
+                MeasuredCorpusValues.HUE_PROFILE_ID);
+
+        ZigbeeAdoptionSlice.AdoptedDevice adopted = slice.adopt(HUE);
+
+        List<String> registrationSequence = publisher.published().stream()
+                .map(com.homesynapse.event.EventEnvelope::eventType)
+                .filter(type -> type.equals(EventTypes.DEVICE_REGISTERED)
+                        || type.equals(EventTypes.ENTITY_REGISTERED)
+                        || type.equals(EventTypes.DEVICE_ADOPTED))
+                .toList();
+        assertThat(registrationSequence).containsExactly(
+                EventTypes.DEVICE_REGISTERED,
+                EventTypes.ENTITY_REGISTERED,
+                EventTypes.DEVICE_ADOPTED);
+
+        // Full fidelity (REG-INV-1): the payloads alone reconstruct EXACTLY the
+        // registry rows the projection applied — the log is the source of truth.
+        DeviceRegisteredEvent deviceRegistered = (DeviceRegisteredEvent) publisher
+                .ofType(EventTypes.DEVICE_REGISTERED).toList().get(0).payload();
+        assertThat(RegistryEventMapper.toDevice(deviceRegistered))
+                .isEqualTo(deviceRegistry.getDevice(adopted.deviceId()));
+        EntityRegisteredEvent entityRegistered = (EntityRegisteredEvent) publisher
+                .ofType(EventTypes.ENTITY_REGISTERED).toList().get(0).payload();
+        Entity registryEntity = entityRegistry
+                .listEntitiesByDevice(adopted.deviceId()).get(0);
+        assertThat(RegistryEventMapper.toEntity(entityRegistered))
+                .isEqualTo(registryEntity);
+        // The installed DP-a tuning rides the payload (the trust-product fact).
+        assertThat(RegistryEventMapper.toEntity(entityRegistered).capabilities()
+                .stream()
+                .filter(c -> c.capabilityId().equals("color_temperature"))
+                .findFirst().orElseThrow().confirmation().defaultTimeoutMs())
+                .isEqualTo(15000L);
+        // Subject refs: device-scoped / entity-scoped respectively (AMD-99 §3).
+        assertThat(publisher.ofType(EventTypes.DEVICE_REGISTERED).toList().get(0)
+                .subjectRef().id()).isEqualTo(adopted.deviceId().value());
+        assertThat(publisher.ofType(EventTypes.ENTITY_REGISTERED).toList().get(0)
+                .subjectRef().id()).isEqualTo(registryEntity.entityId().value());
     }
 
     // ── M9.4b §6.5 (F-11) + §6.6 (N-8) + the F-8 hook seam ──────────────────

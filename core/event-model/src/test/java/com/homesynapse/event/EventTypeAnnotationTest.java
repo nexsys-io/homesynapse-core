@@ -37,7 +37,7 @@ class EventTypeAnnotationTest {
 
     /**
      * The authoritative list of core {@link DomainEvent} payload record classes
-     * that must carry {@link EventType}. Must contain exactly 37 entries.
+     * that must carry {@link EventType}. Must contain exactly 43 entries.
      * {@link DegradedEvent} is deliberately absent — it is the fallback wrapper
      * and is never serialized under its own type discriminator.
      */
@@ -54,6 +54,9 @@ class EventTypeAnnotationTest {
             DeviceAdoptedEvent.class,
             DeviceRemovedEvent.class,
             AvailabilityChangedEvent.class,
+            // M9.5-DUR registries-as-projections slice (AMD-99)
+            DeviceRegisteredEvent.class,
+            EntityRegisteredEvent.class,
             AutomationTriggeredEvent.class,
             AutomationCompletedEvent.class,
             PresenceSignalEvent.class,
@@ -163,9 +166,9 @@ class EventTypeAnnotationTest {
     }
 
     @Test
-    @DisplayName("exactly 41 core event records carry @EventType")
-    void exactlyFortyOneAnnotatedRecords() {
-        assertThat(EXPECTED_EVENT_RECORDS).hasSize(41);
+    @DisplayName("exactly 43 core event records carry @EventType")
+    void exactlyFortyThreeAnnotatedRecords() {
+        assertThat(EXPECTED_EVENT_RECORDS).hasSize(43);
 
         long annotatedCount = EXPECTED_EVENT_RECORDS.stream()
                 .filter(cls -> cls.isRecord())
@@ -173,7 +176,7 @@ class EventTypeAnnotationTest {
                 .filter(cls -> cls.getAnnotation(EventType.class) != null)
                 .count();
 
-        assertThat(annotatedCount).isEqualTo(41L);
+        assertThat(annotatedCount).isEqualTo(43L);
     }
 
     @Test

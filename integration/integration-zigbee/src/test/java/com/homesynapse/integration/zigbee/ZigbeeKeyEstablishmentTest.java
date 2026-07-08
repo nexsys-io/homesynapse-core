@@ -11,6 +11,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.config.ConfigurationAccess;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
 import com.homesynapse.platform.identity.EntityId;
@@ -504,7 +505,9 @@ class ZigbeeKeyEstablishmentTest {
         Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
         channels.push(channel);
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
-                context(), deviceRegistry, tempDir, clock, null,
+                context(), deviceRegistry,
+                new RegistryProjection(deviceRegistry, entityRegistry),
+                tempDir, clock, null,
                 () -> List.of(coordinatorCandidate()),
                 candidate -> channels.pop());
         adapter.initialize();

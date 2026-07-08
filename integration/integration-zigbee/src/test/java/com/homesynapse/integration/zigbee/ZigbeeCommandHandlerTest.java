@@ -6,6 +6,7 @@ package com.homesynapse.integration.zigbee;
 
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.event.CommandResultEvent;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
@@ -65,9 +66,12 @@ class ZigbeeCommandHandlerTest {
         publisher = new RecordingEventPublisher(clock);
         profileRegistry = new StandardDeviceProfileRegistry();
         profileRegistry.register(new ZigbeeProfileLoader().loadBundled());
+        InMemoryDeviceRegistry deviceRegistry = new InMemoryDeviceRegistry();
+        InMemoryEntityRegistry entityRegistry = new InMemoryEntityRegistry();
         slice = new ZigbeeAdoptionSlice(
                 new IntegrationId(UlidFactory.generate(clock)),
-                new InMemoryDeviceRegistry(), new InMemoryEntityRegistry(),
+                deviceRegistry, entityRegistry,
+                new RegistryProjection(deviceRegistry, entityRegistry),
                 profileRegistry, publisher, clock);
         cache = new ZigbeeDeviceCache(tempDir.resolve("zigbee-devices.json"), clock);
         sent = new ArrayList<>();

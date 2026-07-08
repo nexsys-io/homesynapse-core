@@ -4,13 +4,17 @@
  */
 package com.homesynapse.app;
 
+import com.tngtech.archunit.core.domain.JavaClass;
 import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.domain.JavaMethod;
+import com.tngtech.archunit.core.domain.JavaMethodCall;
 import com.tngtech.archunit.core.domain.JavaModifier;
 import com.tngtech.archunit.lang.ArchCondition;
 import com.tngtech.archunit.lang.ArchRule;
 import com.tngtech.archunit.lang.ConditionEvents;
 import com.tngtech.archunit.lang.SimpleConditionEvent;
+
+import java.util.Set;
 
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noMethods;
@@ -326,6 +330,82 @@ final class HomeSynapseArchRules {
                             + " Jackson-free — the AttributeValue codec lives only in"
                             + " com.homesynapse.persistence");
 
+    // ──────────────────────────────────────────────────────────────────
+    // Rule 11: Registry mutation only via RegistryProjection (REG-INV-1,
+    // AMD-99 §4)
+    //
+    // The device and entity registries are projections of the event log:
+    // every registry mutation flows through the single projection-apply
+    // path in com.homesynapse.device.RegistryProjection, whose only
+    // inputs are the registration/removal event types. Any other
+    // production caller of a registry mutating method would create
+    // registry state the log cannot reconstruct — exactly the identity
+    // re-mint / orphan-row class AMD-99 closed. Enforcement ships WITH
+    // the mechanism (R-B — no deferral).
+    //
+    // Reach: production classes of every module plus this app module's
+    // own test tree (the only test code on this classpath). Non-app TEST
+    // code is not scanned (the corrected-2026-06-13 reach note) and may
+    // mutate registries freely for fixtures. The one named test-tree
+    // exclusion below is the teeth fixture RegistryMutationRuleTest uses
+    // to prove — on every build — that this rule actually bites.
+    // ──────────────────────────────────────────────────────────────────
+
+    /** The mutating method names of DeviceRegistry + EntityRegistry. */
+    private static final Set<String> REGISTRY_MUTATORS = Set.of(
+            "createDevice", "updateDevice", "removeDevice",
+            "createEntity", "updateEntity", "removeEntity",
+            "enableEntity", "disableEntity");
+
+    /**
+     * Package-private (not {@code private}) so {@code RegistryMutationRuleTest}
+     * can rebuild the rule WITHOUT the teeth-fixture exclusion and prove the
+     * exact matching logic rejects a direct mutator call.
+     */
+    static final ArchCondition<JavaClass> CALL_A_REGISTRY_MUTATOR =
+            new ArchCondition<>("call a DeviceRegistry/EntityRegistry mutating method") {
+                @Override
+                public void check(JavaClass clazz, ConditionEvents events) {
+                    for (JavaMethodCall call : clazz.getMethodCallsFromSelf()) {
+                        if (!REGISTRY_MUTATORS.contains(call.getTarget().getName())) {
+                            continue;
+                        }
+                        JavaClass owner = call.getTargetOwner();
+                        if (owner.isAssignableTo("com.homesynapse.device.DeviceRegistry")
+                                || owner.isAssignableTo(
+                                        "com.homesynapse.device.EntityRegistry")) {
+                            events.add(SimpleConditionEvent.satisfied(clazz,
+                                    "Class " + clazz.getFullName() + " calls "
+                                            + call.getTarget().getFullName()
+                                            + " (" + call.getSourceCodeLocation() + ")"
+                                            + " — registry mutation flows only through"
+                                            + " RegistryProjection (REG-INV-1)"));
+                        }
+                    }
+                }
+            };
+
+    /**
+     * REG-INV-1 (AMD-99 §4): no production class other than
+     * {@code com.homesynapse.device.RegistryProjection} may call the
+     * registries' mutating methods.
+     */
+    static final ArchRule REGISTRY_MUTATION_ONLY_VIA_PROJECTION =
+            noClasses()
+                    .that().resideInAPackage("com.homesynapse..")
+                    .and().doNotHaveFullyQualifiedName(
+                            "com.homesynapse.device.RegistryProjection")
+                    // The teeth fixture: RegistryMutationRuleTest imports it in
+                    // ISOLATION and asserts the rule REJECTS it — the permanent
+                    // proof the rule bites. Excluded here so the codebase-wide
+                    // @ArchTest sweep stays green while the proof stays red.
+                    .and().doNotHaveFullyQualifiedName(
+                            "com.homesynapse.app.RegistryMutationRuleTest$DirectMutatorFixture")
+                    .should(CALL_A_REGISTRY_MUTATOR)
+                    .as("REG-INV-1 (AMD-99): registry mutation flows only through"
+                            + " RegistryProjection — no other production class may call"
+                            + " DeviceRegistry/EntityRegistry mutating methods");
+
     /**
      * Validates all rules against the given classes.
      *
@@ -345,5 +425,6 @@ final class HomeSynapseArchRules {
         QUERY_SERVICE_READ_ONLY.check(classes);
         REST_ENDPOINTS_NO_EVENT_PUBLISHING.check(classes);
         NO_JACKSON_IN_DOMAIN_MODEL.check(classes);
+        REGISTRY_MUTATION_ONLY_VIA_PROJECTION.check(classes);
     }
 }

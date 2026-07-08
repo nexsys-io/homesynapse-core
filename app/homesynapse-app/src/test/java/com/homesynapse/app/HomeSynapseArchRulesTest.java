@@ -67,4 +67,10 @@ class HomeSynapseArchRulesTest {
     @ArchTest
     static final ArchRule noJacksonInDomainModel =
             HomeSynapseArchRules.NO_JACKSON_IN_DOMAIN_MODEL;
+
+    // REG-INV-1 (AMD-99) — registries are projections of the event log.
+
+    @ArchTest
+    static final ArchRule registryMutationOnlyViaProjection =
+            HomeSynapseArchRules.REGISTRY_MUTATION_ONLY_VIA_PROJECTION;
 }

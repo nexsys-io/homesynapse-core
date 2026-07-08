@@ -16,7 +16,7 @@ import java.util.stream.Stream;
  * register classes with the {@link EventTypeRegistry}.
  *
  * <p>The lists are aliased to the canonical per-module manifests:
- * {@link EventTypes#CORE_PRODUCTION_EVENT_CLASSES} contributes the 37 core records
+ * {@link EventTypes#CORE_PRODUCTION_EVENT_CLASSES} contributes the 43 core records
  * (24 prior + 8 from the M7.1 run-initiation slice + 5 from the M7.2 run-lifecycle slice,
  * AMD-92), {@link IntegrationEvents#LIFECYCLE_EVENT_CLASSES} contributes the 10 integration
  * lifecycle records (5 original + 5 added by AMD-58), and
@@ -34,7 +34,7 @@ final class AllEventClasses {
         // Utility class — non-instantiable
     }
 
-    /** 41 core domain event records from event-model, all carrying {@code @EventType}. */
+    /** 43 core domain event records from event-model, all carrying {@code @EventType}. */
     static final List<Class<? extends DomainEvent>> CORE_EVENTS =
             EventTypes.CORE_PRODUCTION_EVENT_CLASSES;
 
@@ -46,7 +46,7 @@ final class AllEventClasses {
     static final List<Class<? extends DomainEvent>> CAPABILITY_EVENTS =
             IntegrationEvents.CAPABILITY_EVENT_CLASSES;
 
-    /** All 53 registered event record classes — core + integration lifecycle + capability. */
+    /** All 55 registered event record classes — core + integration lifecycle + capability. */
     static final List<Class<? extends DomainEvent>> ALL_EVENTS =
             Stream.of(CORE_EVENTS, INTEGRATION_EVENTS, CAPABILITY_EVENTS)
                     .flatMap(List::stream)

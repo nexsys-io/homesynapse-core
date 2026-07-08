@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.StateReportedEvent;
@@ -65,9 +66,12 @@ class FixtureReplayTest {
         publisher = new RecordingEventPublisher(clock);
         registry = new StandardDeviceProfileRegistry();
         registry.register(new ZigbeeProfileLoader().loadBundled());
+        InMemoryDeviceRegistry deviceRegistry = new InMemoryDeviceRegistry();
+        InMemoryEntityRegistry entityRegistry = new InMemoryEntityRegistry();
         adoption = new ZigbeeAdoptionSlice(
                 new IntegrationId(UlidFactory.generate(clock)),
-                new InMemoryDeviceRegistry(), new InMemoryEntityRegistry(),
+                deviceRegistry, entityRegistry,
+                new RegistryProjection(deviceRegistry, entityRegistry),
                 registry, publisher, clock);
         deduplicator = new ReportDeduplicator(clock);
         pendingFrames = new ArrayList<>();

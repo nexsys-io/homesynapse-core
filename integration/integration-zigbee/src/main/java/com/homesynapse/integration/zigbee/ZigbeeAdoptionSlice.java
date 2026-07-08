@@ -10,9 +10,13 @@ import com.homesynapse.device.DeviceRegistry;
 import com.homesynapse.device.Entity;
 import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.device.HardwareIdentifier;
+import com.homesynapse.device.RegistryEventMapper;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.event.AvailabilityChangedEvent;
 import com.homesynapse.event.DeviceAdoptedEvent;
 import com.homesynapse.event.DeviceDiscoveredEvent;
+import com.homesynapse.event.DeviceRegisteredEvent;
+import com.homesynapse.event.EntityRegisteredEvent;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventOrigin;
 import com.homesynapse.event.EventPriority;
@@ -47,9 +51,12 @@ import java.util.function.Consumer;
  * {@code device_discovered}; proposal dedups on the IEEE hardware identifier
  * against the {@link DeviceRegistry} ({@code (namespace="zigbee", value=IEEE)}
  * — a match re-links to the existing device with an {@code availability_changed},
- * NO new adoption event); adoption mints identity, registers device + entities
- * + capabilities through the existing registry surfaces, and publishes
- * {@code device_adopted}.
+ * NO new adoption event); adoption mints identity, publishes the AMD-99
+ * full-fidelity registration facts ({@code device_registered}, then one
+ * {@code entity_registered} per classified endpoint — durable BEFORE the
+ * in-memory apply, REG-INV-1's write-ahead clause), applies each through the
+ * single {@link RegistryProjection} path (never a direct registry write), and
+ * publishes the existing {@code device_adopted} LAST, byte-unchanged.
  *
  * <p><strong>Identity-UNGATED (DP-B, permanent):</strong> device/entity ULIDs
  * mint locally from the injected clock — no identity file, no adoption
@@ -104,6 +111,7 @@ final class ZigbeeAdoptionSlice {
     private final IntegrationId integrationId;
     private final DeviceRegistry deviceRegistry;
     private final EntityRegistry entityRegistry;
+    private final RegistryProjection registryProjection;
     private final DeviceProfileRegistry profileRegistry;
     private final EventPublisher publisher;
     private final Clock clock;
@@ -123,6 +131,9 @@ final class ZigbeeAdoptionSlice {
      * @param deviceRegistry the device registry (the DeviceIdentifiers dedup
      *        surface), never {@code null}
      * @param entityRegistry the entity registry, never {@code null}
+     * @param registryProjection the single registry-apply path (AMD-99 /
+     *        REG-INV-1) — adoption-time writes use the SAME apply function the
+     *        boot rebuild replays through, never {@code null}
      * @param profileRegistry the device-profile registry (resolves the matched
      *        profile id to its AMD-97 confirmation characterizations — DP-a),
      *        never {@code null}
@@ -130,13 +141,16 @@ final class ZigbeeAdoptionSlice {
      * @param clock the time source (identity minting + event time), never {@code null}
      */
     ZigbeeAdoptionSlice(IntegrationId integrationId, DeviceRegistry deviceRegistry,
-            EntityRegistry entityRegistry, DeviceProfileRegistry profileRegistry,
+            EntityRegistry entityRegistry, RegistryProjection registryProjection,
+            DeviceProfileRegistry profileRegistry,
             EventPublisher publisher, Clock clock) {
         this.integrationId = Objects.requireNonNull(integrationId, "integrationId");
         this.deviceRegistry = Objects.requireNonNull(deviceRegistry,
                 "deviceRegistry");
         this.entityRegistry = Objects.requireNonNull(entityRegistry,
                 "entityRegistry");
+        this.registryProjection = Objects.requireNonNull(registryProjection,
+                "registryProjection");
         this.profileRegistry = Objects.requireNonNull(profileRegistry,
                 "profileRegistry");
         this.publisher = Objects.requireNonNull(publisher, "publisher");
@@ -235,21 +249,39 @@ final class ZigbeeAdoptionSlice {
         String hex = ieee.toHexString();
         String displayName = sentinel(interview.manufacturerName()) + " "
                 + sentinel(interview.modelIdentifier());
-        deviceRegistry.createDevice(new Device(
-                deviceId,
-                "zigbee-" + hex.toLowerCase(Locale.ROOT),
-                displayName,
-                sentinel(interview.manufacturerName()),
-                sentinel(interview.modelIdentifier()),
+        // AMD-99 §3 (DP-3): publish the full-fidelity registration fact FIRST
+        // (durable at publishRoot return — the write-ahead half of REG-INV-1),
+        // THEN apply through the single projection path. The apply consumes only
+        // the payload, so the adoption-time write and the boot replay run the
+        // IDENTICAL function; the live bus self-delivery of this very event is a
+        // no-op by DP-8 idempotency. Causal order: device before its entities.
+        DeviceRegisteredEvent deviceRegistered = RegistryEventMapper.toPayload(
+                new Device(
+                        deviceId,
+                        "zigbee-" + hex.toLowerCase(Locale.ROOT),
+                        displayName,
+                        sentinel(interview.manufacturerName()),
+                        sentinel(interview.modelIdentifier()),
+                        null,
+                        null,
+                        null,
+                        integrationId,
+                        null,
+                        null,
+                        List.of(),
+                        Set.of(new HardwareIdentifier(HARDWARE_NAMESPACE, hex)),
+                        clock.instant()));
+        publishRegistration(new EventDraft(
+                EventTypes.DEVICE_REGISTERED,
+                1,
+                clock.instant(),
+                SubjectRef.device(deviceId),
+                EventPriority.NORMAL,
+                EventOrigin.INTEGRATION,
+                deviceRegistered,
                 null,
-                null,
-                null,
-                integrationId,
-                null,
-                null,
-                List.of(),
-                Set.of(new HardwareIdentifier(HARDWARE_NAMESPACE, hex)),
-                clock.instant()));
+                null));
+        registryProjection.applyDeviceRegistered(deviceRegistered);
 
         Map<Integer, EntityId> entityIds = new HashMap<>();
         List<EntityId> created = new ArrayList<>();
@@ -269,19 +301,31 @@ final class ZigbeeAdoptionSlice {
             // path (ledger, executor) consumes the tuned CapabilityInstance unchanged.
             List<CapabilityInstance> capabilities = installOverrides(
                     proposal.matchedProfileId(), classification.get().capabilities());
-            entityRegistry.createEntity(new Entity(
-                    entityId,
-                    "zigbee-" + hex.toLowerCase(Locale.ROOT) + "-ep"
-                            + endpoint.endpointId(),
-                    classification.get().entityType(),
-                    displayName,
-                    deviceId,
-                    endpoint.endpointId(),
+            EntityRegisteredEvent entityRegistered = RegistryEventMapper.toPayload(
+                    new Entity(
+                            entityId,
+                            "zigbee-" + hex.toLowerCase(Locale.ROOT) + "-ep"
+                                    + endpoint.endpointId(),
+                            classification.get().entityType(),
+                            displayName,
+                            deviceId,
+                            endpoint.endpointId(),
+                            null,
+                            true,
+                            List.of(),
+                            capabilities,
+                            clock.instant()));
+            publishRegistration(new EventDraft(
+                    EventTypes.ENTITY_REGISTERED,
+                    1,
+                    clock.instant(),
+                    SubjectRef.entity(entityId),
+                    EventPriority.NORMAL,
+                    EventOrigin.INTEGRATION,
+                    entityRegistered,
                     null,
-                    true,
-                    List.of(),
-                    capabilities,
-                    clock.instant()));
+                    null));
+            registryProjection.applyEntityRegistered(entityRegistered);
             entityIds.put(endpoint.endpointId(), entityId);
             created.add(entityId);
         }
@@ -374,7 +418,14 @@ final class ZigbeeAdoptionSlice {
         }
     }
 
-    private void relink(IEEEAddress ieee, Device device, String matchedProfileId) {
+    /**
+     * Re-links a registry-known device to its protocol identity: rebuilds the
+     * adapter-local IEEE&rarr;id / entity / binding maps FROM the registry view
+     * and records the matched profile id. Package-private — the adapter's DP-6
+     * startup rehydration invokes this per registry-carried device, which is
+     * what makes ingestion and pin-2 work immediately post-restart.
+     */
+    void relink(IEEEAddress ieee, Device device, String matchedProfileId) {
         lock.lock();
         try {
             devicesByIeee.put(ieee.value(), device.deviceId());
@@ -394,15 +445,16 @@ final class ZigbeeAdoptionSlice {
         } finally {
             lock.unlock();
         }
-        // DP-a pin 2 (verbatim binding): "the re-link path re-installs overrides from
-        // the cached matchedProfileId (the in-memory registries start empty on
-        // restart)." The id arriving here is the rediscovery re-match — the same value
-        // recordInterview (re)writes to the cache. Idempotent: same profile => same
-        // tuning => updateEntity is skipped. The registry-empty-post-restart rebuild
-        // is FENCED (out of M9.4a scope); this installer reuse is its ready seam.
-        if (matchedProfileId != null) {
-            reinstallOverrides(device, matchedProfileId);
-        }
+        // DP-a pin 2, post-DUR (AMD-99): the pre-DUR fence ("the registry-empty-
+        // post-restart rebuild is FENCED") is REALIZED — the registry projection
+        // rebuilds both registries from the event log at boot (Phase 3), and this
+        // relink rebuilds the adapter-local maps FROM that rebuilt registry view
+        // (the DP-6 rehydration calls it per device at adapter startup). The
+        // adoption-time tuning PERSISTS via replay, so the former override
+        // re-install is redundant and was REMOVED (DP-4): a profile-file change
+        // silently mutating the registries is exactly what REG-INV-1 bans — the
+        // sanctioned path for a genuine capability change is an entity_registered
+        // re-emit from a real re-interview (future work, Q10).
         publishRoot(new EventDraft(
                 EventTypes.AVAILABILITY_CHANGED,
                 1,
@@ -415,21 +467,6 @@ final class ZigbeeAdoptionSlice {
                 null));
         log.info("zigbee.device_relinked: device={} deviceId={} — re-pairing, "
                 + "no new adoption", ieee, device.deviceId());
-    }
-
-    /** Re-derives tuned capabilities and re-registers each entity whose set differs. */
-    private void reinstallOverrides(Device device, String matchedProfileId) {
-        for (Entity entity : entityRegistry.listEntitiesByDevice(device.deviceId())) {
-            List<CapabilityInstance> tuned =
-                    installOverrides(matchedProfileId, entity.capabilities());
-            if (!tuned.equals(entity.capabilities())) {
-                entityRegistry.updateEntity(new Entity(entity.entityId(),
-                        entity.entitySlug(), entity.entityType(), entity.displayName(),
-                        entity.deviceId(), entity.endpointIndex(), entity.areaId(),
-                        entity.enabled(), entity.labels(), tuned, entity.entityRole(),
-                        entity.createdAt()));
-            }
-        }
     }
 
     /**
@@ -492,6 +529,39 @@ final class ZigbeeAdoptionSlice {
         } catch (SequenceConflictException e) {
             log.error("zigbee.adoption_publish_conflict: type={}: {}",
                     draft.eventType(), e.getMessage());
+        }
+    }
+
+    /**
+     * Publishes a registration fact with the write-ahead guarantee REG-INV-1
+     * requires: the projection apply must never run for an event that failed to
+     * persist, so — unlike {@link #publishRoot(EventDraft)}'s log-and-continue —
+     * a publish failure here aborts the adoption. A sequence conflict on a
+     * freshly minted subject cannot occur in practice; if it ever does, the
+     * {@link IllegalStateException} reaches the cycle's existing
+     * {@code interview_failed} WARN and the ingestion loop survives.
+     *
+     * <p><strong>Known post-DUR recovery gap (flagged for ruling, M9.5-DUR
+     * review):</strong> if the abort (or a process death) lands BETWEEN the
+     * durable {@code device_registered} and its entities' publishes, the log
+     * permanently carries a device with zero entities — every later
+     * re-announce then takes the LINKED arm (the registry knows the IEEE), so
+     * no proposal is ever re-minted and no re-adopt arm exists; boot replay
+     * faithfully rebuilds the same device-only state, and no
+     * {@code device_removed} emitter exists yet (AMD-99 keeps removal
+     * emission a future milestone). Pre-DUR this window self-healed because
+     * the in-memory {@code createDevice} vanished on restart. The sanctioned
+     * repair (e.g. a LINKED-with-zero-registry-entities + COMPLETE-interview
+     * re-propose arm, or a compensating tombstone emit) needs a PM ruling —
+     * recorded in the M9.5-DUR handoff, not improvised here.</p>
+     */
+    private void publishRegistration(EventDraft draft) {
+        try {
+            publisher.publishRoot(draft);
+        } catch (SequenceConflictException e) {
+            throw new IllegalStateException("Registration publish failed for "
+                    + draft.eventType() + " (write-ahead precondition, REG-INV-1): "
+                    + e.getMessage(), e);
         }
     }
 

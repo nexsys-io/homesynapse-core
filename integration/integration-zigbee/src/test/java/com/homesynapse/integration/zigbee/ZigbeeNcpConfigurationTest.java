@@ -11,6 +11,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.config.ConfigurationAccess;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
 import com.homesynapse.integration.PermanentIntegrationException;
@@ -370,7 +371,10 @@ class ZigbeeNcpConfigurationTest {
         channels.push(channelOver(ncp));
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
                 context(configAccess(permitJoinDuration)),
-                new InMemoryDeviceRegistry(), tempDir, clock, null,
+                new InMemoryDeviceRegistry(),
+                new RegistryProjection(new InMemoryDeviceRegistry(),
+                        new InMemoryEntityRegistry()),
+                tempDir, clock, null,
                 () -> List.of(coordinatorCandidate()),
                 candidate -> channels.pop());
         adapter.initialize();

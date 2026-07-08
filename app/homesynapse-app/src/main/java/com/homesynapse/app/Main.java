@@ -77,8 +77,16 @@ public final class Main {
         Path zigbeeDataDir = baseDir.resolve("data").resolve("zigbee");
         Files.createDirectories(zigbeeDataDir);
         InMemoryDeviceRegistry zigbeeDeviceRegistry = new InMemoryDeviceRegistry();
+        // M9.5-DUR (AMD-99): the registry projection is core-constructed (Phase 3
+        // — it wraps the core-owned entity registry), so the factory receives it
+        // through the same resolved-at-create() supplier shape as the device
+        // registry. The one-element holder bridges the construction order (the
+        // factory list is a core ctor argument); create() runs during start()
+        // Phase 6, after the holder is set and after Phase 3 built the projection.
+        HomeSynapseCore[] coreRef = new HomeSynapseCore[1];
         ZigbeeIntegrationFactory zigbeeFactory = new ZigbeeIntegrationFactory(
-                () -> zigbeeDeviceRegistry, zigbeeDataDir, clock);
+                () -> zigbeeDeviceRegistry, () -> coreRef[0].registryProjection(),
+                zigbeeDataDir, clock);
 
         // AB-4 boundary: the at-rest payload cipher goes LIVE — the ctor passes
         // the payloadCipher(configDir, clock) adapter, flipping
@@ -89,6 +97,7 @@ public final class Main {
                 dbPath, configDir, HomeSynapseConfig.HOME_DEFAULT, clock, homeId,
                 payloadCipher(configDir, clock), List.of(zigbeeFactory),
                 zigbeeDeviceRegistry);
+        coreRef[0] = core;
         SystemLifecycleManager manager = core;
 
         CountDownLatch shutdownLatch = new CountDownLatch(1);

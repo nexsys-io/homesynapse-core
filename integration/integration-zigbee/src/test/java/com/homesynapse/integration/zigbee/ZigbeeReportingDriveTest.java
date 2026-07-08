@@ -15,6 +15,10 @@ import com.homesynapse.device.Device;
 import com.homesynapse.device.Entity;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
+import com.homesynapse.device.RegistryEventMapper;
+import com.homesynapse.device.RegistryProjection;
+import com.homesynapse.event.EntityRegisteredEvent;
+import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
@@ -387,6 +391,23 @@ class ZigbeeReportingDriveTest {
                 .containsExactly("zigbee.confirmation_downgraded: device="
                         + LIGHT_HEX + " capability=on_off cluster=0x6 "
                         + "posture=NONE/NONE outcome=disabled");
+
+        // The durable half of DP-4 (AMD-99 F1 / REG-INV-1 write-ahead): the
+        // downgrade rides an entity_registered RE-EMIT — adoption emitted one,
+        // the routing re-emit makes two — and the LAST payload reconstructs
+        // EXACTLY the routed registry entity, so the measured posture survives
+        // the Phase-3 replay after a process restart. An apply-without-publish
+        // regression keeps every registry-read assertion above green; it must
+        // fail HERE.
+        List<EventEnvelope> registrations =
+                publisher.ofType(EventTypes.ENTITY_REGISTERED).toList();
+        assertThat(registrations)
+                .as("adoption emit + the posture-routing re-emit")
+                .hasSize(2);
+        assertThat(RegistryEventMapper.toEntity(
+                (EntityRegisteredEvent) registrations.get(1).payload()))
+                .as("the re-emit payload alone rebuilds the routed entity")
+                .isEqualTo(entity);
     }
 
     // ── T6 (scenario 6): every ops call failing — the loop survives ─────────
@@ -452,7 +473,9 @@ class ZigbeeReportingDriveTest {
         channels.push(channelOver(ncp));
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
                 context(configAccess(adoptDevices)),
-                deviceRegistry, tempDir, clock, null,
+                deviceRegistry,
+                new RegistryProjection(deviceRegistry, entityRegistry),
+                tempDir, clock, null,
                 () -> List.of(coordinatorCandidate()),
                 candidate -> channels.pop());
         adapter.initialize();

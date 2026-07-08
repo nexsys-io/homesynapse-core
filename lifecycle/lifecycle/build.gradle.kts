@@ -72,6 +72,12 @@ dependencies {
     // provides Awaitility-compatible helpers and the NoRealIoExtension.
     testImplementation(project(":testing:test-support"))
 
+    // M9.5-DUR: ProcessRestartIdentityIT asserts the registry projection's
+    // positive-evidence INFO (registry.projection_live) via a logback
+    // ListAppender -- logback backs slf4j in this module's test tree only
+    // (the integration-zigbee F-12 precedent).
+    testImplementation(libs.logback.classic)
+
     // M3.7 fix round 1: HomeSynapseCoreTest's
     // mode_returnsLiveAfterProjectionCompletesReplay needs Awaitility polling
     // to await the bus's COLD → REPLAY → TRANSITION → LIVE FSM without using

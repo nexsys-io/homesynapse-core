@@ -340,6 +340,7 @@ final class HeroLoopHardwareFreeIT {
         clock = TestClock.createDefault();
         writeConfig(tempDir);
         rig = new ZigbeeHardwareFreeRig(clock, () -> core.deviceRegistry(),
+                () -> core.registryProjection(),
                 tempDir.resolve("zigbee"));
         core = new HomeSynapseCore(
                 tempDir.resolve("homesynapse-events.db"),

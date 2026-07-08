@@ -5,6 +5,7 @@
 package com.homesynapse.integration.zigbee;
 
 import com.homesynapse.device.DeviceRegistry;
+import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.integration.DataPath;
 import com.homesynapse.integration.HealthParameters;
 import com.homesynapse.integration.IntegrationAdapter;
@@ -52,6 +53,7 @@ public final class ZigbeeIntegrationFactory implements ZigbeeAdapterFactory {
     public static final String INTEGRATION_TYPE = "zigbee";
 
     private final Supplier<DeviceRegistry> deviceRegistry;
+    private final Supplier<RegistryProjection> registryProjection;
     private final Path dataDirectory;
     private final Clock clock;
     private final Function<Object, SerialByteChannel> channelOpener;
@@ -67,22 +69,31 @@ public final class ZigbeeIntegrationFactory implements ZigbeeAdapterFactory {
      *        root owns is assembled during {@code start()}, after the factory list
      *        is constructed; it is resolved once, at {@code create(...)} (Phase 6).
      *        Never {@code null}, and must not supply {@code null}
+     * @param registryProjection supplies the AMD-99 single registry-apply path
+     *        (REG-INV-1) — the same supplier shape and rationale as
+     *        {@code deviceRegistry}: the composition root constructs the
+     *        projection in Phase 3, resolved once at {@code create(...)}
+     *        (Phase 6). Never {@code null}, and must not supply {@code null}
      * @param dataDirectory the adapter data directory (the device-cache home),
      *        never {@code null}
      * @param clock the injected time source, never {@code null}
      */
     public ZigbeeIntegrationFactory(Supplier<DeviceRegistry> deviceRegistry,
+            Supplier<RegistryProjection> registryProjection,
             Path dataDirectory, Clock clock) {
-        this(deviceRegistry, dataDirectory, clock, null);
+        this(deviceRegistry, registryProjection, dataDirectory, clock, null);
     }
 
     /**
      * The transport-injectable seam (bench/test): the channel supplier replaces the
      * real serial port — the E2E gates substitute the scripted NCP here.
      */
-    ZigbeeIntegrationFactory(Supplier<DeviceRegistry> deviceRegistry, Path dataDirectory,
+    ZigbeeIntegrationFactory(Supplier<DeviceRegistry> deviceRegistry,
+            Supplier<RegistryProjection> registryProjection, Path dataDirectory,
             Clock clock, Function<Object, SerialByteChannel> channelOpener) {
         this.deviceRegistry = Objects.requireNonNull(deviceRegistry, "deviceRegistry");
+        this.registryProjection = Objects.requireNonNull(registryProjection,
+                "registryProjection");
         this.dataDirectory = Objects.requireNonNull(dataDirectory, "dataDirectory");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.channelOpener = channelOpener;
@@ -137,14 +148,23 @@ public final class ZigbeeIntegrationFactory implements ZigbeeAdapterFactory {
                     "The device-registry supplier resolved null at create(); the "
                             + "composition root must bind the registry before Phase 6");
         }
+        RegistryProjection projection = registryProjection.get();
+        if (projection == null) {
+            throw new PermanentIntegrationException(
+                    "zigbee.registry_projection_unbound",
+                    "The registry-projection supplier resolved null at create(); the "
+                            + "composition root constructs it in Phase 3 — it must be "
+                            + "bound before Phase 6 (AMD-99)");
+        }
         // Driven mode (injected channel — the rig) vs production mode (§5.1): the
         // real enumerator + jSerialComm channel opener bind HERE, keeping
         // jSerialComm types interior to this module (D-M92-1).
         ZigbeeIntegrationAdapter adapter = channelOpener != null
                 ? new ZigbeeIntegrationAdapter(
-                        context, registry, dataDirectory, clock, channelOpener)
+                        context, registry, projection, dataDirectory, clock,
+                        channelOpener)
                 : new ZigbeeIntegrationAdapter(
-                        context, registry, dataDirectory, clock, null,
+                        context, registry, projection, dataDirectory, clock, null,
                         new JSerialCommPortEnumerator(),
                         candidate -> JSerialCommByteChannel.open(
                                 com.fazecast.jSerialComm.SerialPort.getCommPort(

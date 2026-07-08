@@ -7,6 +7,7 @@ package com.homesynapse.persistence;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.homesynapse.device.Expectation;
 import com.homesynapse.event.EventId;
+import com.homesynapse.event.ExpectationRef;
 import com.homesynapse.value.AttributeValue;
 import com.homesynapse.platform.identity.AreaId;
 import com.homesynapse.platform.identity.AutomationId;
@@ -117,6 +118,14 @@ final class PersistenceJacksonModule extends SimpleModule {
         // wrapped AttributeValue to the codec registered just above.
         addSerializer(Expectation.class, new ExpectationSerializer());
         addDeserializer(Expectation.class, new ExpectationDeserializer());
+
+        // ExpectationRef serde (AMD-99 / M9.5-DUR). The event-local sealed mirror
+        // riding inside entity_registered payloads (CapabilityInstanceRef ->
+        // CommandDefinitionRef -> ExpectedOutcomeRef) needs the same interface-keyed
+        // tagged-union treatment as the domain Expectation above — identical wire
+        // form, same delegation to the AttributeValue codec (no @JsonTypeInfo).
+        addSerializer(ExpectationRef.class, new ExpectationRefSerializer());
+        addDeserializer(ExpectationRef.class, new ExpectationRefDeserializer());
     }
 
     /**
