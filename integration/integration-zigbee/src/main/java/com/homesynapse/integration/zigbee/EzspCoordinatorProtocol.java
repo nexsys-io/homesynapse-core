@@ -136,26 +136,32 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
 
     /**
      * The EZSP {@code stackStatusHandler} callback frame id (bellows-derived;
-     * BENCH-VERIFY — synthetic-tested until silicon, the P22/F-1 discipline).
-     * M9.4b §5.3: form/resume returning OK does not mean the stack is up.
+     * SILICON-VERIFIED — the M9.4 bench record's 3a/3b legs, 2026-07-06:
+     * {@code zigbee.network_up} on the FORMATION and RESUME arms, held across
+     * the whole iteration 1→5b arc). M9.4b §5.3: form/resume returning OK does
+     * not mean the stack is up.
      */
     static final int FRAME_STACK_STATUS_HANDLER = 0x0019;
 
     /**
      * EmberStatus NETWORK_UP (0x90, v13 1-byte dialect; bellows-derived,
-     * BENCH-VERIFY). The {@code stackStatusHandler} payload byte that ends the
-     * §5.3 await — a radio we won't lie about (never-false-ALIVE).
+     * SILICON-VERIFIED — the same 3a/3b both-arms evidence as
+     * {@link #FRAME_STACK_STATUS_HANDLER}). The {@code stackStatusHandler}
+     * payload byte that ends the §5.3 await — a radio we won't lie about
+     * (never-false-ALIVE).
      */
     static final int EMBER_NETWORK_UP = 0x90;
 
     /** The §5.3 NETWORK_UP await window (chosen constant, M9.4b). */
     static final long NETWORK_UP_TIMEOUT_MS = 10_000;
 
-    // ── M9.4-TCJ §A: Trust Center join enablement (BENCH-VERIFY block) ──────
+    // ── M9.4-TCJ §A: Trust Center join enablement (SILICON-VERIFIED block) ──
     // Frame ids, policy decisions, and callback layouts below are bellows-derived
-    // and synthetic-tested until silicon (the 0x0019/0x90 precedent): a wrong
-    // constant NAKs honestly at window-open or leaves a join stalled, and the
-    // correction fed back from the bench is a one-constant/one-layout edit.
+    // and SILICON-VERIFIED: iteration 1 (2026-07-06) accepted the enablement
+    // (zigbee.tc_joins_enabled — all three exchanges, no NAK) and iteration 2
+    // joined both bench devices, parsing real 0x0024/0x0023 payloads. The
+    // isolated constants-block structure STAYS: any future silicon correction
+    // remains a one-constant/one-layout edit.
 
     /** EZSP {@code setPolicy} (UG100; bellows commands.py). */
     static final int FRAME_SET_POLICY = 0x0055;
@@ -170,15 +176,18 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      * left THIS policy at its firmware default (deny-class), so the TC rejected
      * every TCLK-update request (iteration 4: {@code key_establishment_failed}
      * {@code status=0x11} ×3 at ~5 s cadence → BDB leave at +18.8 s).
-     * BENCH-VERIFY: silicon confirmation = iteration 5a
-     * ({@code key_established} + the device stays).
+     * SILICON-CONFIRMED at iteration 5a (2026-07-07): {@code key_established}
+     * {@code status=TC_REQUESTER_VERIFY_KEY_SUCCESS} and the SNZB stayed
+     * ≥5 min hands-off — the one-constant 0x09→0x05 correction was the whole
+     * fix.
      */
     static final int POLICY_TC_KEY_REQUEST = 0x05;
     /**
      * EzspDecisionBitmask ALLOW_JOINS (0x0001) | ALLOW_UNSECURED_REJOINS (0x0002)
      * — the bellows/ZHA trust-center posture that admits preconfigured-key joins
-     * (v8 widened the setPolicy decision to u16 LE). BENCH-VERIFY the exact
-     * decision value.
+     * (v8 widened the setPolicy decision to u16 LE). SILICON-VERIFIED at
+     * iteration 2: both devices joined under this decision
+     * ({@code device_join … decision=USE_PRECONFIGURED_KEY}).
      */
     static final int DECISION_ALLOW_PRECONFIGURED_KEY_JOINS = 0x0003;
     /**
@@ -194,21 +203,29 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     static final int DECISION_ALLOW_TC_KEY_REQUESTS = 0x51;
     /**
      * EZSP {@code importTransientKey} — the EmberZNet 7.x/v13 security-manager
-     * frame: EUI64[8] + KeyData[16] + flags u8. BENCH-VERIFY: if the frozen
-     * stack answers only the legacy {@code addTransientLinkKey} (0x00AF —
-     * EUI64[8] + KeyData[16], no flags byte), this id + the trailing flags byte
-     * are the one-layout correction.
+     * frame: EUI64[8] + KeyData[16] + flags u8. SILICON-VERIFIED: iteration 1
+     * accepted the exchange (no NAK) and iteration 2's joins completed through
+     * the installed key — the legacy {@code addTransientLinkKey} (0x00AF)
+     * contingency never fired on the frozen 7.4.5 stack.
      */
     static final int FRAME_IMPORT_TRANSIENT_KEY = 0x0111;
     /** sl_zb_sec_man_flags_t NONE. */
     static final int TRANSIENT_KEY_FLAGS_NONE = 0x00;
 
-    /** EZSP {@code trustCenterJoinHandler} callback (bellows-derived, BENCH-VERIFY). */
+    /**
+     * EZSP {@code trustCenterJoinHandler} callback (bellows-derived;
+     * SILICON-VERIFIED — iteration 2 parsed real 0x0024 payloads).
+     */
     static final int FRAME_TRUST_CENTER_JOIN_HANDLER = 0x0024;
-    /** EZSP {@code childJoinHandler} callback (bellows-derived, BENCH-VERIFY). */
+    /**
+     * EZSP {@code childJoinHandler} callback (bellows-derived;
+     * SILICON-VERIFIED — iteration 2 parsed real 0x0023 payloads).
+     */
     static final int FRAME_CHILD_JOIN_HANDLER = 0x0023;
 
-    // EmberDeviceUpdate — the 0x0024 status byte (bellows-derived, BENCH-VERIFY).
+    // EmberDeviceUpdate — the 0x0024 status byte (bellows-derived;
+    // SILICON-VERIFIED — iterations 2–5a decoded real join/leave statuses:
+    // UNSECURED_JOIN at every join, DEVICE_LEFT on the iteration-4 BDB leave).
     static final int DEVICE_UPDATE_SECURED_REJOIN = 0x00;
     static final int DEVICE_UPDATE_UNSECURED_JOIN = 0x01;
     static final int DEVICE_UPDATE_DEVICE_LEFT = 0x02;
@@ -220,13 +237,16 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     static final int JOIN_DECISION_DENY_JOIN = 0x02;
     static final int JOIN_DECISION_NO_ACTION = 0x03;
 
-    // ── M9.4-NCFG §1: NCP session configuration (BENCH-VERIFY block) ────────
-    // Config ids and values below are bellows/UG100-derived and synthetic-tested
-    // until silicon (the 0x0019/0x90 precedent): the NCP resets to firmware
-    // defaults on every launch and is configured by NO ONE unless the host writes
-    // this batch before stack-up; the §1.2 read-back measures what the frozen v13
-    // stack actually applied, and a correction fed back from the bench is a
-    // one-constant edit fixing code and tests together.
+    // ── M9.4-NCFG §1: NCP session configuration (SILICON-VERIFIED block) ────
+    // Config ids and values below are bellows/UG100-derived and SILICON-VERIFIED:
+    // iteration 2's read-back came back CLEAN (zigbee.ncp_configured:
+    // zdo_flags=0x3 stack_profile=2 security_level=5; the two expected
+    // ncp_config_skipped WARNs — id=0x1 PACKET_BUFFER_COUNT, id=0x6
+    // MULTICAST_TABLE_SIZE — are firmware-managed rejections) and both devices
+    // joined; iteration 3 proved the RESUME-boot re-configure arm (G-NCFG6).
+    // The NCP resets to firmware defaults on every launch and is configured by
+    // NO ONE unless the host writes this batch before stack-up; the isolated
+    // block structure STAYS — a future correction remains a one-constant edit.
 
     /** EZSP {@code setConfigurationValue}: configId u8 + value u16 LE → status. */
     static final int FRAME_SET_CONFIGURATION_VALUE = 0x0053;
@@ -270,12 +290,15 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     static final int CONFIG_MULTICAST_TABLE_SIZE = 0x06;
     static final int MULTICAST_TABLE_SIZE_VALUE = 16;
 
-    // ── M9.4-RPT: reporting binding + §B observability (BENCH-VERIFY block) ─
+    // ── M9.4-RPT: reporting binding + §B observability (SILICON-VERIFIED) ───
     // Frame ids and the 0x009B layout/status vocabulary below are
-    // bellows-derived and synthetic-tested until silicon (the 0x0019/0x90
-    // precedent): a correction fed back from the bench is a one-constant edit
-    // fixing code and tests together. The ZDO/ZCL command ids the reporting
-    // binding rides live in EzspReportingOps's own BENCH-VERIFY block.
+    // bellows-derived and SILICON-VERIFIED: iteration 4 proved the reporting
+    // binding end-to-end (zigbee.reporting_configured: clusters=3 verified=3
+    // degraded=0; the Hue's entity row materialized on its first configured
+    // report) and parsed real 0x009B payloads (status=0x11 ×3 → the BDB
+    // leave). The ZDO/ZCL command ids the reporting binding rides live in
+    // EzspReportingOps's own silicon-verified constants block; the isolated
+    // block structure STAYS — a future correction remains a one-constant edit.
 
     /** EZSP {@code getEui64}: no parameters → the NCP's EUI64, 8 bytes LE. */
     static final int FRAME_GET_EUI64 = 0x0026;
@@ -286,10 +309,13 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      */
     static final int FRAME_ZIGBEE_KEY_ESTABLISHMENT_HANDLER = 0x009B;
 
-    // EmberKeyStatus — the 0x009B status byte (bellows types/named.py VERBATIM,
-    // BENCH-VERIFY). M9.4-KEY folded the full vocabulary so every 0x009B log
-    // line self-decodes — the 0x00/0x02/0x06–0x13/0x1E names previously
-    // rendered as raw hex (iteration 4 logged the undecoded status=0x11).
+    // EmberKeyStatus — the 0x009B status byte (bellows types/named.py VERBATIM;
+    // SILICON-VERIFIED: iteration 4 measured 0x11 — TC_REJECTED_APP_KEY_REQUEST
+    // ×3 → the BDB leave; iteration 5a decoded the healthy exchange, 0x06
+    // progress → 0x34 success; iteration 5b showed exactly one key_established
+    // and zero key_establishment_failed — the KEYb confirmation). M9.4-KEY
+    // folded the full vocabulary so every 0x009B log line self-decodes — the
+    // 0x00/0x02/0x06–0x13/0x1E names previously rendered as raw hex.
     /** Bellows names this member KEY_STATUS_NONE itself — no added prefix here. */
     static final int KEY_STATUS_NONE = 0x00;
     static final int KEY_STATUS_APP_LINK_KEY_ESTABLISHED = 0x01;
@@ -740,8 +766,9 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      * class. Reads inbound frames under the pipeline lock until
      * {@code stackStatusHandler} reports {@link #EMBER_NETWORK_UP} or the
      * {@value #NETWORK_UP_TIMEOUT_MS} ms window closes; unrelated callbacks are
-     * preserved for ingestion. Both frame constants are BENCH-VERIFY
-     * (bellows-derived; synthetic-tested until silicon).
+     * preserved for ingestion. Both frame constants are SILICON-VERIFIED (the
+     * bench record's 3a/3b legs — formation AND resume arms, held across the
+     * iteration 1→5b arc).
      *
      * @throws IllegalStateException on timeout — classifies TRANSIENT at the
      *         supervisor (a stack that did not come up is retryable; a radio we
@@ -958,10 +985,13 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      * <p>Every exchange is {@code requireSuccess}-fenced: a stack that rejects
      * the enablement surfaces honestly (TRANSIENT &rarr; supervisor backoff),
      * never a silent half-open window. §A.3 hygiene: the transient key carries
-     * the stack's own bounded lifetime (EmberZNet transient keys self-expire,
-     * expected to cover the 254 s window max — BENCH-VERIFY on silicon; no
-     * auto-expiry would make a clear-on-window-close the follow-up correction).
-     * The key material is never logged (INV-SE-03).
+     * the stack's own bounded lifetime (EmberZNet transient keys self-expire).
+     * The enablement itself is SILICON-VERIFIED (iteration 1 accepted it;
+     * iterations 2–5b joined through it), and the arc's repeated windows left
+     * no lingering-key misbehavior — a DIRECT expiry observation remains
+     * unmeasured, so the clear-on-window-close correction stays the recorded
+     * contingency if silicon ever shows no auto-expiry. The key material is
+     * never logged (INV-SE-03).
      */
     @Override
     public void enablePreconfiguredKeyJoins() {
@@ -996,8 +1026,9 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     /**
      * The parsed {@code trustCenterJoinHandler} (0x0024) callback — join-side
      * OBSERVABILITY only (M9.4-TCJ §A.2): the ingestion logs it and synthesizes
-     * NOTHING; adoption stays Device_annce-gated. Layout (bellows-derived,
-     * BENCH-VERIFY): newNodeId u16 LE, newNodeEui64 u64 LE, status u8
+     * NOTHING; adoption stays Device_annce-gated. Layout (bellows-derived;
+     * SILICON-VERIFIED — iteration 2 parsed real payloads from both bench
+     * devices): newNodeId u16 LE, newNodeEui64 u64 LE, status u8
      * (EmberDeviceUpdate), policyDecision u8 (EmberJoinDecision),
      * parentOfNewNodeId u16 LE.
      *
@@ -1076,8 +1107,9 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      * The parsed {@code childJoinHandler} (0x0023) callback — the coordinator's
      * own end-device children (e.g. a sleepy sensor joining directly). Same
      * §A.2 contract: log-only observability, never a synthesis path. Layout
-     * (bellows-derived, BENCH-VERIFY): index u8, joining u8 (bool), childId
-     * u16 LE, childEui64 u64 LE, childType u8 (EmberNodeType).
+     * (bellows-derived; SILICON-VERIFIED — iteration 2 parsed the SNZB's real
+     * {@code child_join type=SLEEPY_END_DEVICE} payload): index u8, joining u8
+     * (bool), childId u16 LE, childEui64 u64 LE, childType u8 (EmberNodeType).
      *
      * @param index the child table index
      * @param joining {@code true} on join, {@code false} on leave
@@ -1124,8 +1156,11 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
 
     /**
      * The parsed {@code zigbeeKeyEstablishmentHandler} (0x009B) callback —
-     * M9.4-RPT §B, the OBS-2 discriminator instrument. Layout (BENCH-VERIFY):
-     * partner EUI64 (8 bytes LE) + EmberKeyStatus (u8).
+     * M9.4-RPT §B, the OBS-2 discriminator instrument. Layout SILICON-VERIFIED:
+     * iteration 4 parsed real payloads ({@code status=0x11} ×3 — the
+     * discriminator's adjudicating measurement) and iteration 5a the healthy
+     * sequence (0x06 progress → 0x34 success). Partner EUI64 (8 bytes LE) +
+     * EmberKeyStatus (u8).
      *
      * @param partner the key-exchange partner
      * @param status the EmberKeyStatus byte

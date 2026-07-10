@@ -34,11 +34,14 @@ import java.util.function.Function;
  */
 final class EzspReportingOps implements ReportingOps {
 
-    // ── BENCH-VERIFY constants (M9.4-RPT §1 — the 0x0019/0x90 model) ────────
+    // ── SILICON-VERIFIED constants (M9.4-RPT §1 — the 0x0019/0x90 model) ────
     // ZDO cluster ids, ZCL global command ids, status codes, and the wire
-    // layouts below are ZDP/ZCL8-derived and synthetic-tested until silicon:
-    // a correction fed back from the bench is a one-constant edit fixing code
-    // and tests together.
+    // layouts below are ZDP/ZCL8-derived and SILICON-VERIFIED: iteration 4
+    // proved bind/configure/read-back end-to-end (zigbee.reporting_configured:
+    // clusters=3 verified=3 degraded=0 on the Hue, whose entity row
+    // materialized on its first configured report). The isolated block
+    // structure STAYS — a future correction remains a one-constant edit
+    // fixing code and tests together.
 
     /** ZDP Bind_req (ZDO cluster 0x0021; response = request | 0x8000). */
     static final int ZDO_CLUSTER_BIND_REQ = 0x0021;
@@ -83,8 +86,10 @@ final class EzspReportingOps implements ReportingOps {
      * timeout class, dossier §E): a sleepy device that parks mid-configure
      * times out HERE and the configurator records the SLEEPY posture; the
      * drive runs in the post-announce awake window, so a healthy device
-     * answers well inside it. BENCH-VERIFY the width against the SNZB's
-     * measured awake window.
+     * answers well inside it. SILICON-MEASURED at iterations 5a/5b: the SNZB
+     * configured {@code verified=2 degraded=1} inside its awake window — the
+     * one timeout IS the honest sleepy posture (BEST_EFFORT, not a defect);
+     * the width stands.
      */
     static final long REPORTING_EXCHANGE_TIMEOUT_MILLIS = 5_000;
 
@@ -355,8 +360,10 @@ final class EzspReportingOps implements ReportingOps {
      * The reportable-change field width per ZCL data type: present for ANALOG
      * types only, sized as the type (ZCL8 §2.5.7.1). Covers the §3.7 DEFAULTS
      * vocabulary — uint8 0x20, uint16 0x21, int16 0x29, uint48 0x25; the
-     * discrete types (bool 0x10, map8 0x18) carry NO change field. Unknown
-     * types conservatively omit it (BENCH-VERIFY on any new row).
+     * discrete types (bool 0x10, map8 0x18) carry NO change field. This
+     * vocabulary is silicon-verified (iteration 4: the Hue's clusters
+     * configured {@code verified=3}). Unknown types conservatively omit the
+     * field — a NEW row's width must be silicon-verified before it is trusted.
      */
     private static int analogChangeWidth(int dataType) {
         return switch (dataType) {

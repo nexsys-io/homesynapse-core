@@ -183,8 +183,10 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     /**
      * The permit-join window close instant (M9.4-PJ), or {@code null} when no
      * window is open. Written once by {@link #openPermitJoinWindow()} on the
-     * production {@code run()} thread; read by {@link #isPermitJoinActive()} from
-     * query threads — {@code volatile} for cross-thread visibility.
+     * production {@code run()} thread and CLEARED by a successful
+     * {@link #attemptReopen()} (DP-B5 — the reset NCP holds no window); read by
+     * {@link #isPermitJoinActive()} from query threads — {@code volatile} for
+     * cross-thread visibility.
      */
     private volatile Instant permitJoinDeadline;
 
@@ -264,7 +266,8 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         // F-8: adoption completion invalidates the device's handler-table entry
         // (the classifier may have attached new capabilities; zone type may bind).
         adoption.onAdopted(ingestion::invalidateHandlers);
-        commandHandler = new ZigbeeCommandHandler(adoption, cache, profileRegistry,
+        commandHandler = new ZigbeeCommandHandler(adoption,
+                context.entityRegistry(), cache, profileRegistry,
                 protocol::sendZclFrame, protocol::lookupNetworkAddress,
                 context.eventPublisher(), clock);
         // M9.4-RPT §1/§2: the reporting configurator over its real EZSP binding
@@ -591,6 +594,13 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
             protocol.resetSession();
             protocol.startSession();
             protocol.resumeStored();
+            // DP-B5 (M9.5-DURb): the reset NCP holds no join window, no TC
+            // policy, no transient key — clearing the deadline keeps
+            // isPermitJoinActive() from reading stale-true past a reopen (the
+            // M9.4-TCJ recorded limitation, closed). Reopen ≠ boot: the window
+            // is NOT renewed; the operator re-opens by restart while the key
+            // is present.
+            permitJoinDeadline = null;
             log.info("zigbee.reopened: port={}", target.get().systemPath());
             return true;
         } catch (PermanentIntegrationException | RuntimeException failure) {
@@ -784,7 +794,12 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
             adoption.relink(ieee, device, matchedProfileId);
             rehydrated++;
         }
-        log.debug("zigbee.adoption_maps_rehydrated: devices={}", rehydrated);
+        // DP-B3 (M9.5-DURb): UNCONDITIONAL INFO — the count prints at zero too.
+        // Iteration 5b measured this line SILENT at devices=2 (DEBUG under the
+        // bench's INFO root): absence read as absence-of-the-mechanism, the
+        // vacuous-silence class. The token is FROZEN (the 5b/acceptance-run
+        // boot glance-point).
+        log.info("zigbee.adoption_maps_rehydrated: devices={}", rehydrated);
     }
 
     /**

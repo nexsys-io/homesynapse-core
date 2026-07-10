@@ -201,6 +201,35 @@ class ZigbeePermitJoinTest {
                 .isZero();
     }
 
+    // ── M9.5-DURb §4 (DP-B5): a successful reopen clears the window ─────────
+
+    @Test
+    @DisplayName("DP-B5: a successful watchdog reopen clears permitJoinDeadline — the "
+            + "reset NCP holds no window, so isPermitJoinActive never reads stale-true "
+            + "(the M9.4-TCJ recorded limitation, closed)")
+    void reopenClearsThePermitJoinDeadline() throws Exception {
+        FakeNcp formingNcp = new FakeNcp();
+        formingNcp.onEzspCommand(command -> formationHandler(formingNcp, command));
+        FakeNcp reopenedNcp = new FakeNcp();
+        Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
+        channels.push(channelOver(reopenedNcp));
+        channels.push(channelOver(formingNcp));   // pop order: forming, then reopened
+        ZigbeeIntegrationAdapter adapter = bootProduction(channels, null, 200);
+        adapter.openPermitJoinWindow();
+        assertThat(adapter.isPermitJoinActive()).as("the window opened").isTrue();
+        NetworkParameters formed = new PersistentNetworkParameterStore(tempDir, clock)
+                .load().orElseThrow();
+        reopenedNcp.onEzspCommand(command -> resumeHandler(command, formed));
+
+        assertThat(adapter.attemptReopen()).isTrue();
+
+        assertThat(adapter.isPermitJoinActive())
+                .as("the deadline is cleared inside the un-elapsed window — a reopen "
+                        + "resets NCP-side policy/key/MAC-window state, and the "
+                        + "adapter no longer claims a window the NCP does not hold")
+                .isFalse();
+    }
+
     // ── harness ─────────────────────────────────────────────────────────────
 
     private static PortCandidate coordinatorCandidate() {
@@ -229,6 +258,13 @@ class ZigbeePermitJoinTest {
             Integer permitJoinDuration) throws Exception {
         Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
         channels.push(channelOver(ncp));
+        return bootProduction(channels, serialPort, permitJoinDuration);
+    }
+
+    /** The multi-channel variant (the reopen leg pops a second channel). */
+    private ZigbeeIntegrationAdapter bootProduction(
+            Deque<FakeSerialByteChannel> channels, String serialPort,
+            Integer permitJoinDuration) throws Exception {
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
                 context(configAccess(serialPort, permitJoinDuration)),
                 new InMemoryDeviceRegistry(),
@@ -276,6 +312,46 @@ class ZigbeePermitJoinTest {
                     new byte[] {0x00, (byte) 0x90, 0x01, 0x19, 0x00, (byte) 0x90});
             default -> defaultResponses(seq, command);
         };
+    }
+
+    /** Resume-capable handler for the reopened NCP (the transport-test mirror). */
+    private List<byte[]> resumeHandler(byte[] command, NetworkParameters stored) {
+        if (isLegacyVersion(command)) {
+            return List.of(new byte[] {
+                command[0], (byte) 0x80, 0x00, 13, 0x02, 0x30, 0x74
+            });
+        }
+        int seq = command[0] & 0xFF;
+        return switch (frameIdOf(command)) {
+            case FRAME_NETWORK_INIT -> List.of(
+                    extendedResponse(seq, FRAME_NETWORK_INIT, new byte[] {0x00}),
+                    new byte[] {0x00, (byte) 0x90, 0x01, 0x19, 0x00, (byte) 0x90});
+            case 0x0028 -> List.of(extendedResponse(seq, 0x0028,
+                    networkParametersStruct(stored.channel(), stored.panId(),
+                            stored.extendedPanId())));
+            default -> defaultResponses(seq, command);
+        };
+    }
+
+    private static byte[] networkParametersStruct(int channel, int panId,
+            long extendedPanId) {
+        byte[] parameters = new byte[1 + 1 + 20];
+        parameters[0] = 0x00;   // status SUCCESS (v13: 1 byte)
+        parameters[1] = 0x01;   // nodeType: coordinator
+        int offset = 2;
+        for (int i = 0; i < 8; i++) {
+            parameters[offset + i] = (byte) ((extendedPanId >> (8 * i)) & 0xFF);
+        }
+        parameters[offset + 8] = (byte) (panId & 0xFF);
+        parameters[offset + 9] = (byte) ((panId >> 8) & 0xFF);
+        parameters[offset + 10] = 0x08;
+        parameters[offset + 11] = (byte) channel;
+        int channels = 1 << channel;
+        parameters[offset + 16] = (byte) (channels & 0xFF);
+        parameters[offset + 17] = (byte) ((channels >> 8) & 0xFF);
+        parameters[offset + 18] = (byte) ((channels >> 16) & 0xFF);
+        parameters[offset + 19] = (byte) ((channels >> 24) & 0xFF);
+        return parameters;
     }
 
     private List<byte[]> defaultResponses(int seq, byte[] command) {

@@ -368,6 +368,63 @@ class ZigbeeConfigAcceptedAdoptionTest {
                 .isZero();
     }
 
+    // ── M9.5-DURb §2 — the always-print rehydration INFO (DP-B3) ────────────
+
+    @Test
+    @DisplayName("DP-B3: the rehydration count INFO prints even at devices=0 — "
+            + "absence-of-devices must never read as absence-of-the-mechanism")
+    void rehydrationInfoPrintsAtCountZero() throws Exception {
+        drivenAdapter();
+
+        assertThat(adapterMessages(Level.INFO, "zigbee.adoption_maps_rehydrated"))
+                .as("the 5b vacuous-silence class: the line is unconditional")
+                .containsExactly("zigbee.adoption_maps_rehydrated: devices=0");
+    }
+
+    @Test
+    @DisplayName("DP-B3: the rehydration INFO carries the real count — devices=2 "
+            + "over two registry-carried devices (the bench-5b boot glance-point)")
+    void rehydrationInfoPrintsAtCountTwo() throws Exception {
+        seedAdoptedDevice(SNZB_IEEE, "snzb");
+        seedAdoptedDevice(0x00178801101A09BBL, "hue");
+
+        drivenAdapter();
+
+        assertThat(adapterMessages(Level.INFO, "zigbee.adoption_maps_rehydrated"))
+                .containsExactly("zigbee.adoption_maps_rehydrated: devices=2");
+    }
+
+    /**
+     * A driven-mode adapter: {@code initialize()} alone runs the DP-6
+     * rehydration (INV-RF-03 — no serial I/O), which is all these legs need.
+     */
+    private ZigbeeIntegrationAdapter drivenAdapter() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        FakeSerialByteChannel channel = channelOver(ncp);
+        ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
+                context(configAccess(null)), deviceRegistry,
+                new RegistryProjection(deviceRegistry, entityRegistry),
+                tempDir, clock, ignored -> channel);
+        adapter.initialize();
+        return adapter;
+    }
+
+    /** One registry-carried device + entity, the projection-rebuild shape. */
+    private void seedAdoptedDevice(long ieeeValue, String name) {
+        IEEEAddress ieee = new IEEEAddress(ieeeValue);
+        DeviceId deviceId = new DeviceId(UlidFactory.generate(clock));
+        deviceRegistry.createDevice(new Device(
+                deviceId, "zigbee-" + name, name, "manufacturer", name,
+                null, null, null, integrationId, null, null, List.of(),
+                Set.of(new HardwareIdentifier("zigbee", ieee.toHexString())),
+                clock.instant()));
+        entityRegistry.createEntity(new Entity(
+                EntityId.of(UlidFactory.generate(clock)),
+                "zigbee-" + name + "-ep1", EntityType.BINARY_SENSOR,
+                name, deviceId, 1, null, true, List.of(), List.of(),
+                clock.instant()));
+    }
+
     // ── harness (the ZigbeeTrustCenterJoinTest production-ladder idiom) ─────
 
     private static PortCandidate coordinatorCandidate() {

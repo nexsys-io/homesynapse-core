@@ -4,6 +4,10 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import com.homesynapse.device.CapabilityInstance;
+import com.homesynapse.device.ConfirmationMode;
+import com.homesynapse.device.ConfirmationPolicy;
+import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.event.CausalContext;
 import com.homesynapse.event.CommandResultEvent;
 import com.homesynapse.event.EventDraft;
@@ -15,6 +19,7 @@ import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.integration.CommandEnvelope;
 import com.homesynapse.integration.CommandHandler;
+import com.homesynapse.platform.identity.EntityId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,12 +42,15 @@ import java.util.Set;
  *       misdirected-actuation class closed). Data absence (no binding / no record /
  *       not in the coordinator table) publishes an {@code unroutable} failure — never
  *       a throw.</li>
- *   <li><strong>The honest immediate verdict (Doc 02 §3.8 / AMD-97, INV-SA-03):</strong>
- *       an UNCONFIRMABLE command still dispatches (actuation is not gated), then
- *       renders {@code command_result(outcome="unconfirmed")} with the profile's
- *       recorded reason — the characterization lookup and reason mapping are protocol
- *       knowledge and live HERE (INV-CE-04). The ledger never tracked it (the
- *       adoption-installed DISABLED policy), so there is no double verdict.</li>
+ *   <li><strong>The honest immediate verdict (Doc 02 §3.8 / AMD-97, INV-SA-03;
+ *       DP-B6, M9.5-DURb):</strong> the fence reads the adopted entity's INSTALLED
+ *       {@code CapabilityInstance.confirmation()} first — the durable per-device
+ *       tuning, carrying every §3 posture downgrade. An installed-DISABLED command
+ *       still dispatches (actuation is not gated), then renders
+ *       {@code command_result(outcome="unconfirmed")} with the recorded reason;
+ *       the ledger never tracked it, so there is no double verdict. The profile
+ *       characterization is the pre-adoption/no-entity fallback — the lookup and
+ *       reason mapping are protocol knowledge and live HERE (INV-CE-04).</li>
  *   <li><strong>CONFIRMABLE/BEST_EFFORT:</strong> dispatch and publish NOTHING on
  *       success — the confirmation window owns the eventual outcome (Doc 08 §3.10
  *       step 7; the router publishes failures only). An NCP rejection publishes
@@ -103,6 +111,7 @@ final class ZigbeeCommandHandler implements CommandHandler {
             LoggerFactory.getLogger(ZigbeeCommandHandler.class);
 
     private final ZigbeeAdoptionSlice adoption;
+    private final EntityRegistry entityRegistry;
     private final ZigbeeDeviceCache cache;
     private final DeviceProfileRegistry profileRegistry;
     private final ZclDispatch dispatch;
@@ -110,10 +119,12 @@ final class ZigbeeCommandHandler implements CommandHandler {
     private final EventPublisher publisher;
     private final Clock clock;
 
-    ZigbeeCommandHandler(ZigbeeAdoptionSlice adoption, ZigbeeDeviceCache cache,
+    ZigbeeCommandHandler(ZigbeeAdoptionSlice adoption, EntityRegistry entityRegistry,
+            ZigbeeDeviceCache cache,
             DeviceProfileRegistry profileRegistry, ZclDispatch dispatch,
             AddressLookup addressLookup, EventPublisher publisher, Clock clock) {
         this.adoption = Objects.requireNonNull(adoption, "adoption");
+        this.entityRegistry = Objects.requireNonNull(entityRegistry, "entityRegistry");
         this.cache = Objects.requireNonNull(cache, "cache");
         this.profileRegistry = Objects.requireNonNull(profileRegistry, "profileRegistry");
         this.dispatch = Objects.requireNonNull(dispatch, "dispatch");
@@ -174,14 +185,29 @@ final class ZigbeeCommandHandler implements CommandHandler {
             return;
         }
 
-        // The Doc 02 §3.8 "reason recorded" half: UNCONFIRMABLE renders the honest
-        // immediate verdict AFTER actuation; CONFIRMABLE publishes nothing — the
-        // confirmation window owns the outcome. SD-3 (v18 beat 5, the M9.4b §3.3
-        // regression fence): "an issuable command whose policy is DISABLED but
-        // whose characterization is absent must NOT silently bypass" — an
-        // inherently-unconfirmable command with NO characterization renders the
-        // generic honest verdict instead of silence ("never-tracked and
+        // The Doc 02 §3.8 "reason recorded" half — DP-B6 (M9.5-DURb): the fence
+        // consults the adopted entity's INSTALLED policy FIRST. The registry-held
+        // CapabilityInstance carries the DP-a adoption tuning AND every §3
+        // measured-posture downgrade, both durable across restarts (AMD-99) —
+        // the profile file is pre-adoption truth and can drift from what is
+        // installed. Installed-DISABLED still dispatches (actuation is not
+        // gated), is never ledger-tracked (AMD-97-INV-01 structural), and
+        // renders the immediate honest UNCONFIRMED verdict with the recorded
+        // reason — never a silent bypass, never CONFIRMED. A kept (non-DISABLED)
+        // policy publishes NOTHING: the confirmation window owns the outcome on
+        // the tuned timeout. The characterization remains the pre-adoption /
+        // no-entity fallback; INHERENTLY_UNCONFIRMABLE backstops commands with
+        // no confirmation surface anywhere (SD-3: "never-tracked and
         // honestly-verdicted are different promises").
+        Optional<ConfirmationPolicy> installed =
+                installedPolicyFor(command.entityRef(), command.commandName());
+        if (installed.isPresent()) {
+            if (installed.get().mode() == ConfirmationMode.DISABLED) {
+                publishResult(command, "unconfirmed", EventPriority.NORMAL,
+                        disabledReason(record.get(), ieee, command.commandName()));
+            }
+            return;
+        }
         Optional<ConfirmationCharacterization> characterization =
                 characterizationFor(record.get(), ieee, command.commandName());
         if (characterization.isPresent()) {
@@ -191,9 +217,59 @@ final class ZigbeeCommandHandler implements CommandHandler {
                             EventPriority.NORMAL, unconfirmableReason(c)));
         } else if (INHERENTLY_UNCONFIRMABLE.contains(command.commandName())) {
             publishResult(command, "unconfirmed", EventPriority.NORMAL,
-                    "no confirmation surface exists for '" + command.commandName()
-                            + "'; the command was issued and is not tracked");
+                    noSurfaceReason(command.commandName()));
         }
+    }
+
+    /**
+     * Resolves the adopted entity's INSTALLED confirmation policy for a
+     * command's capability (DP-B6 — the fence's first read). Empty when the
+     * command maps to no capability, the entity is not in the registry
+     * (pre-adoption), or the capability is not installed on it — the
+     * characterization fallback covers those shapes.
+     */
+    private Optional<ConfirmationPolicy> installedPolicyFor(EntityId entityRef,
+            String commandName) {
+        String capability = CAPABILITY_BY_COMMAND.get(commandName);
+        if (capability == null) {
+            return Optional.empty();
+        }
+        return entityRegistry.findEntity(entityRef)
+                .flatMap(entity -> entity.capabilities().stream()
+                        .filter(instance ->
+                                capability.equals(instance.capabilityId()))
+                        .findFirst())
+                .map(CapabilityInstance::confirmation);
+    }
+
+    /**
+     * The installed-DISABLED verdict's recorded reason: the characterization's
+     * measured unconfirmable note where one exists (the reason recorded when
+     * the device was characterized), else the SD-3 generic for commands with
+     * no confirmation surface anywhere, else the installed policy itself (the
+     * §3 posture-downgrade class — the measurement lives in the downgrade WARN
+     * and the posture fact).
+     */
+    private String disabledReason(ZigbeeDeviceRecord record, IEEEAddress ieee,
+            String commandName) {
+        Optional<ConfirmationCharacterization> characterization =
+                characterizationFor(record, ieee, commandName)
+                        .filter(c -> c.confirmability()
+                                == Confirmability.UNCONFIRMABLE);
+        if (characterization.isPresent()) {
+            return unconfirmableReason(characterization.get());
+        }
+        if (INHERENTLY_UNCONFIRMABLE.contains(commandName)) {
+            return noSurfaceReason(commandName);
+        }
+        return "the installed confirmation policy for '"
+                + CAPABILITY_BY_COMMAND.get(commandName)
+                + "' is DISABLED; the command was issued and is not tracked";
+    }
+
+    private static String noSurfaceReason(String commandName) {
+        return "no confirmation surface exists for '" + commandName
+                + "'; the command was issued and is not tracked";
     }
 
     /** Builds the protocol frame for a command (adapter vocabulary — INV-CE-04). */

@@ -173,8 +173,23 @@ final class ZigbeeAdoptionSlice {
         Optional<Device> existing = deviceRegistry.findByHardwareIdentifier(
                 HARDWARE_NAMESPACE, ieee.toHexString());
         if (existing.isPresent()) {
-            relink(ieee, existing.get(), matchedProfileId);
-            return DiscoveryOutcome.LINKED;
+            // DP-B1 (M9.5-DURb): LINKED requires at least one registered entity.
+            // A device with NONE is the durable half-registration state (a death
+            // between the device_registered publish and its entities' publishes)
+            // — re-linking it would freeze the hole forever, because no removal
+            // emitter exists and boot replay faithfully rebuilds it. The repair
+            // is the normal proposal/adoption flow: fall through to propose, and
+            // adopt() reuses the durable deviceId (DP-B2) so the re-emit is
+            // log-clean idempotent (AMD-99 F1). Registry reads happen OUTSIDE
+            // the slice lock (the existing lock discipline).
+            if (!entityRegistry.listEntitiesByDevice(
+                    existing.get().deviceId()).isEmpty()) {
+                relink(ieee, existing.get(), matchedProfileId);
+                return DiscoveryOutcome.LINKED;
+            }
+            log.warn("zigbee.half_registration_detected: device={} deviceId={} "
+                            + "— re-proposing for repair",
+                    ieee, existing.get().deviceId());
         }
         Instant offeredAt = clock.instant();
         lock.lock();
@@ -245,8 +260,18 @@ final class ZigbeeAdoptionSlice {
         }
         InterviewResult interview = proposal.interview();
 
-        DeviceId deviceId = new DeviceId(UlidFactory.generate(clock));
         String hex = ieee.toHexString();
+        // DP-B2 (M9.5-DURb): identity continuity — a hardware-id match here is
+        // the half-registration repair (DP-B1 re-proposed a registry-known
+        // device with zero entities). REUSING the durable deviceId makes the
+        // device_registered re-emit idempotent-by-identity (REG-INV-1: apply
+        // upserts on the same id — AMD-99 F1); entities mint fresh ids below
+        // (none were ever durable — nothing to preserve). The read races
+        // nothing: the proposal claim above is already atomic (F-11).
+        DeviceId deviceId = deviceRegistry
+                .findByHardwareIdentifier(HARDWARE_NAMESPACE, hex)
+                .map(Device::deviceId)
+                .orElseGet(() -> new DeviceId(UlidFactory.generate(clock)));
         String displayName = sentinel(interview.manufacturerName()) + " "
                 + sentinel(interview.modelIdentifier());
         // AMD-99 §3 (DP-3): publish the full-fidelity registration fact FIRST
@@ -541,19 +566,18 @@ final class ZigbeeAdoptionSlice {
      * {@link IllegalStateException} reaches the cycle's existing
      * {@code interview_failed} WARN and the ingestion loop survives.
      *
-     * <p><strong>Known post-DUR recovery gap (flagged for ruling, M9.5-DUR
-     * review):</strong> if the abort (or a process death) lands BETWEEN the
-     * durable {@code device_registered} and its entities' publishes, the log
-     * permanently carries a device with zero entities — every later
-     * re-announce then takes the LINKED arm (the registry knows the IEEE), so
-     * no proposal is ever re-minted and no re-adopt arm exists; boot replay
-     * faithfully rebuilds the same device-only state, and no
-     * {@code device_removed} emitter exists yet (AMD-99 keeps removal
-     * emission a future milestone). Pre-DUR this window self-healed because
-     * the in-memory {@code createDevice} vanished on restart. The sanctioned
-     * repair (e.g. a LINKED-with-zero-registry-entities + COMPLETE-interview
-     * re-propose arm, or a compensating tombstone emit) needs a PM ruling —
-     * recorded in the M9.5-DUR handoff, not improvised here.</p>
+     * <p><strong>The half-registration window is REPAIRED (M9.5-DURb, ruled
+     * 2026-07-08):</strong> if the abort (or a process death) lands BETWEEN
+     * the durable {@code device_registered} and its entities' publishes, the
+     * log carries a device with zero entities — the announce path's LINKED
+     * arm now requires at least one registered entity (DP-B1), so the next
+     * re-announce re-proposes instead of freezing the hole, and
+     * {@link #adopt} reuses the durable deviceId on the hardware-id match
+     * (DP-B2), making the {@code device_registered} re-emit
+     * idempotent-by-identity (AMD-99 F1). Recorded scope limit: a PARTIAL
+     * multi-entity registration (some entities durable) still takes the
+     * LINKED arm — Wave-1 devices are single-entity and the emission loop is
+     * milliseconds; the projection-side count makes it detectable later.</p>
      */
     private void publishRegistration(EventDraft draft) {
         try {

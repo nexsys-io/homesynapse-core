@@ -4,9 +4,14 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.device.Device;
 import com.homesynapse.device.Entity;
 import com.homesynapse.device.EntityType;
+import com.homesynapse.device.HardwareIdentifier;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
 import com.homesynapse.device.RegistryEventMapper;
@@ -15,16 +20,21 @@ import com.homesynapse.event.DeviceDiscoveredEvent;
 import com.homesynapse.event.DeviceRegisteredEvent;
 import com.homesynapse.event.EntityRegisteredEvent;
 import com.homesynapse.event.EventTypes;
+import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.UlidFactory;
 import com.homesynapse.test.TestClock;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 
@@ -46,24 +56,49 @@ class ZigbeeAdoptionSliceTest {
 
     private TestClock clock;
     private RecordingEventPublisher publisher;
+    private IntegrationId integrationId;
     private InMemoryDeviceRegistry deviceRegistry;
     private InMemoryEntityRegistry entityRegistry;
+    private RegistryProjection registryProjection;
     private StandardDeviceProfileRegistry profileRegistry;
     private ZigbeeAdoptionSlice slice;
+    private ListAppender<ILoggingEvent> sliceLogCapture;
 
     @BeforeEach
     void setUp() {
         clock = TestClock.createDefault();
         publisher = new RecordingEventPublisher(clock);
+        integrationId = new IntegrationId(UlidFactory.generate(clock));
         deviceRegistry = new InMemoryDeviceRegistry();
         entityRegistry = new InMemoryEntityRegistry();
+        registryProjection = new RegistryProjection(deviceRegistry, entityRegistry);
         profileRegistry = new StandardDeviceProfileRegistry();
         profileRegistry.register(new ZigbeeProfileLoader().loadBundled());
         slice = new ZigbeeAdoptionSlice(
-                new IntegrationId(UlidFactory.generate(clock)),
+                integrationId,
                 deviceRegistry, entityRegistry,
-                new RegistryProjection(deviceRegistry, entityRegistry),
+                registryProjection,
                 profileRegistry, publisher, clock);
+        sliceLogCapture = new ListAppender<>();
+        sliceLogCapture.start();
+        sliceLogger().addAppender(sliceLogCapture);
+    }
+
+    @AfterEach
+    void tearDown() {
+        sliceLogger().detachAppender(sliceLogCapture);
+    }
+
+    private static Logger sliceLogger() {
+        return (Logger) LoggerFactory.getLogger(ZigbeeAdoptionSlice.class);
+    }
+
+    private List<String> sliceMessages(Level level, String prefix) {
+        return sliceLogCapture.list.stream()
+                .filter(event -> event.getLevel() == level)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith(prefix))
+                .toList();
     }
 
     private static InterviewResult snzbInterview() {
@@ -415,5 +450,119 @@ class ZigbeeAdoptionSliceTest {
                 MeasuredCorpusValues.SNZB_PROFILE_ID);
         slice.adopt(SNZB);
         assertThat(invalidated).containsExactly(SNZB);
+    }
+
+    // ── M9.5-DURb §1 — the durable half-registration repair (DP-B1/DP-B2) ───
+
+    /**
+     * Seeds the projection the way the kill window leaves the log: a durable
+     * {@code device_registered} with NO {@code entity_registered} siblings —
+     * the state boot replay faithfully rebuilds after a process death between
+     * the device publish and its entities' publishes.
+     */
+    private DeviceId seedHalfRegisteredDevice(IEEEAddress ieee) {
+        DeviceId seeded = new DeviceId(UlidFactory.generate(clock));
+        String hex = ieee.toHexString();
+        registryProjection.applyDeviceRegistered(RegistryEventMapper.toPayload(
+                new Device(
+                        seeded,
+                        "zigbee-" + hex.toLowerCase(Locale.ROOT),
+                        "eWeLink SNZB-03P",
+                        "eWeLink", "SNZB-03P",
+                        null, null, null,
+                        integrationId,
+                        null, null, List.of(),
+                        Set.of(new HardwareIdentifier(
+                                ZigbeeAdoptionSlice.HARDWARE_NAMESPACE, hex)),
+                        clock.instant())));
+        return seeded;
+    }
+
+    @Test
+    @DisplayName("DP-B1: a half-registered device (zero registry entities) is NOT "
+            + "re-linked — ONE repair WARN, and the discovery falls through to a "
+            + "fresh proposal")
+    void halfRegisteredDevice_reProposedForRepair() {
+        DeviceId seeded = seedHalfRegisteredDevice(SNZB);
+
+        ZigbeeAdoptionSlice.DiscoveryOutcome outcome =
+                slice.onDeviceDiscovered(snzbInterview(),
+                        MeasuredCorpusValues.SNZB_PROFILE_ID);
+
+        assertThat(outcome)
+                .as("the entity-less LINKED arm is the permanent hole — the repair "
+                        + "is a fresh proposal through the normal adoption flow")
+                .isEqualTo(ZigbeeAdoptionSlice.DiscoveryOutcome.PROPOSED);
+        assertThat(sliceMessages(Level.WARN, "zigbee.half_registration_detected"))
+                .containsExactly("zigbee.half_registration_detected: device="
+                        + SNZB.toHexString() + " deviceId=" + seeded
+                        + " — re-proposing for repair");
+        assertThat(publisher.ofType(EventTypes.DEVICE_DISCOVERED).toList())
+                .as("the proposal publishes normally").hasSize(1);
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).toList())
+                .as("no re-link ran — the repair arm never rides relink()")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("DP-B2: the repair adoption REUSES the durable deviceId (idempotent "
+            + "re-emit, AMD-99 F1) and mints fresh entity ids — the registries are whole")
+    void repairAdoptionReusesTheDeviceId() {
+        DeviceId seeded = seedHalfRegisteredDevice(SNZB);
+        slice.onDeviceDiscovered(snzbInterview(),
+                MeasuredCorpusValues.SNZB_PROFILE_ID);
+
+        ZigbeeAdoptionSlice.AdoptedDevice adopted = slice.adopt(SNZB);
+
+        assertThat(adopted.deviceId())
+                .as("identity continuity: the hardware-id match reuses the durable id")
+                .isEqualTo(seeded);
+        assertThat(deviceRegistry.listAllDevices())
+                .as("the re-emit upserts — never a duplicate device")
+                .hasSize(1);
+        List<Entity> entities = entityRegistry.listEntitiesByDevice(seeded);
+        assertThat(entities)
+                .as("fresh entity ids repair the hole — none were ever durable")
+                .hasSize(1);
+        // The re-emitted device_registered rides the SAME device subject and its
+        // payload reconstructs the upserted registry row (full fidelity holds
+        // through the repair).
+        List<com.homesynapse.event.EventEnvelope> reEmits =
+                publisher.ofType(EventTypes.DEVICE_REGISTERED).toList();
+        assertThat(reEmits).hasSize(1);
+        assertThat(reEmits.get(0).subjectRef().id()).isEqualTo(seeded.value());
+        DeviceRegisteredEvent reEmit =
+                (DeviceRegisteredEvent) reEmits.get(0).payload();
+        assertThat(RegistryEventMapper.toDevice(reEmit))
+                .isEqualTo(deviceRegistry.getDevice(seeded));
+
+        // The idempotent-replay leg: applying the re-emitted fact again (the live
+        // bus self-delivery / a boot replay) is an upsert by identity — no
+        // duplicate device, the repaired entities untouched.
+        registryProjection.applyDeviceRegistered(reEmit);
+        assertThat(deviceRegistry.listAllDevices()).hasSize(1);
+        assertThat(entityRegistry.listEntitiesByDevice(seeded))
+                .containsExactlyElementsOf(entities);
+    }
+
+    @Test
+    @DisplayName("DP-B1 happy-path regression: an existing device WITH entities still "
+            + "LINKs — no re-propose, no repair WARN")
+    void healthyRelink_noRepairWarn() {
+        slice.onDeviceDiscovered(snzbInterview(),
+                MeasuredCorpusValues.SNZB_PROFILE_ID);
+        slice.adopt(SNZB);
+
+        ZigbeeAdoptionSlice.DiscoveryOutcome outcome =
+                slice.onDeviceDiscovered(snzbInterview(),
+                        MeasuredCorpusValues.SNZB_PROFILE_ID);
+
+        assertThat(outcome).isEqualTo(ZigbeeAdoptionSlice.DiscoveryOutcome.LINKED);
+        assertThat(sliceMessages(Level.WARN, "zigbee.half_registration_detected"))
+                .as("a whole registration never trips the repair arm")
+                .isEmpty();
+        assertThat(publisher.ofType(EventTypes.DEVICE_DISCOVERED).toList())
+                .as("no second proposal — the healthy re-link is unchanged")
+                .hasSize(1);
     }
 }
