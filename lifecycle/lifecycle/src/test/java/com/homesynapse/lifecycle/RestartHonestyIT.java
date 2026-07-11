@@ -149,6 +149,7 @@ final class RestartHonestyIT {
         rig.deliverAndCycle();
         hueEntity = rig.adopt(ZigbeeHardwareFreeRig.HUE_IEEE)
                 .get(ZigbeeHardwareFreeRig.HUE_ENDPOINT);
+        awaitRegistryProjectionCaughtUp();
         label(hueEntity, "hero-light");
     }
 
@@ -223,6 +224,46 @@ final class RestartHonestyIT {
                 .map(SubscriberSnapshot::mode)
                 .findFirst()
                 .orElse(SubscriberMode.COLD);
+    }
+
+    /**
+     * M9.5-DURc — the registry-projection checkpoint barrier. {@code adopt()}
+     * applies the registration facts synchronously AND publishes them; the
+     * {@code registry_projection} subscriber re-applies each self-delivery on
+     * its own virtual thread (idempotent only when state is EQUAL — different
+     * state ⇒ replace). {@code label()} mutates the registry directly
+     * (log-invisible), so a self-delivery landing after it lawfully replaces
+     * the labeled entity with its as-adopted state and the label-targeted
+     * automation resolves zero entities. Awaiting the subscriber's checkpoint
+     * reaching the LAST registration fact closes the window.
+     *
+     * <p>The await target is the max {@code globalPosition} over the
+     * {@code device_registered}/{@code entity_registered} envelopes — NOT
+     * {@code EventStore.latestPosition()}: the subscriber is type-filtered
+     * ({@link RegistryProjectionSubscriber#subscriptionFilter()}) and the bus
+     * advances a subscriber checkpoint only on MATCHING deliveries, while
+     * {@code adopt()} publishes the non-matching {@code device_adopted} LAST
+     * — a store-head target is unreachable by construction.</p>
+     */
+    private void awaitRegistryProjectionCaughtUp() {
+        long lastRegistrationFact = events().stream()
+                .filter(event -> event.eventType().equals(EventTypes.DEVICE_REGISTERED)
+                        || event.eventType().equals(EventTypes.ENTITY_REGISTERED))
+                .mapToLong(EventEnvelope::globalPosition)
+                .max()
+                .orElseThrow(() -> new AssertionError(
+                        "no registration facts in the log after adopt()"));
+        awaitTrue(() -> registryProjectionCheckpoint() >= lastRegistrationFact,
+                "the registry projection consuming the adoption events");
+    }
+
+    private long registryProjectionCheckpoint() {
+        return core.eventBus().subscribers().stream()
+                .filter(snapshot -> RegistryProjectionSubscriber.SUBSCRIBER_ID
+                        .equals(snapshot.subscriberId()))
+                .mapToLong(SubscriberSnapshot::checkpoint)
+                .findFirst()
+                .orElse(0L);
     }
 
     private List<EventEnvelope> events() {
