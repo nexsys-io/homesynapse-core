@@ -11,6 +11,7 @@ import com.homesynapse.device.Entity;
 import com.homesynapse.device.HardwareIdentifier;
 import com.homesynapse.device.RegistryEventMapper;
 import com.homesynapse.device.RegistryProjection;
+import com.homesynapse.event.AvailabilityChangedEvent;
 import com.homesynapse.event.EntityRegisteredEvent;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventOrigin;
@@ -32,9 +33,11 @@ import java.time.Instant;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
@@ -147,6 +150,14 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
      */
     static final int KEEPALIVE_MISS_LIMIT = 3;
 
+    /**
+     * The availability ping's exchange deadline (M9.6-AVAIL DP-4; chosen
+     * constant matching the reporting binding's 5 s sleepy-tolerant window).
+     * The ping is one ZCL Basic read on the run thread; a lapsed deadline is
+     * the honest {@code PING_TIMEOUT} verdict, never an exception.
+     */
+    static final long AVAILABILITY_PING_TIMEOUT_MILLIS = 5_000;
+
     /** Opens a byte channel over a located candidate (the §5.1 production seam). */
     interface PortChannelOpener {
         SerialByteChannel open(PortCandidate candidate);
@@ -179,6 +190,8 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     private ZclIngestionUnit ingestion;
     private ZigbeeCommandHandler commandHandler;
     private ReportingConfigurator reporting;
+    private StandardAvailabilityTracker availabilityTracker;
+    private EntityAvailabilityPublisher availabilityPublisher;
     private NetworkParameterStore parameterStore;
     private PortLocator portLocator;
     private PortWatchdog watchdog;
@@ -285,13 +298,39 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         parameterStore = new PersistentNetworkParameterStore(dataDirectory, clock);
         protocol = new EzspCoordinatorProtocol(transport, parameterStore, clock);
         interviewQueue = new PendingInterviewQueue(clock);
+        // M9.6-AVAIL DP-1/DP-2: the availability tracker goes live. The
+        // persisted map is EMPTY, deliberately — the tracker's ctor inits
+        // sidecar-known devices SILENTLY (M-1) and transitions are
+        // edge-triggered, so a sidecar-initialized AVAILABLE against a view
+        // that boots UNKNOWN would suppress the first post-boot frame's event
+        // and starve the view (Nick's ruled trap; sidecar snapshot-init + the
+        // boot-time view reconciliation is a NAMED deferred WU). Tracker and
+        // view thus agree at boot, and the first RX frame emits the edge the
+        // view is waiting for. PowerSource resolves through the cache record —
+        // uninterviewed records carry 0 and N-5 gives every non-mains-proven
+        // device the conservative 25 h window.
+        availabilityPublisher = new EntityAvailabilityPublisher();
+        availabilityTracker = new StandardAvailabilityTracker(clock,
+                ieee -> cache.device(ieee)
+                        .map(ZigbeeDeviceRecord::powerSource).orElse(0),
+                Map.of(),
+                availabilityPublisher);
         ingestion = new ZclIngestionUnit(() -> protocol.drainPendingCallbacks(),
                 new CacheDeviceResolver(), new AdapterIngestionListener(),
                 new ReportDeduplicator(clock), context.eventPublisher(), clock,
                 protocol::sendZclFrame);   // F-7a: the enroll-response send seam
         // F-8: adoption completion invalidates the device's handler-table entry
         // (the classifier may have attached new capabilities; zone type may bind).
-        adoption.onAdopted(ingestion::invalidateHandlers);
+        // M9.6-AVAIL: it ALSO seeds the freshly adopted entities' availability —
+        // on the bench the announce (the tracker's first contact) precedes
+        // adoption, so the online edge fired while the device had no adopted
+        // entities and published nothing; without the seed the new entities
+        // would sit UNKNOWN in the view until the device's next offline/online
+        // cycle.
+        adoption.onAdopted(ieee -> {
+            ingestion.invalidateHandlers(ieee);
+            availabilityPublisher.seedFreshAdoption(ieee);
+        });
         commandHandler = new ZigbeeCommandHandler(adoption,
                 context.entityRegistry(), cache, profileRegistry,
                 protocol::sendZclFrame, protocol::lookupNetworkAddress,
@@ -398,14 +437,82 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
 
     // ── The driven cycle (§G — M9.4a: gates own the cadence) ───────────────
 
-    /** One §G pass: drain → route → interviews due/expire → cache flush check. */
+    /**
+     * One §G pass: drain → route → interviews due/expire → availability
+     * timeouts (M9.6-AVAIL DP-4 — after the drain, so this cycle's RX evidence
+     * counts before silence is judged) → cache flush check.
+     */
     void runCycleOnce() {
         ingestion.processCycle();
         for (PendingInterviewQueue.Pending due : interviewQueue.due()) {
             interviewDevice(due.ieeeAddress());
         }
         interviewQueue.expireStale();
+        evaluateAvailabilityTimeouts();
         cache.maybeFlush();
+    }
+
+    /**
+     * The M9.6-AVAIL DP-4 absence evaluation: battery devices past their 25 h
+     * silence transition offline inside {@code evaluateTimeouts()}; each
+     * returned MAINS ping candidate gets ONE ZCL Basic read on this run thread
+     * — the load-bearing arm of never-false-ALIVE in the other direction
+     * (without it a dead mains device stays ALIVE forever; silence alone never
+     * marks a mains device offline). The ping result is genuine
+     * device-originated evidence and is the ONLY {@code recordCommandResult}
+     * caller (DP-7: the dispatch path's boolean is NCP acceptance, not device
+     * evidence — wiring it would fabricate liveness).
+     */
+    private void evaluateAvailabilityTimeouts() {
+        for (IEEEAddress candidate : availabilityTracker.evaluateTimeouts()) {
+            availabilityTracker.recordCommandResult(candidate,
+                    pingBasic(candidate), clock.instant());
+        }
+    }
+
+    /**
+     * One availability ping: a ZCL global Read Attributes of Basic attribute
+     * {@code 0x0000} (ZCLVersion) over the existing {@code zclGlobalExchange}
+     * seam. {@code false} — the honest unreachable-by-measurement verdict —
+     * covers the no-record / unknown-address cases too (a mains candidate is
+     * interviewed in practice; a device whose address we lost self-heals on
+     * its next RX, which re-indexes and re-edges). An
+     * {@link EzspCommandTimeoutException} (the NCP itself not answering)
+     * propagates to the production loop's existing watchdog arm — coordinator
+     * trouble is never device evidence.
+     */
+    private boolean pingBasic(IEEEAddress device) {
+        Optional<ZigbeeDeviceRecord> record = cache.device(device);
+        if (record.isEmpty() || record.get().networkAddress()
+                == ZigbeeDeviceCache.NETWORK_ADDRESS_UNKNOWN) {
+            return false;
+        }
+        return protocol.zclGlobalExchange(record.get().networkAddress(),
+                firstApplicationEndpoint(record.get()), 0x0000,
+                ZclCodec.COMMAND_READ_ATTRIBUTES, new byte[] {0x00, 0x00},
+                ZclCodec.COMMAND_READ_ATTRIBUTES_RESPONSE,
+                AVAILABILITY_PING_TIMEOUT_MILLIS).isPresent();
+    }
+
+    /**
+     * The ping target endpoint: the record's first application endpoint in
+     * wire order (the interview's EP-selection rule — Green Power EP 242 and
+     * GP-profile endpoints are never pinged), with the adapter-wide EP-1
+     * convention as the defensive fallback for endpoint-less records.
+     */
+    private static int firstApplicationEndpoint(ZigbeeDeviceRecord record) {
+        List<EndpointDescriptor> endpoints = record.endpoints();
+        if (endpoints != null) {
+            for (EndpointDescriptor endpoint : endpoints) {
+                if (endpoint.endpointId()
+                        != InterviewStateMachine.GREEN_POWER_ENDPOINT_ID
+                        && endpoint.profileId()
+                                != InterviewStateMachine.GREEN_POWER_PROFILE_ID) {
+                    return endpoint.endpointId();
+                }
+            }
+        }
+        return 1;
     }
 
     // ── Production transport orchestration (M9.4b §5) ──────────────────────
@@ -933,8 +1040,92 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
 
         @Override
         public void onFrame(IEEEAddress device) {
-            cache.recordFrame(device);
-            interviewQueue.onFrameReceived(device);
+            cache.recordFrame(device);   // the cache's last-seen — a DIFFERENT
+            interviewQueue.onFrameReceived(device);   // class than the tracker's
+            // M9.6-AVAIL DP-3: every device-originated RX is liveness — this
+            // seam is the documented availability feed, pre-dedup by design
+            // (a duplicate frame is still the device talking).
+            availabilityTracker.recordFrame(device, clock.instant());
+        }
+    }
+
+    /**
+     * The M9.6-AVAIL DP-5 transition listener: one root
+     * {@code availability_changed} PER ADOPTED ENTITY of the transitioning
+     * device — ENTITY grain, because the state projection applies availability
+     * only there ({@code subjectEntityIdOrNull} gates it; the relink emission's
+     * device grain is a structural no-op, recorded and untouched). Canonical
+     * {@code "online"}/{@code "offline"} vocabulary (the payload record's
+     * documented triple — never relink's {@code "available"}); CRITICAL toward
+     * offline, NORMAL toward online (the record's priority doctrine). Every
+     * transition ALSO writes the cache sidecar — nothing else does, and the
+     * deferred snapshot-init WU depends on it staying current.
+     *
+     * <p>{@code previousStatus} is the last state THIS publisher rendered for
+     * the device ({@code "unknown"} before the first publish) — with the DP-1
+     * empty-map construction it mirrors the tracker's own prior state exactly,
+     * because the listener observes every tracker transition.
+     */
+    private final class EntityAvailabilityPublisher
+            implements StandardAvailabilityTracker.TransitionListener {
+
+        /** The last published state per device; absent = never published. */
+        private final Map<Long, Boolean> lastPublished = new ConcurrentHashMap<>();
+
+        @Override
+        public void onTransition(IEEEAddress device, boolean available) {
+            Boolean prior = lastPublished.put(device.value(), available);
+            cache.setAvailability(device, available);
+            publishForEntities(device,
+                    prior == null ? "unknown" : prior ? "online" : "offline",
+                    available);
+        }
+
+        /**
+         * The fresh-adoption view seed: on the bench the announce — the
+         * tracker's first contact — ALWAYS precedes adoption, so the online
+         * edge fires while the device has no adopted entities and publishes
+         * nothing; edge-triggering then keeps every later report silent and
+         * the new entities would sit UNKNOWN in the view until the device's
+         * next offline/online cycle. When the tracker already holds the device
+         * AVAILABLE at adoption, publish the per-entity online edge now.
+         * {@code previousStatus} is {@code "unknown"} — the fresh entity
+         * subjects never carried an availability event. A device the tracker
+         * has never seen (slice-driven adoption without a prior frame) seeds
+         * nothing; its first frame edges normally.
+         */
+        void seedFreshAdoption(IEEEAddress device) {
+            if (!availabilityTracker.isAvailable(device)) {
+                return;
+            }
+            lastPublished.put(device.value(), true);
+            publishForEntities(device, "unknown", true);
+        }
+
+        private void publishForEntities(IEEEAddress device, String previous,
+                boolean available) {
+            String next = available ? "online" : "offline";
+            EventPriority priority =
+                    available ? EventPriority.NORMAL : EventPriority.CRITICAL;
+            for (EntityId entityId : adoption.entitiesFor(device).values()) {
+                try {
+                    context.eventPublisher().publishRoot(new EventDraft(
+                            EventTypes.AVAILABILITY_CHANGED,
+                            1,
+                            clock.instant(),
+                            SubjectRef.entity(entityId),
+                            priority,
+                            EventOrigin.INTEGRATION,
+                            new AvailabilityChangedEvent(previous, next),
+                            null,
+                            null));
+                } catch (SequenceConflictException conflict) {
+                    // The relink-precedent idiom: swallow with a log — a lost
+                    // transition re-renders on the device's next edge.
+                    log.warn("zigbee.availability_publish_conflict: entity={}: {}",
+                            entityId, conflict.getMessage());
+                }
+            }
         }
     }
 

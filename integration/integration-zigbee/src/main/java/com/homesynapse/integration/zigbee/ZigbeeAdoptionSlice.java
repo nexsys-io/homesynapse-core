@@ -428,6 +428,26 @@ final class ZigbeeAdoptionSlice {
     }
 
     /**
+     * All adopted entities for a device, keyed by endpoint — the M9.6-AVAIL
+     * per-entity availability fanout source (DP-5: one {@code
+     * availability_changed} per adopted entity; a device with none publishes
+     * nothing). Populated by {@link #adopt} and {@link #relink}; the returned
+     * map is the stored immutable copy.
+     *
+     * @param ieee the device, never {@code null}
+     * @return the endpoint&rarr;entity map, or an empty map when none
+     */
+    Map<Integer, EntityId> entitiesFor(IEEEAddress ieee) {
+        Objects.requireNonNull(ieee, "ieee");
+        lock.lock();
+        try {
+            return entitiesByIeee.getOrDefault(ieee.value(), Map.of());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
      * Resolves the adopted device id for an IEEE address.
      *
      * @param ieee the device, never {@code null}

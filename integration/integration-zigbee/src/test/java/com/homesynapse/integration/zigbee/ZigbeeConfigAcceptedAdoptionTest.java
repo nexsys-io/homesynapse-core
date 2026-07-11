@@ -17,6 +17,7 @@ import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
 import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.event.EventTypes;
+import com.homesynapse.event.SubjectType;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
 import com.homesynapse.platform.identity.DeviceId;
@@ -225,8 +226,21 @@ class ZigbeeConfigAcceptedAdoptionTest {
 
         assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).count())
                 .as("the re-link never re-adopts").isEqualTo(1);
+        // M9.6-AVAIL P2 drift (enumerated): the adoption gained the entity-grain
+        // view seed, so the stream carries TWO availability events — the seed
+        // (entity grain) plus the re-link's device-grain emission, which stays
+        // byte-untouched (DP-6: a structural projection no-op, recorded).
         assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).count())
-                .as("the re-link's availability path is untouched").isEqualTo(1);
+                .as("the adoption seed + the untouched re-link emission")
+                .isEqualTo(2);
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED)
+                .filter(e -> e.subjectRef().type() == SubjectType.ENTITY).count())
+                .as("the adoption-time seed is entity-grain")
+                .isEqualTo(1);
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED)
+                .filter(e -> e.subjectRef().type() == SubjectType.DEVICE).count())
+                .as("the re-link's device-grain emission is untouched")
+                .isEqualTo(1);
         assertThat(sliceMessages(Level.INFO, "zigbee.device_relinked"))
                 .as("the Stage-2 re-link ran").hasSize(1);
         assertThat(adapterMessages(Level.INFO, "zigbee.proposal_accepted"))
