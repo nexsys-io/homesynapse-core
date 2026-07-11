@@ -194,6 +194,25 @@ class PortLocatorTest {
     }
 
     @Test
+    @DisplayName("a by-id-pinned pinned-only identity matches through the "
+            + "byIdPath disjunct — the raw-fallback window where systemPath "
+            + "equality cannot (M9.6-RO-R1)")
+    void reopen_pinnedOnly_byIdPin_matchesViaByIdPathDisjunct() {
+        // An operator pins the by-id path itself and the capture still fell to
+        // the pinned-only sentinel (the node was unenumerable or unidentified
+        // at bind). Under raw-string matching (the 1-arg locator — exactly the
+        // production toRealPath-fallback window) the pinned path equals NO
+        // candidate systemPath — only the byIdPath disjunct of the pinned-only
+        // rule can re-find the stick.
+        PortIdentity byIdPin = new PortIdentity(0, 0, SONOFF_BY_ID, "EZSP");
+        PortCandidate candidate = new PortCandidate(
+                "/dev/ttyUSB2", SONOFF_BY_ID, 0x10C4, 0xEA60, null);
+        PortLocator locator = new PortLocator(() -> List.of(candidate));
+
+        assertThat(locator.reopenTarget(byIdPin)).contains(candidate);
+    }
+
+    @Test
     @DisplayName("DEVNUM-IMMUNITY PIN: a healthy identity re-matches a "
             + "string-identical candidate — devnum is unrepresented BY DESIGN")
     void reopen_devnumImmunity_pin() {
