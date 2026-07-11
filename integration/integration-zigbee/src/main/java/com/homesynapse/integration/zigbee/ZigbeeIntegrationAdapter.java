@@ -37,6 +37,7 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
 /**
@@ -159,6 +160,14 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     private final Function<Object, SerialByteChannel> channelOpener;
     private final PortLocator.PortEnumerator portEnumerator;
     private final PortChannelOpener portChannelOpener;
+    /**
+     * Resolves a configured path to its canonical device node (M9.6-RO DP-4):
+     * the production binding is {@link PortLocator#realPathCanonicalizer()}
+     * (udev aliases resolve to their real nodes); tests inject pure maps.
+     * Consulted only on the pinned-path capture arm and the pinned-only reopen
+     * rule — never on the happy enumerated arm.
+     */
+    private final UnaryOperator<String> pathCanonicalizer;
     private final CountDownLatch stopSignal = new CountDownLatch(1);
 
     private StandardDeviceProfileRegistry profileRegistry;
@@ -191,17 +200,21 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     private volatile Instant permitJoinDeadline;
 
     /**
-     * The canonical constructor. Exactly one transport source is bound:
-     * {@code channelOpener} non-null selects DRIVEN mode (the rig's scripted
-     * channel); otherwise {@code portEnumerator} + {@code portChannelOpener}
-     * select PRODUCTION mode (§5.1).
+     * The canonical constructor (M9.6-RO shape). Exactly one transport source is
+     * bound: {@code channelOpener} non-null selects DRIVEN mode (the rig's
+     * scripted channel); otherwise {@code portEnumerator} +
+     * {@code portChannelOpener} select PRODUCTION mode (§5.1).
+     * {@code pathCanonicalizer} feeds the identity capture and the pinned-only
+     * reopen rule (tests inject pure maps; production binds
+     * {@link PortLocator#realPathCanonicalizer()}).
      */
     ZigbeeIntegrationAdapter(IntegrationContext context, DeviceRegistry deviceRegistry,
             RegistryProjection registryProjection,
             Path dataDirectory, Clock clock,
             Function<Object, SerialByteChannel> channelOpener,
             PortLocator.PortEnumerator portEnumerator,
-            PortChannelOpener portChannelOpener) {
+            PortChannelOpener portChannelOpener,
+            UnaryOperator<String> pathCanonicalizer) {
         this.context = context;
         this.deviceRegistry = deviceRegistry;
         this.registryProjection = registryProjection;
@@ -210,6 +223,19 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         this.channelOpener = channelOpener;
         this.portEnumerator = portEnumerator;
         this.portChannelOpener = portChannelOpener;
+        this.pathCanonicalizer = pathCanonicalizer;
+    }
+
+    /** The pre-M9.6-RO production shape: the real-path canonicalizer binds. */
+    ZigbeeIntegrationAdapter(IntegrationContext context, DeviceRegistry deviceRegistry,
+            RegistryProjection registryProjection,
+            Path dataDirectory, Clock clock,
+            Function<Object, SerialByteChannel> channelOpener,
+            PortLocator.PortEnumerator portEnumerator,
+            PortChannelOpener portChannelOpener) {
+        this(context, deviceRegistry, registryProjection, dataDirectory, clock,
+                channelOpener, portEnumerator, portChannelOpener,
+                PortLocator.realPathCanonicalizer());
     }
 
     /** The M9.4a driven-mode shape (the rig path) — behavior-identical. */
@@ -276,7 +302,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         reporting = new ReportingConfigurator(
                 new EzspReportingOps(protocol, this::cachedNetworkAddress));
         if (channelOpener == null) {
-            portLocator = new PortLocator(portEnumerator);
+            portLocator = new PortLocator(portEnumerator, pathCanonicalizer);
             watchdog = new PortWatchdog(clock, this::attemptReopen);
         }
         log.info("zigbee.initialized: integration_id={} data_dir={} mode={}",
@@ -415,7 +441,11 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     /**
      * Opens the located port's byte channel, probes the transport kind, and binds
      * the SAME channel into the ASH transport (§5.1 — the probe channel is reused,
-     * never a double-open). Records the port identity for reopen (§5.6).
+     * never a double-open). Records the port identity for reopen (§5.6): an
+     * enumerated port captures as-is; a synthesized/unidentified port resolves
+     * through {@link #captureIdentity} (M9.6-RO DP-1) so an alias-pinned config
+     * no longer captures an unmatchable identity. The one capture INFO
+     * ({@code zigbee.port_identity_captured}, DP-5) fires on every arm.
      *
      * @throws PermanentIntegrationException when the probe cannot characterize the
      *         transport, or the coordinator speaks ZNP (the Wave-2 transport)
@@ -438,10 +468,42 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         }
         productionChannel = channel;
         transport.open(port);   // the opener returns productionChannel (§5.1 reuse)
-        portIdentity = port.vendorId() >= 0
-                ? PortLocator.identityFor(port, TransportProbe.Kind.EZSP.name())
-                : new PortIdentity(0, 0, port.systemPath(),
-                        TransportProbe.Kind.EZSP.name());
+        portIdentity = captureIdentity(port);
+        log.info("zigbee.port_identity_captured: stableId={} vendorId={} "
+                        + "productId={} pinnedOnly={}",
+                portIdentity.stableId(),
+                Integer.toHexString(portIdentity.vendorId()),
+                Integer.toHexString(portIdentity.productId()),
+                portIdentity.isPinnedOnly());
+    }
+
+    /**
+     * Captures the reopen identity for the bound port (M9.6-RO DP-1).
+     *
+     * <p>An enumerated port ({@code vendorId() >= 0}) captures directly — the
+     * pre-existing happy arm, untouched. A port WITHOUT a USB identity (the
+     * {@code serial_port} synthesis arm, or an enumerated node the platform
+     * could not identify) canonicalizes its path (udev alias → real device
+     * node) and re-scans the enumeration for the candidate at that node: found
+     * with a real USB identity ⇒ the capture is that candidate's REAL identity
+     * (by-id stable path + VID:PID) and every reopen tier works. Only when the
+     * path resolves to no identified candidate does the capture fall back to
+     * the honest pinned-only sentinel ({@code 0/0} + the pinned path,
+     * {@link PortIdentity#isPinnedOnly()}) — which reopens by canonicalized
+     * path equality only.
+     */
+    private PortIdentity captureIdentity(PortCandidate port) {
+        if (port.vendorId() >= 0) {
+            return PortLocator.identityFor(port, TransportProbe.Kind.EZSP.name());
+        }
+        String canonical = pathCanonicalizer.apply(port.systemPath());
+        return portEnumerator.enumerate().stream()
+                .filter(c -> canonical.equals(c.systemPath()) && c.vendorId() >= 0)
+                .findFirst()
+                .map(real -> PortLocator.identityFor(real,
+                        TransportProbe.Kind.EZSP.name()))
+                .orElseGet(() -> new PortIdentity(0, 0, port.systemPath(),
+                        TransportProbe.Kind.EZSP.name()));
     }
 
     /**

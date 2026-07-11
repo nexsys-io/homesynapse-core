@@ -55,4 +55,20 @@ class PortIdentityTest {
         assertThat(new PortIdentity(0x10C4, 0xEA60, BY_ID, "7.4.5.0"))
                 .isEqualTo(new PortIdentity(0x10C4, 0xEA60, BY_ID, "7.4.5.0"));
     }
+
+    @Test
+    @DisplayName("isPinnedOnly: 0/0 is the sanctioned pinned-only sentinel — any "
+            + "real USB id in either half is NOT pinned-only (M9.6-RO DP-3)")
+    void isPinnedOnly_truthTable() {
+        // USB VID 0x0000 is reserved and never assigned to a vendor, so 0/0
+        // cannot collide with a real device identity.
+        assertThat(new PortIdentity(0, 0, "/dev/zigbee", null).isPinnedOnly())
+                .isTrue();
+        assertThat(new PortIdentity(0x10C4, 0xEA60, BY_ID, null).isPinnedOnly())
+                .isFalse();
+        assertThat(new PortIdentity(0, 0xEA60, BY_ID, null).isPinnedOnly())
+                .isFalse();
+        assertThat(new PortIdentity(0x10C4, 0, BY_ID, null).isPinnedOnly())
+                .isFalse();
+    }
 }

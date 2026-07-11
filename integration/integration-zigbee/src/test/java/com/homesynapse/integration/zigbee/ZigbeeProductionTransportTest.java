@@ -4,6 +4,10 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.config.ConfigurationAccess;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
@@ -18,10 +22,12 @@ import com.homesynapse.state.EntityState;
 import com.homesynapse.state.StateQueryService;
 import com.homesynapse.state.StateSnapshot;
 import com.homesynapse.test.TestClock;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -30,11 +36,13 @@ import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -71,11 +79,20 @@ class ZigbeeProductionTransportTest {
     private TestClock clock;
     private RecordingEventPublisher publisher;
     private final List<FakeSerialByteChannel> opened = new ArrayList<>();
+    private ListAppender<ILoggingEvent> adapterLogCapture;
 
     @BeforeEach
     void setUp() {
         clock = TestClock.createDefault();
         publisher = new RecordingEventPublisher(clock);
+        adapterLogCapture = new ListAppender<>();
+        adapterLogCapture.start();
+        adapterLogger().addAppender(adapterLogCapture);
+    }
+
+    @AfterEach
+    void tearDown() {
+        adapterLogger().detachAppender(adapterLogCapture);
     }
 
     // ── harness ─────────────────────────────────────────────────────────────
@@ -87,14 +104,18 @@ class ZigbeeProductionTransportTest {
                 PortLocator.PRODUCT_CP210X_UART_BRIDGE, null);
     }
 
-    private ZigbeeIntegrationAdapter adapter(List<PortCandidate> enumerated,
-            Deque<FakeSerialByteChannel> channels, String configuredPort) {
-        IntegrationContext context = new IntegrationContext(
+    private IntegrationContext context(String configuredPort) {
+        return new IntegrationContext(
                 new IntegrationId(UlidFactory.generate(clock)), "zigbee", publisher,
                 new InMemoryEntityRegistry(), unusedQueryService(),
                 unusedHealthReporter(), configAccess(configuredPort),
                 null, null, null, null, null);
-        return new ZigbeeIntegrationAdapter(context, new InMemoryDeviceRegistry(),
+    }
+
+    private ZigbeeIntegrationAdapter adapter(List<PortCandidate> enumerated,
+            Deque<FakeSerialByteChannel> channels, String configuredPort) {
+        return new ZigbeeIntegrationAdapter(context(configuredPort),
+                new InMemoryDeviceRegistry(),
                 new RegistryProjection(new InMemoryDeviceRegistry(),
                         new InMemoryEntityRegistry()),
                 tempDir, clock, null,
@@ -104,6 +125,24 @@ class ZigbeeProductionTransportTest {
                     opened.add(channel);
                     return channel;
                 });
+    }
+
+    /** The M9.6-RO shape: an injected path canonicalizer (tests use pure maps). */
+    private ZigbeeIntegrationAdapter adapter(List<PortCandidate> enumerated,
+            Deque<FakeSerialByteChannel> channels, String configuredPort,
+            UnaryOperator<String> pathCanonicalizer) {
+        return new ZigbeeIntegrationAdapter(context(configuredPort),
+                new InMemoryDeviceRegistry(),
+                new RegistryProjection(new InMemoryDeviceRegistry(),
+                        new InMemoryEntityRegistry()),
+                tempDir, clock, null,
+                () -> enumerated,
+                candidate -> {
+                    FakeSerialByteChannel channel = channels.pop();
+                    opened.add(channel);
+                    return channel;
+                },
+                pathCanonicalizer);
     }
 
     private FakeSerialByteChannel channelOver(FakeNcp ncp) {
@@ -280,6 +319,104 @@ class ZigbeeProductionTransportTest {
         assertThat(adapter.attemptReopen()).isFalse();
     }
 
+    // ── M9.6-RO: identity capture (DP-1/DP-3/DP-5) + pinned-only reopen ─────
+
+    @Test
+    @DisplayName("FIELD REPRO (M9.6-RO): an alias-pinned serial_port captures the "
+            + "REAL enumerated identity at bind — and reopen recovers the stick")
+    void fieldRepro_aliasPinned_capturesRealIdentity_reopenRecovers()
+            throws Exception {
+        // The bench shape (bench record, 2026-07-10 correction block): the config
+        // pins the udev alias /dev/zigbee; the enumeration carries the REAL
+        // candidate; the alias literal-matches nothing. Pre-fix the capture was
+        // PortIdentity(0, 0, /dev/zigbee) — unsatisfiable by both reopen tiers,
+        // structurally dead since boot.
+        FakeNcp formingNcp = new FakeNcp();
+        formingNcp.onEzspCommand(command -> formationHandler(formingNcp, command));
+        FakeNcp reopenedNcp = new FakeNcp();
+        Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
+        FakeSerialByteChannel second = channelOver(reopenedNcp);
+        channels.push(second);
+        channels.push(channelOver(formingNcp));   // pop order: boot, then reopen
+        ZigbeeIntegrationAdapter adapter = adapter(List.of(coordinatorCandidate()),
+                channels, "/dev/zigbee",
+                path -> path.equals("/dev/zigbee") ? "/dev/ttyUSB7" : path);
+        adapter.initialize();
+        PortCandidate port = adapter.resolvePort();
+        // The synthesis arm still serves operator intent (resolve is untouched)…
+        assertThat(port.systemPath()).isEqualTo("/dev/zigbee");
+        adapter.bindTransport(port);
+        adapter.coordinatorProtocol().startSession();
+        adapter.resumeOrForm();
+        adapter.coordinatorProtocol().awaitNetworkUp();
+        NetworkParameters formed = new PersistentNetworkParameterStore(tempDir,
+                clock).load().orElseThrow();
+        reopenedNcp.onEzspCommand(command -> resumeHandler(command, formed));
+
+        // …while the CAPTURE resolves the alias to the real candidate (DP-1) and
+        // says so on the record (DP-5 — the line the field diagnosis needed).
+        assertThat(adapterMessages(Level.INFO, "zigbee.port_identity_captured"))
+                .containsExactly("zigbee.port_identity_captured: stableId="
+                        + coordinatorCandidate().byIdPath()
+                        + " vendorId=10c4 productId=ea60 pinnedOnly=false");
+
+        // The watchdog's reopen finds the stick — dead-since-boot pre-fix.
+        assertThat(adapter.attemptReopen()).isTrue();
+    }
+
+    @Test
+    @DisplayName("a truly-unresolvable pin captures the honest pinned-only "
+            + "sentinel — and reopens by canonicalized path once the alias resolves")
+    void unresolvablePin_capturesSentinel_reopensByPathOnceResolvable()
+            throws Exception {
+        FakeNcp formingNcp = new FakeNcp();
+        formingNcp.onEzspCommand(command -> formationHandler(formingNcp, command));
+        FakeNcp reopenedNcp = new FakeNcp();
+        Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
+        channels.push(channelOver(reopenedNcp));
+        channels.push(channelOver(formingNcp));
+        Map<String, String> aliasTable = new HashMap<>();   // resolves NOTHING yet
+        ZigbeeIntegrationAdapter adapter = adapter(List.of(coordinatorCandidate()),
+                channels, "/dev/zigbee",
+                path -> aliasTable.getOrDefault(path, path));
+        adapter.initialize();
+        adapter.bindTransport(adapter.resolvePort());
+        adapter.coordinatorProtocol().startSession();
+        adapter.resumeOrForm();
+        adapter.coordinatorProtocol().awaitNetworkUp();
+
+        // DP-3 honesty: 0/0 is the RECORDED pinned-only sentinel, not a
+        // masquerading USB id — and the DP-5 INFO renders it as such.
+        assertThat(adapterMessages(Level.INFO, "zigbee.port_identity_captured"))
+                .containsExactly("zigbee.port_identity_captured: "
+                        + "stableId=/dev/zigbee vendorId=0 productId=0 "
+                        + "pinnedOnly=true");
+
+        NetworkParameters formed = new PersistentNetworkParameterStore(tempDir,
+                clock).load().orElseThrow();
+        reopenedNcp.onEzspCommand(command -> resumeHandler(command, formed));
+        // The alias becomes resolvable (the udev-rule-materialized case): the
+        // pinned-only rule matches by canonicalized path EQUALITY — never class.
+        aliasTable.put("/dev/zigbee", "/dev/ttyUSB7");
+
+        assertThat(adapter.attemptReopen()).isTrue();
+    }
+
+    @Test
+    @DisplayName("the locator arm's capture INFO fires too: pinnedOnly=false on "
+            + "an un-configured boot (DP-5 covers BOTH capture arms)")
+    void locatorArm_captureInfo_pinnedOnlyFalse() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> formationHandler(ncp, command));
+
+        boot(ncp, null);
+
+        assertThat(adapterMessages(Level.INFO, "zigbee.port_identity_captured"))
+                .containsExactly("zigbee.port_identity_captured: stableId="
+                        + coordinatorCandidate().byIdPath()
+                        + " vendorId=10c4 productId=ea60 pinnedOnly=false");
+    }
+
     // ── scripted NCP handlers (v13 dialect) ─────────────────────────────────
 
     /** Formation-capable handler: scan + form + the NETWORK_UP callback. */
@@ -393,6 +530,20 @@ class ZigbeeProductionTransportTest {
             }
         }
         return match;
+    }
+
+    // ── adapter log capture (the KEYb idiom; root INFO passes these through) ─
+
+    private List<String> adapterMessages(Level level, String prefix) {
+        return adapterLogCapture.list.stream()
+                .filter(event -> event.getLevel() == level)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith(prefix))
+                .toList();
+    }
+
+    private static Logger adapterLogger() {
+        return (Logger) LoggerFactory.getLogger(ZigbeeIntegrationAdapter.class);
     }
 
     // ── inert context stubs (the adapter never touches these paths here) ────

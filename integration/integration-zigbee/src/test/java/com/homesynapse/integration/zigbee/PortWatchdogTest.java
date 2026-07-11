@@ -168,4 +168,30 @@ class PortWatchdogTest {
         assertThat(attempts).isZero();
         assertThat(watchdog.isHealthy()).isTrue();
     }
+
+    @Test
+    @DisplayName("the field cadence (M9.6-RO): attempts fail while the target is "
+            + "absent, then the FIRST attempt after it re-appears recovers")
+    void fieldCadence_recoveryAtLaterAttempt_accounting() {
+        // The bench timeline in miniature: the stick re-attached mid-backoff; a
+        // truthfully-captured identity makes the next attempt succeed.
+        PortWatchdog watchdog = watchdog();
+        watchdog.onDisconnectSignal();
+
+        watchdog.tick();   // attempt 1 fails (immediate)
+        for (long delay : new long[] {1000, 2000, 4000}) {
+            clock.advance(Duration.ofMillis(delay));
+            watchdog.tick();   // attempts 2-4 fail on the backoff schedule
+        }
+        assertThat(attempts).isEqualTo(4);
+        assertThat(watchdog.isHealthy()).isFalse();
+
+        reopenResult = true;   // the stick is back and the identity matches
+        clock.advance(Duration.ofMillis(8000));
+        watchdog.tick();       // attempt 5 recovers
+
+        assertThat(attempts).isEqualTo(5);
+        assertThat(watchdog.isHealthy()).isTrue();
+        assertThat(watchdog.failedAttempts()).isZero();
+    }
 }

@@ -7,10 +7,14 @@ package com.homesynapse.integration.zigbee;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.UnaryOperator;
 
 /**
  * Locates the coordinator serial port by USB VID:PID with by-id-path preference —
@@ -21,9 +25,13 @@ import java.util.Optional;
  * <p>Reopen support targets the STABLE identity: a re-enumerated (renumbered) device
  * node is re-found by its by-id path first, then by VID:PID class match — never by
  * the possibly-stale system path alone (W5 neighborhood; consumed by
- * {@link PortWatchdog}'s reopen action at M9.4 wiring).
+ * {@link PortWatchdog}'s reopen action at M9.4 wiring). Pinned-only identities
+ * (M9.6-RO DP-2) instead match by canonicalized path equality ONLY — no VID:PID
+ * class fallback, so an operator pin can never reopen a neighboring same-class
+ * stick.
  *
- * <p>Thread-safe: stateless over an injected enumerator.
+ * <p>Thread-safe: stateless over an injected enumerator (and an injected, total
+ * path canonicalizer — M9.6-RO DP-4).
  *
  * @see PortCandidate
  * @see PortIdentity
@@ -52,14 +60,60 @@ final class PortLocator {
     }
 
     private final PortEnumerator enumerator;
+    private final UnaryOperator<String> canonicalizer;
 
     /**
-     * Creates a locator over {@code enumerator}. Performs no I/O (INV-RF-03).
+     * Creates a locator over {@code enumerator} with NO path canonicalization
+     * (raw-string comparison — the pre-M9.6-RO semantics). Performs no I/O
+     * (INV-RF-03).
      *
      * @param enumerator the enumeration seam, never {@code null}
      */
     PortLocator(PortEnumerator enumerator) {
+        this(enumerator, UnaryOperator.identity());
+    }
+
+    /**
+     * Creates a locator over {@code enumerator} with an injected path
+     * canonicalizer (M9.6-RO DP-4). The canonicalizer is consulted ONLY for
+     * pinned-only identities ({@link PortIdentity#isPinnedOnly()}); healthy
+     * identities flow through the two matching tiers untouched. It must be a
+     * TOTAL function — the production binding
+     * ({@link #realPathCanonicalizer()}) falls back to the raw string
+     * internally; tests inject pure maps so this class stays I/O-free under
+     * test. Performs no I/O (INV-RF-03).
+     *
+     * @param enumerator the enumeration seam, never {@code null}
+     * @param canonicalizer resolves a path to its canonical device-node form,
+     *                      never {@code null}
+     */
+    PortLocator(PortEnumerator enumerator, UnaryOperator<String> canonicalizer) {
         this.enumerator = Objects.requireNonNull(enumerator, "enumerator");
+        this.canonicalizer = Objects.requireNonNull(canonicalizer, "canonicalizer");
+    }
+
+    /**
+     * The PRODUCTION canonicalizer binding (M9.6-RO DP-4): best-effort symlink
+     * resolution via {@link Path#toRealPath} — the {@code /dev/zigbee} udev
+     * alias resolves to its real device node — falling back to the RAW string
+     * on any failure (missing path, non-Linux host, malformed input), so
+     * matching degrades to string equality rather than throwing.
+     *
+     * <p>The returned function performs file-system I/O on every apply. It is
+     * bound at composition ({@code ZigbeeIntegrationAdapter}) and shared with
+     * the bind-time capture; it must never be invoked from this class's own
+     * matching logic except through the injected seam.
+     *
+     * @return the toRealPath-with-fallback canonicalizer
+     */
+    static UnaryOperator<String> realPathCanonicalizer() {
+        return path -> {
+            try {
+                return Path.of(path).toRealPath().toString();
+            } catch (IOException | InvalidPathException e) {
+                return path;
+            }
+        };
     }
 
     /**
@@ -83,9 +137,21 @@ final class PortLocator {
     }
 
     /**
-     * Re-finds a previously identified port after unplug/renumbering: first by the
-     * stable id (by-id path or recorded stable path), then by VID:PID class match —
-     * the device node may have renumbered ({@code ttyUSB0} → {@code ttyUSB1}).
+     * Re-finds a previously identified port after unplug/renumbering.
+     *
+     * <p><strong>Pinned-only identities</strong> ({@link PortIdentity#isPinnedOnly()},
+     * M9.6-RO DP-2) match by CANONICALIZED-PATH EQUALITY ONLY: the pinned
+     * {@code stableId} and each candidate's paths are both canonicalized, and
+     * nothing else participates — the VID:PID tier is SKIPPED and there is no
+     * coordinator-class fallback, because with two same-class sticks attached an
+     * operator pin must never reopen the neighbor (promiscuous re-resolution was
+     * REJECTED on the record: it could push the NCP config batch into a foreign
+     * stick on every backoff tick).
+     *
+     * <p><strong>Healthy identities</strong> flow through the two pre-existing
+     * tiers unchanged: first the stable id (by-id path or recorded stable path),
+     * then the VID:PID class match — the device node may have renumbered
+     * ({@code ttyUSB0} → {@code ttyUSB1}).
      *
      * @param identity the previously captured identity, never {@code null}
      * @return the candidate to reopen, or empty when the device is absent
@@ -93,6 +159,16 @@ final class PortLocator {
     Optional<PortCandidate> reopenTarget(PortIdentity identity) {
         Objects.requireNonNull(identity, "identity");
         List<PortCandidate> candidates = enumerator.enumerate();
+        if (identity.isPinnedOnly()) {
+            String pinned = canonicalizer.apply(identity.stableId());
+            return candidates.stream()
+                    .filter(c -> pinned.equals(canonicalizer.apply(c.systemPath()))
+                            || (c.byIdPath() != null
+                                    && pinned.equals(
+                                            canonicalizer.apply(c.byIdPath()))))
+                    .sorted(byStability())
+                    .findFirst();
+        }
         Optional<PortCandidate> byStableId = candidates.stream()
                 .filter(c -> identity.stableId().equals(c.byIdPath())
                         || identity.stableId().equals(c.systemPath()))
