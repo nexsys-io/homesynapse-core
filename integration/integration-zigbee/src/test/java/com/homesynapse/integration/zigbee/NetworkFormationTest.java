@@ -9,6 +9,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.HashMap;
 import java.util.List;
@@ -31,6 +32,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class NetworkFormationTest {
 
     private static final String KEY_REF = NetworkFormation.NETWORK_KEY_REF;
+
+    /** The independent well-known-key literal (never the production constant). */
+    private static final byte[] WELL_KNOWN_TC_LINK_KEY =
+            "ZigBeeAlliance09".getBytes(StandardCharsets.US_ASCII);
 
     private FakeCoordinatorOps ops;
     private RecordingNetworkParameterStore store;
@@ -172,13 +177,14 @@ class NetworkFormationTest {
 
     @Test
     @DisplayName("form() with an existing key reference reuses the stored key — "
-            + "no fresh generation")
+            + "no fresh generation (custody fully seeded: key + TCLK seed, M9.6-SEED)")
     void form_existingKeyReused() {
         byte[] knownKey = new byte[16];
         for (int i = 0; i < 16; i++) {
             knownKey[i] = (byte) (0x60 + i);
         }
         store.saveNetworkKey(KEY_REF, knownKey);
+        store.seedTclkSeed(new byte[16]); // full custody — no seed mint either
         CountingSecureRandom counting = new CountingSecureRandom();
         formation = new NetworkFormation(ops, store, counting);
 
@@ -186,6 +192,149 @@ class NetworkFormationTest {
 
         assertThat(ops.receivedKey).isEqualTo(knownKey);
         assertThat(counting.nextBytesCalls).isZero();
+    }
+
+    // ------------------------------------------------------------------
+    // Generated-seed TCLK custody (M9.6-SEED, SD-5)
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("M9.6-SEED DP-1/DP-4: fresh custody mints key AND seed in ONE "
+            + "atomic batch, durable BEFORE the coordinator forms; the seed rides "
+            + "the ops seam and nothing observable leaks it")
+    void form_freshCustody_mintsSeedAtomicallyBeforeForm() {
+        ops.journal = store.custodyOperations();
+
+        NetworkParameters formed = formation.form();
+
+        byte[] seed = store.storedTclkSeed();
+        assertThat(seed).isNotNull().hasSize(16);
+        assertThat(ops.receivedTcLinkKey)
+                .as("the formation arm passes the minted seed, never the "
+                        + "well-known root")
+                .isEqualTo(seed)
+                .isNotEqualTo(WELL_KNOWN_TC_LINK_KEY);
+        assertThat(seed)
+                .as("seed and network key are distinct materials")
+                .isNotEqualTo(store.storedKey(KEY_REF));
+        // ONE never-torn batch, then formation, then parameters — the DP-1
+        // ordering doctrine extended verbatim to every newly-minted secret.
+        assertThat(store.custodyOperations())
+                .containsExactly("saveNetworkKeyAndTclkSeed", "formNetwork", "save");
+        // H5 discipline: both hex casings on every observable surface.
+        String seedHex = hex(seed);
+        assertThat(formed.toString().replace(" ", ""))
+                .doesNotContain(seedHex)
+                .doesNotContain(seedHex.toUpperCase());
+    }
+
+    @Test
+    @DisplayName("M9.6-SEED DP-1: an existing seed is REUSED — no re-mint, no "
+            + "second persist")
+    void form_existingSeed_reusedNeverReminted() {
+        byte[] knownKey = new byte[16];
+        byte[] knownSeed = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            knownKey[i] = (byte) (0x60 + i);
+            knownSeed[i] = (byte) (0xA0 + i);
+        }
+        store.seedNetworkKey(KEY_REF, knownKey);
+        store.seedTclkSeed(knownSeed);
+        CountingSecureRandom counting = new CountingSecureRandom();
+        formation = new NetworkFormation(ops, store, counting);
+        ops.journal = store.custodyOperations();
+
+        formation.form(new NetworkParameters(15, 0x1234, 0xAAL, KEY_REF));
+
+        assertThat(ops.receivedTcLinkKey).isEqualTo(knownSeed);
+        assertThat(counting.nextBytesCalls).as("nothing is re-minted").isZero();
+        assertThat(store.custodyOperations())
+                .as("no custody persist happens for fully-present material")
+                .containsExactly("formNetwork", "save");
+    }
+
+    @Test
+    @DisplayName("M9.6-SEED DP-4 asymmetric custody: key present + seed absent — "
+            + "only the missing seed is minted, persisted via a SINGLE save")
+    void form_keyPresentSeedAbsent_mintsOnlySeed() {
+        byte[] knownKey = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            knownKey[i] = (byte) (0x60 + i);
+        }
+        store.seedNetworkKey(KEY_REF, knownKey);
+        CountingSecureRandom counting = new CountingSecureRandom();
+        formation = new NetworkFormation(ops, store, counting);
+        ops.journal = store.custodyOperations();
+
+        formation.form(new NetworkParameters(15, 0x1234, 0xAAL, KEY_REF));
+
+        assertThat(ops.receivedKey).isEqualTo(knownKey);
+        assertThat(counting.nextBytesCalls).as("one mint: the seed").isEqualTo(1);
+        assertThat(store.storedTclkSeed()).isNotNull().hasSize(16);
+        assertThat(store.custodyOperations())
+                .containsExactly("saveTclkSeed", "formNetwork", "save");
+    }
+
+    @Test
+    @DisplayName("M9.6-SEED DP-4 asymmetric custody: seed present + key absent — "
+            + "only the missing key is minted, persisted via a SINGLE save")
+    void form_seedPresentKeyAbsent_mintsOnlyKey() {
+        byte[] knownSeed = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            knownSeed[i] = (byte) (0xA0 + i);
+        }
+        store.seedTclkSeed(knownSeed);
+        CountingSecureRandom counting = new CountingSecureRandom();
+        formation = new NetworkFormation(ops, store, counting);
+        ops.journal = store.custodyOperations();
+
+        formation.form(new NetworkParameters(15, 0x1234, 0xAAL, KEY_REF));
+
+        assertThat(ops.receivedTcLinkKey).isEqualTo(knownSeed);
+        assertThat(counting.nextBytesCalls).as("one mint: the key").isEqualTo(1);
+        assertThat(store.storedKey(KEY_REF)).isNotNull().hasSize(16);
+        assertThat(store.custodyOperations())
+                .containsExactly("saveNetworkKey", "formNetwork", "save");
+    }
+
+    @Test
+    @DisplayName("M9.6-SEED DP-7: restore with a seed IN CUSTODY re-forms with "
+            + "the CUSTODY seed (AS-FORMED reproduction)")
+    void resume_restoreWithSeed_passesCustodySeed() throws Exception {
+        NetworkParameters stored =
+                new NetworkParameters(20, 0x2B84, 0xBEEFL, KEY_REF);
+        byte[] knownKey = new byte[16];
+        knownKey[0] = 0x7F;
+        byte[] knownSeed = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            knownSeed[i] = (byte) (0xA0 + i);
+        }
+        store.seed(stored);
+        store.seedNetworkKey(KEY_REF, knownKey);
+        store.seedTclkSeed(knownSeed);
+        ops.joined = false; // NVRAM wiped
+
+        formation.resume();
+
+        assertThat(ops.receivedTcLinkKey).isEqualTo(knownSeed);
+        assertThat(ops.receivedKey).isEqualTo(knownKey);
+    }
+
+    @Test
+    @DisplayName("M9.6-SEED DP-7: restore WITHOUT a seed passes the well-known "
+            + "root (AS-FORMED — the pre-SEED bench custody) and NEVER mints")
+    void resume_restoreWithoutSeed_passesWellKnown_neverMints() throws Exception {
+        store.seed(new NetworkParameters(20, 0x2B84, 0xBEEFL, KEY_REF));
+        store.seedNetworkKey(KEY_REF, new byte[16]);
+        CountingSecureRandom counting = new CountingSecureRandom();
+        formation = new NetworkFormation(ops, store, counting);
+        ops.joined = false; // NVRAM wiped
+
+        formation.resume();
+
+        assertThat(ops.receivedTcLinkKey).isEqualTo(WELL_KNOWN_TC_LINK_KEY);
+        assertThat(counting.nextBytesCalls).as("never a mint on restore").isZero();
+        assertThat(store.storedTclkSeed()).as("restore writes no seed").isNull();
     }
 
     @Test
@@ -239,16 +388,27 @@ class NetworkFormationTest {
     }
 
     @Test
-    @DisplayName("coordinator lost its network AND the key is gone: permanent")
+    @DisplayName("coordinator lost its network AND the key is gone: permanent — "
+            + "the message never carries the custody seed (INV-SE-03)")
     void resume_lostNetworkMissingKey_permanent() {
         store.seed(new NetworkParameters(20, 0x2B84, 0xBEEFL, KEY_REF));
+        byte[] seed = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            seed[i] = (byte) (0xA0 + i);
+        }
+        store.seedTclkSeed(seed);
         ops.joined = false;
 
         assertThatThrownBy(() -> formation.resume())
                 .isInstanceOf(PermanentIntegrationException.class)
-                .satisfies(e -> assertThat(
-                        ((PermanentIntegrationException) e).errorCode())
-                        .isEqualTo("zigbee.network_key_missing"));
+                .satisfies(e -> {
+                    assertThat(((PermanentIntegrationException) e).errorCode())
+                            .isEqualTo("zigbee.network_key_missing");
+                    // H5: both casings — the seed never rides an exception.
+                    assertThat(e.getMessage())
+                            .doesNotContain(hex(seed))
+                            .doesNotContain(hex(seed).toUpperCase());
+                });
     }
 
     @Test
@@ -258,8 +418,13 @@ class NetworkFormationTest {
         NetworkParameters stored =
                 new NetworkParameters(15, 0x1A62, 0x1234L, KEY_REF);
         byte[] key = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+        byte[] seed = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            seed[i] = (byte) (0xA0 + i);
+        }
         store.seed(stored);
         store.saveNetworkKey(KEY_REF, key);
+        store.seedTclkSeed(seed);
         ops.joined = true;
         ops.current = new NetworkFormation.CoordinatorOps.CoordinatorNetwork(
                 true, 20, 0x7777, 0x9999L);
@@ -271,10 +436,13 @@ class NetworkFormationTest {
                 .satisfies(e -> {
                     assertThat(((PermanentIntegrationException) e).errorCode())
                             .isEqualTo("zigbee.network_parameter_mismatch");
-                    // H5: both casings — see form_keyCustody.
+                    // H5: both casings — see form_keyCustody; the seed takes
+                    // the key's exact discipline (M9.6-SEED, INV-SE-03).
                     assertThat(e.getMessage())
                             .doesNotContain(hex(key))
-                            .doesNotContain(hex(key).toUpperCase());
+                            .doesNotContain(hex(key).toUpperCase())
+                            .doesNotContain(hex(seed))
+                            .doesNotContain(hex(seed).toUpperCase());
                 });
     }
 
@@ -307,9 +475,12 @@ class NetworkFormationTest {
         RuntimeException formNetworkFailure;
 
         byte[] receivedKey;
+        byte[] receivedTcLinkKey;
         int formedChannel = -1;
         int formedPanId = -1;
         int scanCalls;
+        /** Shared with the store's custody journal for cross-object ordering. */
+        List<String> journal;
 
         private FakeCoordinatorOps() {
             for (int channel = 11; channel <= 26; channel++) {
@@ -325,13 +496,17 @@ class NetworkFormationTest {
 
         @Override
         public void formNetwork(int channel, int panId, long extendedPanId,
-                byte[] networkKey) {
+                byte[] networkKey, byte[] trustCenterLinkKey) {
+            if (journal != null) {
+                journal.add("formNetwork");
+            }
             if (formNetworkFailure != null) {
                 throw formNetworkFailure;
             }
             formedChannel = channel;
             formedPanId = panId;
             receivedKey = networkKey.clone();
+            receivedTcLinkKey = trustCenterLinkKey.clone();
         }
 
         @Override

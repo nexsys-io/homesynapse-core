@@ -198,7 +198,9 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      * without it — and the measured defect was the policy id it was written to
      * ({@link #POLICY_TC_KEY_REQUEST}'s original 0x09 mis-map), never this
      * decision value. With hashed-TCLK formation the send-current path is the
-     * reference behavior (0x52 generate-new is NOT the A/B baseline).
+     * reference behavior (0x52 generate-new is NOT the A/B baseline) — and
+     * UNCHANGED under the M9.6-SEED generated seed (DP-9): send-current serves
+     * each device its seed-derived hashed TCLK, exactly the bellows posture.
      */
     static final int DECISION_ALLOW_TC_KEY_REQUESTS = 0x51;
     /**
@@ -371,14 +373,27 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      * plain for Wave-1 with the reason recorded and a W2 row — evidence-first, one
      * variable at a time, characterized before any user network exists rather than
      * after." The fallback is a one-constant revert of this value to {@code 0x1B04}
-     * (plain), carried in the bench protocol — never a runtime branch. The
-     * preconfigured key stays the well-known ZigBeeAlliance09 (§3.13 step 5) — see
-     * the M9.4b completion report's bellows re-derivation note ([REVIEW]: bellows
-     * supplies a GENERATED random seed under {@code use_hashed_tclk}).</p>
+     * (plain), carried in the bench protocol — never a runtime branch. Since
+     * M9.6-SEED the preconfigured key handed into the struct is the FORMATION
+     * POLICY's ({@link NetworkFormation}): the generated per-install custody seed
+     * on every new formation — resolving the M9.4b [REVIEW] bellows re-derivation
+     * note (bellows supplies a GENERATED random seed under {@code use_hashed_tclk};
+     * this adapter now matches that reference posture) — and the well-known
+     * ZigBeeAlliance09 only on the AS-FORMED restore of pre-SEED custody.</p>
      */
     static final int INITIAL_SECURITY_BITMASK = 0x1B84;
-    /** The well-known Trust Center link key "ZigBeeAlliance09" (§3.13 step 5). */
-    private static final byte[] TC_LINK_KEY = {
+    /**
+     * The well-known Trust Center link key "ZigBeeAlliance09" (§3.13 step 5).
+     * Since M9.6-SEED (SD-5) this key holds exactly TWO roles: the per-window
+     * transient joiner-bootstrap key ({@link #enablePreconfiguredKeyJoins()} —
+     * the standard Z3.0 mechanism, DP-8) and the AS-FORMED reproduction key on
+     * {@link NetworkFormation}'s restore arm for pre-SEED custody (seed absent,
+     * DP-7). It is NEVER the formation root of a new network — fresh formations
+     * install the generated custody seed; the posture policy lives in
+     * {@link NetworkFormation}, and this protocol layer is posture-agnostic
+     * (package-private so the formation arms can pass it explicitly).
+     */
+    static final byte[] TC_LINK_KEY = {
         0x5A, 0x69, 0x67, 0x42, 0x65, 0x65, 0x41, 0x6C,
         0x6C, 0x69, 0x61, 0x6E, 0x63, 0x65, 0x30, 0x39
     };
@@ -1962,10 +1977,10 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
 
         @Override
         public void formNetwork(int channel, int panId, long extendedPanId,
-                byte[] networkKey) {
+                byte[] networkKey, byte[] trustCenterLinkKey) {
             EzspFrame securityResponse = executeLocked(
                     FRAME_SET_INITIAL_SECURITY_STATE,
-                    encodeInitialSecurityState(networkKey),
+                    encodeInitialSecurityState(networkKey, trustCenterLinkKey),
                     DEFAULT_COMMAND_TIMEOUT_MILLIS);
             requireSuccess("setInitialSecurityState", securityResponse);
 
@@ -2032,15 +2047,24 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
             return new CoordinatorNetwork(true, channel, panId, extendedPanId);
         }
 
-        private byte[] encodeInitialSecurityState(byte[] networkKey) {
+        private byte[] encodeInitialSecurityState(byte[] networkKey,
+                byte[] trustCenterLinkKey) {
             if (networkKey.length != 16) {
                 throw new IllegalArgumentException(
                         "networkKey must be 16 bytes, got " + networkKey.length);
             }
+            if (trustCenterLinkKey.length != 16) {
+                throw new IllegalArgumentException(
+                        "trustCenterLinkKey must be 16 bytes, got "
+                                + trustCenterLinkKey.length);
+            }
             byte[] struct = new byte[43];
             struct[0] = (byte) (INITIAL_SECURITY_BITMASK & 0xFF);
             struct[1] = (byte) ((INITIAL_SECURITY_BITMASK >> 8) & 0xFF);
-            System.arraycopy(TC_LINK_KEY, 0, struct, 2, 16);
+            // M9.6-SEED DP-5: posture-agnostic — whatever TC key the formation
+            // policy handed down lands at [2..17]; nothing else in the struct
+            // changed.
+            System.arraycopy(trustCenterLinkKey, 0, struct, 2, 16);
             System.arraycopy(networkKey, 0, struct, 18, 16);
             struct[34] = 0; // networkKeySequenceNumber
             // preconfiguredTrustCenterEui64: zeros (we are the trust center)

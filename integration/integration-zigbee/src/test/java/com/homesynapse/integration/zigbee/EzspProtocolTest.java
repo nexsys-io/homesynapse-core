@@ -4,14 +4,22 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.integration.PermanentIntegrationException;
 import com.homesynapse.test.TestClock;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -32,6 +40,10 @@ class EzspProtocolTest {
 
     private static final String KEY_REF = NetworkFormation.NETWORK_KEY_REF;
 
+    /** The independent well-known-key literal (never the production constant). */
+    private static final byte[] WELL_KNOWN_TC_LINK_KEY =
+            "ZigBeeAlliance09".getBytes(StandardCharsets.US_ASCII);
+
     private TestClock clock;
     private FakeSerialByteChannel channel;
     private FakeNcp ncp;
@@ -39,6 +51,49 @@ class EzspProtocolTest {
     private RecordingNetworkParameterStore store;
     private EzspCoordinatorProtocol protocol;
     private int ncpVersion;
+    /** Captures BOTH loggers the seed flows through (formation + protocol). */
+    private ListAppender<ILoggingEvent> custodyLogCapture;
+
+    @BeforeEach
+    void setUpCustodyLogCapture() {
+        custodyLogCapture = new ListAppender<>();
+        custodyLogCapture.start();
+        formationLogger().addAppender(custodyLogCapture);
+        protocolLogger().addAppender(custodyLogCapture);
+    }
+
+    @AfterEach
+    void tearDownCustodyLogCapture() {
+        formationLogger().detachAppender(custodyLogCapture);
+        protocolLogger().detachAppender(custodyLogCapture);
+    }
+
+    private static Logger formationLogger() {
+        return (Logger) LoggerFactory.getLogger(NetworkFormation.class);
+    }
+
+    private static Logger protocolLogger() {
+        return (Logger) LoggerFactory.getLogger(EzspCoordinatorProtocol.class);
+    }
+
+    /** The captured M9.6-SEED DP-10 posture INFO lines, in order. */
+    private List<String> postureMessages() {
+        return custodyLogCapture.list.stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith("zigbee.tc_link_key_posture"))
+                .toList();
+    }
+
+    /** INV-SE-03: no captured formation/protocol log line carries the seed hex. */
+    private void assertNoSeedHexInCapturedLogs(byte[] seed) {
+        String lower = HexFormat.of().formatHex(seed);
+        String upper = lower.toUpperCase(java.util.Locale.ROOT);
+        for (ILoggingEvent event : custodyLogCapture.list) {
+            assertThat(event.getFormattedMessage())
+                    .doesNotContain(lower)
+                    .doesNotContain(upper);
+        }
+    }
 
     private void connect(int version) {
         ncpVersion = version;
@@ -376,8 +431,8 @@ class EzspProtocolTest {
     // ------------------------------------------------------------------
 
     @Test
-    @DisplayName("formNetwork: security state (TC link key + custody key) then "
-            + "formation struct, then parameter persistence")
+    @DisplayName("formNetwork: security state (generated TCLK seed + custody key) "
+            + "then formation struct, then parameter persistence (M9.6-SEED)")
     void formNetwork_endToEnd() {
         connect(13);
         startSessionOrFail();
@@ -396,14 +451,22 @@ class EzspProtocolTest {
         // the bench-protocol fallback is a one-constant revert to 0x1B04).
         assertThat(struct[0]).isEqualTo((byte) 0x84); // bitmask LE low
         assertThat(struct[1]).isEqualTo((byte) 0x1B); // bitmask LE high
-        // Independent ZigBeeAlliance09 ASCII literal — deliberately NOT the
-        // production constant, so a corrupted constant cannot self-confirm.
-        assertThat(Arrays.copyOfRange(struct, 2, 18)).containsExactly(
-                0x5A, 0x69, 0x67, 0x42, 0x65, 0x65, 0x41, 0x6C,
-                0x6C, 0x69, 0x61, 0x6E, 0x63, 0x65, 0x30, 0x39);
+        // M9.6-SEED (SD-5): the TC link key at [2..17] is the GENERATED custody
+        // seed — never the well-known root, which keeps only the per-window
+        // transient joiner-bootstrap role (DP-8).
+        byte[] seed = store.storedTclkSeed();
+        assertThat(seed).isNotNull().hasSize(16);
+        assertThat(Arrays.copyOfRange(struct, 2, 18))
+                .isEqualTo(seed)
+                .isNotEqualTo(WELL_KNOWN_TC_LINK_KEY);
         byte[] storedKey = store.storedKey(KEY_REF);
         assertThat(storedKey).isNotNull().hasSize(16);
         assertThat(Arrays.copyOfRange(struct, 18, 34)).isEqualTo(storedKey);
+        // The DP-10 posture INFO fires on the formation arm, verbatim, and no
+        // captured formation line leaks the seed (INV-SE-03, both casings).
+        assertThat(postureMessages()).containsExactly(
+                "zigbee.tc_link_key_posture: posture=generated_seed context=formation");
+        assertNoSeedHexInCapturedLogs(seed);
 
         byte[] form = lastCommandWithFrameId(0x001E);
         assertThat(form).isNotNull();
@@ -437,15 +500,28 @@ class EzspProtocolTest {
     }
 
     @Test
-    @DisplayName("resumeNetwork: coordinator NVRAM restored, parameters match")
+    @DisplayName("resumeNetwork: coordinator NVRAM restored, parameters match — "
+            + "NO security state written, no posture INFO (M9.6-SEED DP-7 "
+            + "regression pin: the NVRAM-resume arm ignores custody entirely)")
     void resumeNetwork_restored() {
         connect(13);
         startSessionOrFail();
         NetworkParameters params =
                 new NetworkParameters(15, 0x1A62, 0x00124B0012345678L, KEY_REF);
         store.seed(params);
+        store.seedTclkSeed(new byte[] {
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10
+        }); // a seed in custody must not change the NVRAM arm
 
         protocol.resumeNetwork(); // default handler reports a matching network
+
+        assertThat(lastCommandWithFrameId(0x0068))
+                .as("the NVRAM-resume arm writes no security state")
+                .isNull();
+        assertThat(postureMessages())
+                .as("no posture INFO fires from the NVRAM arm")
+                .isEmpty();
     }
 
     // ------------------------------------------------------------------
@@ -603,8 +679,52 @@ class EzspProtocolTest {
         assertThat(security).isNotNull();
         assertThat(Arrays.copyOfRange(extendedParameters(security), 18, 34))
                 .isEqualTo(knownKey);
+        // M9.6-SEED DP-7: no seed in custody ⇒ AS-FORMED reproduction on the
+        // well-known root — restore NEVER mints.
+        assertThat(Arrays.copyOfRange(extendedParameters(security), 2, 18))
+                .isEqualTo(WELL_KNOWN_TC_LINK_KEY);
+        assertThat(store.storedTclkSeed())
+                .as("restore writes no seed")
+                .isNull();
+        assertThat(postureMessages()).containsExactly(
+                "zigbee.tc_link_key_posture: posture=well_known context=restore");
         byte[] form = lastCommandWithFrameId(0x001E);
         assertThat(extendedParameters(form)[11]).isEqualTo((byte) 15);
+    }
+
+    @Test
+    @DisplayName("M9.6-SEED DP-7: coordinator lost its network + seed IN custody — "
+            + "the re-form struct carries the CUSTODY seed (AS-FORMED)")
+    void resumeNetwork_coordinatorLost_carriesCustodySeed() {
+        connect(13);
+        startSessionOrFail();
+        NetworkParameters params =
+                new NetworkParameters(15, 0x1A62, 0x00124B0012345678L, KEY_REF);
+        byte[] knownKey = new byte[16];
+        byte[] knownSeed = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            knownKey[i] = (byte) (0x40 + i);
+            knownSeed[i] = (byte) (0xA0 + i);
+        }
+        store.seed(params);
+        store.seedNetworkKey(KEY_REF, knownKey);
+        store.seedTclkSeed(knownSeed);
+        ncp.onEzspCommand(command -> {
+            if (!isLegacyVersion(command) && frameIdOf(command) == 0x0017) {
+                return List.of(extendedResponse(command[0] & 0xFF, 0x0017,
+                        new byte[] {(byte) 0x93})); // EMBER_NOT_JOINED
+            }
+            return defaultHandler(command);
+        });
+
+        protocol.resumeNetwork();
+
+        byte[] struct = extendedParameters(lastCommandWithFrameId(0x0068));
+        assertThat(Arrays.copyOfRange(struct, 2, 18)).isEqualTo(knownSeed);
+        assertThat(Arrays.copyOfRange(struct, 18, 34)).isEqualTo(knownKey);
+        assertThat(postureMessages()).containsExactly(
+                "zigbee.tc_link_key_posture: posture=generated_seed context=restore");
+        assertNoSeedHexInCapturedLogs(knownSeed);
     }
 
     // ------------------------------------------------------------------

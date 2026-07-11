@@ -66,4 +66,50 @@ interface NetworkParameterStore {
      * @return the key material, or empty if no key is stored under {@code keyRef}
      */
     Optional<byte[]> loadNetworkKey(String keyRef);
+
+    /**
+     * Stores the 16-byte generated Trust Center link-key seed under the fixed
+     * {@code zigbee.tclk_seed} reference (M9.6-SEED, the SD-5 custody
+     * consequence). INV-SE-03 applies to the seed identically to the network
+     * key: its only legal path is {@code SecureRandom → this store} (and from
+     * the store into the coordinator's initial security state at
+     * formation/restore). The seed is NEVER logged, NEVER serialized into
+     * plain configuration, NEVER included in any {@code toString()}, exception
+     * message, or event payload.
+     *
+     * @param seedMaterial the 16-byte hashed-TCLK seed, never {@code null}
+     */
+    void saveTclkSeed(byte[] seedMaterial);
+
+    /**
+     * Retrieves the generated Trust Center link-key seed, if present.
+     *
+     * <p><strong>Presence is the posture marker (M9.6-SEED DP-2):</strong> a
+     * present seed means this custody's network was FORMED with the generated
+     * seed; an absent seed means it was formed on the well-known root (the
+     * pre-SEED bench network exactly), and restore must reproduce AS-FORMED.
+     * Recorded scope limit (DP-7): a corrupted custody that lost ONLY the seed
+     * secret is indistinguishable from legitimate well-known custody — restore
+     * would honestly reproduce the wrong root, surfacing as TCLK mismatches at
+     * the devices' key-request legs. Bounded and named; the FRAME-CTR custody
+     * schema closes it.
+     *
+     * @return the seed material, or empty if no seed is stored
+     */
+    Optional<byte[]> loadTclkSeed();
+
+    /**
+     * Atomically stores the network key AND the TCLK seed in one never-torn,
+     * durable-before-return write (M9.6-SEED DP-4 — the AMD-68
+     * {@code SecretStore.setAll} semantics in the real binding): either both
+     * secrets are persisted or neither is, so a first-run mint can never leave
+     * half a custody. The INV-SE-03 clauses on {@link #saveNetworkKey} and
+     * {@link #saveTclkSeed} apply here identically.
+     *
+     * @param keyRef the opaque network-key reference, never {@code null}
+     * @param keyMaterial the 16-byte AES-128 network key, never {@code null}
+     * @param seedMaterial the 16-byte hashed-TCLK seed, never {@code null}
+     */
+    void saveNetworkKeyAndTclkSeed(String keyRef, byte[] keyMaterial,
+            byte[] seedMaterial);
 }

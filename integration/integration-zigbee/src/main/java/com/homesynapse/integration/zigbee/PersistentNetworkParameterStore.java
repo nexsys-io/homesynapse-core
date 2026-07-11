@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Clock;
 import java.util.HexFormat;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -36,6 +37,13 @@ import java.util.Optional;
  *       the secret name {@code zigbee.network_key.<keyRef>}. Key bytes ride
  *       hex-encoded INSIDE the store (AES-256-GCM at rest) and NEVER appear in the
  *       parameters JSON, logs, exception messages, or {@code toString()}.</li>
+ *   <li><strong>TCLK-seed material (M9.6-SEED, SD-5):</strong> the generated
+ *       Trust Center link-key seed rides the SAME custody, hex-encoded under the
+ *       fixed secret name {@link #TCLK_SEED_REF}. Its PRESENCE is the posture
+ *       marker (DP-2): present ⇒ this custody's network was formed with the
+ *       generated seed; absent ⇒ formed on the well-known root (the pre-SEED
+ *       bench network). {@code zigbee-network.json} is unchanged — no schema or
+ *       version field this WU (the FRAME-CTR row owns the future schema bump).</li>
  * </ul>
  *
  * <p><strong>Custody-corruption honesty:</strong> parameters present but key
@@ -59,6 +67,12 @@ final class PersistentNetworkParameterStore implements NetworkParameterStore {
 
     /** The secret-name prefix for network-key custody (M9.4b §5.5). */
     static final String KEY_NAME_PREFIX = "zigbee.network_key.";
+
+    /**
+     * The fixed secret name for TCLK-seed custody (M9.6-SEED DP-2, the
+     * {@code NETWORK_KEY_REF} idiom). Presence = generated-seed posture.
+     */
+    static final String TCLK_SEED_REF = "zigbee.tclk_seed";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -131,15 +145,7 @@ final class PersistentNetworkParameterStore implements NetworkParameterStore {
     public void saveNetworkKey(String keyRef, byte[] keyMaterial) {
         Objects.requireNonNull(keyRef, "keyRef");
         Objects.requireNonNull(keyMaterial, "keyMaterial");
-        try {
-            // The SecretStore chain never mkdirs (G12) — the first mutation
-            // creates the temp/store files INSIDE the directory.
-            Files.createDirectories(dataDirectory);
-        } catch (IOException failure) {
-            throw new IllegalStateException(
-                    "failed to create the zigbee data directory " + dataDirectory,
-                    failure);
-        }
+        ensureDataDirectory();
         secrets.set(KEY_NAME_PREFIX + keyRef, HexFormat.of().formatHex(keyMaterial));
     }
 
@@ -151,5 +157,45 @@ final class PersistentNetworkParameterStore implements NetworkParameterStore {
             return Optional.empty();
         }
         return Optional.of(HexFormat.of().parseHex(secrets.resolve(name)));
+    }
+
+    @Override
+    public void saveTclkSeed(byte[] seedMaterial) {
+        Objects.requireNonNull(seedMaterial, "seedMaterial");
+        ensureDataDirectory();
+        secrets.set(TCLK_SEED_REF, HexFormat.of().formatHex(seedMaterial));
+    }
+
+    @Override
+    public Optional<byte[]> loadTclkSeed() {
+        if (!secrets.list().contains(TCLK_SEED_REF)) {
+            return Optional.empty();
+        }
+        return Optional.of(HexFormat.of().parseHex(secrets.resolve(TCLK_SEED_REF)));
+    }
+
+    @Override
+    public void saveNetworkKeyAndTclkSeed(String keyRef, byte[] keyMaterial,
+            byte[] seedMaterial) {
+        Objects.requireNonNull(keyRef, "keyRef");
+        Objects.requireNonNull(keyMaterial, "keyMaterial");
+        Objects.requireNonNull(seedMaterial, "seedMaterial");
+        ensureDataDirectory();
+        // The AMD-68 never-torn write (DP-4): both secrets durable or neither.
+        secrets.setAll(Map.of(
+                KEY_NAME_PREFIX + keyRef, HexFormat.of().formatHex(keyMaterial),
+                TCLK_SEED_REF, HexFormat.of().formatHex(seedMaterial)));
+    }
+
+    private void ensureDataDirectory() {
+        try {
+            // The SecretStore chain never mkdirs (G12) — the first mutation
+            // creates the temp/store files INSIDE the directory.
+            Files.createDirectories(dataDirectory);
+        } catch (IOException failure) {
+            throw new IllegalStateException(
+                    "failed to create the zigbee data directory " + dataDirectory,
+                    failure);
+        }
     }
 }

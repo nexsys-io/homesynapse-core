@@ -36,6 +36,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Deque;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -157,6 +158,47 @@ class ZigbeeTrustCenterJoinTest {
                 .as("the security-manager flags byte")
                 .isEqualTo((byte) EzspCoordinatorProtocol.TRANSIENT_KEY_FLAGS_NONE);
         assertThat(adapter.isPermitJoinActive()).as("the window is open").isTrue();
+    }
+
+    // ── M9.6-SEED DP-8: the transient key NEVER carries the seed ────────────
+
+    @Test
+    @DisplayName("M9.6-SEED DP-8: with a generated seed in custody the formation "
+            + "struct carries the SEED, but the window-open transient key stays the "
+            + "well-known ZigBeeAlliance09 — the seed never rides importTransientKey")
+    void windowOpen_seedInCustody_transientKeyStaysWellKnown() throws Exception {
+        byte[] seed = new byte[16];
+        for (int i = 0; i < 16; i++) {
+            seed[i] = (byte) (0xC0 + i);
+        }
+        new PersistentNetworkParameterStore(tempDir, clock).saveTclkSeed(seed);
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> tcjHandler(ncp, command, List.of()));
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, 200);
+
+        adapter.openPermitJoinWindow();
+
+        byte[] security = parametersOf(framesWithId(ncp,
+                FRAME_SET_INITIAL_SECURITY_STATE).get(0));
+        assertThat(Arrays.copyOfRange(security, 2, 18))
+                .as("the fresh formation REUSES the custody seed (DP-1 idempotence)")
+                .isEqualTo(seed);
+        byte[] transientKey = parametersOf(framesWithId(ncp,
+                EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY).get(0));
+        assertThat(Arrays.copyOfRange(transientKey, 8, 24))
+                .as("the joiner-bootstrap transient key is the well-known key, "
+                        + "never the seed")
+                .isEqualTo(WELL_KNOWN_TC_LINK_KEY)
+                .isNotEqualTo(seed);
+        // INV-SE-03: the known seed appears in NO captured log line (both
+        // casings) across the whole production boot + window-open leg.
+        String seedHexLower = HexFormat.of().formatHex(seed);
+        String seedHexUpper = seedHexLower.toUpperCase(java.util.Locale.ROOT);
+        for (ILoggingEvent event : ingestionLogCapture.list) {
+            assertThat(event.getFormattedMessage())
+                    .doesNotContain(seedHexLower)
+                    .doesNotContain(seedHexUpper);
+        }
     }
 
     // ── §A-2 key absent ⇒ zero enablement frames ────────────────────────────
