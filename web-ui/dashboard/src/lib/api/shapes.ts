@@ -62,6 +62,14 @@ function oneOf<T extends string>(v: unknown, domain: T[], path: string): asserts
 function isStr(v: unknown, path: string): asserts v is string {
   if (typeof v !== 'string') throw new ContractError(`${path}: expected string, got ${typeof v}`);
 }
+/** String OR null — the observed live prior-instance nullability class
+ *  (RunSummary/CausalChain automationName, CausalTrigger.type; see contract.ts).
+ *  Absent is still a contract error; only an explicit null is tolerated. */
+function strOrNull(v: unknown, path: string): void {
+  if (v !== null && typeof v !== 'string') {
+    throw new ContractError(`${path}: expected string or null, got ${typeof v}`);
+  }
+}
 /** Optional field: absent is fine (additive-tolerant, freeze §A C8); present must be a string. */
 function optStr(o: Record<string, unknown>, key: string, path: string): void {
   if (key in o && typeof o[key] !== 'string') {
@@ -213,7 +221,7 @@ export const validators: Record<EndpointId, Validator> = {
       if (!isObj(r)) throw new ContractError(`${p}: must be object`);
       isStr(req(r, 'runId', p), `${p}.runId`);
       isStr(req(r, 'automationId', p), `${p}.automationId`);
-      isStr(req(r, 'automationName', p), `${p}.automationName`);
+      strOrNull(req(r, 'automationName', p), `${p}.automationName`); // observed live null (prior-instance runs)
       isStr(req(r, 'triggeredAt', p), `${p}.triggeredAt`);
       oneOf(req(r, 'status', p), RUN_STATUS, `${p}.status`);
     });
@@ -224,9 +232,10 @@ export const validators: Record<EndpointId, Validator> = {
     const d = req(b, 'data', 'B3chain');
     if (!isObj(d)) throw new ContractError('B3chain.data must be object');
     isStr(req(d, 'runId', 'B3chain.data'), 'B3chain.data.runId');
-    isStr(req(d, 'automationName', 'B3chain.data'), 'B3chain.data.automationName');
+    strOrNull(req(d, 'automationName', 'B3chain.data'), 'B3chain.data.automationName'); // observed live null
     const trigger = req(d, 'trigger', 'B3chain.data');
     if (!isObj(trigger)) throw new ContractError('B3chain.trigger must be object');
+    strOrNull(req(trigger, 'type', 'B3chain.trigger'), 'B3chain.trigger.type'); // observed live null
     subjectRef(req(trigger, 'subjectRef', 'B3chain.trigger'), 'B3chain.trigger.subjectRef');
     const conditions = req(d, 'conditions', 'B3chain.data');
     if (!Array.isArray(conditions)) throw new ContractError('B3chain.conditions must be array');

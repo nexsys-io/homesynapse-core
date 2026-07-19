@@ -455,6 +455,189 @@ function buildE5Confirmation(): MockDataset {
   };
 }
 
+/* The TEN-value command_result vocabulary (CommandResultEvent.java:22-27), as it
+ * actually reaches the frozen v1.1 causal-chain read TODAY: Core's explanation
+ * service flattens every non-acknowledged result into outcome:FAILED
+ * (StandardExplanationService.isFailure), with the truth surviving only in the
+ * RECORDED REASON. This scenario reproduces that wire faithfully — the two
+ * deterministic ledger disposition strings verbatim (StandardPendingCommandLedger
+ * .java:912-916 / :922-924), bare outcome tokens for the rest — so the UI's
+ * honest-verdict recovery (lib/verdicts.ts) is exercised against wire truth, and
+ * the flattening's cost is demonstrable to a stranger in one click.
+ */
+function buildVerdictVocabulary(): MockDataset {
+  const A = { automationId: 'auto_vv', automationName: 'Verdict vocabulary' };
+  // [outcome-on-the-wire, recorded reason (wire-faithful), minutes ago]
+  const flattened: { id: string; reason: string; min: number }[] = [
+    {
+      id: 'run_vv_superseded',
+      reason:
+        'superseded by a newer command on the same attribute; superseding command event 01JVVDEMO0000000000000000',
+      min: 4,
+    },
+    { id: 'run_vv_expired', reason: 'command was in-flight at restart and is not idempotent', min: 8 },
+    { id: 'run_vv_rejected', reason: 'rejected', min: 12 },
+    { id: 'run_vv_timed_out', reason: 'timed_out', min: 16 },
+    { id: 'run_vv_invalid', reason: 'invalid', min: 20 },
+    { id: 'run_vv_unsupported', reason: 'unsupported', min: 24 },
+    { id: 'run_vv_handler_error', reason: 'handler_error', min: 28 },
+    { id: 'run_vv_integration', reason: 'integration_unavailable', min: 32 },
+    { id: 'run_vv_unconfirmed', reason: 'unconfirmed', min: 36 },
+  ];
+  const runs: RunSummary[] = [];
+  const causalChains: Record<string, CausalChain> = {};
+  // The confirmed baseline (acknowledged → state_confirmed → CONFIRMED).
+  runs.push(makeRun('run_vv_confirmed', { ...A, minAgo: 2 }));
+  causalChains['run_vv_confirmed'] = makeChain('run_vv_confirmed', { ...A, outcome: 'CONFIRMED', minAgo: 2 });
+  for (const f of flattened) {
+    runs.push(makeRun(f.id, { ...A, status: 'COMPLETED', minAgo: f.min }));
+    causalChains[f.id] = makeChain(f.id, {
+      ...A,
+      status: 'COMPLETED',
+      minAgo: f.min,
+      actions: [makeAction('FAILED', { reason: f.reason })],
+    });
+  }
+  return {
+    ...defaultDataset,
+    automations: [makeAutomation('auto_vv', 'Verdict vocabulary', { lastRunId: 'run_vv_confirmed' })],
+    runs,
+    causalChains,
+    nonFiring: { auto_vv: makeNonFiring('auto_vv', 'NEVER_TRIGGERED', { automationName: 'Verdict vocabulary' }) },
+  };
+}
+
+/* The field-evidence set (skill v1.4 §4c — every class observed on the certified
+ * deployed build), one scenario:
+ *   - the SILENT-SKIP run: COMPLETED, actionCount 2 / commandCount 0 / actions[]
+ *     empty (lawful Doc 07 §3.9 per-target skips) — must never read as success;
+ *   - the NULL-NAME run: automationName/trigger.type null (prior-instance runs);
+ *   - the REHYDRATED-AVAILABLE entity: API says AVAILABLE from rehydrated history
+ *     while the last evidence is days old (why the surface renders evidence-with-age);
+ *   - the HONEST-UNKNOWN entity: no report since restart (calm, resolves on first report);
+ *   - DP-B2 "ran fine": NEVER_TRIGGERED + non-null lastRelevantRunId pointing at
+ *     the silent-skip run — the composed lie the run page then untangles honestly.
+ */
+function buildFieldEvidence(): MockDataset {
+  // Silent-skip run — the actionCount-vs-actions[] disagreement IS the tell.
+  const skip = makeChain('run_fe_skip', {
+    automationId: 'auto_fe',
+    automationName: 'Away lights',
+    minAgo: 12,
+  });
+  skip.actions = [];
+  skip.outcome = { status: 'COMPLETED', reason: null, durationMs: 41, actionCount: 2, commandCount: 0 };
+
+  // Null-name run (prior-instance class): name + trigger.type null ON THE WIRE.
+  const nullName = makeChain('run_fe_nullname', { minAgo: 2880 });
+  nullName.automationName = null;
+  nullName.trigger.type = null;
+  const nullNameRun = makeRun('run_fe_nullname', { minAgo: 2880 });
+  nullNameRun.automationName = null;
+
+  const entities: EntitySummary[] = [
+    ...base.entities,
+    // Physically off-network, yet AVAILABLE from rehydrated history (AVAIL-RECONCILE).
+    { entityId: 'ent_office_bulb', availability: 'AVAILABLE', stale: true },
+    // Honest UNKNOWN since restart — no fresh report yet.
+    { entityId: 'ent_porch_contact', availability: 'UNKNOWN', stale: false },
+  ];
+  const entityState: Record<string, EntityState> = {
+    ...base.entityState,
+    ent_office_bulb: {
+      entityId: 'ent_office_bulb',
+      availability: 'AVAILABLE',
+      attributes: { power: { t: 'BOOL', v: true } },
+      stateVersion: 44,
+      lastChanged: iso(2760),
+      lastUpdated: iso(2760),
+      lastReported: iso(2760), // ~2 days of silence behind an "Available" flag
+      stale: true,
+      staleAfter: iso(2640),
+    },
+    ent_porch_contact: {
+      entityId: 'ent_porch_contact',
+      availability: 'UNKNOWN',
+      attributes: {},
+      stateVersion: 1,
+      lastChanged: null,
+      lastUpdated: null,
+      lastReported: null,
+      stale: false,
+      staleAfter: null,
+    },
+  };
+
+  return {
+    ...defaultDataset,
+    entities,
+    entityState,
+    automations: [makeAutomation('auto_fe', 'Away lights', { lastRunId: 'run_fe_skip' })],
+    runs: [makeRun('run_fe_skip', { automationId: 'auto_fe', automationName: 'Away lights', minAgo: 12 }), nullNameRun],
+    causalChains: { run_fe_skip: skip, run_fe_nullname: nullName },
+    nonFiring: {
+      // DP-B2 wire shape for a "clean" COMPLETED run — which here was a do-nothing
+      // run: the verdict alone would read "ran and confirmed"; the linked run page
+      // is where the honest story lives.
+      auto_fe: makeNonFiring('auto_fe', 'NEVER_TRIGGERED', {
+        automationName: 'Away lights',
+        lastRelevantRunId: 'run_fe_skip',
+        explanation: 'It ran 12 minutes ago and reported no problem.',
+      }),
+    },
+  };
+}
+
+/* The live-fleet mirror (post-04P): one entity per deployed class — light ·
+ * occupancy · switch · temp/hum/battery · contact · battery-only. Attribute keys
+ * are SOURCE-DERIVED (canonical schema keys temperature_c / humidity_pct from the
+ * W2 handlers; brightness 0–254 canonical + the DERIVED brightness_percent
+ * decoration, MaterializedStateQueryService.java:113). A live probe of the Pi's
+ * read-API was not reachable from this session — re-verify shapes at the first
+ * live run (noted in the lane return).
+ */
+function buildLiveFleet(): MockDataset {
+  const mk = (
+    entityId: string,
+    availability: EntitySummary['availability'],
+    attrs: EntityState['attributes'],
+    minAgo: number,
+    stale = false,
+  ): EntityState => ({
+    entityId,
+    availability,
+    attributes: attrs,
+    stateVersion: 3,
+    lastChanged: iso(minAgo),
+    lastUpdated: iso(minAgo),
+    lastReported: iso(minAgo),
+    stale,
+    staleAfter: null,
+  });
+  const entityState: Record<string, EntityState> = {
+    ent_hue_light: mk('ent_hue_light', 'AVAILABLE', {
+      power: { t: 'BOOL', v: true },
+      brightness: { t: 'NUMBER', v: 209 }, // canonical 0–254 level
+      brightness_percent: { t: 'PERCENT', v: 82 }, // DERIVED at query time — the % the UI shows
+    }, 3),
+    ent_snzb03p_motion: mk('ent_snzb03p_motion', 'AVAILABLE', { occupancy: { t: 'BOOL', v: false }, battery: { t: 'PERCENT', v: 97 } }, 6),
+    ent_s31_switch: mk('ent_s31_switch', 'AVAILABLE', { power: { t: 'BOOL', v: true } }, 1),
+    ent_snzb02p_climate: mk('ent_snzb02p_climate', 'AVAILABLE', {
+      temperature_c: { t: 'NUMBER', v: 23.41 },
+      humidity_pct: { t: 'NUMBER', v: 47.2 },
+      battery: { t: 'PERCENT', v: 100 },
+    }, 9),
+    ent_snzb04p_contact: mk('ent_snzb04p_contact', 'AVAILABLE', { contact: { t: 'BOOL', v: true }, battery: { t: 'PERCENT', v: 100 } }, 14),
+    ent_snzb01p_button: mk('ent_snzb01p_button', 'AVAILABLE', { battery: { t: 'PERCENT', v: 100 } }, 45),
+  };
+  const entities: EntitySummary[] = Object.values(entityState).map((s) => ({
+    entityId: s.entityId,
+    availability: s.availability,
+    stale: s.stale,
+  }));
+  return { ...defaultDataset, entities, entityState, entityDetail: {} };
+}
+
 // Connected but empty — exercises the "empty as teaching", never a blank panel.
 function buildEmpty(): MockDataset {
   return {
@@ -489,6 +672,9 @@ export const SCENARIOS: Scenario[] = [
   { id: 'cascade', label: 'Cascade', group: 'Story', blurb: 'A run that triggered another — the child links back to “what triggered this”.', build: buildCascade },
   { id: 'all-verdicts', label: 'All “why not?” verdicts', group: 'Story', blurb: 'Condition-not-met, never-triggered, acted-but-unconfirmed, disabled.', build: buildAllVerdicts },
   { id: 'e5-confirmation', label: 'Confirmation, measured', group: 'Story', blurb: 'AMD-97 honest states at measured timing: color confirms slowly (flips live ~8s in), idempotent confirmed-from-cache, effect honestly unconfirmed, superseded expiry.', build: buildE5Confirmation },
+  { id: 'verdict-vocabulary', label: 'The ten verdicts', group: 'Story', blurb: 'Every command_result outcome as it reaches the wire today — the flattened FAILEDs carry the recorded reason, and the honest layer renders superseded/expired as intent-change, not failure.', build: buildVerdictVocabulary },
+  { id: 'field-evidence', label: 'Field evidence', group: 'Story', blurb: 'The silent-skip do-nothing run, the null-name prior-instance run, rehydrated “Available” with days-old evidence, and honest UNKNOWN since restart.', build: buildFieldEvidence },
+  { id: 'live-fleet', label: 'Live fleet mirror', group: 'Story', blurb: 'One entity per deployed device class with canonical attribute keys — including brightness level 0–254 plus the hub-derived percent.', build: buildLiveFleet },
   { id: 'all-origins', label: 'All event origins', group: 'Story', blurb: 'Automation, device, you, external, and the honest UNKNOWN.', build: buildAllOrigins },
   { id: 'large', label: 'Large (300 runs · 500 events)', group: 'Scale', blurb: 'Forces list virtualization + a render budget.', build: buildLarge },
   { id: 'empty', label: 'Empty (fresh install)', group: 'Scale', blurb: 'Connected but nothing has happened yet — empty states that teach.', build: buildEmpty },

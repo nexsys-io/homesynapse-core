@@ -167,6 +167,36 @@ describe('A4/A5 enveloped at the frozen v1.1.1 shapes (M7.5c-a)', () => {
   });
 });
 
+/* OBSERVED LIVE NULLABILITY (field-evidenced 2026-07-18; folded 2026-07-19 by the
+   explainability-UX lane): prior-instance runs arrive with automationName = null
+   (B3:runs, B3:causalChain) and trigger.type = null — automation instance ULIDs
+   re-mint per YAML load, and StandardExplanationService serves registry-miss names
+   as null. The v1.1 freeze text does not annotate these nullable; the clarification
+   ask is recorded in the 2026-07-19 lane return. These pins hold the tolerance to
+   EXACTLY null (absence and wrong types still fail). */
+describe('prior-instance null-name tolerance (observed live wire)', () => {
+  const META = { viewPosition: 9, timestamp: '2026-07-19T00:00:00Z' };
+
+  it('B3:runs accepts automationName: null, rejects absence and non-strings', () => {
+    const run = (automationName: unknown) => ({
+      data: [{ runId: 'r', automationId: 'a', automationName, triggeredAt: 't', status: 'COMPLETED', terminalReason: null }],
+      meta: META,
+    });
+    expect(() => validateAgainstContract('B3:runs', run(null))).not.toThrow();
+    expect(() => validateAgainstContract('B3:runs', run('Named'))).not.toThrow();
+    expect(() => validateAgainstContract('B3:runs', run(42))).toThrow();
+    const absent = { data: [{ runId: 'r', automationId: 'a', triggeredAt: 't', status: 'COMPLETED' }], meta: META };
+    expect(() => validateAgainstContract('B3:runs', absent)).toThrow();
+  });
+
+  it('B3:causalChain accepts automationName: null and trigger.type: null', () => {
+    const chain = SCENARIOS.find((s) => s.id === 'field-evidence')!.build().causalChains['run_fe_nullname']!;
+    expect(chain.automationName).toBeNull();
+    expect(chain.trigger.type).toBeNull();
+    expect(() => validateAgainstContract('B3:causalChain', { data: chain, meta: META })).not.toThrow();
+  });
+});
+
 /* T1.2: every scenario the mock can serve must be contract-shaped — so FE-4 verifies real
    shapes and live-integration (FE-1) meets nothing the UI hasn't already faced. */
 describe('every mock scenario is contract-shaped', () => {

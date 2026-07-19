@@ -150,6 +150,37 @@ export function availabilityMeta(a: Availability): { label: string; tone: Tone }
   }
 }
 
+/* ---- Availability as EVIDENCE WITH AGE — never the flag alone. ----
+ * Field-proven both directions on the live fleet: honest UNKNOWN at boot until
+ * evidence; UNAVAILABLE declared on evidence at ping-resolution (minutes-scale BY
+ * DESIGN); and a rehydrated AVAILABLE can outlive the device being physically
+ * off-network until the next ping resolves (the AVAIL-RECONCILE class). So every
+ * availability rendering pairs the flag with the last-evidence age — the flag says
+ * what the system last CONCLUDED; the age says how old the evidence is. */
+export function availabilityEvidence(
+  a: Availability,
+  lastReported: string | null | undefined,
+  now = Date.now(),
+): string {
+  const age = lastReported ? timeAgo(lastReported, now) : null;
+  switch (a) {
+    case 'AVAILABLE':
+      return age
+        ? `Available — last heard from ${age}.`
+        : 'Available — no report received yet.';
+    case 'UNAVAILABLE':
+      return age
+        ? `Offline — last heard from ${age}. Devices are rechecked every few minutes.`
+        : 'Offline — no report has been received. Devices are rechecked every few minutes.';
+    case 'UNKNOWN':
+      // Honest state after a restart (AMD-99): rehydrated from the log, waiting
+      // for the first fresh report. Calm — it resolves on the first report.
+      return age
+        ? `Not determined yet — the last report on record is from ${age}. This settles after the next report.`
+        : 'Not determined yet — waiting for the device’s first report. This is normal right after a restart.';
+  }
+}
+
 export function healthMeta(h: IntegrationHealth): { label: string; tone: Tone } {
   switch (h) {
     case 'HEALTHY':
@@ -191,6 +222,42 @@ export function verdictMeta(v: NonFiringVerdict): { label: string; tone: Tone } 
   }
 }
 
+/* ---- Names for runs whose automation is no longer on record ----
+ * Field evidence: prior-instance runs render `automationName` (and `trigger.type`)
+ * as null on the LIVE wire — automation instance identity re-mints per YAML load,
+ * so runs from an earlier load lose their name. Render the class honestly and
+ * calmly; NEVER invent a name for a null. */
+export function runName(name: string | null | undefined): string {
+  return name ?? 'An earlier automation';
+}
+
+/** One plain sentence explaining WHY a run can have no name — shown wherever the
+ *  null-name class surfaces (calm, honest; not an error). */
+export const NULL_NAME_NOTE =
+  'This run happened under an earlier version of your automations, so its name is no longer on record. The run itself is preserved.';
+
+/* ---- Brightness: percent comes from the DERIVED key, never a client rescale ----
+ * Canonical brightness state is 0–254 LEVEL units (Doc 08 §3.5); the percentage is
+ * derived AT QUERY TIME by Core and arrives as the additive `brightness_percent`
+ * data key inside the A3 attributes map (M9.4b — MaterializedStateQueryService).
+ * The dashboard displays that derived percent and NEVER rescales the raw level
+ * itself. When only the raw level is present, show it honestly in level units. */
+export function brightnessDisplay(
+  attributes: Record<string, TypedValue>,
+): { key: string; text: string } | null {
+  const pct = attributes['brightness_percent'];
+  if (pct && typeof pct.v === 'number') {
+    return { key: 'brightness_percent', text: `${pct.v}%` };
+  }
+  const raw = attributes['brightness'];
+  if (raw && typeof raw.v === 'number') {
+    // No derived percent on this payload — show the canonical level honestly,
+    // never a client-side 0–254 → % rescale.
+    return { key: 'brightness', text: `level ${raw.v} of 254` };
+  }
+  return null;
+}
+
 /* ---- Render a typed attribute value plainly ---- */
 export function attrValue(tv: TypedValue): string {
   const v = tv.v;
@@ -215,12 +282,21 @@ export function attrValueList(params: Record<string, unknown>): string {
 
 /* ---- The hero device-backward sentence (the mom test) ---- */
 export function causalSentence(chain: CausalChain): string {
-  const action = chain.actions[0];
-  const target = action ? labelFor(action.targetRef.id) : chain.automationName;
-  const verb = action ? commandVerb(action.command) : 'ran';
   const triggerSubject = labelFor(chain.trigger.subjectRef.id);
   const triggerVerb = triggerVerbFromValue(chain.trigger.firingValue);
   const when = clockTime(chain.trigger.matchedAt);
+  // The silent-skip class: the run finished without doing anything visible —
+  // say so up front, never a sentence that implies something happened.
+  if (
+    chain.actions.length === 0 &&
+    chain.outcome.actionCount > 0 &&
+    chain.outcome.commandCount === 0
+  ) {
+    return `${runName(chain.automationName)} ran when ${triggerSubject} ${triggerVerb} at ${when}, but nothing was changed.`;
+  }
+  const action = chain.actions[0];
+  const target = action ? labelFor(action.targetRef.id) : runName(chain.automationName);
+  const verb = action ? commandVerb(action.command) : 'ran';
   return `${target} ${verb} because ${triggerSubject} ${triggerVerb} at ${when}.`;
 }
 

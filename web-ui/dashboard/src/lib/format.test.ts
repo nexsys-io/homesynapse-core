@@ -4,7 +4,19 @@
  * these fail.
  */
 import { describe, it, expect } from 'vitest';
-import { causalSentence, labelFor, outcomeMeta, originMeta, runStatusMeta, timeAgo, verdictMeta } from './format';
+import {
+  availabilityEvidence,
+  brightnessDisplay,
+  causalSentence,
+  labelFor,
+  NULL_NAME_NOTE,
+  outcomeMeta,
+  originMeta,
+  runName,
+  runStatusMeta,
+  timeAgo,
+  verdictMeta,
+} from './format';
 import { causalChains } from './api/mock/mockData';
 import { BRAND } from './i18n';
 
@@ -50,5 +62,71 @@ describe('plain-language formatting', () => {
   it('labels run status plainly', () => {
     expect(runStatusMeta('COMPLETED').label).toBe('Completed');
     expect(runStatusMeta('SKIPPED').tone).toBe('unknown');
+  });
+});
+
+describe('availability is evidence-with-age — never the flag alone', () => {
+  const now = Date.parse('2026-07-19T12:00:00Z');
+  const ago = (min: number) => new Date(now - min * 60_000).toISOString();
+
+  it('pairs AVAILABLE with when the device was last heard from (the rehydrated-flag exhibit)', () => {
+    const s = availabilityEvidence('AVAILABLE', ago(2 * 24 * 60), now);
+    expect(s).toMatch(/^Available — last heard from 2 days ago\./);
+  });
+
+  it('renders offline with its evidence age and the recheck cadence, calmly', () => {
+    const s = availabilityEvidence('UNAVAILABLE', ago(9), now);
+    expect(s).toMatch(/Offline — last heard from 9 min ago/);
+    expect(s).toMatch(/rechecked every few minutes/);
+  });
+
+  it('renders honest UNKNOWN after a restart as normal, not a fault', () => {
+    const s = availabilityEvidence('UNKNOWN', null, now);
+    expect(s).toMatch(/waiting for the device’s first report/i);
+    expect(s).toMatch(/normal/i);
+    expect(s).not.toMatch(/error|wrong|fail/i);
+  });
+});
+
+describe('the null-name run class (prior-instance runs) renders honestly', () => {
+  it('never invents a name for a null', () => {
+    expect(runName(null)).toBe('An earlier automation');
+    expect(runName('Evening Hallway Light')).toBe('Evening Hallway Light');
+  });
+
+  it('explains WHY the name is missing, calmly (no blame, no alarm)', () => {
+    expect(NULL_NAME_NOTE).toMatch(/earlier version/i);
+    expect(NULL_NAME_NOTE).toMatch(/preserved/i);
+  });
+});
+
+describe('brightness percent comes from the DERIVED key, never a client rescale', () => {
+  it('prefers the hub-derived brightness_percent', () => {
+    const b = brightnessDisplay({
+      brightness: { t: 'NUMBER', v: 209 },
+      brightness_percent: { t: 'PERCENT', v: 82 },
+    });
+    expect(b).toEqual({ key: 'brightness_percent', text: '82%' });
+  });
+
+  it('shows the canonical level honestly when no derived percent is present — NOT 209/254 rescaled', () => {
+    const b = brightnessDisplay({ brightness: { t: 'NUMBER', v: 209 } });
+    expect(b).toEqual({ key: 'brightness', text: 'level 209 of 254' });
+    expect(b!.text).not.toContain('%');
+  });
+
+  it('returns null when the entity has no brightness at all', () => {
+    expect(brightnessDisplay({ power: { t: 'BOOL', v: true } })).toBeNull();
+  });
+});
+
+describe('the silent-skip run sentence (do-nothing runs never read as success)', () => {
+  it('says up front that nothing was changed', () => {
+    const chain = structuredClone(causalChains['run_eh_001']!);
+    chain.actions = [];
+    chain.outcome = { status: 'COMPLETED', reason: null, durationMs: 41, actionCount: 2, commandCount: 0 };
+    const s = causalSentence(chain);
+    expect(s).toMatch(/nothing was changed\.$/);
+    expect(s).not.toMatch(/turned on/);
   });
 });

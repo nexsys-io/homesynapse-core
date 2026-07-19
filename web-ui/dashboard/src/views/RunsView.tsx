@@ -7,7 +7,7 @@ import { api } from '../lib/api';
 import type { RunSummary } from '../lib/api/contract';
 import { useApi } from '../lib/poll';
 import { navigate } from '../lib/router';
-import { runStatusMeta, timeAgo } from '../lib/format';
+import { NULL_NAME_NOTE, runName, runStatusMeta, timeAgo } from '../lib/format';
 import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { DataTable } from '../components/DataTable';
@@ -26,7 +26,18 @@ export function RunsView() {
               onActivate={(r) => navigate(`/explain/run/${r.runId}`)}
               emptyLabel="No automation runs yet."
               columns={[
-                { key: 'name', header: 'Automation', render: (r) => <strong>{r.automationName}</strong> },
+                {
+                  key: 'name',
+                  header: 'Automation',
+                  // Prior-instance runs carry automationName = null on the live wire —
+                  // render the class honestly (never invent, never a blank cell).
+                  render: (r) =>
+                    r.automationName === null ? (
+                      <em title={NULL_NAME_NOTE}>{runName(r.automationName)}</em>
+                    ) : (
+                      <strong>{r.automationName}</strong>
+                    ),
+                },
                 { key: 'when', header: 'When', render: (r) => timeAgo(r.triggeredAt) },
                 {
                   key: 'status',

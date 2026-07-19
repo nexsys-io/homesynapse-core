@@ -225,18 +225,29 @@ export interface ConsolidatedHealth {
   integrations: { id: string; health: IntegrationHealth }[];
 }
 
-/** B3 — GET /api/v1/runs (the "why did this fire?" entry list). */
+/** B3 — GET /api/v1/runs (the "why did this fire?" entry list).
+ *  [OBSERVED LIVE NULLABILITY, field-evidenced 2026-07-18]: `automationName` is
+ *  `null` on the wire for runs recorded under a prior automation instance
+ *  (instance ULIDs re-mint per YAML load; StandardExplanationService.toSummary
+ *  serves registry-miss names as null). The v1.1 freeze text does not annotate
+ *  this field nullable — a contract-clarification ask is recorded with the hub
+ *  (lane return 2026-07-19); the client tolerates null and renders the class
+ *  honestly (format.runName), never inventing a name. */
 export interface RunSummary {
   runId: string;
   automationId: string;
-  automationName: string;
+  automationName: string | null;
   triggeredAt: string;
   status: RunStatus;
   terminalReason: string | null;
 }
 
+/** [OBSERVED LIVE NULLABILITY — same class as RunSummary.automationName]:
+ *  `type` is null when the automation definition is no longer registered
+ *  (StandardExplanationService.buildTrigger derives it from the registry).
+ *  Tolerated + rendered honestly; clarification ask recorded with the hub. */
 export interface CausalTrigger {
-  type: string;
+  type: string | null;
   subjectRef: SubjectRef;
   matchedAt: string;
   firingValue: string;
@@ -258,11 +269,13 @@ export interface CausalAction {
   reason: string | null;
 }
 
-/** B3 — GET /api/v1/runs/{runId}/causal-chain (the hero "why did this fire?" tree). */
+/** B3 — GET /api/v1/runs/{runId}/causal-chain (the hero "why did this fire?" tree).
+ *  `automationName` nullability: the same observed prior-instance class as
+ *  RunSummary.automationName (tolerated; rendered honestly). */
 export interface CausalChain {
   runId: string;
   automationId: string;
-  automationName: string;
+  automationName: string | null;
   trigger: CausalTrigger;
   conditions: CausalCondition[];
   actions: CausalAction[];

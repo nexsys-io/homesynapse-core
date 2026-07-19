@@ -22,6 +22,7 @@ import type {
   ResponseMeta,
   RunSummary,
 } from '../contract';
+import { BRAND } from '../../i18n';
 
 const T0 = Date.now();
 const iso = (minAgo: number) => new Date(T0 - minAgo * 60_000).toISOString();
@@ -438,7 +439,8 @@ export const events: EventSummary[] = [
     correlationId: 'cor_ext_01',
     causationId: null,
     origin: 'EXTERNAL',
-    summary: 'Kitchen Light changed outside HomeSynapse',
+    // Name-light: even mock strings that mimic server copy go through the token.
+    summary: `Kitchen Light changed outside ${BRAND.productName}`,
   },
   {
     eventId: 'evt_0003',

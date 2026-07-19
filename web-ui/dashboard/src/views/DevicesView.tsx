@@ -8,7 +8,16 @@ import { useState } from 'preact/hooks';
 import { api } from '../lib/api';
 import type { EntitySummary } from '../lib/api/contract';
 import { useApi } from '../lib/poll';
-import { availabilityMeta, attrValue, clockTime, displayName, labelFor, timeAgo } from '../lib/format';
+import {
+  availabilityEvidence,
+  availabilityMeta,
+  attrValue,
+  brightnessDisplay,
+  clockTime,
+  displayName,
+  labelFor,
+  timeAgo,
+} from '../lib/format';
 import { t } from '../lib/i18n';
 import { Page, Card } from '../components/layout';
 import { DataTable } from '../components/DataTable';
@@ -72,7 +81,13 @@ function EntityDetail({ id }: { id: string }) {
 
   const s = state.data;
   const a = availabilityMeta(s.availability);
-  const attrs = Object.entries(s.attributes);
+  // Brightness: the % comes from Core's DERIVED `brightness_percent` data key —
+  // never a client-side rescale of the canonical 0–254 level. When the derived
+  // key is present, the raw level row is folded into it (shown as the detail).
+  const bright = brightnessDisplay(s.attributes);
+  const attrs = Object.entries(s.attributes).filter(
+    ([k]) => !(bright && (k === 'brightness' || k === 'brightness_percent')),
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--hs-space-4)' }}>
@@ -81,16 +96,40 @@ function EntityDetail({ id }: { id: string }) {
         {s.stale ? <StatusPill tone="warn" label="Stale reading" size="sm" /> : null}
       </div>
 
+      {/* Availability is EVIDENCE WITH AGE — the flag alone can outlive reality
+          (a rehydrated "Available" can persist while the device is off-network
+          until the next recheck), and UNKNOWN after a restart is honest, not a
+          fault. Always pair the flag with when the device was last heard from. */}
+      <p style={{ color: 'var(--hs-text-muted)', fontSize: 'var(--hs-text-sm)', margin: 0 }} role="status">
+        {availabilityEvidence(s.availability, s.lastReported)}
+      </p>
+
       <dl class="kv">
-        {attrs.length === 0 ? (
+        {attrs.length === 0 && !bright ? (
           <p style={{ color: 'var(--hs-text-muted)', fontSize: 'var(--hs-text-sm)' }}>No attributes reported.</p>
         ) : (
-          attrs.map(([k, tv]) => (
-            <div key={k} class="kvRow">
-              <dt>{labelFor(k)}</dt>
-              <dd>{attrValue(tv)}</dd>
-            </div>
-          ))
+          <>
+            {bright ? (
+              <div class="kvRow">
+                <dt>Brightness</dt>
+                <dd
+                  title={
+                    bright.key === 'brightness_percent'
+                      ? 'Percentage derived by the hub from the device’s reported level.'
+                      : 'The device’s reported level. A percentage is shown once the hub derives it.'
+                  }
+                >
+                  {bright.text}
+                </dd>
+              </div>
+            ) : null}
+            {attrs.map(([k, tv]) => (
+              <div key={k} class="kvRow">
+                <dt>{labelFor(k)}</dt>
+                <dd>{attrValue(tv)}</dd>
+              </div>
+            ))}
+          </>
         )}
         <div class="kvRow">
           <dt>Last changed</dt>

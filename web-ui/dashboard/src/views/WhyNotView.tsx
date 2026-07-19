@@ -51,7 +51,15 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
       </p>
       <Resource state={state}>
         {(nf: NonFiringExplanation) => {
-          const v = verdictMeta(nf.verdict);
+          // DP-B2 (core's ruled shape): the frozen 4-value verdict has no "fired
+          // fine" value, so a clean recent run arrives as NEVER_TRIGGERED with a
+          // NON-NULL lastRelevantRunId — the run id is how the wire says "it did
+          // run, and confirmed". Tell the two apart here (core's stated intent:
+          // "the UI tells them apart by the non-null run id").
+          const ranFine = nf.verdict === 'NEVER_TRIGGERED' && nf.lastRelevantRunId !== null;
+          const v = ranFine
+            ? ({ label: 'It did run', tone: 'ok' } as const)
+            : verdictMeta(nf.verdict);
           return (
             <Card>
               <div class={styles.detail}>
@@ -78,6 +86,16 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
                   ) : null}
                 </dl>
 
+                {ranFine && nf.lastRelevantRunId ? (
+                  <p class={styles.nextStep}>
+                    {/* Honest caveat: a run that lawfully skipped every unavailable
+                        target still reports "ran" here — the run's own page shows
+                        whether anything actually changed. */}
+                    <a href={href(`/explain/run/${nf.lastRelevantRunId}`)}>
+                      See that run — including whether anything actually changed →
+                    </a>
+                  </p>
+                ) : null}
                 {nf.verdict === 'DISABLED' ? (
                   <p class={styles.nextStep}>To let it run, turn this automation on in your automation settings.</p>
                 ) : null}
