@@ -198,9 +198,52 @@ class ClusterHandlersTest {
     }
 
     @Test
+    @DisplayName("the table carries exactly the EIGHT report-path handlers "
+            + "(M9.7-W2: + TemperatureMeasurement 0x0402 + RelativeHumidity 0x0405)")
+    void tableCarriesExactlyTheEightReportPathHandlers() {
+        assertThat(handlers).hasSize(8);
+        assertThat(handlers.get(0x0402))
+                .isInstanceOf(TemperatureMeasurementHandler.class);
+        assertThat(handlers.get(0x0405))
+                .isInstanceOf(RelativeHumidityHandler.class);
+    }
+
+    @Nested
+    @DisplayName("TemperatureMeasurement 0x0402 → temperature_c (M9.7-W2 §2)")
+    class TemperatureMeasurement {
+
+        @Test
+        @DisplayName("measuredValue dispatches through the table: 2350 → 23.50 °C")
+        void dispatchesThroughTheTable() {
+            List<NormalizedAttribute> reports =
+                    normalize(0x0402, Map.of(0x0000, 2350L));
+
+            assertThat(reports).hasSize(1);
+            assertThat(reports.get(0).attributeKey()).isEqualTo("temperature_c");
+            assertThat(reports.get(0).value()).isEqualTo(23.5);
+        }
+    }
+
+    @Nested
+    @DisplayName("RelativeHumidity 0x0405 → humidity_pct (M9.7-W2 §2)")
+    class RelativeHumidity {
+
+        @Test
+        @DisplayName("measuredValue dispatches through the table: 4523 → 45.23 %")
+        void dispatchesThroughTheTable() {
+            List<NormalizedAttribute> reports =
+                    normalize(0x0405, Map.of(0x0000, 4523L));
+
+            assertThat(reports).hasSize(1);
+            assertThat(reports.get(0).attributeKey()).isEqualTo("humidity_pct");
+            assertThat(reports.get(0).value()).isEqualTo(45.23);
+        }
+    }
+
+    @Test
     @DisplayName("buildCommand: the ingestion-only handlers throw naming handler + command (M9.4a — the actuator trio is BuildCommandTest's)")
     void buildCommand_ingestionOnlyHandlersThrow() {
-        for (int clusterId : new int[] {0x0406, 0x0001, 0x0500}) {
+        for (int clusterId : new int[] {0x0406, 0x0001, 0x0500, 0x0402, 0x0405}) {
             ZigbeeClusterHandler handler = handlers.get(clusterId);
             assertThatThrownBy(() -> handler.buildCommand("turn_on", Map.of()))
                     .isInstanceOf(UnsupportedOperationException.class)

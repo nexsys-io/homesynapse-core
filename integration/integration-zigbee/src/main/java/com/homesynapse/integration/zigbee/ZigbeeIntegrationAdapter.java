@@ -280,7 +280,12 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
                 dataDirectory.resolve("zigbee-devices.json"), clock);
         adoption = new ZigbeeAdoptionSlice(context.integrationId(), deviceRegistry,
                 context.entityRegistry(), registryProjection, profileRegistry,
-                context.eventPublisher(), clock);
+                context.eventPublisher(), clock,
+                // §4 (M9.7-W2): the learned-zoneType source resolves LAZILY —
+                // the ingestion unit is constructed later in this method, and
+                // adoption only runs on the ingestion cycle after run() starts
+                // (the factory's Supplier<RegistryProjection> R4 shape).
+                this::learnedZoneTypeFor);
         adoptAcceptList = readAdoptAcceptList();
         // DP-6 (AMD-99 §3 boundary note): the adapter-local IEEE->id / entity /
         // binding maps rebuild FROM the projection-rebuilt registries (Phase 3
@@ -1008,6 +1013,22 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         }
         log.debug("zigbee.adopt_list_loaded: entries={}", accepted.size());
         return Set.copyOf(accepted);
+    }
+
+    /**
+     * The adoption slice's §4 zone-type source (M9.7-W2): the ingestion unit's
+     * wire-learned IAS zone type — LEARNED state only; empty before the unit
+     * exists ({@code initialize()} constructs the slice first) or when nothing
+     * was learned, and classification then takes the DP-6 motion fallback.
+     * Reads in-memory cycle-thread state only: the adoption path runs on the
+     * same ingestion cycle thread as {@code processCycle()}. The resolver's
+     * {@code zoneTypeFor} MOTION stub below is a DIFFERENT seam — the
+     * handler-table fallback, which the unit's learned-first read already
+     * outranks (F-7a).
+     */
+    private Optional<ZoneType> learnedZoneTypeFor(IEEEAddress device) {
+        ZclIngestionUnit unit = ingestion;
+        return unit == null ? Optional.empty() : unit.learnedZoneType(device);
     }
 
     /** NWK→IEEE and entity resolution over the cache + adoption slice. */

@@ -34,6 +34,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -202,6 +203,64 @@ class ZigbeeAdoptionSliceTest {
                 .containsExactlyInAnyOrder("on_off", "brightness",
                         "color_temperature", "identify");
         assertThat(entities.get(0).endpointIndex()).isEqualTo(11);
+    }
+
+    // ── M9.7-W2 §4 — the learned-zoneType classification seam ───────────────
+
+    /** The SNZB-04P dossier shape: IAS + battery, NO occupancy (deviceType 0x0402). */
+    private static final IEEEAddress CONTACT_SENSOR =
+            new IEEEAddress(0x00124B00AA0004B4L);
+
+    private static InterviewResult contactSensorInterview() {
+        return new InterviewResult(CONTACT_SENSOR, 0x7C21,
+                new NodeDescriptor(2, 0x1286, 82, 128),
+                List.of(new EndpointDescriptor(1, 0x0104, 0x0402,
+                        List.of(0x0000, 0x0001, 0x0003, 0x0020, 0x0500, 0xFC11,
+                                0xFC57),
+                        List.of(0x0003, 0x0006, 0x0019))),
+                "eWeLink", "SNZB-04P", 3, InterviewStatus.COMPLETE);
+    }
+
+    @Test
+    @DisplayName("§4: adoption under a learned-CONTACT zoneType source lands a "
+            + "BINARY_SENSOR whose installed capability set carries contact")
+    void learnedContactZoneType_adoptsContactEntity() {
+        ZigbeeAdoptionSlice contactSlice = new ZigbeeAdoptionSlice(
+                integrationId, deviceRegistry, entityRegistry, registryProjection,
+                profileRegistry, publisher, clock,
+                ieee -> Optional.of(ZoneType.CONTACT));
+        contactSlice.onDeviceDiscovered(contactSensorInterview(),
+                "sonoff_snzb_04p");
+
+        ZigbeeAdoptionSlice.AdoptedDevice adopted =
+                contactSlice.adopt(CONTACT_SENSOR);
+
+        List<Entity> entities =
+                entityRegistry.listEntitiesByDevice(adopted.deviceId());
+        assertThat(entities).hasSize(1);
+        assertThat(entities.get(0).entityType())
+                .isEqualTo(EntityType.BINARY_SENSOR);
+        assertThat(entities.get(0).capabilities())
+                .extracting(c -> c.capabilityId())
+                .containsExactlyInAnyOrder("contact", "battery", "identify");
+    }
+
+    @Test
+    @DisplayName("§4 boundary: the no-source constructor adopts the same shape "
+            + "as motion — unlearned classification is byte-equivalent to today")
+    void unlearnedZoneType_adoptsMotionEntity() {
+        // The 7-arg constructor binds the empty zone-type source (the DP-6
+        // motion fallback) — the pre-W2 semantics every existing caller keeps.
+        slice.onDeviceDiscovered(contactSensorInterview(), null);
+
+        ZigbeeAdoptionSlice.AdoptedDevice adopted = slice.adopt(CONTACT_SENSOR);
+
+        List<Entity> entities =
+                entityRegistry.listEntitiesByDevice(adopted.deviceId());
+        assertThat(entities).hasSize(1);
+        assertThat(entities.get(0).capabilities())
+                .extracting(c -> c.capabilityId())
+                .containsExactlyInAnyOrder("motion", "battery", "identify");
     }
 
     @Test

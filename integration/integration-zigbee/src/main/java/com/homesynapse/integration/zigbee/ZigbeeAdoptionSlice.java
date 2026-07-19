@@ -44,6 +44,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * The Doc 02 §3.12 discovery/adoption slice, scoped INSIDE the zigbee ingestion
@@ -115,6 +116,13 @@ final class ZigbeeAdoptionSlice {
     private final DeviceProfileRegistry profileRegistry;
     private final EventPublisher publisher;
     private final Clock clock;
+    /**
+     * The M9.7-W2 §4 learned-zoneType seam: the wire-learned IAS zone type for
+     * a device, empty when none was learned. Consulted at classification time
+     * for IAS-bearing endpoints only; reads in-memory learned state — never
+     * blocks, never performs I/O.
+     */
+    private final Function<IEEEAddress, Optional<ZoneType>> zoneTypeSource;
     private final ReentrantLock lock = new ReentrantLock();
     private final Map<Long, Proposal> proposals = new HashMap<>();
     private final Map<Long, DeviceId> devicesByIeee = new HashMap<>();
@@ -123,6 +131,27 @@ final class ZigbeeAdoptionSlice {
     private final Map<Long, String> profilesByIeee = new HashMap<>();
     /** The F-8 invalidation listener; null until the adapter wires it. */
     private Consumer<IEEEAddress> adoptionListener;
+
+    /**
+     * Creates the slice with no zone-type source — IAS classification takes
+     * the motion fallback (byte-equivalent pre-M9.7-W2 semantics; callers with
+     * no wire-learn surface).
+     *
+     * @param integrationId this integration's identity, never {@code null}
+     * @param deviceRegistry the device registry, never {@code null}
+     * @param entityRegistry the entity registry, never {@code null}
+     * @param registryProjection the single registry-apply path, never {@code null}
+     * @param profileRegistry the device-profile registry, never {@code null}
+     * @param publisher the event publisher, never {@code null}
+     * @param clock the time source, never {@code null}
+     */
+    ZigbeeAdoptionSlice(IntegrationId integrationId, DeviceRegistry deviceRegistry,
+            EntityRegistry entityRegistry, RegistryProjection registryProjection,
+            DeviceProfileRegistry profileRegistry,
+            EventPublisher publisher, Clock clock) {
+        this(integrationId, deviceRegistry, entityRegistry, registryProjection,
+                profileRegistry, publisher, clock, ieee -> Optional.empty());
+    }
 
     /**
      * Creates the slice.
@@ -139,11 +168,16 @@ final class ZigbeeAdoptionSlice {
      *        never {@code null}
      * @param publisher the event publisher, never {@code null}
      * @param clock the time source (identity minting + event time), never {@code null}
+     * @param zoneTypeSource the wire-learned IAS zone-type view (M9.7-W2 §4 —
+     *        in-memory read only, never blocking, never I/O; empty means
+     *        unlearned and classification takes the DP-6 motion fallback),
+     *        never {@code null}
      */
     ZigbeeAdoptionSlice(IntegrationId integrationId, DeviceRegistry deviceRegistry,
             EntityRegistry entityRegistry, RegistryProjection registryProjection,
             DeviceProfileRegistry profileRegistry,
-            EventPublisher publisher, Clock clock) {
+            EventPublisher publisher, Clock clock,
+            Function<IEEEAddress, Optional<ZoneType>> zoneTypeSource) {
         this.integrationId = Objects.requireNonNull(integrationId, "integrationId");
         this.deviceRegistry = Objects.requireNonNull(deviceRegistry,
                 "deviceRegistry");
@@ -155,6 +189,8 @@ final class ZigbeeAdoptionSlice {
                 "profileRegistry");
         this.publisher = Objects.requireNonNull(publisher, "publisher");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.zoneTypeSource = Objects.requireNonNull(zoneTypeSource,
+                "zoneTypeSource");
     }
 
     /**
@@ -311,8 +347,15 @@ final class ZigbeeAdoptionSlice {
         Map<Integer, EntityId> entityIds = new HashMap<>();
         List<EntityId> created = new ArrayList<>();
         for (EndpointDescriptor endpoint : interview.endpoints()) {
+            // §4 (M9.7-W2): IAS-bearing endpoints classify under the wire-learned
+            // zone type when one exists (DP-6 learned-first; empty ⇒ the motion
+            // fallback inside the classifier). The source reads in-memory learned
+            // state only — never blocking, never I/O.
+            ZoneType learnedZoneType = endpoint.inputClusters()
+                    .contains(IasZoneHandler.CLUSTER_ID)
+                    ? zoneTypeSource.apply(ieee).orElse(null) : null;
             Optional<EndpointClassifier.Classification> classification =
-                    EndpointClassifier.classify(endpoint);
+                    EndpointClassifier.classify(endpoint, learnedZoneType);
             if (classification.isEmpty()) {
                 log.warn("zigbee.endpoint_unclassified: device={} endpoint={} "
                                 + "deviceType=0x{}; endpoint skipped", ieee,

@@ -536,6 +536,24 @@ final class ZclIngestionUnit {
     }
 
     /**
+     * The wire-learned IAS zone type for a device, when a ZoneType attribute
+     * has been observed (F-7a) — LEARNED state ONLY, never the resolver
+     * default, so adoption-time classification (M9.7-W2 §4) can distinguish
+     * unlearned (the DP-6 motion fallback) from a learned type.
+     *
+     * <p>Cycle-thread confined like the map it reads (the class contract):
+     * the production caller is the adoption path, which runs on the same
+     * ingestion cycle thread as {@link #processCycle()}.
+     *
+     * @param device the device, never {@code null}
+     * @return the learned zone type, or empty when none was observed
+     */
+    Optional<ZoneType> learnedZoneType(IEEEAddress device) {
+        Objects.requireNonNull(device, "device");
+        return Optional.ofNullable(learnedZoneTypes.get(device.value()));
+    }
+
+    /**
      * The F-7a precedence: a wire-learned zone type beats the resolver's
      * default ({@link ZoneType#MOTION} stays the unenrolled fallback, inside
      * the resolver).

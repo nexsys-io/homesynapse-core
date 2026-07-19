@@ -4,11 +4,12 @@
     "source": "BENCH_CAPTURE",
     "corpus": [
       "nexsys-bench/corpus/devices/philips-hue-white-a19.md",
-      "nexsys-bench/corpus/devices/sonoff-snzb-03p-motion.md"
+      "nexsys-bench/corpus/devices/sonoff-snzb-03p-motion.md",
+      "nexsys-hivemind/context/assessments/2026-07-11_wave2-device-dossiers_research-return.md"
     ],
     "benchCommit": "5ceff3b",
     "capturedAt": "2026-07-01",
-    "note": "Pointer, not copy: the bench corpus is the source of truth for these measured values; this bundled file cites it. Corpus updates flow through the data channel (bundled resource + user override file), never coupled to a core release (Doc 18 seam 6)."
+    "note": "Pointer, not copy: the bench corpus is the source of truth for the Wave-1 measured values; this bundled file cites it. The Wave-2 four (sonoff_s31_lite_zb, sonoff_snzb_02p, sonoff_snzb_04p, sonoff_snzb_01p) are DOSSIER-SOURCED pre-silicon — secondary evidence: fingerprints from zigpy/zha machine captures; re-derive from OUR interviews at the first bench session (the LCA006-to-LCA017 lesson). Corpus updates flow through the data channel (bundled resource + user override file), never coupled to a core release (Doc 18 seam 6)."
   },
   "profiles": [
     {
@@ -110,6 +111,89 @@
               "deviceType": "0x0107",
               "inClusters": ["0x0000", "0x0001", "0x0003", "0x0020", "0x0406", "0x0500", "0xFC57"],
               "outClusters": ["0x0003", "0x0019"]
+            }
+          ]
+        }
+      ],
+      "category": "STANDARD_ZCL",
+      "confirmation": []
+    },
+    {
+      "profileId": "sonoff_s31_lite_zb",
+      "matches": [
+        {"type": "exact_model", "manufacturer": "SONOFF", "model": "S31 Lite zb"}
+      ],
+      "category": "STANDARD_ZCL",
+      "confirmation": [
+        {
+          "capability": "on_off",
+          "confirmationMode": "EXACT_MATCH",
+          "authoritativeAttribute": "OnOff/0x0000",
+          "reportsAuthoritative": "VERIFIED_REPORTS",
+          "reportingPosture": "ON_CHANGE",
+          "confirmability": "CONFIRMABLE",
+          "recommendedTimeoutMs": 5000,
+          "degradeRule": ["NO_REPORT_TIMEOUT_TO_UNCONFIRMED", "NACK_TO_FAILED", "CONFIRM_FROM_CACHE_OR_READBACK"],
+          "notes": "timeout is the Hue's SEED value, not measured — the bench mints the envelope (expect <= the Hue's 293-701 ms; mains relay, no fade transients); no-change commands produce no report (honest-timeout class on a DISCRETE capability); duplicate-transaction reports community-documented (z2m #3904) — twin-absorption watch; fingerprint deliberately withheld pending the 0xC05E-vs-0x0104 bench adjudication (dossier 6.1-a)"
+        }
+      ]
+    },
+    {
+      "profileId": "sonoff_snzb_02p",
+      "matches": [
+        {"type": "exact_model", "manufacturer": "eWeLink", "model": "SNZB-02P"},
+        {
+          "type": "fingerprint",
+          "manufacturer": "eWeLink",
+          "model": "SNZB-02P",
+          "endpoints": [
+            {
+              "profileId": "0x0104",
+              "deviceType": "0x0302",
+              "inClusters": ["0x0000", "0x0001", "0x0003", "0x0020", "0x0402", "0x0405", "0xFC11", "0xFC57"],
+              "outClusters": ["0x0019"]
+            }
+          ]
+        }
+      ],
+      "category": "STANDARD_ZCL",
+      "confirmation": []
+    },
+    {
+      "profileId": "sonoff_snzb_04p",
+      "matches": [
+        {"type": "exact_model", "manufacturer": "eWeLink", "model": "SNZB-04P"},
+        {
+          "type": "fingerprint",
+          "manufacturer": "eWeLink",
+          "model": "SNZB-04P",
+          "endpoints": [
+            {
+              "profileId": "0x0104",
+              "deviceType": "0x0402",
+              "inClusters": ["0x0000", "0x0001", "0x0003", "0x0020", "0x0500", "0xFC11", "0xFC57"],
+              "outClusters": ["0x0003", "0x0006", "0x0019"]
+            }
+          ]
+        }
+      ],
+      "category": "STANDARD_ZCL",
+      "confirmation": []
+    },
+    {
+      "profileId": "sonoff_snzb_01p",
+      "matches": [
+        {"type": "exact_model", "manufacturer": "eWeLink", "model": "SNZB-01P"},
+        {
+          "type": "fingerprint",
+          "manufacturer": "eWeLink",
+          "model": "SNZB-01P",
+          "endpoints": [
+            {
+              "profileId": "0x0104",
+              "deviceType": "0x0000",
+              "inClusters": ["0x0000", "0x0001", "0x0003", "0x0020", "0xFC57"],
+              "outClusters": ["0x0003", "0x0006", "0x0019"]
             }
           ]
         }

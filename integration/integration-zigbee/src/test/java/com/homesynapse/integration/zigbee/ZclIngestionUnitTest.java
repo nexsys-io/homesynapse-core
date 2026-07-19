@@ -444,6 +444,111 @@ class ZclIngestionUnitTest {
         assertThat(lastReportedKey()).isEqualTo("open");
     }
 
+    // ── M9.7-W2 §2 — the temperature/humidity ingestion wiring ──────────────
+
+    @Test
+    @DisplayName("a 0x0402 temperature report publishes the canonical "
+            + "temperature_c: wire 2350 (0.01 °C) → 23.5 °C, raw retained")
+    void temperatureReportPublishesCanonicalCelsius() {
+        // Report Attributes: attr 0x0000, type 0x29 (int16), 2350 = 0x092E LE.
+        enqueueReport(SNZB_NWK, 1, 0x0402,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x29, 0x2E, 0x09});
+
+        ingestion.processCycle();
+
+        assertThat(publisher.published()).hasSize(1);
+        EventEnvelope envelope = publisher.published().get(0);
+        assertThat(envelope.eventType()).isEqualTo(EventTypes.STATE_REPORTED);
+        assertThat(envelope.origin()).isEqualTo(EventOrigin.PHYSICAL);
+        StateReportedEvent payload = (StateReportedEvent) envelope.payload();
+        assertThat(payload.attributeKey()).isEqualTo("temperature_c");
+        assertThat(payload.value()).isEqualTo("23.5");
+        assertThat(payload.unit()).isEqualTo("°C");
+        assertThat(payload.rawProtocolValue()).isEqualTo("2350");
+    }
+
+    @Test
+    @DisplayName("the embedded negative vector: wire 0xF830 sign-extends to "
+            + "−2000 → −20.00 °C (the DP-9 int16 contract)")
+    void temperatureNegativeWireVectorSignExtends() {
+        enqueueReport(SNZB_NWK, 1, 0x0402,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x29, 0x30, (byte) 0xF8});
+
+        ingestion.processCycle();
+
+        assertThat(publisher.published()).hasSize(1);
+        StateReportedEvent payload =
+                (StateReportedEvent) publisher.published().get(0).payload();
+        assertThat(payload.value()).isEqualTo("-20.0");
+        assertThat(payload.rawProtocolValue()).isEqualTo("-2000");
+    }
+
+    @Test
+    @DisplayName("the temperature invalid sentinel (wire 0x8000) publishes "
+            + "NOTHING — honest absence")
+    void temperatureInvalidSentinelPublishesNothing() {
+        enqueueReport(SNZB_NWK, 1, 0x0402,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x29, 0x00, (byte) 0x80});
+
+        ingestion.processCycle();
+
+        assertThat(publisher.published()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a 0x0405 humidity report publishes the canonical humidity_pct: "
+            + "wire 4523 (0.01 %) → 45.23 %, raw retained")
+    void humidityReportPublishesCanonicalPercent() {
+        // Report Attributes: attr 0x0000, type 0x21 (uint16), 4523 = 0x11AB LE.
+        enqueueReport(SNZB_NWK, 1, 0x0405,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x21, (byte) 0xAB, 0x11});
+
+        ingestion.processCycle();
+
+        assertThat(publisher.published()).hasSize(1);
+        StateReportedEvent payload =
+                (StateReportedEvent) publisher.published().get(0).payload();
+        assertThat(payload.attributeKey()).isEqualTo("humidity_pct");
+        assertThat(payload.value()).isEqualTo("45.23");
+        assertThat(payload.unit()).isEqualTo("%");
+        assertThat(payload.rawProtocolValue()).isEqualTo("4523");
+    }
+
+    @Test
+    @DisplayName("the humidity invalid sentinel (0xFFFF) publishes NOTHING — "
+            + "honest absence")
+    void humidityInvalidSentinelPublishesNothing() {
+        enqueueReport(SNZB_NWK, 1, 0x0405,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x21,
+                        (byte) 0xFF, (byte) 0xFF});
+
+        ingestion.processCycle();
+
+        assertThat(publisher.published()).isEmpty();
+    }
+
+    // ── M9.7-W2 §4 — the learned-zoneType accessor ──────────────────────────
+
+    @Test
+    @DisplayName("learnedZoneType exposes LEARNED state only — empty before a "
+            + "wire learn even while the resolver default is MOTION, the learned "
+            + "type after (the classification seam's unlearned/learned split)")
+    void learnedZoneTypeExposesWireLearnedStateOnly() {
+        assertThat(ingestion.learnedZoneType(SNZB))
+                .as("unlearned reads EMPTY — never the resolver default")
+                .isEmpty();
+
+        // ZoneType 0x0015 (CONTACT) observed via Report-Attributes (enum16 0x31).
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x18, 0x2C, 0x0A, 0x01, 0x00, 0x31, 0x15, 0x00});
+        ingestion.processCycle();
+
+        assertThat(ingestion.learnedZoneType(SNZB)).contains(ZoneType.CONTACT);
+        assertThat(ingestion.learnedZoneType(new IEEEAddress(0x00124B00FFFF0001L)))
+                .as("a different device stays unlearned")
+                .isEmpty();
+    }
+
     private String lastReportedKey() {
         List<EventEnvelope> published = publisher.published();
         return ((StateReportedEvent) published.get(published.size() - 1)

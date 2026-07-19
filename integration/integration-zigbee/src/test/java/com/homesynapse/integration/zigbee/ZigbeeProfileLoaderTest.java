@@ -257,14 +257,19 @@ class ZigbeeProfileLoaderTest {
     class BundledCorpus {
 
         @Test
-        @DisplayName("the bundled resource loads both Wave-1 profiles")
+        @DisplayName("the bundled resource loads the Wave-1 pair + the four "
+                + "dossier-sourced Wave-2 profiles (M9.7-W2 §1)")
         void bundledResourceLoads() {
             List<ProfileEntry> entries = loader.loadBundled();
 
             assertThat(entries).extracting(ProfileEntry::profileId)
                     .containsExactlyInAnyOrder(
                             MeasuredCorpusValues.HUE_PROFILE_ID,
-                            MeasuredCorpusValues.SNZB_PROFILE_ID);
+                            MeasuredCorpusValues.SNZB_PROFILE_ID,
+                            "sonoff_s31_lite_zb",
+                            "sonoff_snzb_02p",
+                            "sonoff_snzb_04p",
+                            "sonoff_snzb_01p");
         }
 
         @Test
