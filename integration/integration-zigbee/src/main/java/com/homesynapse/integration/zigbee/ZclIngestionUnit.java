@@ -52,8 +52,9 @@ import java.util.function.Supplier;
  * <p>Dedup guards ONLY the unsolicited 0x0A report channel (F-4, M9.4b §6.1);
  * the 0x01 Read-Attributes-Response — the readback/VERIFY channel, AMD-97
  * caveat 1's confirm path — bypasses it entirely. IAS Zone (0x0500) devices
- * are enrolled on request (ZoneEnrollRequest → ZoneEnrollResponse, F-7a) and
- * their wire-observed ZoneType outranks the resolver's default; the per-device
+ * are enrolled on request (ZoneEnrollRequest → ZoneEnrollResponse, F-7a; the
+ * request's zoneType payload feeds the learn — W2-LEARN) and their
+ * wire-observed ZoneType outranks the resolver's default; the per-device
  * handler table invalidates on announce and on a zone-type change (F-8).
  *
  * <p>Thread-safe for the intended single-cycle-driver use: the per-device
@@ -297,6 +298,15 @@ final class ZclIngestionUnit {
             return;
         }
         if (message.profileId() != EzspCoordinatorProtocol.HA_PROFILE_ID) {
+            // W2-LEARN §3: the drop stands unchanged — Green-Power frames
+            // (0xA1E0) route here lawfully, so never above DEBUG. The line is
+            // the standing instrument if a non-HA emitter ever appears
+            // (the DP-WL-5 S31 closure).
+            log.debug("zigbee.ingestion_profile_skipped: nwk=0x{} profile=0x{} "
+                            + "cluster=0x{}; non-HA frame skipped",
+                    Integer.toHexString(message.sender()),
+                    Integer.toHexString(message.profileId()),
+                    Integer.toHexString(message.clusterId()));
             return;
         }
         Optional<IEEEAddress> device =
@@ -401,6 +411,18 @@ final class ZclIngestionUnit {
                 && message.clusterId() == IasZoneHandler.CLUSTER_ID
                 && header.commandId()
                         == IasZoneHandler.COMMAND_ZONE_ENROLL_REQUEST) {
+            // W2-LEARN §1 — ZCL8 §8.2.2.3: the request payload is
+            // [zoneType u16 LE][manufacturerCode u16 LE], the wire truth no
+            // real device volunteers as an attribute (the joins-night record).
+            // The learn precedes the response and never depends on the send
+            // outcome (the F-7a learn-before-dispatch principle); a short
+            // payload learns nothing and still enrolls (§3.12 tolerate — a
+            // malformed request never blocks enrollment).
+            if (zcl.length >= header.payloadOffset() + 2) {
+                int zoneType = (zcl[header.payloadOffset()] & 0xFF)
+                        | ((zcl[header.payloadOffset() + 1] & 0xFF) << 8);
+                learnZoneType(device, zoneType);
+            }
             respondZoneEnroll(device, message);
             return;
         } else {
@@ -480,12 +502,9 @@ final class ZclIngestionUnit {
     }
 
     /**
-     * F-7a: the wire-observed ZoneType (IAS attribute 0x0001) outranks the
-     * resolver's adoption-time default — the sensor itself is the authority on
-     * what it is. A learn that CHANGES the effective type invalidates the
-     * device's handler table (F-8) so subsequent frames normalize under the
-     * new type; unknown zone-type values never learn (the tolerate default
-     * stands).
+     * F-7a, the ATTRIBUTE path: the ZoneType attribute (0x0001) observed via
+     * report/readback extracts to the shared learn core. Non-{@code Long}
+     * values (absent attribute, malformed record) learn nothing.
      */
     private void learnZoneType(IEEEAddress device,
             Map<Integer, Object> attributes) {
@@ -493,6 +512,20 @@ final class ZclIngestionUnit {
         if (!(value instanceof Long zclId)) {
             return;
         }
+        learnZoneType(device, zclId);
+    }
+
+    /**
+     * The shared learn core (W2-LEARN) — fed by the attribute path above and
+     * by the ZoneEnrollRequest payload parse (ZCL8 §8.2.2.3): the wire-observed
+     * ZoneType outranks the resolver's adoption-time default — the sensor
+     * itself is the authority on what it is. A learn that CHANGES the
+     * effective type invalidates the device's handler table (F-8) so
+     * subsequent frames normalize under the new type; a same-as-effective
+     * learn stores silently; unknown zone-type values never learn (the
+     * tolerate default stands).
+     */
+    private void learnZoneType(IEEEAddress device, long zclId) {
         ZoneType learned = null;
         for (ZoneType candidate : ZoneType.values()) {
             if (candidate.zclId() == zclId) {

@@ -53,6 +53,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * and the accepted adoption lands a BINARY_SENSOR whose installed capability
  * set carries {@code contact} (DP-6 learned-first). Without the learn the same
  * join classifies {@code motion} — byte-for-byte the pre-W2 fallback.
+ *
+ * <p>W2-LEARN adds the enroll-driven twin: the CONTACT truth arrives ONLY via
+ * a ZoneEnrollRequest in the drain (ZCL8 §8.2.2.3 — zoneType rides the request
+ * payload; no device volunteers the attribute on real silicon, the joins-night
+ * record) — the ACTUAL choreography the long-press re-pair runs.
  */
 @DisplayName("ZigbeeIntegrationAdapter — Wave-2 contact adoption (M9.7-W2 §4)")
 class ZigbeeWave2ContactAdoptionTest {
@@ -173,6 +178,52 @@ class ZigbeeWave2ContactAdoptionTest {
         assertThat(entities.get(0).capabilities())
                 .extracting(c -> c.capabilityId())
                 .containsExactlyInAnyOrder("motion", "battery", "identify");
+    }
+
+    @Test
+    @DisplayName("W2-LEARN: the enroll-driven twin — the CONTACT truth arrives "
+            + "ONLY via a ZoneEnrollRequest in the drain, the learn is observed "
+            + "BEFORE the adopt step, and the adopted entity carries contact "
+            + "(the silicon choreography: long-press re-pair → enroll → learn "
+            + "→ adopt)")
+    void enrollDrivenLearnBeforeAdoption_landsContactEntity() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::adoptionHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+
+        // The joins-night choreography: the announce indexes the device, then
+        // the device's OWN ZoneEnrollRequest (zoneType 0x0015 in the request
+        // payload) learns — NO ZoneType attribute report anywhere in this walk.
+        riders.add(deviceAnnounceCallback(CONTACT_IEEE, CONTACT_NWK));
+        riders.add(zoneEnrollRequestCallback());
+        adapter.coordinatorProtocol().ping();
+        adapter.runCycleOnce();
+
+        assertThat(ingestionMessages(Level.INFO, "zigbee.ias_zone_type_learned"))
+                .as("the enroll-payload learn is observed BEFORE the adopt "
+                        + "step (the go-package guard's log surface)")
+                .containsExactly("zigbee.ias_zone_type_learned: "
+                        + "device=0x00124B00AA0004B4 zoneType=CONTACT "
+                        + "(was MOTION)");
+        assertThat(ingestionMessages(Level.INFO, "zigbee.ias_zone_enrolled"))
+                .as("enrollment still granted through the production send path "
+                        + "— the learn never gates the response")
+                .hasSize(1);
+        assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).count())
+                .as("the listed COMPLETE proposal adopted").isEqualTo(1);
+        Optional<Device> device = deviceRegistry.findByHardwareIdentifier(
+                ZigbeeAdoptionSlice.HARDWARE_NAMESPACE,
+                new IEEEAddress(CONTACT_IEEE).toHexString());
+        List<Entity> entities =
+                entityRegistry.listEntitiesByDevice(device.orElseThrow().deviceId());
+        assertThat(entities).hasSize(1);
+        assertThat(entities.get(0).entityType())
+                .isEqualTo(EntityType.BINARY_SENSOR);
+        assertThat(entities.get(0).capabilities())
+                .extracting(c -> c.capabilityId())
+                .as("the enroll-learned CONTACT selects contact — never the "
+                        + "motion fallback")
+                .containsExactlyInAnyOrder("contact", "battery", "identify");
     }
 
     // ── harness (the ZigbeeConfigAcceptedAdoptionTest production-ladder idiom) ─
@@ -413,6 +464,18 @@ class ZigbeeWave2ContactAdoptionTest {
         return incomingMessage(EzspCoordinatorProtocol.HA_PROFILE_ID,
                 IasZoneHandler.CLUSTER_ID, CONTACT_ENDPOINT,
                 new byte[] {0x18, 0x2C, 0x0A, 0x01, 0x00, 0x31, 0x15, 0x00});
+    }
+
+    /**
+     * An IAS ZoneEnrollRequest (cluster-specific 0x01) carrying zoneType
+     * 0x0015 CONTACT LE + manufacturerCode 0x0000 LE — the W2-LEARN wire-learn
+     * stimulus (ZCL8 §8.2.2.3; the joins-night record: enrollments arrive,
+     * ZoneType attribute reports never do).
+     */
+    private static byte[] zoneEnrollRequestCallback() {
+        return incomingMessage(EzspCoordinatorProtocol.HA_PROFILE_ID,
+                IasZoneHandler.CLUSTER_ID, CONTACT_ENDPOINT,
+                new byte[] {0x19, 0x2C, 0x01, 0x15, 0x00, 0x00, 0x00});
     }
 
     /** The 0x0045 incomingMessageHandler callback layout (v13 — bench-proven). */

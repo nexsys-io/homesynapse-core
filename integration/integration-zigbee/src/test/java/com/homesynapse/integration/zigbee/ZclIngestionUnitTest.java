@@ -4,6 +4,10 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventOrigin;
 import com.homesynapse.event.EventTypes;
@@ -12,9 +16,11 @@ import com.homesynapse.event.SubjectType;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.UlidFactory;
 import com.homesynapse.test.TestClock;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -52,9 +58,13 @@ class ZclIngestionUnitTest {
     private boolean sendAccepted;
     private ZoneType resolverZoneType;
     private ZclIngestionUnit ingestion;
+    private ListAppender<ILoggingEvent> logCapture;
 
     @BeforeEach
     void setUp() {
+        logCapture = new ListAppender<>();
+        logCapture.start();
+        ingestionLogger().addAppender(logCapture);
         clock = TestClock.createDefault();
         publisher = new RecordingEventPublisher(clock);
         pendingFrames = new ArrayList<>();
@@ -112,6 +122,11 @@ class ZclIngestionUnitTest {
             sentTargets.add(networkAddress);
             return sendAccepted;
         });
+    }
+
+    @AfterEach
+    void tearDown() {
+        ingestionLogger().detachAppender(logCapture);
     }
 
     private static long entityKey(IEEEAddress device, int endpoint) {
@@ -549,6 +564,173 @@ class ZclIngestionUnitTest {
                 .isEmpty();
     }
 
+    // ── W2-LEARN §1 — the enroll-payload learn (the joins-night gap) ────────
+
+    @Test
+    @DisplayName("F-7a: a ZoneEnrollRequest's zoneType payload LEARNS — no real "
+            + "device volunteers the ZoneType attribute; the enroll request is "
+            + "where zoneType arrives (ZCL8 §8.2.2.3)")
+    void enrollRequestLearnsZoneType() {
+        // The zoneEnrollRequestAnswered fixture shape: fc 0x19, tsn, cmd 0x01,
+        // zoneType 0x0015 LE, manufacturerCode 0x0000 LE. Mutant bound:
+        // deleting the payload parse flips the learn assert to empty.
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x01, 0x15, 0x00, 0x00, 0x00});
+
+        ingestion.processCycle();
+
+        assertThat(ingestion.learnedZoneType(SNZB))
+                .as("the request payload's zoneType is wire truth — learned")
+                .contains(ZoneType.CONTACT);
+        assertThat(sentFrames)
+                .as("the ZoneEnrollResponse still sent — the learn never gates "
+                        + "enrollment")
+                .hasSize(1);
+    }
+
+    @Test
+    @DisplayName("F-7a/F-8: an enroll-driven CONTACT learn on an effective-MOTION "
+            + "device rebuilds the handler table and logs the learn INFO")
+    void enrollLearnRebuildsHandlers() {
+        // The table builds under the resolver's MOTION default.
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x00, 0x21, 0x00, 0x00, 0x01, 0x00, 0x00});
+        ingestion.processCycle();
+        assertThat(lastReportedKey()).isEqualTo("detected");
+
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2B, 0x01, 0x15, 0x00, 0x00, 0x00});
+        // The next notification normalizes under the LEARNED type. Mutant
+        // bound: removing the shared core's invalidate leaves the MOTION
+        // table cached and this stays "detected".
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2C, 0x00, 0x21, 0x00, 0x00, 0x01, 0x00, 0x00});
+        ingestion.processCycle();
+
+        assertThat(lastReportedKey()).isEqualTo("open");
+        assertThat(ingestionMessages(Level.INFO, "zigbee.ias_zone_type_learned"))
+                .as("the FROZEN-shape learn INFO, fed by effectiveZoneType")
+                .containsExactly("zigbee.ias_zone_type_learned: "
+                        + "device=0x00124B0012345678 zoneType=CONTACT "
+                        + "(was MOTION)");
+    }
+
+    @Test
+    @DisplayName("F-7a: the learn precedes the send outcome — a rejected "
+            + "enroll-response send still records the learn")
+    void enrollLearnPrecedesSendOutcome() {
+        // Mutant bound: gating the learn on the send outcome (or reordering
+        // respond-before-learn and returning on rejection) loses the learn.
+        sendAccepted = false;
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x01, 0x15, 0x00, 0x00, 0x00});
+
+        ingestion.processCycle();
+
+        assertThat(sentFrames)
+                .as("the send was attempted and rejected")
+                .hasSize(1);
+        assertThat(ingestion.learnedZoneType(SNZB))
+                .as("the learn never depends on the send outcome")
+                .contains(ZoneType.CONTACT);
+    }
+
+    @Test
+    @DisplayName("F-7a: an unknown zoneType in the enroll payload is ignored — "
+            + "the existing unknown DEBUG, no store, the response still sent")
+    void enrollUnknownZoneTypeIgnored() {
+        // logback filters below the logger's effective level (root INFO in the
+        // test tree) BEFORE appenders run — the explicit DEBUG keeps the
+        // presence assertion from passing vacuously on an empty capture.
+        Level previous = ingestionLogger().getLevel();
+        ingestionLogger().setLevel(Level.DEBUG);
+        try {
+            enqueueReport(SNZB_NWK, 1, 0x0500,
+                    new byte[] {0x19, 0x2A, 0x01, 0x77, 0x77, 0x00, 0x00});
+            ingestion.processCycle();
+        } finally {
+            ingestionLogger().setLevel(previous);
+        }
+
+        assertThat(ingestion.learnedZoneType(SNZB))
+                .as("an unknown zclId never stores")
+                .isEmpty();
+        assertThat(ingestionMessages(Level.DEBUG, "zigbee.ias_zone_type_unknown"))
+                .containsExactly("zigbee.ias_zone_type_unknown: "
+                        + "device=0x00124B0012345678 zclId=0x7777; ignored");
+        assertThat(sentFrames).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("§3.12: an enroll payload shorter than 2 bytes learns nothing — "
+            + "the response still sent (a malformed request never blocks "
+            + "enrollment)")
+    void enrollShortPayloadLearnsNothing() {
+        // A 1-byte payload — the mutant bound: dropping the length guard makes
+        // the LE uint16 read throw past the frame end and fail this test.
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x01, 0x15});
+
+        ingestion.processCycle();
+
+        assertThat(ingestion.learnedZoneType(SNZB)).isEmpty();
+        assertThat(sentFrames).hasSize(1);
+        assertThat(publisher.published()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("F-7a: a second enroll with the same type stores silently — "
+            + "no second invalidate, no second learn INFO (the same-as-effective "
+            + "rule)")
+    void enrollSameTypeTwiceInvalidatesOnce() {
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x01, 0x15, 0x00, 0x00, 0x00});
+        ingestion.processCycle();
+        assertThat(ingestionMessages(Level.INFO, "zigbee.ias_zone_type_learned"))
+                .as("the first learn changes the effective type — ONE INFO")
+                .hasSize(1);
+
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2B, 0x01, 0x15, 0x00, 0x00, 0x00});
+        ingestion.processCycle();
+
+        assertThat(ingestion.learnedZoneType(SNZB)).contains(ZoneType.CONTACT);
+        assertThat(ingestionMessages(Level.INFO, "zigbee.ias_zone_type_learned"))
+                .as("the second same-type learn is a silent store — still ONE")
+                .hasSize(1);
+        assertThat(sentFrames)
+                .as("both requests answered")
+                .hasSize(2);
+    }
+
+    // ── W2-LEARN §3 — the route() non-HA diagnostic ─────────────────────────
+
+    @Test
+    @DisplayName("route(): a non-HA-profile frame is dropped exactly as before, "
+            + "now with ONE DEBUG diagnostic; HA frames produce no such line")
+    void nonHaProfileFrameSkippedWithDiagnostic() {
+        Level previous = ingestionLogger().getLevel();
+        ingestionLogger().setLevel(Level.DEBUG);
+        try {
+            pendingFrames.add(incomingFrame(0xC05E, 0x0006, 1, SNZB_NWK,
+                    new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x18, 0x01}));
+            enqueueReport(SNZB_NWK, 1, 0x0406,
+                    new byte[] {0x18, 0x2B, 0x0A, 0x00, 0x00, 0x18, 0x01});
+            ingestion.processCycle();
+        } finally {
+            ingestionLogger().setLevel(previous);
+        }
+
+        assertThat(publisher.published())
+                .as("the non-HA frame never dispatches; the HA frame does")
+                .hasSize(1);
+        assertThat(ingestionMessages(Level.DEBUG,
+                "zigbee.ingestion_profile_skipped"))
+                .as("ONE diagnostic for the 0xC05E frame, none for the HA frame")
+                .containsExactly("zigbee.ingestion_profile_skipped: nwk=0x6b9a "
+                        + "profile=0xc05e cluster=0x6; non-HA frame skipped");
+    }
+
     private String lastReportedKey() {
         List<EventEnvelope> published = publisher.published();
         return ((StateReportedEvent) published.get(published.size() - 1)
@@ -590,5 +772,19 @@ class ZclIngestionUnitTest {
         return new EzspFrame(
                 EzspCoordinatorProtocol.FRAME_INCOMING_MESSAGE_HANDLER, true,
                 parameters);
+    }
+
+    // ── log capture (the ZigbeeWave2ContactAdoptionTest idiom) ──────────────
+
+    private List<String> ingestionMessages(Level level, String prefix) {
+        return logCapture.list.stream()
+                .filter(event -> event.getLevel() == level)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith(prefix))
+                .toList();
+    }
+
+    private static Logger ingestionLogger() {
+        return (Logger) LoggerFactory.getLogger(ZclIngestionUnit.class);
     }
 }
