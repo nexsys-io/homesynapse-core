@@ -32,6 +32,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayDeque;
@@ -226,6 +228,129 @@ class ZigbeeWave2ContactAdoptionTest {
                 .containsExactlyInAnyOrder("contact", "battery", "identify");
     }
 
+    @Test
+    @DisplayName("LEARN-PERSIST: the wire learn PERSISTS across a restart — the "
+            + "next session's fast propose adopts CONTACT with ZERO enroll or "
+            + "attribute frames processed (the 2026-07-19 bench race, "
+            + "hardware-free)")
+    void persistedLearnSurvivesRestart_fastProposeReadsContact()
+            throws Exception {
+        // Session A — window #1: the device joins + enrolls while UNLISTED;
+        // the learn lands and persists, nothing adopts (the bench mechanism:
+        // listing the device requires the restart that wipes the in-memory
+        // learned map).
+        FakeNcp ncpA = new FakeNcp();
+        ncpA.onEzspCommand(this::adoptionHandler);
+        ZigbeeIntegrationAdapter sessionA =
+                bootProduction(ncpA, configAccess(List.of()));
+        riders.add(deviceAnnounceCallback(CONTACT_IEEE, CONTACT_NWK));
+        riders.add(zoneEnrollRequestCallback());
+        sessionA.coordinatorProtocol().ping();
+        sessionA.runCycleOnce();
+        assertThat(ingestionMessages(Level.INFO, "zigbee.ias_zone_type_learned"))
+                .as("window #1: the enroll-payload learn landed")
+                .hasSize(1);
+        assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).count())
+                .as("unlisted — the proposal sits, nothing adopts in session A")
+                .isZero();
+        sessionA.deviceCache().flush();
+
+        // The restart: every in-memory surface rebuilds fresh (registries,
+        // publisher, adapter, NCP) — only the data directory survives. The
+        // NCP wrapper answers networkInit NOT_JOINED (0x93): a fresh fake
+        // coordinator holds no NVRAM network, so resume takes the
+        // restore-from-parameters arm over the already-scripted form frames.
+        deviceRegistry = new InMemoryDeviceRegistry();
+        entityRegistry = new InMemoryEntityRegistry();
+        publisher = new RecordingEventPublisher(clock);
+        ingestionLogCapture.list.clear();
+        FakeNcp ncpB = new FakeNcp();
+        ncpB.onEzspCommand(command -> {
+            if (!isLegacyVersion(command)
+                    && frameIdOf(command) == FRAME_NETWORK_INIT) {
+                return List.of(extendedResponse(command[0] & 0xFF,
+                        FRAME_NETWORK_INIT, new byte[] {(byte) 0x93}));
+            }
+            return adoptionHandler(command);
+        });
+        ListAppender<ILoggingEvent> adapterLogCapture = new ListAppender<>();
+        adapterLogCapture.start();
+        adapterLogger().addAppender(adapterLogCapture);
+        ZigbeeIntegrationAdapter sessionB;
+        try {
+            sessionB = bootProduction(ncpB,
+                    configAccess(List.of(CONTACT_LISTED)));
+        } finally {
+            adapterLogger().detachAppender(adapterLogCapture);
+        }
+        assertThat(adapterMessages(adapterLogCapture, Level.INFO,
+                "zigbee.learned_zonetypes_rehydrated"))
+                .as("the DP-LP-6 glance-point: persistence confirmed at boot, "
+                        + "BEFORE any window opens")
+                .containsExactly("zigbee.learned_zonetypes_rehydrated: count=1");
+
+        // Session B — window #2: the fast propose. ONLY the announce rides —
+        // no enroll, no ZoneType attribute, nothing IAS at all.
+        riders.add(deviceAnnounceCallback(CONTACT_IEEE, CONTACT_NWK));
+        sessionB.coordinatorProtocol().ping();
+        sessionB.runCycleOnce();
+
+        assertThat(ingestionMessages(Level.INFO, "zigbee.ias_zone_type_learned"))
+                .as("session B never learns on the wire — the truth rehydrated")
+                .isEmpty();
+        assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).count())
+                .as("the listed COMPLETE proposal adopted")
+                .isEqualTo(1);
+        Optional<Device> device = deviceRegistry.findByHardwareIdentifier(
+                ZigbeeAdoptionSlice.HARDWARE_NAMESPACE,
+                new IEEEAddress(CONTACT_IEEE).toHexString());
+        List<Entity> entities = entityRegistry
+                .listEntitiesByDevice(device.orElseThrow().deviceId());
+        assertThat(entities).hasSize(1);
+        assertThat(entities.get(0).entityType())
+                .isEqualTo(EntityType.BINARY_SENSOR);
+        assertThat(entities.get(0).capabilities())
+                .extracting(c -> c.capabilityId())
+                .as("adopt-time classification reads the PERSISTED learn — "
+                        + "never the MOTION default the bench race would have "
+                        + "durably shipped")
+                .containsExactlyInAnyOrder("contact", "battery", "identify");
+    }
+
+    @Test
+    @DisplayName("LEARN-PERSIST DP-LP-6: the boot INFO fires with the APPLIED "
+            + "count — tolerance-skipped ids excluded, and a learn needs no "
+            + "device record to rehydrate")
+    void rehydratedCountFiresAndExcludesUnknownIds() throws Exception {
+        Files.writeString(tempDir.resolve("zigbee-devices.json"), """
+                {
+                  "version" : 1,
+                  "devices" : [ ],
+                  "learnedZoneTypes" : {
+                    "0x00124B00AA0004B4" : 21,
+                    "0x00124B00FFFF0001" : 30583
+                  }
+                }
+                """, StandardCharsets.UTF_8);
+        ListAppender<ILoggingEvent> adapterLogCapture = new ListAppender<>();
+        adapterLogCapture.start();
+        adapterLogger().addAppender(adapterLogCapture);
+        try {
+            FakeNcp ncp = new FakeNcp();
+            ncp.onEzspCommand(this::adoptionHandler);
+            bootProduction(ncp);
+        } finally {
+            adapterLogger().detachAppender(adapterLogCapture);
+        }
+
+        assertThat(adapterMessages(adapterLogCapture, Level.INFO,
+                "zigbee.learned_zonetypes_rehydrated"))
+                .as("count = APPLIED entries: the unknown id 0x7777 is "
+                        + "tolerance-skipped; the CONTACT learn applies with "
+                        + "no devices[] node at all")
+                .containsExactly("zigbee.learned_zonetypes_rehydrated: count=1");
+    }
+
     // ── harness (the ZigbeeConfigAcceptedAdoptionTest production-ladder idiom) ─
 
     private static PortCandidate coordinatorCandidate() {
@@ -266,6 +391,76 @@ class ZigbeeWave2ContactAdoptionTest {
         adapter.resumeOrForm();
         adapter.coordinatorProtocol().awaitNetworkUp();
         return adapter;
+    }
+
+    // ── LEARN-PERSIST harness additions (the existing helpers above stay
+    // byte-untouched; the restart leg needs per-session accept lists) ────────
+
+    /** {@link #configAccess()} with an explicit accept list (LEARN-PERSIST). */
+    private static ConfigurationAccess configAccess(List<String> adoptDevices) {
+        return new ConfigurationAccess() {
+            @Override
+            public Map<String, Object> getConfig() {
+                return Map.of(ZigbeeIntegrationAdapter.ADOPT_DEVICES_KEY,
+                        adoptDevices);
+            }
+
+            @Override
+            public Optional<String> getString(String key) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<Integer> getInt(String key) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<Boolean> getBoolean(String key) {
+                return Optional.empty();
+            }
+        };
+    }
+
+    private IntegrationContext context(ConfigurationAccess config) {
+        return new IntegrationContext(
+                integrationId, "zigbee", publisher,
+                entityRegistry, unusedQueryService(),
+                unusedHealthReporter(), config,
+                null, null, null, null, null);
+    }
+
+    /** {@link #bootProduction(FakeNcp)} with an explicit accept-list config. */
+    private ZigbeeIntegrationAdapter bootProduction(FakeNcp ncp,
+            ConfigurationAccess config) throws Exception {
+        Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
+        channels.push(channelOver(ncp));
+        ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
+                context(config), deviceRegistry,
+                new RegistryProjection(deviceRegistry, entityRegistry),
+                tempDir, clock, null,
+                () -> List.of(coordinatorCandidate()),
+                candidate -> channels.pop());
+        adapter.initialize();
+        PortCandidate port = adapter.resolvePort();
+        adapter.bindTransport(port);
+        adapter.coordinatorProtocol().startSession();
+        adapter.resumeOrForm();
+        adapter.coordinatorProtocol().awaitNetworkUp();
+        return adapter;
+    }
+
+    private static Logger adapterLogger() {
+        return (Logger) LoggerFactory.getLogger(ZigbeeIntegrationAdapter.class);
+    }
+
+    private static List<String> adapterMessages(
+            ListAppender<ILoggingEvent> capture, Level level, String prefix) {
+        return capture.list.stream()
+                .filter(event -> event.getLevel() == level)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith(prefix))
+                .toList();
     }
 
     // ── scripted NCP (v13 dialect; the SNZB-04P interview walk) ─────────────

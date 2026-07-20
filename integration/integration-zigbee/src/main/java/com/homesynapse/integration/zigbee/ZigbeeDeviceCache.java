@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,7 +39,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * the §8.1 M-1 persisted pre-restart availability the
  * {@link StandardAvailabilityTracker} initializes from (the frozen
  * {@link ZigbeeDeviceRecord} has no availability component; the FILE carries
- * the sidecar, tolerated-additively by this loader).
+ * the sidecar, tolerated-additively by this loader) — and a TOP-LEVEL
+ * {@code learnedZoneTypes} section (LEARN-PERSIST DP-LP-1): wire-learned IAS
+ * zone-type ids keyed by IEEE hex, top-level rather than per-record so a learn
+ * for a device with no record node still persists and the frozen record shape
+ * is provably untouched. Absence and malformed content both degrade to
+ * unlearned (skip + one WARN), never a load failure.
  *
  * <p>Thread-safe ({@link ReentrantLock} only, LTD-11). Writes snapshot the
  * serializable state under the lock and perform the file I/O outside it, so
@@ -67,6 +73,7 @@ final class ZigbeeDeviceCache {
     private final ReentrantLock lock = new ReentrantLock();
     private final Map<Long, ZigbeeDeviceRecord> devices = new LinkedHashMap<>();
     private final Map<Long, Boolean> lastKnownAvailability = new HashMap<>();
+    private final Map<Long, Long> learnedZoneTypes = new HashMap<>();
     private final Map<Integer, Long> ieeeByNetworkAddress = new HashMap<>();
 
     private boolean dirty;
@@ -216,6 +223,41 @@ final class ZigbeeDeviceCache {
     }
 
     /**
+     * Persists a wire-learned IAS zone type (LEARN-PERSIST DP-LP-3): state
+     * mutation under the lock ONLY — no I/O on the calling (ingestion cycle)
+     * thread; the debounced {@link #maybeFlush()} and the shutdown
+     * {@link #flush()} carry the file I/O exactly as they do for availability.
+     *
+     * @param ieee the learned device, never {@code null}
+     * @param zclId the learned ZCL zone-type id ({@link ZoneType#zclId()})
+     */
+    void recordLearnedZoneType(IEEEAddress ieee, long zclId) {
+        Objects.requireNonNull(ieee, "ieee");
+        lock.lock();
+        try {
+            learnedZoneTypes.put(ieee.value(), zclId);
+            dirty = true;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Returns the persisted wire-learned zone-type ids by IEEE value — the
+     * LEARN-PERSIST DP-LP-4 rehydration seed. Ids, never enum names, so the
+     * ingestion's candidate-scan tolerance stays the one code path (DP-LP-2:
+     * an unknown persisted id is the SEED consumer's skip, not a load error).
+     */
+    Map<Long, Long> learnedZoneTypeIds() {
+        lock.lock();
+        try {
+            return Map.copyOf(learnedZoneTypes);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
      * Returns a device's record.
      *
      * @param ieee the device, never {@code null}
@@ -349,7 +391,8 @@ final class ZigbeeDeviceCache {
      * valid however long the file I/O takes.
      */
     private record WriteSnapshot(List<ZigbeeDeviceRecord> devices,
-            Map<Long, Boolean> availability) { }
+            Map<Long, Boolean> availability,
+            Map<Long, Long> learnedZoneTypes) { }
 
     private WriteSnapshot snapshotLocked(Instant now) {
         // F-14: dirty clears at snapshot time — a mutation racing the file
@@ -357,7 +400,8 @@ final class ZigbeeDeviceCache {
         dirty = false;
         lastWrite = now;
         return new WriteSnapshot(List.copyOf(devices.values()),
-                Map.copyOf(lastKnownAvailability));
+                Map.copyOf(lastKnownAvailability),
+                Map.copyOf(learnedZoneTypes));
     }
 
     private void write(WriteSnapshot snapshot) {
@@ -442,6 +486,19 @@ final class ZigbeeDeviceCache {
                 }
             }
         }
+        if (!snapshot.learnedZoneTypes().isEmpty()) {
+            // DP-LP-1: a TOP-LEVEL section, not a per-record field — a learn
+            // for a device with no record node still persists. Keys sorted
+            // unsigned so identical state serializes to identical bytes.
+            ObjectNode learnedNode = root.putObject("learnedZoneTypes");
+            List<Long> ieees =
+                    new ArrayList<>(snapshot.learnedZoneTypes().keySet());
+            ieees.sort(Long::compareUnsigned);
+            for (Long ieee : ieees) {
+                learnedNode.put(new IEEEAddress(ieee).toHexString(),
+                        snapshot.learnedZoneTypes().get(ieee).longValue());
+            }
+        }
         return MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(root);
     }
 
@@ -504,6 +561,7 @@ final class ZigbeeDeviceCache {
                             node.get("lastKnownAvailability").asBoolean());
                 }
             }
+            loadLearnedZoneTypes(root);
             log.info("zigbee.device_cache_loaded: {} devices from {}",
                     devices.size(), file);
         } catch (IOException | RuntimeException e) {
@@ -514,6 +572,50 @@ final class ZigbeeDeviceCache {
             devices.clear();
             ieeeByNetworkAddress.clear();
             lastKnownAvailability.clear();
+            learnedZoneTypes.clear();
+        }
+    }
+
+    /**
+     * Loads the top-level {@code learnedZoneTypes} section (LEARN-PERSIST):
+     * absent ⇒ empty, silently (the first-run/upgrade path); malformed content
+     * — a non-object section, an unparseable IEEE key, a non-integral value —
+     * is skipped with ONE WARN and the parseable entries still apply.
+     * Fail-safe is always unlearned, which is exactly the pre-LEARN-PERSIST
+     * behavior (the classifier's MOTION default). Zone-type VALIDITY is not
+     * judged here — DP-LP-2 keeps that in the ingestion's candidate scan, the
+     * one tolerance code path.
+     */
+    private void loadLearnedZoneTypes(JsonNode root) {
+        JsonNode learnedNode = root.path("learnedZoneTypes");
+        if (learnedNode.isMissingNode()) {
+            return;
+        }
+        if (!learnedNode.isObject()) {
+            log.warn("zigbee.learned_zonetypes_malformed: section in {} is not "
+                    + "an object; ignored", file);
+            return;
+        }
+        int skipped = 0;
+        Iterator<Map.Entry<String, JsonNode>> entries = learnedNode.fields();
+        while (entries.hasNext()) {
+            Map.Entry<String, JsonNode> entry = entries.next();
+            if (!entry.getValue().isIntegralNumber()) {
+                skipped++;
+                continue;
+            }
+            try {
+                learnedZoneTypes.put(
+                        IEEEAddress.fromHexString(entry.getKey()).value(),
+                        entry.getValue().asLong());
+            } catch (RuntimeException e) {
+                skipped++;
+            }
+        }
+        if (skipped > 0) {
+            log.warn("zigbee.learned_zonetypes_malformed: {} unparseable "
+                    + "entries in {} skipped; the parseable entries apply",
+                    skipped, file);
         }
     }
 }

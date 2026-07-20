@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.ObjLongConsumer;
 import java.util.function.Supplier;
 
 /**
@@ -56,6 +57,9 @@ import java.util.function.Supplier;
  * request's zoneType payload feeds the learn — W2-LEARN) and their
  * wire-observed ZoneType outranks the resolver's default; the per-device
  * handler table invalidates on announce and on a zone-type change (F-8).
+ * Learns PERSIST across restarts (LEARN-PERSIST): every successful learn
+ * writes through the injected sink, and the persisted set seeds the map at
+ * construction — silently, before any cycle can run.
  *
  * <p>Thread-safe for the intended single-cycle-driver use: the per-device
  * handler table and the learned zone-type map are confined to the cycle
@@ -140,9 +144,13 @@ final class ZclIngestionUnit {
     // F-7a: wire-learned IAS zone types by IEEE — consulted before the
     // resolver's default when the handler table builds.
     private final Map<Long, ZoneType> learnedZoneTypes = new HashMap<>();
+    // LEARN-PERSIST DP-LP-3: every successful wire learn writes through here.
+    private final ObjLongConsumer<IEEEAddress> learnSink;
 
     /**
-     * Creates the ingestion unit.
+     * Creates the ingestion unit with no persisted seed and a no-op learn sink
+     * — the pre-LEARN-PERSIST shape; pre-existing construction sites behave
+     * byte-identically.
      *
      * @param callbackDrain drains the protocol's bounded callback queue, never {@code null}
      * @param resolver the device/entity resolution surface, never {@code null}
@@ -157,6 +165,43 @@ final class ZclIngestionUnit {
             DeviceResolver resolver, IngestionListener listener,
             ReportDeduplicator deduplicator, EventPublisher publisher,
             Clock clock, ZclFrameSender frameSender) {
+        this(callbackDrain, resolver, listener, deduplicator, publisher, clock,
+                frameSender, Map.of(), (device, zclId) -> { });
+    }
+
+    /**
+     * Creates the ingestion unit with a persisted learned-zone-type seed and a
+     * write-through learn sink (LEARN-PERSIST).
+     *
+     * <p>The seed applies at construction — structurally BEFORE
+     * {@link #processCycle()} can run — through the same candidate-scan
+     * tolerance the wire learn uses (DP-LP-2: an unknown persisted id is
+     * skipped with a DEBUG, never a crash, never a learn). Seeding is SILENT:
+     * no {@code ias_zone_type_learned} INFO (that line means exactly one
+     * thing — a wire learn), no handler invalidation (no handlers exist
+     * pre-cycle; DP-LP-4).
+     *
+     * @param callbackDrain drains the protocol's bounded callback queue, never {@code null}
+     * @param resolver the device/entity resolution surface, never {@code null}
+     * @param listener the announce/frame signal sink, never {@code null}
+     * @param deduplicator the measured-contract deduplicator, never {@code null}
+     * @param publisher the event publisher from the integration context, never {@code null}
+     * @param clock the time source, never {@code null}
+     * @param frameSender the outbound ZCL send surface for protocol-mandated
+     *        responses (the F-7a ZoneEnrollResponse), never {@code null}
+     * @param learnedZoneTypeSeed persisted zone-type ids by IEEE value
+     *        (the cache's {@code learnedZoneTypeIds()} snapshot), never {@code null}
+     * @param learnSink invoked with (device, learned zclId) after EVERY
+     *        successful wire learn — the change case AND the same-as-effective
+     *        silent case (DP-LP-3); state-mutation-only on this thread, never
+     *        I/O; never {@code null}
+     */
+    ZclIngestionUnit(Supplier<List<EzspFrame>> callbackDrain,
+            DeviceResolver resolver, IngestionListener listener,
+            ReportDeduplicator deduplicator, EventPublisher publisher,
+            Clock clock, ZclFrameSender frameSender,
+            Map<Long, Long> learnedZoneTypeSeed,
+            ObjLongConsumer<IEEEAddress> learnSink) {
         this.callbackDrain = Objects.requireNonNull(callbackDrain, "callbackDrain");
         this.resolver = Objects.requireNonNull(resolver, "resolver");
         this.listener = Objects.requireNonNull(listener, "listener");
@@ -164,6 +209,35 @@ final class ZclIngestionUnit {
         this.publisher = Objects.requireNonNull(publisher, "publisher");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.frameSender = Objects.requireNonNull(frameSender, "frameSender");
+        this.learnSink = Objects.requireNonNull(learnSink, "learnSink");
+        Objects.requireNonNull(learnedZoneTypeSeed, "learnedZoneTypeSeed");
+        // DP-LP-4: apply the persisted seed at construction — structurally
+        // BEFORE processCycle() can run, so a cached-interview fast propose
+        // reads the learned truth. A plain put, NEVER the learn path: no
+        // ias_zone_type_learned INFO (it means exactly one thing — a wire
+        // learn), no invalidation (no handlers exist yet), no sink invocation
+        // (the entry came FROM the cache).
+        learnedZoneTypeSeed.forEach((ieee, zclId) -> {
+            ZoneType seeded = zoneTypeForZclId(zclId);
+            if (seeded == null) {
+                log.debug("zigbee.ias_zone_type_seed_unknown: device={} "
+                        + "zclId=0x{}; skipped", new IEEEAddress(ieee),
+                        Long.toHexString(zclId));
+                return;
+            }
+            learnedZoneTypes.put(ieee, seeded);
+        });
+    }
+
+    /**
+     * The count of learned zone types currently held — rehydration
+     * observability: the adapter's DP-LP-6 boot INFO reads it right after
+     * construction, when the map holds exactly the APPLIED seed (tolerance-
+     * skipped entries excluded). Cycle-thread/construction confined like the
+     * map it reads.
+     */
+    int learnedZoneTypeCount() {
+        return learnedZoneTypes.size();
     }
 
     /**
@@ -526,13 +600,7 @@ final class ZclIngestionUnit {
      * tolerate default stands).
      */
     private void learnZoneType(IEEEAddress device, long zclId) {
-        ZoneType learned = null;
-        for (ZoneType candidate : ZoneType.values()) {
-            if (candidate.zclId() == zclId) {
-                learned = candidate;
-                break;
-            }
-        }
+        ZoneType learned = zoneTypeForZclId(zclId);
         if (learned == null) {
             log.debug("zigbee.ias_zone_type_unknown: device={} zclId=0x{}; "
                     + "ignored", device, Long.toHexString(zclId));
@@ -540,6 +608,12 @@ final class ZclIngestionUnit {
         }
         ZoneType previous = effectiveZoneType(device);
         learnedZoneTypes.put(device.value(), learned);
+        // DP-LP-3 (LEARN-PERSIST): EVERY successful learn persists — the
+        // change case AND the same-as-effective silent case (a first wire
+        // learn matching the resolver default is still a learned fact). The
+        // sink mutates cache state only; the debounced flush carries the I/O
+        // off this cycle-thread call.
+        learnSink.accept(device, learned.zclId());
         if (learned != previous) {
             // F-8: the cached table was built under the previous type — drop
             // it so the rebuild picks up the learned truth.
@@ -547,6 +621,21 @@ final class ZclIngestionUnit {
             log.info("zigbee.ias_zone_type_learned: device={} zoneType={} "
                     + "(was {})", device, learned, previous);
         }
+    }
+
+    /**
+     * The candidate scan — DP-LP-2's ONE tolerance code path: resolves a ZCL
+     * zone-type id to the enum, {@code null} when unknown. Shared by the wire
+     * learn and the construction seed, so persisted ids and wire ids tolerate
+     * identically and a {@link ZoneType} change can never split the behavior.
+     */
+    private static ZoneType zoneTypeForZclId(long zclId) {
+        for (ZoneType candidate : ZoneType.values()) {
+            if (candidate.zclId() == zclId) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     /**

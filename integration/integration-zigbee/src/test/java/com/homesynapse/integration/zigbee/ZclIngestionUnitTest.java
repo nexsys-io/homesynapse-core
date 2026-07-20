@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.ObjLongConsumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -57,8 +58,14 @@ class ZclIngestionUnitTest {
     private List<Integer> sentTargets;
     private boolean sendAccepted;
     private ZoneType resolverZoneType;
+    private ZclIngestionUnit.DeviceResolver resolver;
+    private ZclIngestionUnit.IngestionListener listener;
+    private List<SinkCall> sinkCalls;
     private ZclIngestionUnit ingestion;
     private ListAppender<ILoggingEvent> logCapture;
+
+    /** One write-through sink invocation (LEARN-PERSIST DP-LP-3). */
+    private record SinkCall(IEEEAddress device, long zclId) { }
 
     @BeforeEach
     void setUp() {
@@ -78,8 +85,9 @@ class ZclIngestionUnitTest {
         sentTargets = new ArrayList<>();
         sendAccepted = true;
         resolverZoneType = ZoneType.MOTION;
+        sinkCalls = new ArrayList<>();
 
-        ZclIngestionUnit.DeviceResolver resolver =
+        resolver =
                 new ZclIngestionUnit.DeviceResolver() {
                     @Override
                     public Optional<IEEEAddress> deviceForNetworkAddress(
@@ -100,7 +108,7 @@ class ZclIngestionUnitTest {
                         return resolverZoneType;
                     }
                 };
-        ZclIngestionUnit.IngestionListener listener =
+        listener =
                 new ZclIngestionUnit.IngestionListener() {
                     @Override
                     public void onDeviceAnnounce(ZdoCodec.DeviceAnnounce announce) {
@@ -729,6 +737,126 @@ class ZclIngestionUnitTest {
                 .as("ONE diagnostic for the 0xC05E frame, none for the HA frame")
                 .containsExactly("zigbee.ingestion_profile_skipped: nwk=0x6b9a "
                         + "profile=0xc05e cluster=0x6; non-HA frame skipped");
+    }
+
+    // ── LEARN-PERSIST — the construction seed + the write-through sink ──────
+
+    /** A unit over the setUp collaborators with an explicit seed and sink. */
+    private ZclIngestionUnit seededUnit(Map<Long, Long> seed,
+            ObjLongConsumer<IEEEAddress> sink) {
+        return new ZclIngestionUnit(() -> {
+            drainCalls++;
+            List<EzspFrame> drained = List.copyOf(pendingFrames);
+            pendingFrames.clear();
+            return drained;
+        }, resolver, listener, dedup, publisher, clock, (frame, networkAddress) -> {
+            sentFrames.add(frame);
+            sentTargets.add(networkAddress);
+            return sendAccepted;
+        }, seed, sink);
+    }
+
+    @Test
+    @DisplayName("LEARN-PERSIST DP-LP-4: a seeded zone type answers WITHOUT any "
+            + "frame processed, and seeding is SILENT — no ias_zone_type_learned "
+            + "INFO at construction (the wire-learn INFO means exactly one thing)")
+    void seededZoneTypeAnswersWithoutFramesAndStaysSilent() {
+        ZclIngestionUnit seeded = seededUnit(
+                Map.of(SNZB.value(), (long) ZoneType.CONTACT.zclId()),
+                (device, zclId) -> { });
+
+        assertThat(seeded.learnedZoneType(SNZB))
+                .as("the persisted learn answers pre-cycle — the fast-propose "
+                        + "race read")
+                .contains(ZoneType.CONTACT);
+        assertThat(seeded.learnedZoneTypeCount()).isEqualTo(1);
+        assertThat(ingestionMessages(Level.INFO, "zigbee.ias_zone_type_learned"))
+                .as("seeding is NOT a wire learn — the INFO absence pin "
+                        + "(mutant M3's kill)")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("LEARN-PERSIST DP-LP-2: an unknown persisted zclId is skipped "
+            + "with a DEBUG — never a crash, never a learn; the known sibling "
+            + "still applies and the applied count excludes the skip")
+    void seedUnknownZclIdSkippedWithDebug() {
+        IEEEAddress other = new IEEEAddress(0x00124B00FFFF0001L);
+        Level previous = ingestionLogger().getLevel();
+        ingestionLogger().setLevel(Level.DEBUG);
+        ZclIngestionUnit seeded;
+        try {
+            seeded = seededUnit(Map.of(
+                    SNZB.value(), 0x7777L,
+                    other.value(), (long) ZoneType.CONTACT.zclId()),
+                    (device, zclId) -> { });
+        } finally {
+            ingestionLogger().setLevel(previous);
+        }
+
+        assertThat(seeded.learnedZoneType(SNZB))
+                .as("an unknown persisted id never stores")
+                .isEmpty();
+        assertThat(seeded.learnedZoneType(other)).contains(ZoneType.CONTACT);
+        assertThat(seeded.learnedZoneTypeCount())
+                .as("the applied count excludes tolerance-skipped entries")
+                .isEqualTo(1);
+        assertThat(ingestionMessages(Level.DEBUG,
+                "zigbee.ias_zone_type_seed_unknown"))
+                .containsExactly("zigbee.ias_zone_type_seed_unknown: "
+                        + "device=0x00124B0012345678 zclId=0x7777; skipped");
+    }
+
+    @Test
+    @DisplayName("LEARN-PERSIST DP-LP-3: EVERY successful wire learn reaches "
+            + "the sink — the change case AND the same-as-effective silent case")
+    void wireLearnWritesThroughSinkBothCases() {
+        ZclIngestionUnit unit = seededUnit(Map.of(),
+                (device, zclId) -> sinkCalls.add(new SinkCall(device, zclId)));
+
+        // The change case: effective MOTION (resolver default) → CONTACT.
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x01, 0x15, 0x00, 0x00, 0x00});
+        unit.processCycle();
+        assertThat(sinkCalls).containsExactly(
+                new SinkCall(SNZB, ZoneType.CONTACT.zclId()));
+
+        // The same-as-effective case: the INFO-silent path STILL persists —
+        // a re-learn equal to the effective type is a learned fact (DP-LP-3;
+        // mutant M2's kill is the sink staying empty, a sink-inside-the-
+        // changed-branch mutant dies on this second invocation).
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2B, 0x01, 0x15, 0x00, 0x00, 0x00});
+        unit.processCycle();
+
+        assertThat(sinkCalls).hasSize(2);
+        assertThat(ingestionMessages(Level.INFO, "zigbee.ias_zone_type_learned"))
+                .as("the second learn stays INFO-silent — persistence is "
+                        + "never log noise")
+                .hasSize(1);
+    }
+
+    @Test
+    @DisplayName("LEARN-PERSIST DP-LP-7: after rehydration a live re-learn of "
+            + "the SAME type is INFO-silent (no re-learn noise across sessions) "
+            + "and still writes through")
+    void rehydratedRelearnStaysSilentAndWritesThrough() {
+        ZclIngestionUnit seeded = seededUnit(
+                Map.of(SNZB.value(), (long) ZoneType.CONTACT.zclId()),
+                (device, zclId) -> sinkCalls.add(new SinkCall(device, zclId)));
+
+        enqueueReport(SNZB_NWK, 1, 0x0500,
+                new byte[] {0x19, 0x2A, 0x01, 0x15, 0x00, 0x00, 0x00});
+        seeded.processCycle();
+
+        assertThat(seeded.learnedZoneType(SNZB)).contains(ZoneType.CONTACT);
+        assertThat(ingestionMessages(Level.INFO, "zigbee.ias_zone_type_learned"))
+                .as("the seeded type IS the effective type — the wire re-learn "
+                        + "takes the silent path")
+                .isEmpty();
+        assertThat(sinkCalls)
+                .as("the silent path still persists")
+                .containsExactly(new SinkCall(SNZB, ZoneType.CONTACT.zclId()));
     }
 
     private String lastReportedKey() {

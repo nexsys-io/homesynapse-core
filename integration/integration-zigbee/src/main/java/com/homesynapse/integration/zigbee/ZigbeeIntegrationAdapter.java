@@ -323,7 +323,21 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         ingestion = new ZclIngestionUnit(() -> protocol.drainPendingCallbacks(),
                 new CacheDeviceResolver(), new AdapterIngestionListener(),
                 new ReportDeduplicator(clock), context.eventPublisher(), clock,
-                protocol::sendZclFrame);   // F-7a: the enroll-response send seam
+                protocol::sendZclFrame,   // F-7a: the enroll-response send seam
+                // LEARN-PERSIST: the cache (constructed above) seeds the
+                // learned map BEFORE the ingestion cycle can process any join
+                // — rehydrate-before-joins holds by construction (DP-LP-4) —
+                // and every successful wire learn writes back through the
+                // cache's debounced persistence (DP-LP-3; no I/O on the
+                // cycle thread).
+                cache.learnedZoneTypeIds(),
+                cache::recordLearnedZoneType);
+        // DP-LP-6: the anti-vacuous boot glance-point — an operator confirms
+        // persistence worked before opening any window. Count = entries
+        // APPLIED post-tolerance; unconditional (count=0 is honest evidence
+        // the mechanism ran, the adoption_maps_rehydrated precedent).
+        log.info("zigbee.learned_zonetypes_rehydrated: count={}",
+                ingestion.learnedZoneTypeCount());
         // F-8: adoption completion invalidates the device's handler-table entry
         // (the classifier may have attached new capabilities; zone type may bind).
         // M9.6-AVAIL: it ALSO seeds the freshly adopted entities' availability —

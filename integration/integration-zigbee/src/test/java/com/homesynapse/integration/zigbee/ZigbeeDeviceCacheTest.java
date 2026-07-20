@@ -4,17 +4,24 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.test.TestClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -22,9 +29,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link ZigbeeDeviceCache} tests (Doc 08 §3.14): announce/interview/frame
  * lifecycle updates, the NWK→IEEE index the ingestion resolves through, the
  * 30 s write debounce, shutdown flush, and the JSON round-trip including the
- * persisted availability sidecar (§8.1 M-1 restart-init input). F-14 pins the
- * write-failure backoff: a failed write arms a 60 s suppression, reads stay
- * live through it, and shutdown {@code flush()} still attempts.
+ * persisted availability sidecar (§8.1 M-1 restart-init input) and the
+ * LEARN-PERSIST {@code learnedZoneTypes} top-level section (DP-LP-1: the FILE
+ * carries the learns, keyed by IEEE hex, tolerated-additively — absence and
+ * malformed content both degrade to unlearned, never a load failure). F-14
+ * pins the write-failure backoff: a failed write arms a 60 s suppression,
+ * reads stay live through it, and shutdown {@code flush()} still attempts.
  */
 class ZigbeeDeviceCacheTest {
 
@@ -184,6 +194,140 @@ class ZigbeeDeviceCacheTest {
         assertThat(cache.device(SNZB).orElseThrow().networkAddress())
                 .isEqualTo(0x6B9A);
         assertThat(cache.deviceForNetworkAddress(0x6B9A)).contains(SNZB);
+    }
+
+    // ── LEARN-PERSIST — the learnedZoneTypes top-level section (DP-LP-1/2) ──
+
+    @Test
+    @DisplayName("learned zone types round-trip through zigbee-devices.json — "
+            + "including a device with no record node (the top-level carry)")
+    void learnedZoneTypesRoundTripThroughFile() {
+        IEEEAddress recordless = new IEEEAddress(0x00124B00AA0004B4L);
+        cache.recordAnnounce(SNZB, 0x6B9A);
+        cache.recordLearnedZoneType(SNZB, ZoneType.CONTACT.zclId());
+        cache.recordLearnedZoneType(recordless, ZoneType.WATER_LEAK.zclId());
+        cache.flush();
+
+        ZigbeeDeviceCache reloaded = new ZigbeeDeviceCache(file, clock);
+
+        assertThat(reloaded.learnedZoneTypeIds())
+                .as("both learns persist — the recordless device's learn has "
+                        + "no devices[] node to ride (DP-LP-1's top-level "
+                        + "rationale)")
+                .containsOnly(
+                        Map.entry(SNZB.value(), (long) ZoneType.CONTACT.zclId()),
+                        Map.entry(recordless.value(),
+                                (long) ZoneType.WATER_LEAK.zclId()));
+        assertThat(reloaded.device(recordless))
+                .as("no device record was invented for the recordless learn")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("an existing-format file WITHOUT a learnedZoneTypes section "
+            + "loads clean — empty ids, devices intact (the upgrade path)")
+    void learnedZoneTypesAbsentSectionLoadsClean() throws IOException {
+        Files.writeString(file, """
+                {
+                  "version" : 1,
+                  "devices" : [ {
+                    "ieee" : "0x00124B0012345678",
+                    "networkAddress" : 27546,
+                    "powerSource" : 3,
+                    "lastSeen" : "2026-01-01T00:00:00Z",
+                    "interviewStatus" : "COMPLETE"
+                  } ]
+                }
+                """, StandardCharsets.UTF_8);
+
+        ZigbeeDeviceCache reloaded = new ZigbeeDeviceCache(file, clock);
+
+        assertThat(reloaded.device(SNZB)).isPresent();
+        assertThat(reloaded.learnedZoneTypeIds()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a non-object learnedZoneTypes section is skipped with ONE "
+            + "WARN — devices load, ids empty, no throw (fail-safe = unlearned)")
+    void learnedZoneTypesNonObjectSectionWarnsAndLoadsEmpty() throws IOException {
+        Files.writeString(file, """
+                {
+                  "version" : 1,
+                  "devices" : [ {
+                    "ieee" : "0x00124B0012345678",
+                    "networkAddress" : 27546,
+                    "powerSource" : 3,
+                    "lastSeen" : "2026-01-01T00:00:00Z",
+                    "interviewStatus" : "COMPLETE"
+                  } ],
+                  "learnedZoneTypes" : [ 21, 42 ]
+                }
+                """, StandardCharsets.UTF_8);
+        ListAppender<ILoggingEvent> capture = attachCacheCapture();
+        ZigbeeDeviceCache reloaded;
+        try {
+            reloaded = new ZigbeeDeviceCache(file, clock);
+        } finally {
+            cacheLogger().detachAppender(capture);
+        }
+
+        assertThat(reloaded.device(SNZB))
+                .as("the devices load — a malformed sidecar section never "
+                        + "discards the cache")
+                .isPresent();
+        assertThat(reloaded.learnedZoneTypeIds()).isEmpty();
+        assertThat(malformedWarnings(capture)).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("malformed learnedZoneTypes entries (bad key, non-numeric "
+            + "value) are skipped with ONE WARN — the parseable entry applies")
+    void learnedZoneTypesMalformedEntriesSkippedWithOneWarn() throws IOException {
+        Files.writeString(file, """
+                {
+                  "version" : 1,
+                  "devices" : [ ],
+                  "learnedZoneTypes" : {
+                    "not-a-hex-key" : 21,
+                    "0x00124B0012345678" : "twenty-one",
+                    "0x00124B00AA0004B4" : 21
+                  }
+                }
+                """, StandardCharsets.UTF_8);
+        ListAppender<ILoggingEvent> capture = attachCacheCapture();
+        ZigbeeDeviceCache reloaded;
+        try {
+            reloaded = new ZigbeeDeviceCache(file, clock);
+        } finally {
+            cacheLogger().detachAppender(capture);
+        }
+
+        assertThat(reloaded.learnedZoneTypeIds())
+                .as("what parses, applies — fail-safe never discards the "
+                        + "healthy siblings")
+                .containsOnly(Map.entry(0x00124B00AA0004B4L, 21L));
+        assertThat(malformedWarnings(capture)).hasSize(1);
+    }
+
+    private static Logger cacheLogger() {
+        return (Logger) LoggerFactory.getLogger(ZigbeeDeviceCache.class);
+    }
+
+    private static ListAppender<ILoggingEvent> attachCacheCapture() {
+        ListAppender<ILoggingEvent> capture = new ListAppender<>();
+        capture.start();
+        cacheLogger().addAppender(capture);
+        return capture;
+    }
+
+    private static List<String> malformedWarnings(
+            ListAppender<ILoggingEvent> capture) {
+        return capture.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message
+                        .startsWith("zigbee.learned_zonetypes_malformed"))
+                .toList();
     }
 
     private Path blockedTarget() {
