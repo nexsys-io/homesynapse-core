@@ -5,6 +5,10 @@
 package com.homesynapse.api.rest;
 
 import com.homesynapse.automation.ExplanationService;
+import com.homesynapse.automation.StandardCommandValidator;
+import com.homesynapse.device.EntityRegistry;
+import com.homesynapse.event.EventPublisher;
+import com.homesynapse.event.EventStore;
 import com.homesynapse.event.bus.EventBus;
 import com.homesynapse.state.ReadinessSource;
 import com.homesynapse.state.StateQueryService;
@@ -305,6 +309,79 @@ public final class RestFilters {
                 new ListAutomationsEndpoint(explanations, viewPositionSupplier, clock));
         app.get("/api/v1/automations/{id}/non-firing",
                 new GetNonFiringEndpoint(explanations, viewPositionSupplier, clock));
+    }
+
+    /**
+     * Registers the CMD-API command write surface (Doc 09 §4.3–§4.5):
+     * <ul>
+     *   <li>{@code POST /api/v1/entities/{entityId}/commands} — issue a command
+     *       (202 = the {@code command_issued} event is durable, INV-ES-04)</li>
+     *   <li>{@code GET /api/v1/commands/{commandId}} — the four-phase lifecycle
+     *       status assembled from the command's correlation chain</li>
+     * </ul>
+     *
+     * <p>Both routes live under {@code /api/*} and therefore inherit the
+     * {@link #installAuth(Object, AuthMiddleware, RateLimiter) bearer-token auth}
+     * filter and the {@link #installReadinessGate(Object, ReadinessSource) 503
+     * readiness gate} — register this AFTER both (the lifecycle composition
+     * root does so).</p>
+     *
+     * <p>The {@code eventPublisher}, {@code entityRegistry}, and
+     * {@code eventStore} parameters are typed as {@link Object} so the exported
+     * public API does not leak {@code com.homesynapse.event.EventPublisher} /
+     * {@code EventStore} / {@code com.homesynapse.device.EntityRegistry}, which
+     * reach this module through automation's {@code requires transitive}
+     * closure, not through an exported edge of rest-api's own (DEC-M3-16 —
+     * the {@link #installAdminEndpoints} {@code bus} precedent). The validator,
+     * idempotency cache, and both handlers are constructed internally.</p>
+     *
+     * @param javalinApp                   the Javalin application instance
+     *                                     (must be a {@link io.javalin.Javalin});
+     *                                     never {@code null}
+     * @param eventPublisher               the event publisher (must be an
+     *                                     {@link EventPublisher}); never
+     *                                     {@code null}
+     * @param entityRegistry               the entity registry (must be an
+     *                                     {@link EntityRegistry}); never
+     *                                     {@code null}
+     * @param eventStore                   the event store (must be an
+     *                                     {@link EventStore}); never {@code null}
+     * @param defaultConfirmationTimeoutMs the config-sourced confirmation
+     *                                     timeout fallback — the SAME value the
+     *                                     action executor receives (Doc 07 §9)
+     * @param viewPositionSupplier         supplier for the projection's current
+     *                                     cursor position; never {@code null}
+     * @param clock                        injected clock for response
+     *                                     timestamps and the idempotency TTL;
+     *                                     never {@code null}
+     * @throws ClassCastException if {@code javalinApp} is not a
+     *         {@link io.javalin.Javalin}, or the erased parameters are not the
+     *         documented types
+     */
+    public static void installCommandEndpoints(Object javalinApp,
+                                               Object eventPublisher,
+                                               Object entityRegistry,
+                                               Object eventStore,
+                                               int defaultConfirmationTimeoutMs,
+                                               LongSupplier viewPositionSupplier,
+                                               Clock clock) {
+        Objects.requireNonNull(javalinApp, "javalinApp");
+        Objects.requireNonNull(eventPublisher, "eventPublisher");
+        Objects.requireNonNull(entityRegistry, "entityRegistry");
+        Objects.requireNonNull(eventStore, "eventStore");
+        Objects.requireNonNull(viewPositionSupplier, "viewPositionSupplier");
+        Objects.requireNonNull(clock, "clock");
+        Javalin app = (Javalin) javalinApp;
+        EventPublisher publisher = (EventPublisher) eventPublisher;
+        EntityRegistry registry = (EntityRegistry) entityRegistry;
+        EventStore store = (EventStore) eventStore;
+        IdempotencyCache idempotencyCache = new IdempotencyCache(clock);
+        app.post("/api/v1/entities/{entityId}/commands",
+                new IssueCommandEndpoint(publisher, registry,
+                        new StandardCommandValidator(registry), idempotencyCache,
+                        defaultConfirmationTimeoutMs, viewPositionSupplier, clock));
+        app.get("/api/v1/commands/{commandId}",
+                new GetCommandStatusEndpoint(store, registry, viewPositionSupplier, clock));
     }
 
     /** Request attribute key carrying the authenticated identity to downstream handlers. */

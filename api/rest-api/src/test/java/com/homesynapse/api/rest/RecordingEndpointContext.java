@@ -25,6 +25,8 @@ final class RecordingEndpointContext implements EndpointContext {
 
     private final Map<String, String> pathParams = new HashMap<>();
     private final Map<String, String> queryParams = new HashMap<>();
+    private final Map<String, String> requestHeaders = new HashMap<>();
+    private String requestBody = "";
 
     Integer statusSet;
     final Map<String, String> headers = new LinkedHashMap<>();
@@ -51,6 +53,23 @@ final class RecordingEndpointContext implements EndpointContext {
         return this;
     }
 
+    /**
+     * Seeds the raw request body. Returns {@code this} for fluent setup.
+     */
+    RecordingEndpointContext withBody(String body) {
+        this.requestBody = Objects.requireNonNull(body, "body");
+        return this;
+    }
+
+    /**
+     * Seeds a request header value. Returns {@code this} for fluent setup.
+     */
+    RecordingEndpointContext withRequestHeader(String name, String value) {
+        Objects.requireNonNull(name, "name");
+        requestHeaders.put(name, value);
+        return this;
+    }
+
     @Override
     public String pathParam(String name) {
         return pathParams.get(name);
@@ -59,6 +78,16 @@ final class RecordingEndpointContext implements EndpointContext {
     @Override
     public String queryParam(String name) {
         return queryParams.get(name);
+    }
+
+    @Override
+    public String body() {
+        return requestBody;
+    }
+
+    @Override
+    public String requestHeader(String name) {
+        return requestHeaders.get(name);
     }
 
     @Override

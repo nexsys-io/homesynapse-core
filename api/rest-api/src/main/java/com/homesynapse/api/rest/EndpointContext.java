@@ -48,6 +48,29 @@ interface EndpointContext {
     String queryParam(String name);
 
     /**
+     * Returns the raw request body as a string, or an empty string when the
+     * request carries no body. Added for the CMD-API write surface — the
+     * first handler that consumes a request body (the same seam growth that
+     * took {@code ReadinessFilter.Responder} to {@code EndpointContext} when
+     * request inputs were first needed, M3.6e.2).
+     *
+     * @return the request body text; never {@code null}
+     */
+    String body();
+
+    /**
+     * Returns the value of a request header, or {@code null} if absent.
+     * Distinct from {@link #header(String, String)}, which writes a
+     * <em>response</em> header (mirroring Javalin's read/write overload
+     * pair).
+     *
+     * @param name the request header name (e.g., {@code Idempotency-Key})
+     * @return the header value, or {@code null} when the client did not
+     *         send the header
+     */
+    String requestHeader(String name);
+
+    /**
      * Sets the HTTP response status code.
      *
      * @param code an HTTP status code (e.g., 200, 400, 404)

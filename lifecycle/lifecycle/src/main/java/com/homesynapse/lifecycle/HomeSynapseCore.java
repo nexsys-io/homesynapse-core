@@ -934,6 +934,18 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             // bearer auth + the 503 readiness gate.
             RestFilters.installAutomationQueryEndpoints(
                     app, explanationService, stateProjection::cursorPosition, clock);
+            // CMD-API: the command write surface (POST issue + GET status) —
+            // thin adapters over the existing pipeline (validate, publish ONE
+            // root command_issued, read ONE correlation chain; the dispatch/
+            // ledger subscribers own everything downstream). The timeout
+            // fallback is the SAME config value the action executor receives
+            // (Doc 07 §9; the constant is a long, the wire field an int —
+            // 30 000 fits). Installed AFTER auth + the readiness gate so both
+            // routes inherit bearer auth and the 503 gate.
+            RestFilters.installCommandEndpoints(
+                    app, eventPublisher, entityRegistry, persistenceFactory.eventStore(),
+                    (int) PendingCommandLedgerAssembly.DEFAULT_CONFIRMATION_TIMEOUT_MS,
+                    stateProjection::cursorPosition, clock);
             // AB-1: loopback bind by default; LAN exposure is the explicit
             // config.bindHost() opt-in. Never bind all-interfaces by default.
             app.start(config.bindHost(), config.httpPort());

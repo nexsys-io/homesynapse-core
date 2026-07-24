@@ -43,6 +43,16 @@ final class JavalinEndpointContext implements EndpointContext {
     }
 
     @Override
+    public String body() {
+        return ctx.body();
+    }
+
+    @Override
+    public String requestHeader(String name) {
+        return ctx.header(name);
+    }
+
+    @Override
     public void status(int code) {
         ctx.status(code);
     }

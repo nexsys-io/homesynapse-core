@@ -272,13 +272,22 @@ final class HomeSynapseArchRules {
                             + " directly — use StateQueryService");
 
     // ──────────────────────────────────────────────────────────────────
-    // Rule 9: REST query endpoints must not publish events (M3.6e.2)
+    // Rule 9: REST query endpoints must not publish events (M3.6e.2,
+    // scoped by CMD-API)
     //
     // The REST surface introduced in M3.6e.2 is read-only (entity
     // queries + operational/admin status). Write operations have their
-    // own surface (command issuance, M5+) and route through the proper
-    // command-validator pipeline — they MUST NOT bypass it by calling
-    // EventPublisher directly from a query handler.
+    // own surface and route through the proper command-validator
+    // pipeline — they MUST NOT bypass it by calling EventPublisher
+    // directly from a query handler.
+    //
+    // CMD-API (2026-07-22) landed exactly that sanctioned write surface:
+    // IssueCommandEndpoint publishes ONE root command_issued after
+    // StandardCommandValidator passes, and RestFilters (the DEC-M3-16
+    // gateway) carries the internal EventPublisher cast. Those two
+    // classes — and ONLY those two — are exempt; every query/status
+    // handler in the package stays pinned read-only. A future writer
+    // needs a deliberate edit here, exactly like the apply-caller census.
     //
     // The brief sketched a `callMethodWhere(target(name("publish"))...)`
     // form. The simpler `accessClassesThat().belongToAnyOf(...)` form
@@ -288,16 +297,24 @@ final class HomeSynapseArchRules {
     // ──────────────────────────────────────────────────────────────────
 
     /**
-     * M3.6e.2: REST query/admin endpoints must not depend on
-     * {@code EventPublisher}. Read-only surface.
+     * M3.6e.2/CMD-API: REST query/admin endpoints must not depend on
+     * {@code EventPublisher}. Read-only surface — except the sanctioned
+     * command write surface ({@code IssueCommandEndpoint} constructed via
+     * the {@code RestFilters} gateway), which publishes the root
+     * {@code command_issued} through the command-validator pipeline.
      */
     static final ArchRule REST_ENDPOINTS_NO_EVENT_PUBLISHING =
             noClasses()
                     .that().resideInAPackage("com.homesynapse.api.rest..")
+                    .and().doNotHaveFullyQualifiedName(
+                            "com.homesynapse.api.rest.IssueCommandEndpoint")
+                    .and().doNotHaveFullyQualifiedName(
+                            "com.homesynapse.api.rest.RestFilters")
                     .should().accessClassesThat().belongToAnyOf(
                             com.homesynapse.event.EventPublisher.class)
-                    .as("M3.6e.2: REST query endpoints must not publish events"
-                            + " — read-only surface");
+                    .as("M3.6e.2/CMD-API: REST endpoints must not publish events"
+                            + " — read-only surface except the sanctioned command"
+                            + " write surface (IssueCommandEndpoint via RestFilters)");
 
     // ──────────────────────────────────────────────────────────────────
     // Rule 10: Jackson isolation of the domain model (AMD-52-INV-02)
