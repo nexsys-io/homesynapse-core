@@ -15,6 +15,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,15 +51,21 @@ import com.homesynapse.platform.identity.Ulid;
  *   <li>The run-lifecycle event <em>payloads</em> carry no automation id; the producer
  *       publishes them on {@code SubjectRef.automation(...)}, so {@code automationId} is read
  *       from the event <em>envelope</em> subject.</li>
- *   <li>A per-action outcome is derived by following the command by id: a
- *       {@code state_confirmed} whose payload {@code commandEventId} matches the
- *       {@code command_issued} id ⇒ {@code CONFIRMED}; a {@code command_result} failure caused
- *       by the command ⇒ {@code FAILED}; a {@code command_confirmation_timed_out} for the
- *       command ⇒ {@code UNCONFIRMED}; otherwise {@code DISPATCHED}. No device registry is
- *       consulted — a confirmation-disabled command is simply never confirmed in the log, so it
- *       renders {@code DISPATCHED}, never a false {@code CONFIRMED} (the honest-confirmation
- *       guarantee, DP-A2). Keeping the outcome a pure function of the log preserves INV-SA-03
- *       determinism (a mutable registry read at read time would not be replay-safe).</li>
+ *   <li>A per-action outcome is derived by following the command by id (v1.1.2 precedence,
+ *       CORE-P1): a {@code state_confirmed} whose payload {@code commandEventId} matches the
+ *       {@code command_issued} id ⇒ {@code CONFIRMED}; else the last failure-class
+ *       {@code command_result} caused by the command ⇒ {@code FAILED} (failure-class = outcome
+ *       outside {acknowledged, superseded, unconfirmed} — SD-7); else a {@code command_result}
+ *       with outcome {@code "unconfirmed"} ⇒ {@code UNCONFIRMED} with the recorded reason
+ *       verbatim; else a {@code command_confirmation_timed_out} ⇒ {@code UNCONFIRMED}; otherwise
+ *       {@code DISPATCHED} (a superseded- or acknowledged-only result lands here — supersession
+ *       is an intent change, not a failure). Every {@code ActionView} additionally carries the
+ *       raw last {@code command_result.outcome} as {@code resultOutcome} and the derived
+ *       {@code settled} flag. No device registry is consulted — a confirmation-disabled command
+ *       is simply never confirmed in the log, so it renders {@code DISPATCHED}, never a false
+ *       {@code CONFIRMED} (the honest-confirmation guarantee, DP-A2). Keeping the outcome a pure
+ *       function of the log preserves INV-SA-03 determinism (a mutable registry read at read
+ *       time would not be replay-safe).</li>
  * </ul>
  *
  * <h2>Ordering and cost</h2>
@@ -78,6 +85,20 @@ final class StandardExplanationService implements ExplanationService {
 
     /** {@code command_result} outcome that is a protocol ack, not a terminal failure. */
     private static final String OUTCOME_ACKNOWLEDGED = "acknowledged";
+
+    /** {@code command_result} disposition for a command replaced by a newer one — an intent change, never a failure (CORE-P1(b)). */
+    private static final String OUTCOME_SUPERSEDED = "superseded";
+
+    /** {@code command_result} disposition for an ACK followed by silence — zigbee's honest-unconfirmed (CORE-P1(c)). */
+    private static final String OUTCOME_UNCONFIRMED = "unconfirmed";
+
+    /**
+     * The non-failure {@code command_result} outcomes (SD-7, v1.1.2). Any outcome outside this
+     * set — including unknown adapter-specific strings — classifies failure-class, keeping the
+     * conservative FAILED semantics for everything not explicitly ruled otherwise.
+     */
+    private static final Set<String> NON_FAILURE_OUTCOMES =
+            Set.of(OUTCOME_ACKNOWLEDGED, OUTCOME_SUPERSEDED, OUTCOME_UNCONFIRMED);
 
     /** {@code automation_action_completed} outcomes for a non-dispatched command action. */
     private static final String ACTION_SKIPPED = "skipped";
@@ -225,8 +246,7 @@ final class StandardExplanationService implements ExplanationService {
         // latestTerminalRun only returns runs whose finalStatus parses, so status is non-null.
         RunStatus status = parseStatus(payload.finalStatus());
         RunId runId = new RunId(payload.runId());
-        Instant evaluatedAt =
-                terminalInstant(latest).minusMillis(Math.max(0L, payload.durationMs()));
+        Instant evaluatedAt = derivedTriggerInstant(latest, payload.durationMs());
 
         return Optional.of(deriveNonFiring(automationId, automationName, triggerSummary,
                 latest, status, runId, evaluatedAt));
@@ -272,18 +292,35 @@ final class StandardExplanationService implements ExplanationService {
     }
 
     /**
-     * A {@code COMPLETED} run is {@code ACTED_BUT_UNCONFIRMED} when any of its device actions did
-     * not confirm (outcome {@code UNCONFIRMED}/{@code FAILED}); otherwise it is a clean confirmed
-     * success. The frozen 4-value verdict has no "fired fine" value, so per <strong>DP-B2</strong>
-     * the clean-success case reports {@code NEVER_TRIGGERED} with a <em>non-null</em>
-     * {@code lastRelevantRunId} and an explanation that distinguishes "ran fine" from "never ran"
-     * (the UI tells them apart by the non-null run id). A post-V1 additive {@code FIRED_CONFIRMED}
-     * verdict is the recommended growth path. The action-outcome check reuses {@link #buildActions}
-     * (the M7.5a honest-confirmation derivation) — no duplication.
+     * A {@code COMPLETED} run that issued <em>zero device commands</em> while defining actions
+     * ({@code commandCount == 0 && actionCount > 0} on the terminal payload) is
+     * {@code ACTED_BUT_UNCONFIRMED} with the v1.1.2 {@code noCommandsIssued} marker (CORE-P2):
+     * the Doc 07 §3.9 per-target skip emits nothing, so the payload arithmetic is the ONLY
+     * log-visible disclosure of a do-nothing run, and the clean-success sentence must be
+     * unreachable for it (a do-nothing run asserting confirmation with zero confirmable commands
+     * was the defect). Otherwise a {@code COMPLETED} run is {@code ACTED_BUT_UNCONFIRMED} when any
+     * of its device actions did not confirm (outcome {@code UNCONFIRMED}/{@code FAILED}); else it
+     * is a clean confirmed success. The frozen 4-value verdict has no "fired fine" value, so per
+     * <strong>DP-B2</strong> the clean-success case reports {@code NEVER_TRIGGERED} with a
+     * <em>non-null</em> {@code lastRelevantRunId} and an explanation that distinguishes "ran fine"
+     * from "never ran" (the UI tells them apart by the non-null run id). A post-V1 additive
+     * {@code FIRED_CONFIRMED} verdict is the recommended growth path. The action-outcome check
+     * reuses {@link #buildActions} (the M7.5a honest-confirmation derivation) — no duplication.
      */
     private NonFiringExplanation completedVerdict(AutomationId automationId, String automationName,
                                                   String triggerSummary, EventEnvelope completed,
                                                   RunId runId, Instant evaluatedAt) {
+        AutomationCompletedEvent payload = (AutomationCompletedEvent) completed.payload();
+        if (payload.commandCount() == 0 && payload.actionCount() > 0) {
+            return new NonFiringExplanation(automationId, automationName, true,
+                    NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED, runId,
+                    "Automation '" + automationName + "' fired, but issued no device commands — "
+                            + "its device actions were skipped or issued nothing (targets "
+                            + "unavailable or no device actions defined).",
+                    triggerSummary,
+                    new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"),
+                    Boolean.TRUE);
+        }
         List<EventEnvelope> chain =
                 eventStore.readByCorrelation(completed.causalContext().correlationId());
         List<RunExplanation.ActionView> actions = buildActions(chain, runId);
@@ -385,8 +422,19 @@ final class StandardExplanationService implements ExplanationService {
         return latest;
     }
 
-    private static Instant terminalInstant(EventEnvelope completed) {
-        return completed.eventTime() != null ? completed.eventTime() : completed.ingestTime();
+    /**
+     * The run's trigger instant, derived from its terminal envelope (v1.1.2, both DP-3 sites).
+     * Under the ruled DP-G inheritance the terminal envelope's {@code eventTime} IS the
+     * triggering event's instant, so when present it is returned with NO arithmetic (the old
+     * unconditional {@code − durationMs} understated the trigger time by exactly the run's
+     * duration). Only the {@code eventTime}-absent fallback subtracts the recorded duration from
+     * {@code ingestTime} (best-effort from wall-time), clamped non-negative. Do not "simplify"
+     * the two branches back into one subtraction.
+     */
+    private static Instant derivedTriggerInstant(EventEnvelope terminal, long durationMs) {
+        return terminal.eventTime() != null
+                ? terminal.eventTime()
+                : terminal.ingestTime().minusMillis(Math.max(0L, durationMs));
     }
 
     private static List<AutomationSummary.ComponentView> componentsOf(AutomationDefinition def) {
@@ -461,9 +509,7 @@ final class StandardExplanationService implements ExplanationService {
         AutomationId automationId = automationOf(completed);
         String automationName =
                 automationRegistry.get(automationId).map(AutomationDefinition::name).orElse(null);
-        Instant terminalTime = completed.eventTime() != null
-                ? completed.eventTime() : completed.ingestTime();
-        Instant triggeredAt = terminalTime.minusMillis(Math.max(0L, payload.durationMs()));
+        Instant triggeredAt = derivedTriggerInstant(completed, payload.durationMs());
         return new RunSummary(new RunId(payload.runId()), automationId, automationName,
                 triggeredAt, status, firstNonBlank(payload.failureReason(), payload.abortReason()));
     }
@@ -582,7 +628,8 @@ final class StandardExplanationService implements ExplanationService {
                 subjectRefView("entity", ci.targetEntityRef().toString());
         Outcome outcome = deriveOutcome(commandEnv.eventId(), chain);
         return new RunExplanation.ActionView(actionType, targetRef, ci.commandType(),
-                ci.parameters(), outcome.value(), outcome.reason());
+                ci.parameters(), outcome.value(), outcome.reason(), outcome.resultOutcome(),
+                outcome.settled());
     }
 
     /**
@@ -607,15 +654,29 @@ final class StandardExplanationService implements ExplanationService {
         RunExplanation.SubjectRefView targetRef = sp.targetRefs().isEmpty()
                 ? null
                 : subjectRefView("entity", sp.targetRefs().get(0).toString());
+        // No command was issued, so no command_result can exist (resultOutcome null), and a
+        // SKIPPED/FAILED view is settled by the Q1b rule (only bare/acked DISPATCHED is provisional).
         return new RunExplanation.ActionView(sp.actionType(), targetRef, null, "{}",
-                outcome, cp.errorDetail());
+                outcome, cp.errorDetail(), null, true);
     }
 
     // ---- outcome derivation (pure log) --------------------------------------
 
+    /**
+     * Derives one command's confirmation outcome from the chain (v1.1.2 precedence, CORE-P1):
+     * {@code state_confirmed} ⇒ CONFIRMED; else the last failure-class {@code command_result}
+     * ⇒ FAILED; else the last {@code "unconfirmed"} result ⇒ UNCONFIRMED carrying the recorded
+     * reason verbatim; else a confirmation timeout ⇒ UNCONFIRMED; else DISPATCHED (which is where
+     * a superseded- or acknowledged-only result lands — supersession is an intent change, not a
+     * failure). In every branch {@code resultOutcome} carries the LAST causation-matched
+     * {@code command_result}'s raw outcome — a pure fact-carry, independent of which branch
+     * classified. "Last" is {@code readByCorrelation}'s stable log order; no re-sort.
+     */
     private Outcome deriveOutcome(EventId commandEventId, List<EventEnvelope> chain) {
         StateConfirmedEvent confirmed = null;
-        CommandResultEvent failure = null;
+        CommandResultEvent lastResult = null;
+        CommandResultEvent lastFailure = null;
+        CommandResultEvent lastUnconfirmed = null;
         CommandConfirmationTimedOutEvent timedOut = null;
         for (EventEnvelope e : chain) {
             switch (e.payload()) {
@@ -630,9 +691,13 @@ final class StandardExplanationService implements ExplanationService {
                     }
                 }
                 case CommandResultEvent p -> {
-                    if (commandEventId.value().equals(e.causalContext().causationId())
-                            && isFailure(p.outcome())) {
-                        failure = p;
+                    if (commandEventId.value().equals(e.causalContext().causationId())) {
+                        lastResult = p;
+                        if (isFailure(p.outcome())) {
+                            lastFailure = p;
+                        } else if (OUTCOME_UNCONFIRMED.equals(p.outcome())) {
+                            lastUnconfirmed = p;
+                        }
                     }
                 }
                 default -> {
@@ -640,25 +705,50 @@ final class StandardExplanationService implements ExplanationService {
                 }
             }
         }
+        String resultOutcome = lastResult != null ? lastResult.outcome() : null;
         if (confirmed != null) {
-            return new Outcome(RunExplanation.ActionOutcome.CONFIRMED, null);
+            return new Outcome(RunExplanation.ActionOutcome.CONFIRMED, null, resultOutcome);
         }
-        if (failure != null) {
+        if (lastFailure != null) {
             return new Outcome(RunExplanation.ActionOutcome.FAILED,
-                    firstNonBlank(failure.failureReason(), failure.outcome()));
+                    firstNonBlank(lastFailure.failureReason(), lastFailure.outcome()),
+                    resultOutcome);
+        }
+        if (lastUnconfirmed != null) {
+            // The recorded reason verbatim (e.g. zigbee's), never the generic timeout text.
+            return new Outcome(RunExplanation.ActionOutcome.UNCONFIRMED,
+                    firstNonBlank(lastUnconfirmed.failureReason(), lastUnconfirmed.outcome()),
+                    resultOutcome);
         }
         if (timedOut != null) {
-            return new Outcome(RunExplanation.ActionOutcome.UNCONFIRMED, "confirmation timed out");
+            return new Outcome(RunExplanation.ActionOutcome.UNCONFIRMED, "confirmation timed out",
+                    resultOutcome);
         }
-        return new Outcome(RunExplanation.ActionOutcome.DISPATCHED, null);
+        return new Outcome(RunExplanation.ActionOutcome.DISPATCHED, null, resultOutcome);
     }
 
+    /**
+     * Failure-class test (SD-7): any outcome outside {@link #NON_FAILURE_OUTCOMES} — including
+     * unknown adapter-specific strings — is failure-class. A null outcome classifies nothing.
+     */
     private static boolean isFailure(String outcome) {
-        return outcome != null && !OUTCOME_ACKNOWLEDGED.equals(outcome);
+        return outcome != null && !NON_FAILURE_OUTCOMES.contains(outcome);
     }
 
-    /** A derived per-action outcome plus its human reason. */
-    private record Outcome(RunExplanation.ActionOutcome value, String reason) {
+    /** A derived per-action outcome, its human reason, and the raw result-outcome fact-carry. */
+    private record Outcome(RunExplanation.ActionOutcome value, String reason,
+                           String resultOutcome) {
+
+        /**
+         * The Q1b settledness derivation (v1.1.2): an action is provisional exactly while it is
+         * {@code DISPATCHED} with no settling record ({@code resultOutcome} absent or a bare
+         * {@code "acknowledged"}). A superseded {@code DISPATCHED} is settled — the ledger
+         * dropped it, nothing further will arrive. Pure derivation, never stored (INV-SA-03).
+         */
+        boolean settled() {
+            return !(value == RunExplanation.ActionOutcome.DISPATCHED
+                    && (resultOutcome == null || OUTCOME_ACKNOWLEDGED.equals(resultOutcome)));
+        }
     }
 
     // ---- lookups ------------------------------------------------------------

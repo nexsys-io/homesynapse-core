@@ -40,6 +40,10 @@ import java.util.function.LongSupplier;
  * JSON string carried on {@link RunExplanation.ActionView#paramsJson()} — the automation
  * module owns no JSON library, so this rest-api boundary (the JSON layer, LTD-08) does the
  * parse, degrading to an empty object on any malformation.</p>
+ *
+ * <p>v1.1.2 amendment (additive-only, Nick ruling 1): each action map additionally carries
+ * {@code resultOutcome} (the raw {@code command_result.outcome} string, or null) and
+ * {@code settled} (the derived Q1b settledness flag).</p>
  */
 final class GetRunCausalChainEndpoint implements Handler {
 
@@ -156,13 +160,15 @@ final class GetRunCausalChainEndpoint implements Handler {
     private static List<Map<String, Object>> actionsList(List<RunExplanation.ActionView> actions) {
         List<Map<String, Object>> list = new ArrayList<>(actions.size());
         for (RunExplanation.ActionView a : actions) {
-            Map<String, Object> map = new LinkedHashMap<>(6);
+            Map<String, Object> map = new LinkedHashMap<>(8);
             map.put("type", a.type());
             map.put("targetRef", subjectRefMap(a.targetRef()));
             map.put("command", a.command());
             map.put("params", parseParams(a.paramsJson()));
             map.put("outcome", a.outcome().name());
             map.put("reason", a.reason());
+            map.put("resultOutcome", a.resultOutcome());
+            map.put("settled", a.settled());
             list.add(map);
         }
         return list;

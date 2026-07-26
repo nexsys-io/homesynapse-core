@@ -41,6 +41,13 @@ import com.homesynapse.platform.identity.AutomationId;
  * @param explanation       a plain-language sentence (Register C); never {@code null}
  * @param triggerSummary    what would fire this, in plain words; never {@code null}
  * @param lastEvaluation    the most-recent evaluation snapshot, or {@code null} when no run exists
+ * @param noCommandsIssued  the v1.1.2 skip marker (CORE-P2): {@code Boolean.TRUE} exactly when the
+ *                          verdict derives from a terminal {@code COMPLETED} run whose payload has
+ *                          {@code actionCount() > 0 && commandCount() == 0} — the run fired but
+ *                          issued zero device commands (all device actions skipped per Doc 07
+ *                          §3.9, or none defined); {@code null} in every other construction
+ *                          (never {@code false} — absent means "not the skip case", the
+ *                          additive-nullable idiom)
  */
 public record NonFiringExplanation(
         AutomationId automationId,
@@ -50,11 +57,13 @@ public record NonFiringExplanation(
         RunId lastRelevantRunId,
         String explanation,
         String triggerSummary,
-        LastEvaluationView lastEvaluation) {
+        LastEvaluationView lastEvaluation,
+        Boolean noCommandsIssued) {
 
     /**
      * Validates the non-nullable components. {@code lastRelevantRunId} and {@code lastEvaluation}
-     * are intentionally nullable (the "never triggered, no run" case).
+     * are intentionally nullable (the "never triggered, no run" case); {@code noCommandsIssued} is
+     * nullable by contract (absent means "not the skip case") and is NOT null-checked.
      *
      * @throws NullPointerException if any non-nullable component is {@code null}
      */
@@ -64,6 +73,19 @@ public record NonFiringExplanation(
         Objects.requireNonNull(verdict, "verdict must not be null");
         Objects.requireNonNull(explanation, "explanation must not be null");
         Objects.requireNonNull(triggerSummary, "triggerSummary must not be null");
+    }
+
+    /**
+     * Convenience constructor for the non-skip constructions: delegates to the canonical
+     * constructor with {@code noCommandsIssued = null} (validation lives ONLY in the canonical
+     * constructor). Pre-v1.1.2 call sites compile unchanged through this overload.
+     */
+    public NonFiringExplanation(AutomationId automationId, String automationName, boolean enabled,
+                                NonFiringVerdict verdict, RunId lastRelevantRunId,
+                                String explanation, String triggerSummary,
+                                LastEvaluationView lastEvaluation) {
+        this(automationId, automationName, enabled, verdict, lastRelevantRunId, explanation,
+                triggerSummary, lastEvaluation, null);
     }
 
     /**

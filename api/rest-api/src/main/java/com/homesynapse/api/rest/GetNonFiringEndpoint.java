@@ -35,6 +35,11 @@ import java.util.function.LongSupplier;
  *
  * <p>Unlike a terminal run's immutable causal chain, a non-firing verdict can change as new events
  * arrive, so this view carries a <strong>weak</strong> ETag keyed on the projection position.</p>
+ *
+ * <p>v1.1.2 amendment (additive-only, Nick ruling 1): the {@code data} object additionally
+ * carries {@code noCommandsIssued} — the CORE-P2 silent-skip marker ({@code true} exactly for a
+ * COMPLETED run that issued zero device commands while defining actions; JSON null otherwise,
+ * never {@code false}).</p>
  */
 final class GetNonFiringEndpoint implements Handler {
 
@@ -103,7 +108,7 @@ final class GetNonFiringEndpoint implements Handler {
     }
 
     private static Map<String, Object> toWire(NonFiringExplanation e) {
-        Map<String, Object> data = new LinkedHashMap<>(8);
+        Map<String, Object> data = new LinkedHashMap<>(9);
         data.put("automationId", e.automationId().toString());
         data.put("automationName", e.automationName());
         data.put("enabled", e.enabled());
@@ -113,6 +118,7 @@ final class GetNonFiringEndpoint implements Handler {
         data.put("explanation", e.explanation());
         data.put("triggerSummary", e.triggerSummary());
         data.put("lastEvaluation", lastEvaluationMap(e.lastEvaluation()));
+        data.put("noCommandsIssued", e.noCommandsIssued());
         return data;
     }
 

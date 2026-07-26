@@ -194,6 +194,88 @@ final class NonFiringExplanationServiceTest {
         assertThat(result.lastRelevantRunId()).isNull();
     }
 
+    // ---- explainNonFiring: silent-skip honesty (DP-2, v1.1.2) ----------------
+
+    @Test
+    @DisplayName("a COMPLETED run that issued zero commands reports ACTED_BUT_UNCONFIRMED + marker")
+    void completedCommandless_actedButUnconfirmed_marker() {
+        AutomationId autoId = automationId();
+        registry.add(definition(autoId, "Scenes", true, entityId()));
+        RunId run = seedCompleted(autoId, "COMPLETED", null, 1234L, 3, 0);
+
+        NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+        assertThat(result.verdict())
+                .isEqualTo(NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED);
+        assertThat(result.noCommandsIssued()).isEqualTo(Boolean.TRUE);
+        assertThat(result.explanation()).isEqualTo("Automation 'Scenes' fired, but issued no "
+                + "device commands — its device actions were skipped or issued nothing (targets "
+                + "unavailable or no device actions defined).");
+        // The false-verdict boundary: the old clean-success sentence must be unreachable here.
+        assertThat(result.explanation()).doesNotContain("fired and confirmed");
+        assertThat(result.lastRelevantRunId()).isEqualTo(run);
+        assertThat(result.lastEvaluation().conditionsResult()).isEqualTo("true");
+    }
+
+    @Test
+    @DisplayName("a COMPLETED run with confirmed commands keeps the DP-B2 clean path, marker absent")
+    void completedWithConfirmedCommands_cleanPathUnchanged() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        registry.add(definition(autoId, "Porch", true, target));
+        RunId run = seedRun(autoId, target, "COMPLETED", null, ConfirmKind.CONFIRMED);
+
+        NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+        assertThat(result.verdict())
+                .isEqualTo(NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED);
+        assertThat(result.lastRelevantRunId()).isEqualTo(run);
+        assertThat(result.noCommandsIssued()).isNull();
+    }
+
+    @Test
+    @DisplayName("a COMPLETED run with an unconfirmed action behaves as today, marker absent")
+    void completedWithUnconfirmed_unchanged() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        registry.add(definition(autoId, "Closet", true, target));
+        RunId run = seedRun(autoId, target, "COMPLETED", null, ConfirmKind.UNCONFIRMED);
+
+        NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+        assertThat(result.verdict())
+                .isEqualTo(NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED);
+        assertThat(result.lastRelevantRunId()).isEqualTo(run);
+        assertThat(result.noCommandsIssued()).isNull();
+    }
+
+    // ---- explainNonFiring: evaluatedAt derivation (DP-3b, v1.1.2) ------------
+
+    @Test
+    @DisplayName("lastEvaluation.at equals the terminal envelope's inherited eventTime exactly (DP-G)")
+    void evaluatedAt_equalsEventTime() {
+        AutomationId autoId = automationId();
+        registry.add(definition(autoId, "Dusk", true, entityId()));
+        seedCompleted(autoId, "CONDITION_NOT_MET", null, 34204L, 1, 1);
+
+        NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+        assertThat(result.lastEvaluation().at()).isEqualTo(FIXED_INSTANT);
+    }
+
+    @Test
+    @DisplayName("with a null eventTime, lastEvaluation.at falls back to ingestTime minus the duration")
+    void evaluatedAt_ingestFallback() {
+        AutomationId autoId = automationId();
+        registry.add(definition(autoId, "Dawn", true, entityId()));
+        seedCompletedNullEventTime(autoId, "CONDITION_NOT_MET", 34204L);
+
+        NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+        // InMemoryEventStore stamps ingestTime = clock.instant() (FIXED_CLOCK) at append.
+        assertThat(result.lastEvaluation().at()).isEqualTo(FIXED_INSTANT.minusMillis(34204L));
+    }
+
     // ---- listAutomations ----------------------------------------------------
 
     @Test
@@ -277,10 +359,38 @@ final class NonFiringExplanationServiceTest {
 
     /** Seeds only a terminal {@code automation_completed} marker. */
     private RunId seedCompleted(AutomationId autoId, String finalStatus, String failureReason) {
+        return seedCompleted(autoId, finalStatus, failureReason, 1234L, 1, 1);
+    }
+
+    /**
+     * Seeds a terminal marker with explicit duration and action/command counts (the DP-2 payload
+     * arithmetic + DP-3b duration fixtures; eventTime present).
+     */
+    private RunId seedCompleted(AutomationId autoId, String finalStatus, String failureReason,
+                                long durationMs, int actionCount, int commandCount) {
         RunId runId = new RunId(ulid());
         publishRoot(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
-                new AutomationCompletedEvent(runId.value(), finalStatus, 1234L, 1, 1,
-                        failureReason, null));
+                new AutomationCompletedEvent(runId.value(), finalStatus, durationMs, actionCount,
+                        commandCount, failureReason, null));
+        return runId;
+    }
+
+    /**
+     * Seeds a terminal marker whose envelope {@code eventTime} is null (the ingest-fallback
+     * fixture — the {@link EventDraft} accepts a null eventTime, as CMD-API roots publish live).
+     */
+    private RunId seedCompletedNullEventTime(AutomationId autoId, String finalStatus,
+                                             long durationMs) {
+        RunId runId = new RunId(ulid());
+        EventDraft draft = new EventDraft(EventTypes.AUTOMATION_COMPLETED, 1, null,
+                SubjectRef.automation(autoId), EventPriority.NORMAL, EventOrigin.AUTOMATION,
+                new AutomationCompletedEvent(runId.value(), finalStatus, durationMs, 1, 1,
+                        null, null), null, null);
+        try {
+            store.publishRoot(draft);
+        } catch (SequenceConflictException e) {
+            throw new AssertionError("seed publish failed", e);
+        }
         return runId;
     }
 

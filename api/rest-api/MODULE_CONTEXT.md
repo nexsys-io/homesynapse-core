@@ -1,4 +1,4 @@
-# rest-api — `com.homesynapse.api.rest` — Phase 3 transition (M3.6e.2) — HTTP command interface, RFC 9457 errors, 4-phase command lifecycle, idempotency keys, ReadinessFilter (Javalin before-handler), entity query endpoints + admin endpoints (M3.6e.2), run query (causal read) endpoints (M7.5a), automation query (non-firing + list) endpoints (M7.5b), internal-read envelope conformance (M7.5c-a), THE COMMAND WRITE SURFACE — POST issue + GET status (CMD-API, 2026-07-22)
+# rest-api — `com.homesynapse.api.rest` — Phase 3 transition (M3.6e.2) — HTTP command interface, RFC 9457 errors, 4-phase command lifecycle, idempotency keys, ReadinessFilter (Javalin before-handler), entity query endpoints + admin endpoints (M3.6e.2), run query (causal read) endpoints (M7.5a), automation query (non-firing + list) endpoints (M7.5b), internal-read envelope conformance (M7.5c-a), THE COMMAND WRITE SURFACE — POST issue + GET status (CMD-API, 2026-07-22), v1.1.2 explanation-read additive keys (SKIP-VIS, 2026-07-26)
 
 ## Purpose
 
@@ -221,6 +221,15 @@ The last unwired plane: the repo's FIRST `app.post` route. Two endpoints land as
 **The `EndpointContext` seam grew for the first body-consuming handler** (the same growth that took `ReadinessFilter.Responder` to `EndpointContext` when request inputs were first needed): `+ String body()` (raw request body) and `+ String requestHeader(String)` (a request-header READ — distinct from `header(String,String)`, the response WRITE, mirroring Javalin's overload pair). `JavalinEndpointContext` forwards to `ctx.body()`/`ctx.header(name)`; `RecordingEndpointContext` gained `withBody`/`withRequestHeader` seeding. Package-private — zero exported-surface change.
 
 **The app-tree ArchUnit Rule 9 (`REST_ENDPOINTS_NO_EVENT_PUBLISHING`) is now SCOPED, not package-wide:** `IssueCommandEndpoint` + `RestFilters` (the casting gateway) are the named exemptions; every query/status handler stays pinned read-only, and a future writer needs a deliberate edit there (the apply-caller-census pattern). The rule's own M3.6e.2 comment always anticipated this surface ("Write operations have their own surface (command issuance, M5+) and route through the proper command-validator pipeline").
+
+### SKIP-VIS — v1.1.2 additive keys on the explanation reads (2026-07-26)
+
+The explanation-honesty read-side amendment (Nick ruling 1, 2026-07-22 — additive-only · per-endpoint camelCase · emitter-leads · version discipline; the contract stamps **v1.1.2**, the freeze-doc amendment note is hub-owned). THREE additive wire keys, ZERO existing key/casing/nesting changes, `ListRunsEndpoint` byte-untouched (the runs-list wire shape is the SD-5 unchanged proof — its `triggeredAt` VALUE corrected at the automation-side derivation, not here):
+
+- **`GetRunCausalChainEndpoint.actionsList`**: each action map gains `resultOutcome` (the raw `command_result.outcome` string, or JSON null when no result exists — the ten-value vocabulary plus adapter strings) and `settled` (the derived Q1b settledness boolean: false exactly while DISPATCHED with no settling record; a superseded DISPATCHED is settled). Keys appended after `reason`; map is now 8 entries, pinned at `RunEndpointsTest` (`causalChain_v11ShapeTest` + `causalChain_resultOutcomeOnWire` + `causalChain_settledOnWire`).
+- **`GetNonFiringEndpoint.toWire`**: the `data` object gains `noCommandsIssued` (the CORE-P2 silent-skip marker — `true` exactly for a COMPLETED run that issued zero device commands while defining actions; JSON null otherwise, NEVER `false`). Appended after `lastEvaluation`; 9 entries, pinned at `AutomationEndpointsTest` (`nonFiring_v11ShapeTest` + `nonFiring_noCommandsIssuedOnWire`).
+
+Both handlers consume the enriched projection records (`RunExplanation.ActionView` 6→8 components, `NonFiringExplanation` 8→9 — see `core/automation/MODULE_CONTEXT.md`, SKIP-VIS banner). Zero module-info / build-file changes (new components are `String`/`Boolean`/`boolean` = `java.base`).
 
 ## M3.6e.2 Phase 3 Note (2026-05-22)
 

@@ -28,11 +28,17 @@ import com.homesynapse.platform.identity.AutomationId;
  * (DP-A1); the internal enum never appears on the wire. The precise engine reason rides
  * {@code terminalReason}.</p>
  *
+ * <p>The {@code triggeredAt} derivation was corrected in v1.1.2 (DP-3): the terminal
+ * envelope's inherited {@code eventTime} is the trigger instant itself (DP-G) — no
+ * duration arithmetic; only the {@code eventTime}-absent fallback subtracts.</p>
+ *
  * @param runId          the Run's identifier, never {@code null}
  * @param automationId   the owning automation's identifier (from the event subject), never {@code null}
  * @param automationName the automation's display name, or {@code null} if the definition is gone
- * @param triggeredAt    when the Run was triggered (best-effort: the terminal event time minus
- *                       the recorded duration), never {@code null}
+ * @param triggeredAt    when the Run was triggered (the terminal event's inherited
+ *                       {@code eventTime} — under DP-G it is the trigger instant; when
+ *                       {@code eventTime} is absent, best-effort {@code ingestTime} minus the
+ *                       recorded duration), never {@code null}
  * @param status         the terminal {@link RunStatus}; mapped to the wire vocabulary at the
  *                       rest-api boundary (DP-A1), never {@code null}
  * @param terminalReason the precise engine reason (failure or abort detail), or {@code null}

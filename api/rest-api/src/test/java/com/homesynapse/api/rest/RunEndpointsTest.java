@@ -199,7 +199,8 @@ final class RunEndpointsTest {
 
         Map<String, Object> action = asMap(((List<?>) data.get("actions")).get(0));
         assertThat(action).containsOnlyKeys(
-                "type", "targetRef", "command", "params", "outcome", "reason");
+                "type", "targetRef", "command", "params", "outcome", "reason",
+                "resultOutcome", "settled");
         assertThat(action).containsEntry("command", "turn_on");
         assertThat(action).containsEntry("outcome", "CONFIRMED");
         assertThat(asMap(action.get("params"))).containsEntry("level", 75);
@@ -221,6 +222,36 @@ final class RunEndpointsTest {
         Map<String, Object> meta = asMap(body.get("meta"));
         assertThat(meta).containsOnlyKeys("viewPosition", "timestamp");
         assertThat(meta).containsEntry("viewPosition", 42L);
+    }
+
+    @Test
+    @DisplayName("GET /runs/{id}/causal-chain carries the raw resultOutcome per action (v1.1.2)")
+    void causalChain_resultOutcomeOnWire() {
+        GetRunCausalChainEndpoint endpoint = new GetRunCausalChainEndpoint(
+                fake().put(twoActionExplanation()), VIEW_POSITION, FIXED_CLOCK);
+        RecordingEndpointContext ctx =
+                new RecordingEndpointContext().withPathParam("runId", RUN_ULID);
+
+        endpoint.apply(ctx);
+
+        List<?> actions = (List<?>) asMap(asMap(ctx.body).get("data")).get("actions");
+        assertThat(asMap(actions.get(0))).containsEntry("resultOutcome", "superseded");
+        assertThat(asMap(actions.get(1))).containsEntry("resultOutcome", null);
+    }
+
+    @Test
+    @DisplayName("GET /runs/{id}/causal-chain carries the derived settled flag per action (v1.1.2)")
+    void causalChain_settledOnWire() {
+        GetRunCausalChainEndpoint endpoint = new GetRunCausalChainEndpoint(
+                fake().put(twoActionExplanation()), VIEW_POSITION, FIXED_CLOCK);
+        RecordingEndpointContext ctx =
+                new RecordingEndpointContext().withPathParam("runId", RUN_ULID);
+
+        endpoint.apply(ctx);
+
+        List<?> actions = (List<?>) asMap(asMap(ctx.body).get("data")).get("actions");
+        assertThat(asMap(actions.get(0))).containsEntry("settled", true);
+        assertThat(asMap(actions.get(1))).containsEntry("settled", false);
     }
 
     @Test
@@ -278,8 +309,31 @@ final class RunEndpointsTest {
                 List.of(new RunExplanation.ActionView("CommandAction",
                         new RunExplanation.SubjectRefView("entity", ENTITY_ULID),
                         "turn_on", "{\"level\":75}",
-                        RunExplanation.ActionOutcome.CONFIRMED, null)),
+                        RunExplanation.ActionOutcome.CONFIRMED, null, "acknowledged", true)),
                 new RunExplanation.OutcomeView(RunStatus.COMPLETED, null, 1234L, 1, 1),
+                new RunExplanation.CascadeView(null, 0));
+    }
+
+    /**
+     * Two actions for the v1.1.2 wire legs: a settled superseded {@code DISPATCHED} and a
+     * provisional bare {@code DISPATCHED} (resultOutcome absent).
+     */
+    private static RunExplanation twoActionExplanation() {
+        return new RunExplanation(runId(), autoId(), "My Automation",
+                new RunExplanation.TriggerView("StateTrigger",
+                        new RunExplanation.SubjectRefView("entity", ENTITY_ULID),
+                        FIXED_INSTANT, null),
+                List.of(),
+                List.of(
+                        new RunExplanation.ActionView("CommandAction",
+                                new RunExplanation.SubjectRefView("entity", ENTITY_ULID),
+                                "set_color_temp", "{}",
+                                RunExplanation.ActionOutcome.DISPATCHED, null, "superseded", true),
+                        new RunExplanation.ActionView("CommandAction",
+                                new RunExplanation.SubjectRefView("entity", ENTITY_ULID),
+                                "turn_on", "{}",
+                                RunExplanation.ActionOutcome.DISPATCHED, null, null, false)),
+                new RunExplanation.OutcomeView(RunStatus.COMPLETED, null, 1234L, 2, 2),
                 new RunExplanation.CascadeView(null, 0));
     }
 

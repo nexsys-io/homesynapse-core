@@ -40,6 +40,7 @@ import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -288,16 +289,200 @@ final class StandardExplanationServiceTest {
         });
     }
 
+    // ---- explainRun: raw outcome carry (DP-1, v1.1.2) -----------------------
+
+    @Test
+    @DisplayName("a superseded command is not FAILED — DISPATCHED with resultOutcome carried (CORE-P1)")
+    void outcomeSuperseded_notFailed_carriesResultOutcome() {
+        RunId runId = seedRunWithResult(automationId(), entityId(), "superseded",
+                "superseded by a newer command on the same attribute; superseding command event 01KYD",
+                false, false);
+
+        RunExplanation.ActionView action = actionOf(runId);
+        assertThat(action.outcome()).isNotEqualTo(RunExplanation.ActionOutcome.FAILED);
+        assertThat(action.outcome()).isEqualTo(RunExplanation.ActionOutcome.DISPATCHED);
+        assertThat(action.resultOutcome()).isEqualTo("superseded");
+        assertThat(action.reason()).isNull();
+    }
+
+    @Test
+    @DisplayName("a superseded command that also timed out derives UNCONFIRMED, resultOutcome carried")
+    void outcomeSupersededThenTimeout_unconfirmed() {
+        RunId runId = seedRunWithResult(automationId(), entityId(), "superseded",
+                "superseded by a newer command on the same attribute", true, false);
+
+        RunExplanation.ActionView action = actionOf(runId);
+        assertThat(action.outcome()).isEqualTo(RunExplanation.ActionOutcome.UNCONFIRMED);
+        assertThat(action.resultOutcome()).isEqualTo("superseded");
+    }
+
+    @Test
+    @DisplayName("zigbee's honest-unconfirmed result derives UNCONFIRMED with the recorded reason verbatim")
+    void outcomeHonestUnconfirmed_fromResult_reasonVerbatim() {
+        RunId runId = seedRunWithResult(automationId(), entityId(), "unconfirmed",
+                "DefaultResponse SUCCESS +90 ms, then no report, ever", false, false);
+
+        RunExplanation.ActionView action = actionOf(runId);
+        assertThat(action.outcome()).isEqualTo(RunExplanation.ActionOutcome.UNCONFIRMED);
+        assertThat(action.reason()).isEqualTo("DefaultResponse SUCCESS +90 ms, then no report, ever");
+        assertThat(action.resultOutcome()).isEqualTo("unconfirmed");
+    }
+
+    @Test
+    @DisplayName("a rejected command stays FAILED — the failure set did not over-shrink (boundary)")
+    void outcomeRejected_staysFailed() {
+        RunId runId = seedRunWithResult(automationId(), entityId(), "rejected",
+                "device offline", false, false);
+
+        RunExplanation.ActionView action = actionOf(runId);
+        assertThat(action.outcome()).isEqualTo(RunExplanation.ActionOutcome.FAILED);
+        assertThat(action.reason()).isEqualTo("device offline");
+        assertThat(action.resultOutcome()).isEqualTo("rejected");
+    }
+
+    @Test
+    @DisplayName("an unknown adapter-specific outcome string stays failure-class (SD-7 pin)")
+    void outcomeUnknownAdapterString_staysFailed() {
+        RunId runId = seedRunWithResult(automationId(), entityId(), "zcl_weird_vendor_code",
+                null, false, false);
+
+        RunExplanation.ActionView action = actionOf(runId);
+        assertThat(action.outcome()).isEqualTo(RunExplanation.ActionOutcome.FAILED);
+        assertThat(action.resultOutcome()).isEqualTo("zcl_weird_vendor_code");
+    }
+
+    @Test
+    @DisplayName("an acknowledged-only result stays DISPATCHED, resultOutcome carried")
+    void outcomeAcknowledgedOnly_dispatched() {
+        RunId runId = seedRunWithResult(automationId(), entityId(), "acknowledged",
+                null, false, false);
+
+        RunExplanation.ActionView action = actionOf(runId);
+        assertThat(action.outcome()).isEqualTo(RunExplanation.ActionOutcome.DISPATCHED);
+        assertThat(action.resultOutcome()).isEqualTo("acknowledged");
+    }
+
+    @Test
+    @DisplayName("resultOutcome is a pure fact-carry — present even on a CONFIRMED action")
+    void outcomeConfirmed_resultOutcomeCarried() {
+        RunId runId = seedRunWithResult(automationId(), entityId(), "acknowledged",
+                null, false, true);
+
+        RunExplanation.ActionView action = actionOf(runId);
+        assertThat(action.outcome()).isEqualTo(RunExplanation.ActionOutcome.CONFIRMED);
+        assertThat(action.resultOutcome()).isEqualTo("acknowledged");
+    }
+
+    @Test
+    @DisplayName("the five honest failure modes carry pairwise-distinct wire signatures")
+    void explainRun_fiveFailureModesDistinct() {
+        record Signature(String outcome, String resultOutcome, String reason) {
+        }
+        RunId timedOut =
+                seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.UNCONFIRMED);
+        RunId superseded = seedRunWithResult(automationId(), entityId(), "superseded",
+                "superseded by a newer command on the same attribute", false, false);
+        RunId honestUnconfirmed = seedRunWithResult(automationId(), entityId(), "unconfirmed",
+                "DefaultResponse SUCCESS +90 ms, then no report, ever", false, false);
+        RunId heldDispatched =
+                seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.DISPATCHED);
+        RunId settledFailed = seedRunWithResult(automationId(), entityId(), "rejected",
+                "device offline", false, false);
+
+        List<Signature> signatures = List.of(
+                        timedOut, superseded, honestUnconfirmed, heldDispatched, settledFailed)
+                .stream()
+                .map(id -> {
+                    RunExplanation.ActionView a = actionOf(id);
+                    return new Signature(a.outcome().name(), a.resultOutcome(), a.reason());
+                })
+                .toList();
+
+        assertThat(signatures.get(0))
+                .isEqualTo(new Signature("UNCONFIRMED", null, "confirmation timed out"));
+        assertThat(signatures.get(1))
+                .isEqualTo(new Signature("DISPATCHED", "superseded", null));
+        assertThat(signatures.get(2)).isEqualTo(new Signature("UNCONFIRMED", "unconfirmed",
+                "DefaultResponse SUCCESS +90 ms, then no report, ever"));
+        assertThat(signatures.get(3)).isEqualTo(new Signature("DISPATCHED", null, null));
+        assertThat(signatures.get(4))
+                .isEqualTo(new Signature("FAILED", "rejected", "device offline"));
+        assertThat(Set.copyOf(signatures)).hasSize(5);
+    }
+
+    @Test
+    @DisplayName("settled derives false only while DISPATCHED with no settling record (Q1b)")
+    void actionSettled_provisionalOnlyWhileBareDispatchedOrAcked() {
+        RunId bare = seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.DISPATCHED);
+        RunId acked =
+                seedRunWithResult(automationId(), entityId(), "acknowledged", null, false, false);
+        RunId superseded = seedRunWithResult(automationId(), entityId(), "superseded",
+                "superseded by a newer command", false, false);
+        RunId confirmed =
+                seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.CONFIRMED);
+        RunId timedOut =
+                seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.UNCONFIRMED);
+        RunId failed = seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.FAILED);
+
+        assertThat(actionOf(bare).settled()).isFalse();
+        assertThat(actionOf(acked).settled()).isFalse();
+        assertThat(actionOf(superseded).settled()).isTrue();
+        assertThat(actionOf(confirmed).settled()).isTrue();
+        assertThat(actionOf(timedOut).settled()).isTrue();
+        assertThat(actionOf(failed).settled()).isTrue();
+    }
+
+    // ---- listRuns: triggeredAt derivation (DP-3, v1.1.2) --------------------
+
+    @Test
+    @DisplayName("triggeredAt equals the terminal envelope's inherited eventTime exactly (DP-G)")
+    void listRuns_triggeredAtEqualsEventTime() {
+        seedCompletedWithDuration(automationId(), 34204L);
+
+        RunPage page = service.listRuns(Optional.empty(), 0, 50);
+
+        assertThat(page.runs()).singleElement().satisfies(s ->
+                assertThat(s.triggeredAt()).isEqualTo(FIXED_INSTANT));
+    }
+
+    @Test
+    @DisplayName("with a null eventTime, triggeredAt falls back to ingestTime minus the duration")
+    void listRuns_triggeredAt_ingestFallback() {
+        seedCompletedNullEventTime(automationId(), 34204L);
+
+        RunPage page = service.listRuns(Optional.empty(), 0, 50);
+
+        // InMemoryEventStore stamps ingestTime = clock.instant() (FIXED_CLOCK) at append.
+        assertThat(page.runs()).singleElement().satisfies(s ->
+                assertThat(s.triggeredAt()).isEqualTo(FIXED_INSTANT.minusMillis(34204L)));
+    }
+
+    @Test
+    @DisplayName("runs[].triggeredAt equals the causal-chain trigger.matchedAt (the alignment law)")
+    void triggeredAt_equalsMatchedAt_regression() {
+        AutomationId autoId = automationId();
+        RunId runId = seedRun(autoId, entityId(), "COMPLETED", null, ConfirmKind.CONFIRMED);
+
+        Instant matchedAt = service.explainRun(runId).orElseThrow().trigger().matchedAt();
+        RunPage page = service.listRuns(Optional.of(autoId), 0, 50);
+
+        assertThat(page.runs()).singleElement().satisfies(s ->
+                assertThat(s.triggeredAt()).isEqualTo(matchedAt));
+    }
+
     // ---- INV-SA-03: pure projection -----------------------------------------
 
     @Test
     @DisplayName("the projection writes nothing — latestPosition is unchanged after both reads")
     void projection_writesNothing() {
         RunId runId = seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.CONFIRMED);
+        RunId superseded = seedRunWithResult(automationId(), entityId(), "superseded",
+                "superseded by a newer command", false, false);
         long before = store.latestPosition();
 
         service.listRuns(Optional.empty(), 0, 50);
         service.explainRun(runId);
+        service.explainRun(superseded);
 
         assertThat(store.latestPosition()).isEqualTo(before);
     }
@@ -306,6 +491,10 @@ final class StandardExplanationServiceTest {
 
     private RunExplanation.ActionOutcome outcomeOf(RunId runId) {
         return service.explainRun(runId).orElseThrow().actions().get(0).outcome();
+    }
+
+    private RunExplanation.ActionView actionOf(RunId runId) {
+        return service.explainRun(runId).orElseThrow().actions().get(0);
     }
 
     /** Seeds only a terminal {@code automation_completed} marker (sufficient for listRuns). */
@@ -369,6 +558,76 @@ final class StandardExplanationServiceTest {
         publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
                 new AutomationCompletedEvent(runId.value(), finalStatus, 1234L, 1, 1, null,
                         abortReason), corr, trigId);
+        return runId;
+    }
+
+    /**
+     * Seeds a full run chain whose command carries a {@code command_result} of the given outcome
+     * (the DP-1 fixture), optionally followed by a confirmation timeout and/or a
+     * {@code state_confirmed} for the same command.
+     */
+    private RunId seedRunWithResult(AutomationId autoId, EntityId target, String resultOutcome,
+                                    String failureReason, boolean alsoTimeout,
+                                    boolean alsoConfirmed) {
+        EventEnvelope trig = publishRoot("state_changed", SubjectRef.entity(target),
+                new StateChangedEvent("motion", str("idle"), str("active"), eventId()));
+        Ulid corr = trig.causalContext().correlationId();
+        Ulid trigId = trig.eventId().value();
+        RunId runId = new RunId(ulid());
+        publishDerived(EventTypes.AUTOMATION_TRIGGERED, SubjectRef.automation(autoId),
+                new AutomationTriggeredEvent(runId.value(), trig.eventId(), List.of("t1"),
+                        Map.of("action:0", Set.of(target)), "hash", 0), corr, trigId);
+        publishDerived(EventTypes.AUTOMATION_ACTION_STARTED, SubjectRef.automation(autoId),
+                new AutomationActionStartedEvent(runId.value(), 0, "CommandAction", List.of(target)),
+                corr, trigId);
+        EventEnvelope cmd = publishDerived(EventTypes.COMMAND_ISSUED, SubjectRef.entity(target),
+                new CommandIssuedEvent(target.value(), "set_color_temp", "{\"mireds\":220}", 5000,
+                        CommandIdempotency.IDEMPOTENT), corr, trigId);
+        publishDerived(EventTypes.COMMAND_RESULT, SubjectRef.entity(target),
+                new CommandResultEvent(target.value(), "set_color_temp", resultOutcome,
+                        failureReason), corr, cmd.eventId().value());
+        if (alsoTimeout) {
+            publishDerived(EventTypes.COMMAND_CONFIRMATION_TIMED_OUT, SubjectRef.entity(target),
+                    new CommandConfirmationTimedOutEvent(cmd.eventId(), null),
+                    corr, cmd.eventId().value());
+        }
+        if (alsoConfirmed) {
+            publishDerived(EventTypes.STATE_CONFIRMED, SubjectRef.entity(target),
+                    new StateConfirmedEvent(cmd.eventId(), eventId(), "on", "true", "true", "exact"),
+                    corr, cmd.eventId().value());
+        }
+        publishDerived(EventTypes.AUTOMATION_ACTION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationActionCompletedEvent(runId.value(), 0, "success", null), corr, trigId);
+        publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null),
+                corr, trigId);
+        return runId;
+    }
+
+    /** Seeds a terminal marker with an explicit duration (the DP-3 fixture; eventTime present). */
+    private RunId seedCompletedWithDuration(AutomationId autoId, long durationMs) {
+        RunId runId = new RunId(ulid());
+        publishRoot(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", durationMs, 1, 1,
+                        null, null));
+        return runId;
+    }
+
+    /**
+     * Seeds a terminal marker whose envelope {@code eventTime} is null (the ingest-fallback
+     * fixture — the {@link EventDraft} accepts a null eventTime, as CMD-API roots publish live).
+     */
+    private RunId seedCompletedNullEventTime(AutomationId autoId, long durationMs) {
+        RunId runId = new RunId(ulid());
+        EventDraft draft = new EventDraft(EventTypes.AUTOMATION_COMPLETED, 1, null,
+                SubjectRef.automation(autoId), EventPriority.NORMAL, EventOrigin.AUTOMATION,
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", durationMs, 1, 1,
+                        null, null), null, null);
+        try {
+            store.publishRoot(draft);
+        } catch (SequenceConflictException e) {
+            throw new AssertionError("seed publish failed", e);
+        }
         return runId;
     }
 

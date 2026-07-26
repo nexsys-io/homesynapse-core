@@ -150,18 +150,32 @@ public record RunExplanation(
      * ({@code "{}"} when parameterless). The automation module owns no JSON library, so the
      * rest-api boundary parses it into the wire {@code params} object.</p>
      *
-     * @param type       the action type label (e.g. {@code "CommandAction"}), never {@code null}
-     * @param targetRef  the target entity, or {@code null} if not recoverable
-     * @param command    the command name, or {@code null} for a skipped/failed action with no command
-     * @param paramsJson the raw command-parameter JSON string ({@code "{}"} when none), never {@code null}
-     * @param outcome    the confirmation outcome (DP-A2), never {@code null}
-     * @param reason     a human reason (failure/timeout detail), or {@code null}
+     * @param type          the action type label (e.g. {@code "CommandAction"}), never {@code null}
+     * @param targetRef     the target entity, or {@code null} if not recoverable
+     * @param command       the command name, or {@code null} for a skipped/failed action with no command
+     * @param paramsJson    the raw command-parameter JSON string ({@code "{}"} when none), never {@code null}
+     * @param outcome       the confirmation outcome (DP-A2), never {@code null}
+     * @param reason        a human reason (failure/timeout detail), or {@code null}
+     * @param resultOutcome the raw {@code command_result.outcome} string associated with this
+     *                      action's command (the ten-value vocabulary plus adapter-specific
+     *                      strings), or {@code null} when no {@code command_result} exists in the
+     *                      chain. Additive v1.1.2 field (GAP-1) — a pure fact-carry, independent
+     *                      of which precedence branch classified {@code outcome}
+     * @param settled       whether this action's outcome can no longer change as late events
+     *                      append to its (immutable, still-growing) correlation: {@code false}
+     *                      exactly while the action is {@code DISPATCHED} with no settling record
+     *                      ({@code resultOutcome} {@code null} or {@code "acknowledged"}); a
+     *                      superseded {@code DISPATCHED} is settled — the ledger dropped it,
+     *                      nothing further will arrive. Derived, never stored (INV-SA-03).
+     *                      Additive v1.1.2 field (Q1b)
      */
     public record ActionView(String type, SubjectRefView targetRef, String command,
-                             String paramsJson, ActionOutcome outcome, String reason) {
+                             String paramsJson, ActionOutcome outcome, String reason,
+                             String resultOutcome, boolean settled) {
 
         /**
-         * Validates the structural components.
+         * Validates the structural components. {@code resultOutcome} is intentionally nullable
+         * (absent means no {@code command_result} in the chain).
          *
          * @throws NullPointerException if {@code type}, {@code paramsJson}, or {@code outcome}
          *                              is {@code null}

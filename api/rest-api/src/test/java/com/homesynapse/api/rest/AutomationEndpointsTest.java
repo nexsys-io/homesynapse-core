@@ -77,7 +77,8 @@ final class AutomationEndpointsTest {
 
         Map<String, Object> data = asMap(body.get("data"));
         assertThat(data).containsOnlyKeys("automationId", "automationName", "enabled", "verdict",
-                "lastRelevantRunId", "explanation", "triggerSummary", "lastEvaluation");
+                "lastRelevantRunId", "explanation", "triggerSummary", "lastEvaluation",
+                "noCommandsIssued");
         assertThat(data).containsEntry("automationId", AUTO_ULID);
         assertThat(data).containsEntry("automationName", "My Automation");
         assertThat(data).containsEntry("enabled", true);
@@ -114,6 +115,39 @@ final class AutomationEndpointsTest {
         assertThat(data).containsEntry("verdict", "NEVER_TRIGGERED");
         assertThat(data).containsEntry("lastRelevantRunId", null);
         assertThat(data).containsEntry("lastEvaluation", null);
+    }
+
+    @Test
+    @DisplayName("GET /automations/{id}/non-firing carries the v1.1.2 noCommandsIssued skip marker")
+    void nonFiring_noCommandsIssuedOnWire() {
+        NonFiringExplanation skipCase = new NonFiringExplanation(
+                AutomationId.parse(AUTO_ULID), "My Automation", true,
+                NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED,
+                new RunId(Ulid.parse(RUN_ULID)),
+                "Automation 'My Automation' fired, but issued no device commands — its device "
+                        + "actions were skipped or issued nothing (targets unavailable or no "
+                        + "device actions defined).",
+                "Fires on state change",
+                new NonFiringExplanation.LastEvaluationView(FIXED_INSTANT, "true"),
+                Boolean.TRUE);
+        GetNonFiringEndpoint endpoint =
+                new GetNonFiringEndpoint(fake().withNonFiring(skipCase), VIEW_POSITION, FIXED_CLOCK);
+        RecordingEndpointContext ctx = new RecordingEndpointContext().withPathParam("id", AUTO_ULID);
+
+        endpoint.apply(ctx);
+
+        assertThat(asMap(asMap(ctx.body).get("data"))).containsEntry("noCommandsIssued", true);
+
+        // The absent (non-skip) construction renders JSON null — never false.
+        NonFiringExplanation nonSkip = new NonFiringExplanation(
+                AutomationId.parse(AUTO_ULID), "My Automation", true,
+                NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, null,
+                "n/a", "Fires on state change", null);
+        GetNonFiringEndpoint absent =
+                new GetNonFiringEndpoint(fake().withNonFiring(nonSkip), VIEW_POSITION, FIXED_CLOCK);
+        RecordingEndpointContext ctx2 = new RecordingEndpointContext().withPathParam("id", AUTO_ULID);
+        absent.apply(ctx2);
+        assertThat(asMap(asMap(ctx2.body).get("data"))).containsEntry("noCommandsIssued", null);
     }
 
     @Test
