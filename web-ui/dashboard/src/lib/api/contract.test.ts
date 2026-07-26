@@ -31,7 +31,7 @@ const REQUESTS: Record<EndpointId, string> = {
 
 describe('frozen read-API contract', () => {
   it('pins the contract version', () => {
-    expect(CONTRACT_VERSION).toBe('v1.1.1-2026-07-02');
+    expect(CONTRACT_VERSION).toBe('v1.1.2-2026-07-26');
   });
 
   it('has a validator for every canonical endpoint', () => {
@@ -194,6 +194,105 @@ describe('prior-instance null-name tolerance (observed live wire)', () => {
     expect(chain.automationName).toBeNull();
     expect(chain.trigger.type).toBeNull();
     expect(() => validateAgainstContract('B3:causalChain', { data: chain, meta: META })).not.toThrow();
+  });
+});
+
+/* v1.1.2 (ratified 2026-07-22 Nick ruling 1; landed core-side 2026-07-26, SKIP-VIS,
+   DP-4 GO): the three ADDITIVE keys. Absence is lawful — the DEPLOYED read surface
+   predates the landing until the deploy completes, so a pre-v1.1.2 payload without
+   the keys must still validate; presence is validated strictly. noCommandsIssued
+   serializes as true or null, NEVER false (the additive-nullable idiom — the core
+   constructs only Boolean.TRUE or null). */
+describe('v1.1.2 additive keys (SKIP-VIS DP-1/DP-2/DP-4)', () => {
+  const META = { viewPosition: 11, timestamp: '2026-07-26T00:00:00Z' };
+  const chainWith = (action: Record<string, unknown>) => ({
+    data: {
+      runId: 'r',
+      automationId: 'a',
+      automationName: 'Named',
+      trigger: { type: 'state_changed', subjectRef: { type: 'ENTITY', id: 'e' }, matchedAt: 't', firingValue: 'v' },
+      conditions: [],
+      actions: [{ type: 'device_command', targetRef: { type: 'ENTITY', id: 'e' }, command: 'turn_on', params: {}, outcome: 'DISPATCHED', reason: null, ...action }],
+      outcome: { status: 'COMPLETED', reason: null, durationMs: 1, actionCount: 1, commandCount: 1 },
+      cascade: { parentRunId: null, depth: 0 },
+    },
+    meta: META,
+  });
+
+  it('causal-chain actions accept resultOutcome string|null and settled boolean when present', () => {
+    expect(() => validateAgainstContract('B3:causalChain', chainWith({ resultOutcome: 'superseded', settled: true }))).not.toThrow();
+    expect(() => validateAgainstContract('B3:causalChain', chainWith({ resultOutcome: null, settled: false }))).not.toThrow();
+  });
+
+  it('a pre-v1.1.2 action WITHOUT the keys still validates (the deployed wire until the deploy)', () => {
+    expect(() => validateAgainstContract('B3:causalChain', chainWith({}))).not.toThrow();
+  });
+
+  it('rejects wrong types on the additive keys', () => {
+    expect(() => validateAgainstContract('B3:causalChain', chainWith({ resultOutcome: 42 }))).toThrow();
+    expect(() => validateAgainstContract('B3:causalChain', chainWith({ settled: 'yes' }))).toThrow();
+  });
+
+  const nf = (extra: Record<string, unknown>) => ({
+    data: {
+      automationId: 'a',
+      automationName: 'Named',
+      enabled: true,
+      verdict: 'ACTED_BUT_UNCONFIRMED',
+      lastRelevantRunId: 'r',
+      explanation: 'x',
+      triggerSummary: 'y',
+      lastEvaluation: { at: null, conditionsResult: null },
+      ...extra,
+    },
+    meta: META,
+  });
+
+  it('non-firing accepts noCommandsIssued true and null; absence stays lawful', () => {
+    expect(() => validateAgainstContract('B3:nonFiring', nf({ noCommandsIssued: true }))).not.toThrow();
+    expect(() => validateAgainstContract('B3:nonFiring', nf({ noCommandsIssued: null }))).not.toThrow();
+    expect(() => validateAgainstContract('B3:nonFiring', nf({}))).not.toThrow();
+  });
+
+  it('non-firing REJECTS noCommandsIssued false — never-false is wire truth', () => {
+    expect(() => validateAgainstContract('B3:nonFiring', nf({ noCommandsIssued: false }))).toThrow();
+    expect(() => validateAgainstContract('B3:nonFiring', nf({ noCommandsIssued: 'true' }))).toThrow();
+  });
+
+  it('the five-modes scenario carries the ruled wire signatures row-exact', () => {
+    const d = SCENARIOS.find((s) => s.id === 'five-modes')!.build();
+    const chain = d.causalChains['run_fm_all']!;
+    const sig = chain.actions.map((a) => `${a.outcome}|${String(a.resultOutcome)}|${String(a.reason)}`);
+    // Pairwise distinct (the law: the distinction IS the product).
+    expect(new Set(sig).size).toBe(chain.actions.length);
+    expect(sig).toContain('UNCONFIRMED|null|confirmation timed out'); // mode 1
+    expect(sig).toContain('DISPATCHED|superseded|null'); // mode 2
+    expect(sig).toContain('UNCONFIRMED|unconfirmed|DefaultResponse SUCCESS +90 ms, then no report, ever'); // mode 3
+    expect(sig).toContain('DISPATCHED|null|null'); // mode 4 (provisional)
+    expect(sig).toContain('FAILED|rejected|device offline'); // mode 5
+    // The DP-3 VALUE correction carried by the mock: triggeredAt ≡ matchedAt.
+    expect(d.runs[0]!.triggeredAt).toBe(chain.trigger.matchedAt);
+    // Mode 4 is the only unsettled action.
+    expect(chain.actions.filter((a) => a.settled === false)).toHaveLength(1);
+  });
+
+  it('the pre-v1.1.2 scenario carries NO v1.1.2 keys (a true pre-fix payload)', () => {
+    const d = SCENARIOS.find((s) => s.id === 'verdict-vocabulary')!.build();
+    for (const chain of Object.values(d.causalChains)) {
+      for (const a of chain.actions) {
+        expect('resultOutcome' in a).toBe(false);
+        expect('settled' in a).toBe(false);
+      }
+    }
+  });
+
+  it('the field-evidence silent-skip now reports ACTED_BUT_UNCONFIRMED + the marker (DP-2)', () => {
+    const d = SCENARIOS.find((s) => s.id === 'field-evidence')!.build();
+    const nfe = d.nonFiring['auto_fe']!;
+    expect(nfe.verdict).toBe('ACTED_BUT_UNCONFIRMED');
+    expect(nfe.noCommandsIssued).toBe(true);
+    expect(nfe.explanation).toContain('issued no device commands');
+    expect(nfe.explanation).not.toContain('fired and confirmed'); // the dead sentence
   });
 });
 

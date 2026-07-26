@@ -20,13 +20,12 @@ import {
   clockTime,
   labelFor,
   NULL_NAME_NOTE,
-  outcomeMeta,
   pendingHint,
   runStatusMeta,
   unconfirmableHint,
   type Tone,
 } from '../lib/format';
-import { classifyRecordedReason, isDoNothingRun, resultOutcomeMeta } from '../lib/verdicts';
+import { actionVerdict, isDoNothingRun } from '../lib/verdicts';
 import styles from './CausalChain.module.css';
 import { t } from '../lib/i18n';
 
@@ -77,41 +76,49 @@ export function CausalChain({ chain }: { chain: Chain }) {
             poll delivers it and NEVER runs its own timeout. The hints below are calm,
             class-keyed plain language — no numbers, no timers, no failure-anxiety.
 
-            VERDICT HONESTY (the ten-value vocabulary): Core's explanation service
-            currently flattens every non-acknowledged command_result into FAILED
-            (StandardExplanationService.isFailure) — but the RECORDED REASON still
-            deterministically identifies the deliberately-superseded and restart-
-            accounting dispositions. Those render with their own calm treatment
-            (an intent change / honest bookkeeping is NOT a failure), with the
-            recorded reason shown as provenance. See lib/verdicts.ts. */}
+            THE FIVE HONEST FAILURE MODES RENDER DISTINCT (the 2026-07-25 law — the
+            distinction IS the product): actionVerdict() consumes the v1.1.2
+            `resultOutcome`/`settled` keys first-class where present (SKIP-VIS landed)
+            and falls back to recorded-reason recovery only on pre-v1.1.2 payloads.
+            Each mode carries its own label + glyph; color reinforces (never hue
+            alone). A not-yet-settled outcome renders visibly PROVISIONAL (§5.9) —
+            calm, never a settled pill. See lib/verdicts.ts. */}
         {chain.actions.map((a, i) => {
-          const disposition = a.outcome === 'FAILED' ? classifyRecordedReason(a.reason) : null;
-          const vm = disposition ? resultOutcomeMeta(disposition) : null;
-          const om = outcomeMeta(a.outcome);
-          const tone = vm ? vm.tone : om.tone;
+          const v = actionVerdict(a);
           const hint =
-            a.outcome === 'DISPATCHED' ? pendingHint(a.command)
-            : a.outcome === 'UNCONFIRMED' ? unconfirmableHint(a.command)
+            v.mode === 'held-dispatched' ? pendingHint(a.command)
+            : v.mode === 'timed-out' || v.mode === 'acked-silent' ? unconfirmableHint(a.command)
             : null;
+          const showHelp =
+            v.provisional || v.mode === 'superseded' || v.mode === 'acked-silent' || v.mode === 'expired-restart';
           return (
             <Step
               key={i}
               kind="action"
-              tone={tone}
+              tone={v.tone}
               marker="→"
               line={`${actionPhrase(a.command)} ${labelFor(a.targetRef.id)}.`}
               pill={
-                vm ? (
-                  <StatusPill tone={vm.tone} label={vm.label} title={vm.help} size="sm" />
-                ) : (
-                  <StatusPill tone={om.tone} label={om.label} title={om.help} size="sm" />
-                )
+                <StatusPill
+                  tone={v.tone}
+                  label={v.label}
+                  title={v.help}
+                  size="sm"
+                  glyph={v.glyph}
+                  provisional={v.provisional}
+                />
               }
             >
-              {vm ? <p class={styles.hint}>{vm.help}</p> : null}
+              {showHelp ? <p class={styles.hint}>{v.help}</p> : null}
               {hint ? <p class={styles.hint}>{hint}</p> : null}
               <Detail label="Command">{a.command}{attrValueList(a.params)}</Detail>
               {a.reason ? <Detail label="Recorded reason">{a.reason}</Detail> : null}
+              {v.resultOutcome ? (
+                <Detail label="Recorded outcome">
+                  {v.resultOutcome}
+                  {v.recovered ? ' (recovered from the recorded reason — this record predates the current hub software)' : ''}
+                </Detail>
+              ) : null}
             </Step>
           );
         })}
@@ -219,9 +226,19 @@ function terminalLine(chain: Chain): string {
   const secs = (chain.outcome.durationMs / 1000).toFixed(1);
   if (s === 'COMPLETED') {
     // A do-nothing run must never read as clean success (the silent-skip class).
-    return isDoNothingRun(chain.outcome, chain.actions.length)
-      ? `Finished in ${secs}s, but nothing was changed.`
-      : `Done in ${secs}s.`;
+    if (isDoNothingRun(chain.outcome, chain.actions.length)) {
+      return `Finished in ${secs}s, but nothing was changed.`;
+    }
+    // §5.9 honesty: a COMPLETED run's action outcome can settle AFTER the run
+    // finishes (a late report re-derives on the next read) — while any action is
+    // still unsettled, the terminal line must not read as the final word.
+    const open = chain.actions.filter((a) => actionVerdict(a).provisional).length;
+    if (open > 0) {
+      return open === 1
+        ? `Done in ${secs}s — one outcome has not settled yet.`
+        : `Done in ${secs}s — ${open} outcomes have not settled yet.`;
+    }
+    return `Done in ${secs}s.`;
   }
   if (s === 'SKIPPED') return chain.outcome.reason ? `Skipped — ${chain.outcome.reason}.` : 'Skipped.';
   if (s === 'FAILED') return chain.outcome.reason ? `Failed — ${chain.outcome.reason}.` : 'Failed.';

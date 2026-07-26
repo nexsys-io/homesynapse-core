@@ -57,9 +57,15 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
           // run, and confirmed". Tell the two apart here (core's stated intent:
           // "the UI tells them apart by the non-null run id").
           const ranFine = nf.verdict === 'NEVER_TRIGGERED' && nf.lastRelevantRunId !== null;
-          const v = ranFine
-            ? ({ label: 'It did run', tone: 'ok' } as const)
-            : verdictMeta(nf.verdict);
+          // v1.1.2 (SKIP-VIS DP-2): the silent-skip marker. TRUE exactly when the
+          // governing COMPLETED run issued zero device commands — a do-nothing run
+          // is NEVER presented as clean success; it gets its own honest verdict pill.
+          const sentNothing = nf.noCommandsIssued === true;
+          const v = sentNothing
+            ? ({ label: 'Ran, but sent nothing', tone: 'warn' } as const)
+            : ranFine
+              ? ({ label: 'It did run', tone: 'ok' } as const)
+              : verdictMeta(nf.verdict);
           return (
             <Card>
               <div class={styles.detail}>
@@ -99,7 +105,16 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
                 {nf.verdict === 'DISABLED' ? (
                   <p class={styles.nextStep}>To let it run, turn this automation on in your automation settings.</p>
                 ) : null}
-                {nf.verdict === 'ACTED_BUT_UNCONFIRMED' && nf.lastRelevantRunId ? (
+                {sentNothing && nf.lastRelevantRunId ? (
+                  <p class={styles.nextStep}>
+                    {/* The silent-skip truth, one click away — the run page shows the
+                        do-nothing record honestly (never a clean success tile). */}
+                    <a href={href(`/explain/run/${nf.lastRelevantRunId}`)}>
+                      See the run that sent no commands →
+                    </a>
+                  </p>
+                ) : null}
+                {!sentNothing && nf.verdict === 'ACTED_BUT_UNCONFIRMED' && nf.lastRelevantRunId ? (
                   <p class={styles.nextStep}>
                     <a href={href(`/explain/run/${nf.lastRelevantRunId}`)}>See the run where the device never confirmed →</a>
                   </p>

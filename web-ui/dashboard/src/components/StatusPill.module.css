@@ -14,6 +14,11 @@
 
 .glyph { width: 12px; height: 12px; flex: none; }
 
+/* Provisional (§5.9 — the outcome may still settle): dashed outline, no settled
+   fill weight. Calm, not alarm; the label TEXT carries the meaning too (the
+   dashes only reinforce — never the sole signal). */
+.provisional { border-style: dashed; border-color: currentColor; background: transparent; }
+
 .ok      { color: var(--hs-ok-500);      background: var(--hs-ok-bg); }
 .warn    { color: var(--hs-warn-500);    background: var(--hs-warn-bg); }
 .error   { color: var(--hs-error-500);   background: var(--hs-error-bg); }

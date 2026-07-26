@@ -7,7 +7,7 @@ import { api } from '../lib/api';
 import type { EntitySummary, ProjectionStatus, RunSummary } from '../lib/api/contract';
 import { useApi } from '../lib/poll';
 import { href } from '../lib/router';
-import { runStatusMeta, timeAgo } from '../lib/format';
+import { runName, runStatusMeta, timeAgo } from '../lib/format';
 import { t } from '../lib/i18n';
 import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
@@ -61,7 +61,8 @@ export function OverviewView() {
                     return (
                       <li key={r.runId}>
                         <a class={styles.runRow} href={href(`/explain/run/${r.runId}`)}>
-                          <span class={styles.runName}>{r.automationName}</span>
+                          {/* Prior-instance runs carry automationName = null — never a blank. */}
+                          <span class={styles.runName}>{runName(r.automationName)}</span>
                           <span class={styles.runWhen}>{timeAgo(r.triggeredAt)}</span>
                           <StatusPill tone={m.tone} label={m.label} size="sm" />
                         </a>
@@ -74,28 +75,47 @@ export function OverviewView() {
           </Resource>
         </Card>
 
+        {/* G2 — the availability tile renders the HONEST states (Rosonway §5.3):
+            "Available" is what the system last CONCLUDED from reports, never a
+            live-contact claim (staleAfter can lawfully be null with hours-old
+            evidence) — so the tile says "Available" (not "Online"), counts the
+            honest UNKNOWN-at-boot state as its own row (never silently absorbed),
+            and states what the counts mean. */}
         <Card title="Devices" aside={<a href={href('/devices')} class={styles.seeAll}>See all</a>}>
           <Resource state={entities}>
             {(rows: EntitySummary[]) => {
               const total = rows.length;
               const available = rows.filter((e) => e.availability === 'AVAILABLE').length;
               const offline = rows.filter((e) => e.availability === 'UNAVAILABLE').length;
+              const undetermined = rows.filter((e) => e.availability === 'UNKNOWN').length;
               const stale = rows.filter((e) => e.stale).length;
               return (
-                <dl class="kv">
-                  <div class="kvRow">
-                    <dt>Online</dt>
-                    <dd>{available} of {total}</dd>
-                  </div>
-                  <div class="kvRow">
-                    <dt>Offline</dt>
-                    <dd>{offline === 0 ? 'none' : offline}</dd>
-                  </div>
-                  <div class="kvRow">
-                    <dt>Stale readings</dt>
-                    <dd>{stale === 0 ? 'none' : stale}</dd>
-                  </div>
-                </dl>
+                <>
+                  <dl class="kv">
+                    <div class="kvRow">
+                      <dt>Available</dt>
+                      <dd>{available} of {total}</dd>
+                    </div>
+                    <div class="kvRow">
+                      <dt>Offline</dt>
+                      <dd>{offline === 0 ? 'none' : offline}</dd>
+                    </div>
+                    <div class="kvRow">
+                      <dt>Not determined yet</dt>
+                      <dd title="Normal right after a restart — settles on each device’s first report.">
+                        {undetermined === 0 ? 'none' : undetermined}
+                      </dd>
+                    </div>
+                    <div class="kvRow">
+                      <dt>Stale readings</dt>
+                      <dd>{stale === 0 ? 'none' : stale}</dd>
+                    </div>
+                  </dl>
+                  <p class={styles.muted} style={{ marginTop: 'var(--hs-space-2)' }}>
+                    Counts reflect each device’s last report — not a live connection test. Open a
+                    device to see when it was last heard from.
+                  </p>
+                </>
               );
             }}
           </Resource>

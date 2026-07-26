@@ -252,3 +252,220 @@ export function isDoNothingRun(outcome: {
     actionsShown === 0
   );
 }
+
+/* ---------------------------------------------------------------------------
+ * THE FIVE HONEST FAILURE MODES — DISTINCT, NEVER COLLAPSED.
+ *
+ * The standing law (Nick, 2026-07-25 — "the distinction IS the product"): the
+ * five honest failure modes render DISTINCT: dispatched-and-timed-out ·
+ * superseded-same-attribute · acked-then-silent-forever · held-DISPATCHED ·
+ * settled-FAILED-on-window-close. The v1.1.2 wire makes them pairwise-distinct
+ * on (outcome, resultOutcome, reason) — the signature table is test-pinned
+ * core-side (explainRun_fiveFailureModesDistinct, SKIP-VIS DP-1). Per the
+ * ALL-USERS/CVD mandate the distinction NEVER rides hue alone: each mode gets
+ * a distinct LABEL + GLYPH; color reinforces, at AA in both themes on the
+ * mode-paired tokens.
+ *
+ * CONSUMPTION ORDER (D-4 retirement, 2026-07-26): the first-class v1.1.2
+ * `resultOutcome` field is consumed WHEN PRESENT; the recorded-reason recovery
+ * (classifyRecordedReason) remains ONLY as the graceful-degrade path for
+ * pre-v1.1.2 payloads (the deployed surface until the SKIP-VIS deploy) —
+ * where the field is present it wins, always.
+ * ------------------------------------------------------------------------- */
+
+export interface ActionVerdictInput {
+  outcome: string; // ActionOutcome
+  reason: string | null;
+  resultOutcome?: string | null;
+  settled?: boolean;
+}
+
+export type ActionMode =
+  | 'confirmed'
+  | 'held-dispatched' // mode 4 — the provisional one
+  | 'timed-out' // mode 1
+  | 'superseded' // mode 2
+  | 'acked-silent' // mode 3
+  | 'settled-failed' // mode 5
+  | 'expired-restart' // wire failure-class (SD-7 residue); honest bookkeeping here
+  | 'skipped';
+
+/** Distinct SVG glyph per MODE (14×14, stroke style matches StatusPill).
+ *  The shape half of the never-hue-alone law. */
+export const MODE_GLYPHS: Record<ActionMode, string> = {
+  confirmed: 'M3.5 7.2l2.2 2.3L10.5 4', // check
+  'held-dispatched': 'M2.5 7h7M7 4.5L9.5 7 7 9.5', // arrow, still travelling
+  'timed-out': 'M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1', // clock
+  superseded: 'M3 4.8h7L8.2 3M11 9.2H4l1.8 1.8', // swap arrows (intent change)
+  'acked-silent': 'M1.8 5.6l1.8 1.8 3.4-3.4M9 10.4h.05M11 10.4h.05M12.9 10.4h.05', // ack, then silence
+  'settled-failed': 'M3.5 3.5l7 7M10.5 3.5l-7 7', // x
+  'expired-restart': 'M11.5 7A4.5 4.5 0 113.9 3.8M11.5 2.5v2h-2', // restart arc
+  skipped: 'M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5', // skip-to-end
+};
+
+export interface ActionVerdict {
+  mode: ActionMode;
+  /** Distinct per mode (the label half of the never-hue-alone law). */
+  label: string;
+  tone: Tone;
+  glyph: string;
+  help: string;
+  /** True exactly while the outcome may still settle (§5.9) — render visibly
+   *  provisional in the calm register, never a settled pill. */
+  provisional: boolean;
+  /** True when the disposition came from recorded-reason recovery on a
+   *  pre-v1.1.2 payload (no first-class resultOutcome on the wire). */
+  recovered: boolean;
+  /** The raw disposition backing this verdict (first-class or recovered), or null. */
+  resultOutcome: string | null;
+}
+
+/** The Q1b settled rule — the SAME derivation the core instruction states
+ *  (SKIP-VIS DP-4): an action is provisional exactly while it is DISPATCHED
+ *  with no settling record (resultOutcome null/absent or bare "acknowledged");
+ *  a superseded DISPATCHED is settled. The first-class `settled` field wins
+ *  when present; this derivation covers pre-v1.1.2 payloads identically. */
+export function isActionSettled(a: ActionVerdictInput): boolean {
+  if (a.settled !== undefined) return a.settled;
+  return !(a.outcome === 'DISPATCHED' && (a.resultOutcome == null || a.resultOutcome === 'acknowledged'));
+}
+
+const KNOWN_FAILED = new Set(['rejected', 'invalid', 'unsupported', 'handler_error', 'integration_unavailable']);
+
+/** Classify one causal-chain action into its honest render mode. */
+export function actionVerdict(a: ActionVerdictInput): ActionVerdict {
+  const hasField = a.resultOutcome !== undefined;
+  const recoveredRo = hasField ? null : (a.outcome === 'FAILED' ? classifyRecordedReason(a.reason) : null);
+  const ro: string | null = hasField ? (a.resultOutcome as string | null) : recoveredRo;
+  const recovered = !hasField && recoveredRo !== null;
+  const settled = isActionSettled(hasField ? a : { ...a, resultOutcome: ro });
+  const base = {
+    provisional: !settled,
+    recovered,
+    resultOutcome: ro,
+  };
+
+  switch (a.outcome) {
+    case 'CONFIRMED':
+      return {
+        ...base,
+        mode: 'confirmed',
+        label: 'Confirmed',
+        tone: 'ok',
+        glyph: MODE_GLYPHS.confirmed,
+        help: 'The device reported it actually did it.',
+      };
+    case 'SKIPPED':
+      return {
+        ...base,
+        mode: 'skipped',
+        label: 'Skipped',
+        tone: 'unknown',
+        glyph: MODE_GLYPHS.skipped,
+        help: 'This step did not run.',
+      };
+    case 'DISPATCHED': {
+      if (ro === 'superseded') {
+        return {
+          ...base,
+          mode: 'superseded',
+          label: 'Replaced',
+          tone: 'neutral',
+          glyph: MODE_GLYPHS.superseded,
+          help: VERDICTS.superseded.help,
+        };
+      }
+      // Mode 4 — held-DISPATCHED (bare, or protocol-acked with no settling
+      // record). The §5.9 field truth: a late report can settle this after the
+      // run reads COMPLETED — the text itself says "not settled yet" so the
+      // provisionality never rides styling alone.
+      return {
+        ...base,
+        mode: 'held-dispatched',
+        label: 'Sent — not settled yet',
+        tone: 'info',
+        glyph: MODE_GLYPHS['held-dispatched'],
+        help:
+          ro === 'acknowledged'
+            ? 'The device accepted the command. What finally happened has not been recorded yet — this can still settle, and the record updates itself when it does.'
+            : 'The command was sent. What finally happened has not been recorded yet — this can still settle, and the record updates itself when it does.',
+      };
+    }
+    case 'UNCONFIRMED': {
+      if (ro === 'unconfirmed') {
+        // Mode 3 — acked-then-silent-forever: the system explicitly refusing to
+        // treat an ACK as proof. The recorded reason is shown VERBATIM.
+        return {
+          ...base,
+          mode: 'acked-silent',
+          label: 'Accepted, never confirmed',
+          tone: 'warn',
+          glyph: MODE_GLYPHS['acked-silent'],
+          help: 'The device accepted the command but never reported doing it. The recorded reason below is shown exactly as recorded — an acceptance is not proof.',
+        };
+      }
+      if (ro === 'superseded') {
+        // Mode 2's timed-out variant (UNCONFIRMED / "superseded" / timeout text):
+        // still an intent change, never a failure.
+        return {
+          ...base,
+          mode: 'superseded',
+          label: 'Replaced',
+          tone: 'neutral',
+          glyph: MODE_GLYPHS.superseded,
+          help: VERDICTS.superseded.help,
+        };
+      }
+      // Mode 1 — dispatched-and-timed-out: sent, window closed, honestly unknown.
+      return {
+        ...base,
+        mode: 'timed-out',
+        label: 'Sent — no reply',
+        tone: 'warn',
+        glyph: MODE_GLYPHS['timed-out'],
+        help: 'The command was sent, but no confirmation arrived before the window closed. Whether the device acted is unknown — reported honestly instead of guessed.',
+      };
+    }
+    case 'FAILED':
+    default: {
+      if (ro === 'superseded') {
+        // Pre-v1.1.2 flattening recovered (or an anomalous wire): an intent
+        // change NEVER renders as a failure.
+        return {
+          ...base,
+          mode: 'superseded',
+          label: 'Replaced',
+          tone: 'neutral',
+          glyph: MODE_GLYPHS.superseded,
+          help: VERDICTS.superseded.help,
+        };
+      }
+      if (ro === 'expired_on_restart') {
+        return {
+          ...base,
+          mode: 'expired-restart',
+          label: VERDICTS.expired_on_restart.label,
+          tone: VERDICTS.expired_on_restart.tone,
+          glyph: MODE_GLYPHS['expired-restart'],
+          help: VERDICTS.expired_on_restart.help,
+        };
+      }
+      // Mode 5 — settled-FAILED. The ten-value sub-verdict layer carries the
+      // distinct label/tone where the disposition is known (rejected vs error vs
+      // bridge-offline vs the D-1 calm "No reply" for timed_out); an unknown
+      // adapter string stays conservative FAILED (SD-7), reason shown verbatim.
+      if (ro && (KNOWN_FAILED.has(ro) || ro === 'timed_out')) {
+        const m = resultOutcomeMeta(ro);
+        return { ...base, mode: 'settled-failed', label: m.label, tone: m.tone, glyph: MODE_GLYPHS['settled-failed'], help: m.help };
+      }
+      return {
+        ...base,
+        mode: 'settled-failed',
+        label: 'Failed',
+        tone: 'error',
+        glyph: MODE_GLYPHS['settled-failed'],
+        help: 'The command failed. The recorded reason says why.',
+      };
+    }
+  }
+}

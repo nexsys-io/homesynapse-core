@@ -46,8 +46,10 @@ export function DevicesView() {
                   key: 'status',
                   header: 'Status',
                   render: (r) => {
+                    // G2 honesty: the flag is what the system last CONCLUDED —
+                    // the title says so (AVAILABLE is never a live-contact claim).
                     const a = availabilityMeta(r.availability);
-                    return <StatusPill tone={a.tone} label={a.label} />;
+                    return <StatusPill tone={a.tone} label={a.label} title={a.help} />;
                   },
                 },
                 {
@@ -92,7 +94,7 @@ function EntityDetail({ id }: { id: string }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--hs-space-4)' }}>
       <div style={{ display: 'flex', gap: 'var(--hs-space-2)', alignItems: 'center' }}>
-        <StatusPill tone={a.tone} label={a.label} />
+        <StatusPill tone={a.tone} label={a.label} title={a.help} />
         {s.stale ? <StatusPill tone="warn" label="Stale reading" size="sm" /> : null}
       </div>
 

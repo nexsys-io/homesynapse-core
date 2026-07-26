@@ -208,7 +208,13 @@ export const runs: RunSummary[] = [
   },
 ];
 
-/* ---- Causal chains (B3 — the hero) ---- */
+/* ---- Causal chains (B3 — the hero) ----
+ * [MOCK — pending the SKIP-VIS DEPLOY] The `resultOutcome`/`settled` keys below
+ * are the ruled v1.1.2 additive shape (Nick ruling 1; SKIP-VIS DP-1/DP-4 GO,
+ * LANDED on main 2026-07-26). They are mocked to the ruled shape per law (c)
+ * (the emitter leads, the consumer follows) because the DEPLOYED read surface
+ * predates the landing until the deploy evening completes — re-verify against
+ * live payloads at the first post-deploy run. */
 export const causalChains: Record<string, CausalChain> = {
   // The happy path: motion -> light, CONFIRMED.
   run_eh_001: {
@@ -237,6 +243,8 @@ export const causalChains: Record<string, CausalChain> = {
         params: { brightness: 82 },
         outcome: 'CONFIRMED',
         reason: null,
+        resultOutcome: 'acknowledged',
+        settled: true,
       },
     ],
     outcome: { status: 'COMPLETED', reason: null, durationMs: 412, actionCount: 1, commandCount: 1 },
@@ -269,6 +277,8 @@ export const causalChains: Record<string, CausalChain> = {
         params: { brightness: 82 },
         outcome: 'UNCONFIRMED',
         reason: 'No state_confirmed within 5s timeout',
+        resultOutcome: null,
+        settled: true,
       },
     ],
     outcome: {
@@ -307,6 +317,8 @@ export const causalChains: Record<string, CausalChain> = {
         params: {},
         outcome: 'SKIPPED',
         reason: 'Condition not met',
+        resultOutcome: null,
+        settled: true,
       },
     ],
     outcome: { status: 'SKIPPED', reason: 'Condition not met: before sunset', durationMs: 38, actionCount: 1, commandCount: 0 },
@@ -338,6 +350,8 @@ export const causalChains: Record<string, CausalChain> = {
         params: { brightness: 60 },
         outcome: 'CONFIRMED',
         reason: null,
+        resultOutcome: 'acknowledged',
+        settled: true,
       },
     ],
     outcome: { status: 'COMPLETED', reason: null, durationMs: 389, actionCount: 1, commandCount: 1 },
@@ -345,7 +359,10 @@ export const causalChains: Record<string, CausalChain> = {
   },
 };
 
-/* ---- Non-firing explanations (B3 — the co-equal hero half) ---- */
+/* ---- Non-firing explanations (B3 — the co-equal hero half) ----
+ * [MOCK — pending the SKIP-VIS DEPLOY] `noCommandsIssued` is the ruled v1.1.2
+ * additive marker (DP-2): null on every non-silent-skip construction (never
+ * false — the additive-nullable idiom). */
 export const nonFiring: Record<string, NonFiringExplanation> = {
   auto_evening_hallway: {
     automationId: 'auto_evening_hallway',
@@ -356,6 +373,7 @@ export const nonFiring: Record<string, NonFiringExplanation> = {
     explanation: 'Nothing set it off. Hallway Motion has not detected motion in the last hour.',
     triggerSummary: 'This runs when Hallway Motion detects motion, after sunset.',
     lastEvaluation: { at: null, conditionsResult: null },
+    noCommandsIssued: null,
   },
   auto_frontdoor_welcome: {
     automationId: 'auto_frontdoor_welcome',
@@ -366,6 +384,7 @@ export const nonFiring: Record<string, NonFiringExplanation> = {
     explanation: 'It did not run because it was before sunset when the front door opened.',
     triggerSummary: 'This runs when the Front Door opens, after sunset.',
     lastEvaluation: { at: iso(240), conditionsResult: 'after sunset = false' },
+    noCommandsIssued: null,
   },
   auto_bedroom_nightlight: {
     automationId: 'auto_bedroom_nightlight',
@@ -376,6 +395,7 @@ export const nonFiring: Record<string, NonFiringExplanation> = {
     explanation: 'This automation is turned off, so it cannot run.',
     triggerSummary: 'This would run when Bedroom Motion detects motion.',
     lastEvaluation: { at: null, conditionsResult: null },
+    noCommandsIssued: null,
   },
 };
 

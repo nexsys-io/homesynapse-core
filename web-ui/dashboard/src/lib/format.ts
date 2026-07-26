@@ -139,14 +139,31 @@ export function originMeta(o: Origin): { label: string; tone: Tone; phrase: stri
   }
 }
 
-export function availabilityMeta(a: Availability): { label: string; tone: Tone } {
+/* Availability honesty (Rosonway §5.3, measured): AVAILABLE is what the system
+ * last CONCLUDED from reports — `staleAfter: null` with an hours-old
+ * `lastReported` is lawful, so AVAILABLE must NEVER be presented as proof of
+ * live radio contact. The help strings say what the flag actually means; the
+ * evidence-with-age line (availabilityEvidence) carries the age. */
+export function availabilityMeta(a: Availability): { label: string; tone: Tone; help: string } {
   switch (a) {
     case 'AVAILABLE':
-      return { label: 'Available', tone: 'ok' };
+      return {
+        label: 'Available',
+        tone: 'ok',
+        help: 'As last concluded from the device’s reports — not a live connection test. The device page shows when it was last heard from.',
+      };
     case 'UNAVAILABLE':
-      return { label: 'Offline', tone: 'error' };
+      return {
+        label: 'Offline',
+        tone: 'error',
+        help: 'Concluded from evidence — the device stopped answering its rechecks. Devices are rechecked every few minutes.',
+      };
     case 'UNKNOWN':
-      return { label: 'Unknown', tone: 'unknown' };
+      return {
+        label: 'Not determined yet',
+        tone: 'unknown',
+        help: 'An honest state, normal right after a restart — it settles on the device’s first report.',
+      };
   }
 }
 

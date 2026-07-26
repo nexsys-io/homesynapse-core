@@ -17,6 +17,7 @@ import { AuthGate } from './components/AuthGate';
 import { StatusPill } from './components/StatusPill';
 import { Loading, EmptyState, ErrorState, OfflineState, ReplayingBanner } from './components/feedback';
 import { causalChains } from './lib/api/mock/mockData';
+import { SCENARIOS } from './lib/api/mock/scenarios';
 
 afterEach(cleanup);
 
@@ -30,6 +31,12 @@ async function violations(node: Element): Promise<string[]> {
 describe('accessibility — axe-core structural rules', () => {
   it('the causal-chain hero has no violations', async () => {
     const { container } = render(<CausalChain chain={causalChains['run_eh_001']!} />);
+    expect(await violations(container)).toEqual([]);
+  });
+
+  it('the five-modes chain (distinct glyphs + a provisional pill) has no violations', async () => {
+    const chain = SCENARIOS.find((s) => s.id === 'five-modes')!.build().causalChains['run_fm_all']!;
+    const { container } = render(<CausalChain chain={chain} />);
     expect(await violations(container)).toEqual([]);
   });
 

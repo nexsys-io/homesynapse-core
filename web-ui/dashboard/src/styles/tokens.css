@@ -90,7 +90,7 @@
   --hs-border-strong: var(--hs-neutral-700);
   --hs-text: var(--hs-neutral-100);
   --hs-text-secondary: var(--hs-neutral-400);
-  --hs-text-muted: var(--hs-neutral-500);
+  --hs-text-muted: #7e8998;
   --hs-link: var(--hs-accent-300);
   --hs-focus-ring: var(--hs-accent-300);
   /* Status / health (color + SHAPE + LABEL — never color alone, WCAG 1.4.1) */
@@ -126,13 +126,13 @@
     --hs-link: var(--hs-accent-500);
     --hs-focus-ring: var(--hs-accent-500);
     /* Status / health (color + SHAPE + LABEL — never color alone, WCAG 1.4.1) */
-    --hs-ok-500: #1a8f4c;
+    --hs-ok-500: #157a40;
     --hs-ok-bg: #e6f4ec;
-    --hs-warn-500: #9a6700;
+    --hs-warn-500: #7f5500;
     --hs-warn-bg: #fbf1d9;
     --hs-error-500: #c1392b;
     --hs-error-bg: #fbeae8;
-    --hs-info-500: var(--hs-accent-500);
+    --hs-info-500: var(--hs-accent-600);
     --hs-info-bg: var(--hs-accent-50);
     --hs-unknown-500: #6a5b8a;
     --hs-unknown-bg: #efecf5;
@@ -158,13 +158,13 @@
   --hs-link: var(--hs-accent-500);
   --hs-focus-ring: var(--hs-accent-500);
   /* Status / health (color + SHAPE + LABEL — never color alone, WCAG 1.4.1) */
-  --hs-ok-500: #1a8f4c;
+  --hs-ok-500: #157a40;
   --hs-ok-bg: #e6f4ec;
-  --hs-warn-500: #9a6700;
+  --hs-warn-500: #7f5500;
   --hs-warn-bg: #fbf1d9;
   --hs-error-500: #c1392b;
   --hs-error-bg: #fbeae8;
-  --hs-info-500: var(--hs-accent-500);
+  --hs-info-500: var(--hs-accent-600);
   --hs-info-bg: var(--hs-accent-50);
   --hs-unknown-500: #6a5b8a;
   --hs-unknown-bg: #efecf5;
@@ -185,7 +185,7 @@
   --hs-border-strong: var(--hs-neutral-700);
   --hs-text: var(--hs-neutral-100);
   --hs-text-secondary: var(--hs-neutral-400);
-  --hs-text-muted: var(--hs-neutral-500);
+  --hs-text-muted: #7e8998;
   --hs-link: var(--hs-accent-300);
   --hs-focus-ring: var(--hs-accent-300);
   /* Status / health (color + SHAPE + LABEL — never color alone, WCAG 1.4.1) */

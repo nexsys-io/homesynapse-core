@@ -2,6 +2,12 @@
  * StatusPill — the canonical status atom.
  * Conveys state with tone + ICON SHAPE + text LABEL (never color alone; WCAG 1.4.1).
  * Used for health, availability, command outcome, run status, and origin.
+ *
+ * v1.1.2 (FE-VERDICT-2): accepts an optional per-verdict `glyph` path override —
+ * the five honest failure modes each carry a DISTINCT shape (lib/verdicts.ts
+ * MODE_GLYPHS), so the distinction never rides hue alone — and a `provisional`
+ * variant (dashed outline) for outcomes that may still settle (§5.9). The
+ * provisional signal never rides styling alone: the label text says it too.
  */
 import type { Tone } from '../lib/format';
 import styles from './StatusPill.module.css';
@@ -20,16 +26,27 @@ export function StatusPill({
   label,
   title,
   size = 'md',
+  glyph,
+  provisional = false,
 }: {
   tone: Tone;
   label: string;
   title?: string;
   size?: 'sm' | 'md';
+  /** SVG path override (14×14) — a per-verdict distinct shape. */
+  glyph?: string;
+  /** Outcome may still settle (§5.9): dashed outline, calm — never a settled pill. */
+  provisional?: boolean;
 }) {
+  const d = glyph ?? GLYPH[tone];
+  const filled = !glyph && (tone === 'warn' || tone === 'neutral');
   return (
-    <span class={`${styles.pill} ${styles[tone]} ${size === 'sm' ? styles.sm : ''}`} title={title}>
+    <span
+      class={`${styles.pill} ${styles[tone]} ${size === 'sm' ? styles.sm : ''} ${provisional ? styles.provisional : ''}`}
+      title={title}
+    >
       <svg class={styles.glyph} viewBox="0 0 14 14" aria-hidden="true" focusable="false">
-        <path d={GLYPH[tone]} fill={tone === 'warn' || tone === 'neutral' ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+        <path d={d} fill={filled ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
       </svg>
       <span>{label}</span>
     </span>

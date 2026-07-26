@@ -254,6 +254,11 @@ export const validators: Record<EndpointId, Validator> = {
       if (!isObj(a)) throw new ContractError(`${p}: must be object`);
       isStr(req(a, 'command', p), `${p}.command`);
       oneOf(req(a, 'outcome', p), ACTION_OUTCOME, `${p}.outcome`);
+      // v1.1.2 ADDITIVE keys (SKIP-VIS DP-1/DP-4 GO). Absence is lawful (a
+      // pre-v1.1.2 payload — the deployed surface may predate the landing);
+      // presence is validated: resultOutcome is string|null, settled is boolean.
+      if ('resultOutcome' in a) strOrNull(a.resultOutcome, `${p}.resultOutcome`);
+      if ('settled' in a) isBool(a.settled, `${p}.settled`);
     });
     if (!isObj(req(d, 'outcome', 'B3chain.data'))) throw new ContractError('B3chain.outcome must be object');
     meta(req(b, 'meta', 'B3chain'), 'B3chain.meta');
@@ -268,6 +273,15 @@ export const validators: Record<EndpointId, Validator> = {
     oneOf(req(d, 'verdict', 'B3nf.data'), VERDICT, 'B3nf.data.verdict');
     isStr(req(d, 'explanation', 'B3nf.data'), 'B3nf.data.explanation');
     isStr(req(d, 'triggerSummary', 'B3nf.data'), 'B3nf.data.triggerSummary');
+    // v1.1.2 ADDITIVE (SKIP-VIS DP-2): noCommandsIssued serializes as true or
+    // JSON null — NEVER false (absent ≠ false is the additive-nullable idiom;
+    // the core constructs only Boolean.TRUE or null). Absence is lawful
+    // (pre-v1.1.2 payload); a false on the wire is contract drift — fail it.
+    if ('noCommandsIssued' in d && d.noCommandsIssued !== true && d.noCommandsIssued !== null) {
+      throw new ContractError(
+        `B3nf.data.noCommandsIssued: expected true or null (never false), got ${String(d.noCommandsIssued)}`,
+      );
+    }
     meta(req(b, 'meta', 'B3nf'), 'B3nf.meta');
   },
   'B3:automations': (b) => {

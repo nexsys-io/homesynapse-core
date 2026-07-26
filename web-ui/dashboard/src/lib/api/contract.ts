@@ -11,7 +11,25 @@
  *   B-class = FROZEN-UNBUILT (mock to these shapes; Core implements TO them).
  */
 
-export const CONTRACT_VERSION = 'v1.1.1-2026-07-02' as const;
+export const CONTRACT_VERSION = 'v1.1.2-2026-07-26' as const;
+/* v1.1.2 (ratified 2026-07-22, Nick ruling 1 — the four-constraint law: additive-only ·
+ * per-endpoint camelCase · the emitter leads · version discipline; landed core-side
+ * 2026-07-26, WU-SKIP-VIS, DP-4 GO). Three ADDITIVE keys, zero changes to any
+ * existing v1.1 field/casing/nesting:
+ *   - causal-chain `actions[].resultOutcome` (raw ten-value command_result.outcome +
+ *     adapter strings; null when no command_result exists) — the un-collapsed
+ *     disposition. Superseded no longer renders FAILED; honest-"unconfirmed"
+ *     derives UNCONFIRMED with its recorded reason.
+ *   - causal-chain `actions[].settled` (the Q1b provisionality flag: false exactly
+ *     while DISPATCHED with no settling record).
+ *   - non-firing `data.noCommandsIssued` (true exactly for the COMPLETED
+ *     zero-command silent-skip run; JSON null otherwise — never false).
+ * CONSUMPTION NOTE (law (c), emitter-leads): SKIP-VIS is ON MAIN but the DEPLOYED
+ * Pi read surface predates it until the deploy evening completes — the mirror
+ * therefore marks the new keys OPTIONAL (absence = a lawful pre-v1.1.2 payload;
+ * presence is validated). The client degrades gracefully on pre-v1.1.2 payloads
+ * via the recorded-reason recovery + client-side settled derivation (verdicts.ts,
+ * the SAME rule the core instruction states). */
 
 /* ===========================================================================
  * 0. Transport + cross-cutting (binds every endpoint)
@@ -237,6 +255,13 @@ export interface RunSummary {
   runId: string;
   automationId: string;
   automationName: string | null;
+  /** [v1.1.2 VALUE note, 2026-07-26 — SKIP-VIS DP-3]: the SHAPE is unchanged, but the
+   *  VALUE is corrected — pre-fix wires understate triggeredAt by exactly durationMs
+   *  whenever the terminal envelope carries a DP-G-inherited eventTime (Rosonway §4).
+   *  Post-fix, runs[].triggeredAt ≡ causal-chain trigger.matchedAt (test-pinned core-
+   *  side). INTERIM CAVEAT: until the SKIP-VIS landing DEPLOYS, do not build ordering/
+   *  age logic that trusts this field on the live wire — trigger.matchedAt on the
+   *  causal chain is the true instant there. This client only displays it. */
   triggeredAt: string;
   status: RunStatus;
   terminalReason: string | null;
@@ -267,6 +292,21 @@ export interface CausalAction {
   params: Record<string, unknown>;
   outcome: ActionOutcome;
   reason: string | null;
+  /** v1.1.2 ADDITIVE (GAP-1 → SKIP-VIS DP-1): the raw `command_result.outcome`
+   *  string associated with this action's command (the live ten-value vocabulary
+   *  plus adapter-specific strings), or null when no command_result exists in the
+   *  chain — a pure fact-carry, independent of which branch classified `outcome`.
+   *  OPTIONAL in the mirror only because the deployed read surface may predate the
+   *  landing (absence = pre-v1.1.2 payload; the recorded-reason recovery covers it). */
+  resultOutcome?: string | null;
+  /** v1.1.2 ADDITIVE (Q1b → SKIP-VIS DP-4 GO): false exactly while the action is
+   *  DISPATCHED with no settling record (resultOutcome null or bare "acknowledged");
+   *  a superseded DISPATCHED is settled. A COMPLETED run's action can settle AFTER
+   *  terminal (a late command_result re-derives on the next read — Rosonway §5.9),
+   *  so an unsettled action renders visibly PROVISIONAL, never as a settled pill.
+   *  OPTIONAL for pre-v1.1.2 payloads; verdicts.isActionSettled derives the same
+   *  rule client-side when absent. */
+  settled?: boolean;
 }
 
 /** B3 — GET /api/v1/runs/{runId}/causal-chain (the hero "why did this fire?" tree).
@@ -298,7 +338,16 @@ export interface NonFiringExplanation {
   lastRelevantRunId: string | null;
   explanation: string;
   triggerSummary: string;
+  /** v1.1.2 VALUE note (SKIP-VIS DP-3b): `at` carries the same eventTime-present
+   *  correction as runs[].triggeredAt (pre-fix wires understate it by durationMs). */
   lastEvaluation: { at: string | null; conditionsResult: string | null };
+  /** v1.1.2 ADDITIVE (CORE-P2 → SKIP-VIS DP-2): TRUE exactly when the governing
+   *  COMPLETED run's terminal payload shows actionCount > 0 with commandCount == 0
+   *  (the silent-skip class — §3.9 all-skipped runs emit nothing; the payload
+   *  arithmetic is the only log-visible disclosure); JSON null otherwise — NEVER
+   *  false. Such runs report ACTED_BUT_UNCONFIRMED; the clean-success sentence is
+   *  unreachable for them. OPTIONAL for pre-v1.1.2 payloads. */
+  noCommandsIssued?: true | null;
 }
 
 /** B3 — GET /api/v1/automations (supporting surface). */

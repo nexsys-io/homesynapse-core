@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   availabilityEvidence,
+  availabilityMeta,
   brightnessDisplay,
   causalSentence,
   labelFor,
@@ -85,6 +86,29 @@ describe('availability is evidence-with-age — never the flag alone', () => {
     expect(s).toMatch(/waiting for the device’s first report/i);
     expect(s).toMatch(/normal/i);
     expect(s).not.toMatch(/error|wrong|fail/i);
+  });
+
+  /* G2 honesty locks (Rosonway §5.3, measured: AVAILABLE with staleAfter null
+   * and hours-old lastReported is lawful): the flag copy must never claim live
+   * radio contact, and the honest UNKNOWN state must never read as a fault. */
+  it('AVAILABLE is presented as a conclusion from reports — NEVER a live-contact claim', () => {
+    const m = availabilityMeta('AVAILABLE');
+    expect(m.help).toMatch(/not a live connection test/i);
+    expect(m.help).toMatch(/last concluded|concluded from/i);
+    expect(m.help).not.toMatch(/\bonline\b|connected right now|live contact/i);
+  });
+
+  it('UNAVAILABLE states its evidence and the recheck cadence, calmly', () => {
+    const m = availabilityMeta('UNAVAILABLE');
+    expect(m.help).toMatch(/evidence/i);
+    expect(m.help).toMatch(/rechecked every few minutes/i);
+  });
+
+  it('UNKNOWN-at-boot is labeled honestly and reads as normal, never a fault', () => {
+    const m = availabilityMeta('UNKNOWN');
+    expect(m.label).toBe('Not determined yet');
+    expect(m.help).toMatch(/honest|normal/i);
+    expect(m.help).not.toMatch(/error|wrong|fail/i);
   });
 });
 

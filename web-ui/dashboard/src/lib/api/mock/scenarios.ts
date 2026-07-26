@@ -64,16 +64,38 @@ const ACTION_REASON: Record<ActionOutcome, string | null> = {
   SKIPPED: 'A condition was not met',
 };
 
+/* [MOCK — pending the SKIP-VIS DEPLOY] The ruled v1.1.2 additive keys, defaulted
+ * per outcome class (law (c): mock to the RULED shape, never beyond it):
+ *   resultOutcome = the raw command_result.outcome backing the derivation (null
+ *   when no command_result exists — e.g. a bare dispatch or a confirmation
+ *   timeout); settled = the Q1b rule (false exactly for a DISPATCHED action with
+ *   no settling record). Scenarios that reproduce the PRE-v1.1.2 deployed wire
+ *   pass `resultOutcome: undefined, settled: undefined` to strip the keys. */
+const ACTION_RESULT_OUTCOME: Record<ActionOutcome, string | null> = {
+  CONFIRMED: 'acknowledged',
+  DISPATCHED: null,
+  UNCONFIRMED: null,
+  FAILED: 'rejected',
+  SKIPPED: null,
+};
+
 function makeAction(outcome: ActionOutcome, over: Partial<CausalAction> = {}): CausalAction {
-  return {
+  const a: CausalAction = {
     type: 'device_command',
     targetRef: { type: 'ENTITY', id: 'ent_hallway_light' },
     command: 'turn_on',
     params: outcome === 'SKIPPED' ? {} : { brightness: 82 },
     outcome,
     reason: ACTION_REASON[outcome],
+    resultOutcome: ACTION_RESULT_OUTCOME[outcome],
+    settled: outcome !== 'DISPATCHED',
     ...over,
   };
+  // An explicit `undefined` override means "this payload predates v1.1.2" —
+  // strip the key entirely so validators see a true pre-v1.1.2 shape.
+  if (a.resultOutcome === undefined) delete a.resultOutcome;
+  if (a.settled === undefined) delete a.settled;
+  return a;
 }
 
 function makeCondition(result: boolean, over: Partial<CausalCondition> = {}): CausalCondition {
@@ -179,7 +201,7 @@ function makeNonFiring(
     ACTED_BUT_UNCONFIRMED: 'It ran, but the device never confirmed it acted — it may be slow or briefly offline.',
     DISABLED: 'This automation is turned off, so it cannot run.',
   };
-  return {
+  const nf: NonFiringExplanation = {
     automationId,
     automationName: over.automationName ?? 'Demo automation',
     enabled: verdict !== 'DISABLED',
@@ -191,8 +213,13 @@ function makeNonFiring(
       verdict === 'CONDITION_NOT_MET'
         ? { at: iso(30), conditionsResult: 'after sunset = false' }
         : { at: null, conditionsResult: null },
+    // v1.1.2 (SKIP-VIS DP-2): null on every non-silent-skip construction
+    // (never false); the silent-skip case overrides with true.
+    noCommandsIssued: null,
     ...over,
   };
+  if (nf.noCommandsIssued === undefined) delete nf.noCommandsIssued;
+  return nf;
 }
 
 function makeAutomation(automationId: string, name: string, over: Partial<AutomationSummary> = {}): AutomationSummary {
@@ -361,6 +388,8 @@ function buildE5Confirmation(): MockDataset {
   const confirmed = () => Date.now() - t0 >= CT_CONFIRM_MS;
 
   // 1 — the live-flipping CT action (getters re-evaluate on every poll read).
+  // v1.1.2: while DISPATCHED it is a bare in-flight action (resultOutcome null,
+  // settled false — renders visibly PROVISIONAL); the flip settles it.
   const ctAction: CausalAction = {
     type: 'device_command',
     targetRef: lamp,
@@ -371,6 +400,12 @@ function buildE5Confirmation(): MockDataset {
     },
     get reason(): string | null {
       return confirmed() ? 'The device reported the new color temperature.' : null;
+    },
+    get resultOutcome(): string | null {
+      return confirmed() ? 'acknowledged' : null;
+    },
+    get settled(): boolean {
+      return confirmed();
     },
   };
 
@@ -406,6 +441,8 @@ function buildE5Confirmation(): MockDataset {
           command: 'identify',
           params: {},
           reason: 'The device acknowledged this command but never reports performing it.',
+          // The acked-then-silent class on the ruled wire: honest-"unconfirmed".
+          resultOutcome: 'unconfirmed',
         }),
       ],
       durationMs: 150,
@@ -420,6 +457,9 @@ function buildE5Confirmation(): MockDataset {
           command: 'set_color_temperature',
           params: { color_temp_kelvin: 3500 },
           reason: 'Superseded — a newer color command replaced this one before the device reported.',
+          // Mode 2's timed-out variant on the ruled wire: the supersession rides
+          // resultOutcome; an intent change, never a failure.
+          resultOutcome: 'superseded',
         }),
         makeAction('CONFIRMED', {
           targetRef: lamp,
@@ -455,18 +495,20 @@ function buildE5Confirmation(): MockDataset {
   };
 }
 
-/* The TEN-value command_result vocabulary (CommandResultEvent.java:22-27), as it
- * actually reaches the frozen v1.1 causal-chain read TODAY: Core's explanation
- * service flattens every non-acknowledged result into outcome:FAILED
- * (StandardExplanationService.isFailure), with the truth surviving only in the
- * RECORDED REASON. This scenario reproduces that wire faithfully — the two
- * deterministic ledger disposition strings verbatim (StandardPendingCommandLedger
- * .java:912-916 / :922-924), bare outcome tokens for the rest — so the UI's
- * honest-verdict recovery (lib/verdicts.ts) is exercised against wire truth, and
- * the flattening's cost is demonstrable to a stranger in one click.
+/* The TEN-value command_result vocabulary as the PRE-v1.1.2 DEPLOYED wire serves
+ * it (the graceful-degrade exhibit): the pre-SKIP-VIS explanation service
+ * flattens every non-acknowledged result into outcome:FAILED, with the truth
+ * surviving only in the RECORDED REASON. This scenario reproduces that wire
+ * faithfully — the two deterministic ledger disposition strings verbatim
+ * (StandardPendingCommandLedger.java:912-916 / :922-924), bare outcome tokens
+ * for the rest, and NO v1.1.2 keys (stripped) — so the recorded-reason recovery
+ * path (the pre-v1.1.2 fallback that D-4's retirement keeps ONLY for payloads
+ * like these) stays exercised against wire truth until the deploy completes.
+ * The ruled v1.1.2 wire is the `five-modes` scenario.
  */
 function buildVerdictVocabulary(): MockDataset {
   const A = { automationId: 'auto_vv', automationName: 'Verdict vocabulary' };
+  const PRE_V112 = { resultOutcome: undefined, settled: undefined } as const;
   // [outcome-on-the-wire, recorded reason (wire-faithful), minutes ago]
   const flattened: { id: string; reason: string; min: number }[] = [
     {
@@ -488,14 +530,18 @@ function buildVerdictVocabulary(): MockDataset {
   const causalChains: Record<string, CausalChain> = {};
   // The confirmed baseline (acknowledged → state_confirmed → CONFIRMED).
   runs.push(makeRun('run_vv_confirmed', { ...A, minAgo: 2 }));
-  causalChains['run_vv_confirmed'] = makeChain('run_vv_confirmed', { ...A, outcome: 'CONFIRMED', minAgo: 2 });
+  causalChains['run_vv_confirmed'] = makeChain('run_vv_confirmed', {
+    ...A,
+    minAgo: 2,
+    actions: [makeAction('CONFIRMED', { ...PRE_V112 })],
+  });
   for (const f of flattened) {
     runs.push(makeRun(f.id, { ...A, status: 'COMPLETED', minAgo: f.min }));
     causalChains[f.id] = makeChain(f.id, {
       ...A,
       status: 'COMPLETED',
       minAgo: f.min,
-      actions: [makeAction('FAILED', { reason: f.reason })],
+      actions: [makeAction('FAILED', { reason: f.reason, ...PRE_V112 })],
     });
   }
   return {
@@ -576,15 +622,94 @@ function buildFieldEvidence(): MockDataset {
     runs: [makeRun('run_fe_skip', { automationId: 'auto_fe', automationName: 'Away lights', minAgo: 12 }), nullNameRun],
     causalChains: { run_fe_skip: skip, run_fe_nullname: nullName },
     nonFiring: {
-      // DP-B2 wire shape for a "clean" COMPLETED run — which here was a do-nothing
-      // run: the verdict alone would read "ran and confirmed"; the linked run page
-      // is where the honest story lives.
-      auto_fe: makeNonFiring('auto_fe', 'NEVER_TRIGGERED', {
+      // v1.1.2 (SKIP-VIS DP-2, LANDED core-side — MOCK pending the deploy): the
+      // silent-skip run now reports ACTED_BUT_UNCONFIRMED with the
+      // noCommandsIssued marker and the frozen "issued no device commands"
+      // sentence — the clean-success "fired and confirmed" text is UNREACHABLE
+      // on this path. (The pre-fix DP-B2 "ran fine" composed case this scenario
+      // used to exhibit is retired with the landing.)
+      auto_fe: makeNonFiring('auto_fe', 'ACTED_BUT_UNCONFIRMED', {
         automationName: 'Away lights',
         lastRelevantRunId: 'run_fe_skip',
-        explanation: 'It ran 12 minutes ago and reported no problem.',
+        explanation:
+          "Automation 'Away lights' fired, but issued no device commands — its device actions were skipped or issued nothing (targets unavailable or no device actions defined).",
+        lastEvaluation: { at: iso(12), conditionsResult: 'true' },
+        noCommandsIssued: true,
       }),
     },
+  };
+}
+
+/* THE FIVE HONEST FAILURE MODES — the ruled v1.1.2 wire, pairwise-distinct on
+ * (outcome, resultOutcome, reason) exactly as the core pins them
+ * (explainRun_fiveFailureModesDistinct, SKIP-VIS DP-1) and as the Rosonway §5.1
+ * exhibit showed them on silicon: five commands into a lamp that is not there,
+ * and not one returned CONFIRMED. One chain, six actions (a confirmed baseline
+ * + the five modes, each seeded to its PRIMARY table row):
+ *   1. dispatched-and-timed-out      UNCONFIRMED / null          / "confirmation timed out"
+ *   2. superseded-same-attribute     DISPATCHED  / "superseded"  / null
+ *   3. acked-then-silent-forever     UNCONFIRMED / "unconfirmed" / the recorded zigbee reason VERBATIM
+ *   4. held-DISPATCHED               DISPATCHED  / null          / null            (settled:false — PROVISIONAL)
+ *   5. settled-FAILED                FAILED      / "rejected"    / "device offline"
+ * [MOCK — pending the SKIP-VIS DEPLOY; law (c): mocked to the RULED shape.]
+ * The run's triggeredAt ≡ trigger.matchedAt exactly (the DP-3 VALUE correction,
+ * pinned here so the mock carries the corrected value semantics).
+ */
+function buildFiveModes(): MockDataset {
+  const A = { automationId: 'auto_fm', automationName: 'Evening lamp scene' };
+  const lamp = { type: 'ENTITY', id: 'ent_livingroom_lamp' };
+  const matched = iso(6);
+  const chain = makeChain('run_fm_all', {
+    ...A,
+    matchedAtIso: matched,
+    durationMs: 34204,
+    actions: [
+      makeAction('CONFIRMED', { targetRef: lamp, command: 'turn_on', params: {} }),
+      makeAction('UNCONFIRMED', {
+        targetRef: lamp,
+        command: 'set_brightness',
+        params: { brightness: 50 },
+        reason: 'confirmation timed out',
+      }),
+      makeAction('DISPATCHED', {
+        targetRef: lamp,
+        command: 'set_color_temp',
+        params: { color_temp_kelvin: 4550 },
+        reason: null,
+        resultOutcome: 'superseded',
+        settled: true, // a superseded DISPATCHED is settled — the ledger dropped it
+      }),
+      makeAction('UNCONFIRMED', {
+        targetRef: lamp,
+        command: 'identify',
+        params: {},
+        reason: 'DefaultResponse SUCCESS +90 ms, then no report, ever',
+        resultOutcome: 'unconfirmed',
+      }),
+      makeAction('DISPATCHED', {
+        targetRef: lamp,
+        command: 'set_color_temp',
+        params: { color_temp_kelvin: 4525 },
+        reason: null,
+        // bare dispatch: no settling record yet — provisional (§5.9); a late
+        // command_result can settle this AFTER the run reads COMPLETED.
+      }),
+      makeAction('FAILED', {
+        targetRef: lamp,
+        command: 'turn_off',
+        params: {},
+        reason: 'device offline',
+        resultOutcome: 'rejected',
+      }),
+    ],
+  });
+  const run = makeRun('run_fm_all', { ...A, triggeredAt: matched }); // ≡ matchedAt (DP-3)
+  return {
+    ...defaultDataset,
+    automations: [makeAutomation('auto_fm', 'Evening lamp scene', { lastRunId: 'run_fm_all' })],
+    runs: [run],
+    causalChains: { run_fm_all: chain },
+    nonFiring: { auto_fm: makeNonFiring('auto_fm', 'NEVER_TRIGGERED', { automationName: 'Evening lamp scene' }) },
   };
 }
 
@@ -672,7 +797,8 @@ export const SCENARIOS: Scenario[] = [
   { id: 'cascade', label: 'Cascade', group: 'Story', blurb: 'A run that triggered another — the child links back to “what triggered this”.', build: buildCascade },
   { id: 'all-verdicts', label: 'All “why not?” verdicts', group: 'Story', blurb: 'Condition-not-met, never-triggered, acted-but-unconfirmed, disabled.', build: buildAllVerdicts },
   { id: 'e5-confirmation', label: 'Confirmation, measured', group: 'Story', blurb: 'AMD-97 honest states at measured timing: color confirms slowly (flips live ~8s in), idempotent confirmed-from-cache, effect honestly unconfirmed, superseded expiry.', build: buildE5Confirmation },
-  { id: 'verdict-vocabulary', label: 'The ten verdicts', group: 'Story', blurb: 'Every command_result outcome as it reaches the wire today — the flattened FAILEDs carry the recorded reason, and the honest layer renders superseded/expired as intent-change, not failure.', build: buildVerdictVocabulary },
+  { id: 'five-modes', label: 'The five failure modes', group: 'Story', blurb: 'The ruled v1.1.2 wire: timed-out, replaced, accepted-never-confirmed, still-settling, and failed — pairwise distinct, never collapsed. One is provisional (§5.9).', build: buildFiveModes },
+  { id: 'verdict-vocabulary', label: 'The ten verdicts (pre-v1.1.2 wire)', group: 'Story', blurb: 'Every command_result outcome as the pre-SKIP-VIS deployed wire flattens it — the recorded-reason recovery path, kept for pre-v1.1.2 payloads until the deploy.', build: buildVerdictVocabulary },
   { id: 'field-evidence', label: 'Field evidence', group: 'Story', blurb: 'The silent-skip do-nothing run, the null-name prior-instance run, rehydrated “Available” with days-old evidence, and honest UNKNOWN since restart.', build: buildFieldEvidence },
   { id: 'live-fleet', label: 'Live fleet mirror', group: 'Story', blurb: 'One entity per deployed device class with canonical attribute keys — including brightness level 0–254 plus the hub-derived percent.', build: buildLiveFleet },
   { id: 'all-origins', label: 'All event origins', group: 'Story', blurb: 'Automation, device, you, external, and the honest UNKNOWN.', build: buildAllOrigins },
