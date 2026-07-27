@@ -88,6 +88,7 @@ import com.homesynapse.state.StateProjection;
 import com.homesynapse.state.StateQueryService;
 
 import io.javalin.Javalin;
+import io.javalin.http.staticfiles.Location;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -903,11 +904,25 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             Javalin app = Javalin.create(cfg -> {
                 cfg.jetty.threadPool = threadPool;
                 cfg.showJavalinBanner = false;
+                // DASH-SERVE (Doc 13 §3.2–§3.3, composed at last): serve the packaged SPA
+                // from the classpath at /dashboard, with the SPA fallback for client-side
+                // routes. The bytes arrive via :web-ui:dashboard's resources jar
+                // (runtimeOnly). Auth posture: the (A) static-shell exemption — see
+                // RestFilters.installAuth.
+                cfg.staticFiles.add(sf -> {
+                    sf.hostedPath = "/dashboard";
+                    sf.directory = "/dashboard";
+                    sf.location = Location.CLASSPATH;
+                });
+                cfg.spaRoot.addFile("/dashboard", "/dashboard/index.html", Location.CLASSPATH);
             });
             // Auth MUST be registered before any other route/gate and before the
             // port binds (the C1 close). installAuth registers its before(*)
             // handler first, so it runs ahead of the /api/* readiness gate.
             RestFilters.installAuth(app, authMiddleware, rateLimiter);
+            // DASH-SERVE: the human entrypoint — http://host:port/ lands on the SPA.
+            // Covered by the same GET/HEAD shell exemption (posture (A)).
+            app.get("/", ctx -> ctx.redirect("/dashboard/"));
             RestFilters.installReadinessGate(app, this);
             RestFilters.installEntityQueryEndpoints(
                     app, stateQueryService, stateProjection::cursorPosition, clock);

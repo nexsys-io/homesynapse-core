@@ -38,6 +38,15 @@ dependencies {
     // Web dashboard (static files on classpath — not a JPMS module)
     runtimeOnly(project(":web-ui:dashboard"))
 
+    // DASH-SERVE: keep the core gate Node-free. The dashboard artifact is inert
+    // static bytes for PACKAGING only — no test reads it. Without this exclusion,
+    // testRuntimeClasspath (which extends runtimeClasspath) would resolve the
+    // :web-ui:dashboard jar and drag npmInstall/npmBuild into `./gradlew check`,
+    // violating the module's DECOUPLING NOTE. One line; reversible.
+    configurations.named("testRuntimeClasspath") {
+        exclude(module = "dashboard")
+    }
+
     // Logging implementation (only at the app level)
     runtimeOnly(libs.logback.classic)
     runtimeOnly(libs.logback.core)

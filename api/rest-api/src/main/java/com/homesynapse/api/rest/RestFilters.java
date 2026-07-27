@@ -392,15 +392,25 @@ public final class RestFilters {
      * AB-1). The filter runs as a Javalin {@code before(*)} handler — before
      * <em>any</em> route resolves, covering {@code /api/*}, {@code /internal/*},
      * and every other path (INV-SE-02; the {@code /internal/*} admin routes sit
-     * outside the readiness gate but MUST still be authenticated). It is registered
-     * <em>before</em> {@link #installReadinessGate(Object, ReadinessSource)} so it
-     * precedes the {@code /api/*} readiness gate.
+     * outside the readiness gate but MUST still be authenticated) — with EXACTLY
+     * ONE exemption: the posture-(A) static-shell allowlist (DASH-SERVE, ruled
+     * 2026-07-26), {@code GET}/{@code HEAD} on {@code /}, {@code /dashboard}, and
+     * {@code /dashboard/**} ({@link #isPublicShellRequest}). The exemption's own
+     * invariant: no DATA route is ever unauthenticated; the shell is inert public
+     * bytes (the same trust class as a downloaded app binary); removing the single
+     * early-return in {@code authorize()} restores the unconditional guard
+     * (one-line-reversible). It is registered <em>before</em>
+     * {@link #installReadinessGate(Object, ReadinessSource)} so it precedes the
+     * {@code /api/*} readiness gate.
      *
      * <p>Per request, in order:</p>
      * <ol>
      *   <li><strong>Canonicalize the path</strong> and reject {@code ..} /
      *       encoded-traversal / control sequences <em>before</em> the auth decision
      *       (R-δ AX-1 / CVE-2023-27482) → 400.</li>
+     *   <li><strong>Exempt the static shell</strong> — a {@code GET}/{@code HEAD}
+     *       shell request returns here (no identity, no rate-limit key); every
+     *       other request continues.</li>
      *   <li><strong>Authenticate</strong> via {@link AuthMiddleware} → 401 (missing/
      *       malformed header) or 403 (invalid/expired/revoked token).</li>
      *   <li><strong>Rate-limit</strong> the authenticated key via {@link RateLimiter}
@@ -438,6 +448,12 @@ public final class RestFilters {
             throw problem(ProblemType.INVALID_PARAMETERS,
                     "request path contains an illegal traversal or control sequence");
         }
+        // Order is load-bearing: traversal/control rejection FIRST (a
+        // `GET /dashboard/../internal/dlq` dies at the gate before the exemption
+        // can see it), exemption second, authentication third, rate-limit fourth.
+        if (isPublicShellRequest(ctx.method().name(), ctx.path())) {
+            return;   // posture (A): the static shell serves without auth; no identity, no rate-limit key
+        }
         ApiKeyIdentity identity = authMiddleware.authenticate(ctx.header("Authorization"));
         RateLimitResult limit = rateLimiter.check(identity.keyId());
         if (!limit.allowed()) {
@@ -446,6 +462,34 @@ public final class RestFilters {
                     "rate limit exceeded; retry after " + limit.retryAfterSeconds() + " seconds");
         }
         ctx.attribute(IDENTITY_ATTRIBUTE, identity);
+    }
+
+    /**
+     * The posture-(A) static-shell exemption (ruled 2026-07-26): TRUE exactly for
+     * GET/HEAD requests to the inert public shell — "/", "/dashboard", or
+     * "/dashboard/**". Every other method and every other path — notably every
+     * /api/* and /internal/* route — remains token-guarded. The exemption's own
+     * invariant: no DATA route is ever unauthenticated; the shell is inert public
+     * bytes (the same trust class as a downloaded app binary); removing the single
+     * early-return in authorize() restores the unconditional guard (one-line-
+     * reversible). Runs strictly AFTER isPathSafe — the traversal gate still
+     * precedes every auth decision.
+     *
+     * @param method the HTTP method name (Javalin 6's {@code ctx.method()} is an
+     *               enum — callers pass {@code .name()}; string-typed here for
+     *               unit-testability)
+     * @param path   the decoded request path; {@code null} is rejected (the
+     *               {@code isPathSafe} null posture)
+     * @return {@code true} exactly when the request is for the public shell
+     */
+    static boolean isPublicShellRequest(String method, String path) {
+        if (!"GET".equals(method) && !"HEAD".equals(method)) {
+            return false;
+        }
+        if (path == null) {
+            return false;
+        }
+        return "/".equals(path) || "/dashboard".equals(path) || path.startsWith("/dashboard/");
     }
 
     /**

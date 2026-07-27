@@ -253,9 +253,20 @@ final class HomeSynapseCoreTest {
 
     private static HttpResponse<String> get(int port, String path, String bearerToken)
             throws IOException, InterruptedException {
+        return send(port, "GET", path, bearerToken);
+    }
+
+    /**
+     * Bodyless request with an arbitrary method (DASH-SERVE needs HEAD/POST probes).
+     * The default {@link HttpClient} redirect policy is NEVER, so a 302 comes back
+     * as a 302 — load-bearing for the root-redirect assertion.
+     */
+    private static HttpResponse<String> send(int port, String method, String path,
+                                             String bearerToken)
+            throws IOException, InterruptedException {
         HttpRequest.Builder builder = HttpRequest.newBuilder(
                         URI.create("http://127.0.0.1:" + port + path))
-                .GET()
+                .method(method, HttpRequest.BodyPublishers.noBody())
                 .timeout(Duration.ofSeconds(5));
         if (bearerToken != null) {
             builder.header("Authorization", "Bearer " + bearerToken);
@@ -277,6 +288,76 @@ final class HomeSynapseCoreTest {
             }
         }
         return Optional.empty();
+    }
+
+    // ── DASH-SERVE — the dashboard serve path (B-1/B-2/B-3; posture (A)) ──
+
+    @Test
+    @DisplayName("headerless GET / redirects 302 to /dashboard/ while /api/* stays 401 "
+            + "(posture (A) never widens onto data routes)")
+    void rootRedirectsToDashboardUnauthenticated(@TempDir Path tempDir) throws Exception {
+        // Clock.fixed per the §4c rule (the constructorAcceptsPayloadCipherSeam
+        // precedent: the runtime boots and serves under a fixed clock).
+        core = new HomeSynapseCore(
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
+                HomeSynapseConfig.testing(),
+                Clock.fixed(Instant.parse("2026-07-27T00:00:00Z"), ZoneOffset.UTC),
+                TEST_HOME_ID);
+        core.start();
+        int port = core.boundHttpPort();
+
+        HttpResponse<String> root = get(port, "/", null);
+        assertThat(root.statusCode()).isEqualTo(302);
+        assertThat(root.headers().firstValue("Location")).hasValue("/dashboard/");
+
+        // The preservation fixture: an over-broad exemption fails HERE, not silently.
+        assertThat(get(port, "/api/v1/entities", null).statusCode()).isEqualTo(401);
+    }
+
+    @Test
+    @DisplayName("the dashboard shell serves headerless: GET /dashboard/ 200 + shell, "
+            + "SPA fallback on client-side routes, HEAD honored")
+    void dashboardShellServesUnauthenticated(@TempDir Path tempDir) throws Exception {
+        core = new HomeSynapseCore(
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
+                HomeSynapseConfig.testing(),
+                Clock.fixed(Instant.parse("2026-07-27T00:00:00Z"), ZoneOffset.UTC),
+                TEST_HOME_ID);
+        core.start();
+        int port = core.boundHttpPort();
+
+        // The test classpath supplies dashboard/index.html (the fixture) where
+        // production gets it from the :web-ui:dashboard resources jar.
+        HttpResponse<String> shell = get(port, "/dashboard/", null);
+        assertThat(shell.statusCode()).isEqualTo(200);
+        assertThat(shell.body()).contains("HS-DASH-FIXTURE-SENTINEL");
+
+        HttpResponse<String> spaRoute = get(port, "/dashboard/nonexistent/route", null);
+        assertThat(spaRoute.statusCode()).isEqualTo(200);
+        assertThat(spaRoute.body()).contains("HS-DASH-FIXTURE-SENTINEL");
+
+        assertThat(send(port, "HEAD", "/dashboard/", null).statusCode()).isEqualTo(200);
+    }
+
+    @Test
+    @DisplayName("writes and data routes stay guarded: POST /dashboard/* 401, /internal/* 401, "
+            + "encoded traversal exactly 400 (the gate precedes the exemption)")
+    void dashboardWriteAndDataRoutesStayGuarded(@TempDir Path tempDir) throws Exception {
+        core = new HomeSynapseCore(
+                tempDir.resolve("homesynapse-events.db"), tempDir.resolve("config"),
+                HomeSynapseConfig.testing(),
+                Clock.fixed(Instant.parse("2026-07-27T00:00:00Z"), ZoneOffset.UTC),
+                TEST_HOME_ID);
+        core.start();
+        int port = core.boundHttpPort();
+
+        assertThat(send(port, "POST", "/dashboard/x", null).statusCode()).isEqualTo(401);
+        assertThat(get(port, "/internal/dlq", null).statusCode()).isEqualTo(401);
+        // EXACTLY 400: the encoded probe survives client-side URI normalization and
+        // must die at isPathSafe. A mutant that lets the exemption precede the gate
+        // yields 404/401/200 here — never 400 (the order IS the security property;
+        // the exact status is its instrument).
+        assertThat(get(port, "/dashboard/%2e%2e/internal/dlq", null).statusCode()).isEqualTo(400);
     }
 
     @Test

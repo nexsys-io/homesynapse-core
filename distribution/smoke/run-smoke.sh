@@ -98,7 +98,24 @@ case "${UNAUTH}" in
     *) bad "unexpected unauth status ${UNAUTH}" ;;
 esac
 
-# ╔══ 6. STOP ════════════════════════════════════════════════════════════════╗
+# ╔══ 6. DASHBOARD SERVE PATH (DASH-SERVE: B-1/B-2/B-3) ══════════════════════╗
+# The static shell must serve WITHOUT auth (posture (A)): packaging (B-2),
+# mount (B-1), and the exemption (B-3) are one seam — any broken hop blanks
+# the browser. Asserted on every push so the seam class stays detected (L4).
+ROOT_REDIRECT="$(curl -sS -o /dev/null -m 5 -w '%{http_code}' "http://${HS_BIND}:${HS_PORT}/" 2>/dev/null)"; [ -n "${ROOT_REDIRECT}" ] || ROOT_REDIRECT=000
+if [ "${ROOT_REDIRECT}" = "302" ]; then
+    ok "headerless GET / redirects to the dashboard (302)"
+else
+    bad "dashboard serve path broken — B-1/B-2/B-3 class: GET / returned ${ROOT_REDIRECT}, expected 302"
+fi
+DASH_SHELL="$(curl -sS -o /dev/null -m 5 -w '%{http_code}' "http://${HS_BIND}:${HS_PORT}/dashboard/" 2>/dev/null)"; [ -n "${DASH_SHELL}" ] || DASH_SHELL=000
+if [ "${DASH_SHELL}" = "200" ]; then
+    ok "headerless GET /dashboard/ serves the shell (200)"
+else
+    bad "dashboard serve path broken — B-1/B-2/B-3 class: GET /dashboard/ returned ${DASH_SHELL}, expected 200"
+fi
+
+# ╔══ 7. STOP ════════════════════════════════════════════════════════════════╗
 if [ "${MODE}" = "systemd" ]; then
     systemctl stop "${HS_UNIT}" && ok "service stopped" || bad "service stop"
     sleep 2
@@ -108,7 +125,7 @@ else
     pgrep -u "${HS_USER}" -f "${HS_LAUNCHER}" >/dev/null && bad "process survived SIGTERM" || ok "process exited on SIGTERM"
 fi
 
-# ╔══ 7. UNINSTALL (data preserved) ══════════════════════════════════════════╗
+# ╔══ 8. UNINSTALL (data preserved) ══════════════════════════════════════════╗
 if [ "${MODE}" = "systemd" ]; then
     if command -v apt-get >/dev/null 2>&1; then apt-get remove -y homesynapse >/dev/null 2>&1 || dpkg -r homesynapse
     else dpkg -r homesynapse; fi

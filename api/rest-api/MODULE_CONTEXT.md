@@ -1,4 +1,4 @@
-# rest-api — `com.homesynapse.api.rest` — Phase 3 transition (M3.6e.2) — HTTP command interface, RFC 9457 errors, 4-phase command lifecycle, idempotency keys, ReadinessFilter (Javalin before-handler), entity query endpoints + admin endpoints (M3.6e.2), run query (causal read) endpoints (M7.5a), automation query (non-firing + list) endpoints (M7.5b), internal-read envelope conformance (M7.5c-a), THE COMMAND WRITE SURFACE — POST issue + GET status (CMD-API, 2026-07-22), v1.1.2 explanation-read additive keys (SKIP-VIS, 2026-07-26)
+# rest-api — `com.homesynapse.api.rest` — Phase 3 transition (M3.6e.2) — HTTP command interface, RFC 9457 errors, 4-phase command lifecycle, idempotency keys, ReadinessFilter (Javalin before-handler), entity query endpoints + admin endpoints (M3.6e.2), run query (causal read) endpoints (M7.5a), automation query (non-firing + list) endpoints (M7.5b), internal-read envelope conformance (M7.5c-a), THE COMMAND WRITE SURFACE — POST issue + GET status (CMD-API, 2026-07-22), v1.1.2 explanation-read additive keys (SKIP-VIS, 2026-07-26), the posture-(A) static-shell auth exemption (DASH-SERVE, 2026-07-27)
 
 ## Purpose
 
@@ -230,6 +230,16 @@ The explanation-honesty read-side amendment (Nick ruling 1, 2026-07-22 — addit
 - **`GetNonFiringEndpoint.toWire`**: the `data` object gains `noCommandsIssued` (the CORE-P2 silent-skip marker — `true` exactly for a COMPLETED run that issued zero device commands while defining actions; JSON null otherwise, NEVER `false`). Appended after `lastEvaluation`; 9 entries, pinned at `AutomationEndpointsTest` (`nonFiring_v11ShapeTest` + `nonFiring_noCommandsIssuedOnWire`).
 
 Both handlers consume the enriched projection records (`RunExplanation.ActionView` 6→8 components, `NonFiringExplanation` 8→9 — see `core/automation/MODULE_CONTEXT.md`, SKIP-VIS banner). Zero module-info / build-file changes (new components are `String`/`Boolean`/`boolean` = `java.base`).
+
+### DASH-SERVE — the posture-(A) static-shell auth exemption (2026-07-27)
+
+The B-3 close (RULED 2026-07-26, Nick by delegation — pm-handoff v38 beat 8): the AB-1 catch-all `before(*)` filter gains EXACTLY ONE exemption so a browser can load the dashboard shell without a token (the deploy-evening live proof: headerless `GET /` → 401, corr `ae7990f0` — headers are unattachable from an address bar).
+
+- **`static boolean isPublicShellRequest(String method, String path)`** — new package-private classifier beside `isPathSafe` (strings in, boolean out; `ctx.method()` is a Javalin-6 `HandlerType` enum, so the call site passes `.name()` to keep the helper unit-testable). TRUE exactly for GET/HEAD on `/`, `/dashboard`, `/dashboard/**`; null method/path → false (the `isPathSafe` null posture). Pinned by `RestFiltersAuthTest` (`isPublicShellRequest_exactAllowlist` · `isPublicShellRequest_rejectsEverythingElse` · `shellExemption_neverPrecedesTraversalGate`); mutation-verified (POST-widening, prefix-widening to `/dash`, and gate-reorder mutants each killed by a named test, cmp-proven restores).
+- **`authorize(...)` order is load-bearing:** `isPathSafe` FIRST (a `GET /dashboard/../internal/dlq` — raw or `%2e%2e`-encoded — dies at the gate with 400 before the exemption can see it; the exemption's prefix rule alone WOULD match the probe), exemption second (early-return: no identity, no rate-limit key), authenticate third, rate-limit fourth. The e2e EXACT-400 traversal pin (`HomeSynapseCoreTest.dashboardWriteAndDataRoutesStayGuarded`) is the reorder-mutant killer: under an exemption-first mutant the probe SERVED (200).
+- **Invariant preserved (INV-SE-02 substance):** no DATA route is ever unauthenticated — every `/api/*` and `/internal/*` request and every non-GET/HEAD method behaves byte-identically to pre-DASH-SERVE (401/403/429 semantics untouched). The shell is inert public bytes (the same trust class as a downloaded app binary). Removing the single early-return restores the unconditional guard (one-line-reversible).
+- **Stated residue (accepted at ruling):** exempted shell requests bypass rate-limiting (no authenticated key exists for them); the surface is loopback-bound by default and serves inert bytes; the posture-(B) cookie-session successor revisits this post-gate.
+- **Zero exported-surface change** (the classifier is package-private; `installAuth`'s signature untouched — only its Javadoc gained the exemption statement); zero module-info / build-file changes.
 
 ## M3.6e.2 Phase 3 Note (2026-05-22)
 
