@@ -8,6 +8,9 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.homesynapse.config.ConfigurationAccess;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
@@ -99,6 +102,10 @@ class ZigbeeAvailabilityWiringTest {
     private InMemoryDeviceRegistry deviceRegistry;
     private InMemoryEntityRegistry entityRegistry;
     private ListAppender<ILoggingEvent> trackerLogCapture;
+    /** Attached on demand (the WU-AVAIL-SEED DP-5 instrument legs). */
+    private ListAppender<ILoggingEvent> adapterLogCapture;
+    private Level priorAdapterLevel;
+    private ListAppender<ILoggingEvent> sliceLogCapture;
 
     /** Callback frames delivered on the NEXT nop keepalive (the rig pump idiom). */
     private final Deque<byte[]> riders = new ArrayDeque<>();
@@ -122,6 +129,13 @@ class ZigbeeAvailabilityWiringTest {
     @AfterEach
     void tearDown() {
         trackerLogger().detachAppender(trackerLogCapture);
+        if (adapterLogCapture != null) {
+            adapterLogger().detachAppender(adapterLogCapture);
+            adapterLogger().setLevel(priorAdapterLevel);
+        }
+        if (sliceLogCapture != null) {
+            sliceLogger().detachAppender(sliceLogCapture);
+        }
     }
 
     // ── the wiring leg (RED pre-M9.6-AVAIL): the bench flow end-to-end ──────
@@ -263,40 +277,348 @@ class ZigbeeAvailabilityWiringTest {
                 .isEmpty();
     }
 
+    // ── WU-AVAIL-SEED: the sidecar seed + boot truth (T-1..T-6 + DP-5) ──────
+    // The pre-seed "first frame still edges" pin is formally SUPERSEDED by this
+    // WU: the seeded tracker and the served view (the log's replayed last
+    // availability) agree at boot by construction — both are written by the
+    // same transition path — so a steady-state boot stays event-quiet (T-6)
+    // and a dead seeded device reaches an honest timeout verdict (T-1/T-2).
+
     @Test
-    @DisplayName("DP-1: after a restart with a PERSISTED sidecar (last state online), "
-            + "the first frame still emits the online edge — the empty persisted map "
-            + "is deliberate (sidecar-init + edge-triggering would starve the view)")
-    void restartWithPersistedSidecar_firstFrameStillEdges() throws Exception {
+    @DisplayName("T-1: a seeded mains device with STALE persisted evidence and zero "
+            + "post-boot frames is pinged on the FIRST cycle; no answer ⇒ offline "
+            + "CRITICAL — UNAVAILABLE within one evaluation window from boot")
+    void seededStaleMains_deadDevice_offlineAtFirstCycle() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, mainsInterview());
+        deliverReport(adapter, MAINS_NWK, 11, 0x0006, onOffReport(1, true));
+        adapter.close();   // flushes the sidecar: availability + evidence recency
+
+        clock.advance(Duration.ofHours(3));   // the downtime — staleness spans it
+        publisher = new RecordingEventPublisher(clock);
+        trackerLogCapture.list.clear();
+        Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
+        FakeNcp restartNcp = new FakeNcp();
+        restartNcp.onEzspCommand(this::scriptedNcp);
+        pingSilent = true;
+        captureAdapterLog(Level.DEBUG);
+        ZigbeeIntegrationAdapter restarted = bootProduction(restartNcp, null);
+
+        restarted.runCycleOnce();   // the FIRST evaluation — no further advance
+
+        assertThat(pingUnicasts(restartNcp, MAINS_NWK))
+                .as("persisted staleness makes the seeded device a candidate at "
+                        + "the first cycle — the seed entered it into tracking")
+                .isEqualTo(1);
+        List<EventEnvelope> events = entityAvailability();
+        assertThat(events)
+                .as("the DP-2 floor: the timeout verdict rides the normal "
+                        + "publish path for the relinked entity")
+                .hasSize(1);
+        AvailabilityChangedEvent payload =
+                (AvailabilityChangedEvent) events.get(0).payload();
+        assertThat(payload.previousStatus())
+                .as("the listener's own memory — boot is honest-UNKNOWN")
+                .isEqualTo("unknown");
+        assertThat(payload.newStatus()).isEqualTo("offline");
+        assertThat(events.get(0).priority()).isEqualTo(EventPriority.CRITICAL);
+        assertThat(new EntityId(events.get(0).subjectRef().id()))
+                .isIn(adoptedEntityIds(MAINS_IEEE));
+        assertThat(restarted.deviceCache()
+                .lastKnownAvailability(new IEEEAddress(MAINS_IEEE)))
+                .contains(false);
+        assertThat(trackerMessages())
+                .as("DP-5(c): the frozen transition token fires identically on "
+                        + "a seed-originated timeout verdict")
+                .containsExactly("zigbee.availability_changed: device="
+                        + new IEEEAddress(MAINS_IEEE) + " available=false");
+        assertThat(adapterMessages("zigbee.availability_ping"))
+                .as("DP-5(b): the per-ping instrument — the arm F-14's "
+                        + "instruments could not see")
+                .singleElement().asString()
+                .contains("device=" + new IEEEAddress(MAINS_IEEE))
+                .contains("outcome=timeout");
+    }
+
+    @Test
+    @DisplayName("T-2: a seeded battery device whose persisted evidence is older than "
+            + "25 h times out at the FIRST evaluation — the clock rides the persisted "
+            + "instant, never boot time; no ping is ever sent")
+    void seededStaleBattery_timesOutAtFirstCycle() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::scriptedNcp);
         ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
         adoptDirect(adapter, reporterInterview());
         deliverReport(adapter, REPORTER_NWK, 1, 0x0406, occupancyReport(1, 1));
-        assertThat(adapter.deviceCache()
-                .lastKnownAvailability(new IEEEAddress(REPORTER_IEEE)))
-                .contains(true);
-        adapter.close();   // flushes zigbee-devices.json — the sidecar persists
+        adapter.close();
 
+        clock.advance(Duration.ofHours(26));   // downtime > the 25 h window
         publisher = new RecordingEventPublisher(clock);
+        trackerLogCapture.list.clear();
         Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
         FakeNcp restartNcp = new FakeNcp();
         restartNcp.onEzspCommand(this::scriptedNcp);
         ZigbeeIntegrationAdapter restarted = bootProduction(restartNcp, null);
 
-        // Had the tracker been "helpfully" seeded from availabilitySnapshot(),
-        // this frame would be a no-edge and the rebuilt view would starve at
-        // UNKNOWN forever — Nick's ruled trap #1.
-        deliverReport(restarted, REPORTER_NWK, 1, 0x0406, occupancyReport(2, 1));
+        restarted.runCycleOnce();   // the FIRST evaluation — no further advance
 
-        List<EventEnvelope> online = entityAvailability();
-        assertThat(online)
-                .as("the first post-boot frame emits the edge the view waits for")
+        List<EventEnvelope> events = entityAvailability();
+        assertThat(events)
+                .as("the battery timeout fires from the persisted clock — a "
+                        + "boot-time seed would wait another 25 h (the nightly-"
+                        + "restart unfireability this WU kills)")
                 .hasSize(1);
         AvailabilityChangedEvent payload =
-                (AvailabilityChangedEvent) online.get(0).payload();
-        assertThat(payload.previousStatus()).isEqualTo("unknown");
-        assertThat(payload.newStatus()).isEqualTo("online");
+                (AvailabilityChangedEvent) events.get(0).payload();
+        assertThat(payload.newStatus()).isEqualTo("offline");
+        assertThat(events.get(0).priority()).isEqualTo(EventPriority.CRITICAL);
+        assertThat(pingUnicasts(restartNcp, REPORTER_NWK))
+                .as("battery devices take the passive arm — never pinged")
+                .isZero();
+        assertThat(restarted.deviceCache()
+                .lastKnownAvailability(new IEEEAddress(REPORTER_IEEE)))
+                .contains(false);
+    }
+
+    @Test
+    @DisplayName("T-2 boundary: a seeded battery device with FRESH persisted evidence "
+            + "(1 h) stays available and event-quiet at the first evaluation")
+    void seededFreshBattery_firstCycleQuiet() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, reporterInterview());
+        deliverReport(adapter, REPORTER_NWK, 1, 0x0406, occupancyReport(1, 1));
+        adapter.close();
+
+        clock.advance(Duration.ofHours(1));   // well inside the 25 h window
+        publisher = new RecordingEventPublisher(clock);
+        trackerLogCapture.list.clear();
+        Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
+        FakeNcp restartNcp = new FakeNcp();
+        restartNcp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter restarted = bootProduction(restartNcp, null);
+
+        restarted.runCycleOnce();
+
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).count())
+                .as("no verdict is due — the persisted recency is honest and "
+                        + "fresh; the false-verdict boundary of T-2")
+                .isZero();
+        assertThat(pingUnicasts(restartNcp, REPORTER_NWK)).isZero();
+        assertThat(trackerMessages()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("T-6: a seeded-available device with prompt fresh evidence publishes "
+            + "NO redundant transition — steady-state boots stay event-quiet (the "
+            + "pre-seed first-frame edge is retired: view and tracker agree at boot)")
+    void seededAvailable_promptEvidence_publishesNothing() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, reporterInterview());
+        deliverReport(adapter, REPORTER_NWK, 1, 0x0406, occupancyReport(1, 1));
+        adapter.close();
+
+        clock.advance(Duration.ofMinutes(1));
+        publisher = new RecordingEventPublisher(clock);
+        trackerLogCapture.list.clear();
+        Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
+        FakeNcp restartNcp = new FakeNcp();
+        restartNcp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter restarted = bootProduction(restartNcp, null);
+
+        deliverReport(restarted, REPORTER_NWK, 1, 0x0406, occupancyReport(2, 1));
+
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).count())
+                .as("the seeded state already carries online and the served "
+                        + "view replays the log's own online — the frame "
+                        + "confirms, never re-edges")
+                .isZero();
+        assertThat(trackerMessages())
+                .as("no transition happened at all")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("T-4: an old-format sidecar (no lastEvidenceAt) loads without throw; "
+            + "its devices enter tracking with UNKNOWN recency — infinitely stale, "
+            + "so a mains device is pinged at the first cycle")
+    void oldFormatSidecar_unknownRecency_mainsPingedAtFirstCycle() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, mainsInterview());
+        deliverReport(adapter, MAINS_NWK, 11, 0x0006, onOffReport(1, true));
+        adapter.close();
+        stripEvidenceRecencyFromSidecar();   // the pre-WU file shape
+
+        publisher = new RecordingEventPublisher(clock);
+        trackerLogCapture.list.clear();
+        Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
+        FakeNcp restartNcp = new FakeNcp();
+        restartNcp.onEzspCommand(this::scriptedNcp);
+        pingSilent = true;
+        ZigbeeIntegrationAdapter restarted = bootProduction(restartNcp, null);
+
+        restarted.runCycleOnce();   // no clock advance at all
+
+        assertThat(pingUnicasts(restartNcp, MAINS_NWK))
+                .as("unknown recency must never read as fresh (never-false-"
+                        + "ALIVE): the device is a candidate immediately")
+                .isEqualTo(1);
+        assertThat(entityAvailability())
+                .as("the dead device converges to offline at the first cycle")
+                .hasSize(1);
+        assertThat(((AvailabilityChangedEvent) entityAvailability().get(0)
+                .payload()).newStatus()).isEqualTo("offline");
+    }
+
+    @Test
+    @DisplayName("T-5: the relink path publishes ZERO availability events — the boot "
+            + "rehydration relink AND the re-announce relink are both silent; the "
+            + "relink log line is preserved")
+    void relinkPaths_publishZeroAvailability_logLinePreserved() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, reporterInterview());
+        deliverReport(adapter, REPORTER_NWK, 1, 0x0406, occupancyReport(1, 1));
+        adapter.close();
+
+        publisher = new RecordingEventPublisher(clock);
+        trackerLogCapture.list.clear();
+        Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
+        FakeNcp restartNcp = new FakeNcp();
+        restartNcp.onEzspCommand(this::scriptedNcp);
+        captureSliceLog();
+        ZigbeeIntegrationAdapter restarted = bootProduction(restartNcp, null);
+        assertThat(sliceRelinkLines())
+                .as("the DP-6 rehydration relink ran at initialize")
+                .hasSize(1);
+
+        // The live re-announce: the LINKED arm re-links again. The announce is
+        // ALSO device evidence — the seeded-available state absorbs it quietly.
+        announce(restarted, REPORTER_IEEE, REPORTER_NWK);
+
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).count())
+                .as("NO availability event of ANY grain rides either relink "
+                        + "path — the evidence-free boot burst is dead")
+                .isZero();
+        assertThat(sliceRelinkLines())
+                .as("the relink log line stays — one per relink")
+                .hasSize(2);
+        assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).count())
+                .as("re-pairing re-links; it never re-adopts")
+                .isZero();
+    }
+
+    @Test
+    @DisplayName("DP-5(a): the boot seed line — devices entered, sidecar-known "
+            + "availability, and unknown-availability counts, once per boot")
+    void bootSeedLine_countsDevices() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, reporterInterview());
+        deliverReport(adapter, REPORTER_NWK, 1, 0x0406, occupancyReport(1, 1));
+        // A second device the cache knows but that never transitioned: it
+        // seeds with UNKNOWN availability.
+        adapter.deviceCache().recordInterview(zeroPowerSourceInterview(), null);
+        adapter.close();
+
+        publisher = new RecordingEventPublisher(clock);
+        Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
+        FakeNcp restartNcp = new FakeNcp();
+        restartNcp.onEzspCommand(this::scriptedNcp);
+        captureAdapterLog(Level.INFO);
+        bootProduction(restartNcp, null);
+
+        assertThat(adapterMessages("zigbee.availability_seeded"))
+                .containsExactly(
+                        "zigbee.availability_seeded: devices=2 from_sidecar=1 "
+                                + "unknown=1");
+    }
+
+    @Test
+    @DisplayName("DP-5(b): a seeded stale mains device that ANSWERS the ping stays "
+            + "online and event-quiet — outcome=ok logged, the silence clock refreshed")
+    void seededStaleMains_pingAnswered_staysQuietRefreshesClock() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, mainsInterview());
+        deliverReport(adapter, MAINS_NWK, 11, 0x0006, onOffReport(1, true));
+        adapter.close();
+
+        clock.advance(Duration.ofHours(3));
+        publisher = new RecordingEventPublisher(clock);
+        trackerLogCapture.list.clear();
+        Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
+        FakeNcp restartNcp = new FakeNcp();
+        restartNcp.onEzspCommand(this::scriptedNcp);
+        captureAdapterLog(Level.DEBUG);
+        ZigbeeIntegrationAdapter restarted = bootProduction(restartNcp, null);
+
+        restarted.runCycleOnce();   // ping goes out; the scripted NCP answers
+
+        assertThat(pingUnicasts(restartNcp, MAINS_NWK)).isEqualTo(1);
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).count())
+                .as("a successful ping is evidence, not a transition")
+                .isZero();
+        assertThat(adapterMessages("zigbee.availability_ping"))
+                .singleElement().asString().contains("outcome=ok");
+
+        // The success refreshed the silence clock: no re-ping inside a fresh
+        // 10 min window, then one once it lapses.
+        clock.advance(Duration.ofMinutes(9));
+        restarted.runCycleOnce();
+        assertThat(pingUnicasts(restartNcp, MAINS_NWK)).isEqualTo(1);
+        clock.advance(Duration.ofMinutes(2));
+        restarted.runCycleOnce();
+        assertThat(pingUnicasts(restartNcp, MAINS_NWK)).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("the evidence guard: adopting a device the tracker holds only as a "
+            + "SEEDED available never manufactures an online seed — and its frames "
+            + "confirm silently (a seeded value is not this-process evidence)")
+    void seededUnevidencedDevice_adoption_neverManufacturesOnline() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, reporterInterview());
+        deliverReport(adapter, REPORTER_NWK, 1, 0x0406, occupancyReport(1, 1));
+        adapter.close();
+
+        // The registries do NOT survive this restart (they are log projections;
+        // the sidecar is a different store) — rehydration relinks nothing and
+        // the device seeds available-but-unevidenced.
+        deviceRegistry = new InMemoryDeviceRegistry();
+        entityRegistry = new InMemoryEntityRegistry();
+        publisher = new RecordingEventPublisher(clock);
+        trackerLogCapture.list.clear();
+        Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
+        FakeNcp restartNcp = new FakeNcp();
+        restartNcp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter restarted = bootProduction(restartNcp, null);
+
+        adoptDirect(restarted, reporterInterview());
+
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).count())
+                .as("the adoption-time seed publishes only from THIS-process "
+                        + "evidence — a persisted value never qualifies")
+                .isZero();
+
+        deliverReport(restarted, REPORTER_NWK, 1, 0x0406, occupancyReport(2, 1));
+
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).count())
+                .as("the frame confirms the seeded-available state silently")
+                .isZero();
+        assertThat(trackerMessages()).isEmpty();
     }
 
     // ── battery timeout ──────────────────────────────────────────────────────
@@ -664,6 +986,63 @@ class ZigbeeAvailabilityWiringTest {
 
     private static Logger trackerLogger() {
         return (Logger) LoggerFactory.getLogger(StandardAvailabilityTracker.class);
+    }
+
+    private static Logger adapterLogger() {
+        return (Logger) LoggerFactory.getLogger(ZigbeeIntegrationAdapter.class);
+    }
+
+    private static Logger sliceLogger() {
+        return (Logger) LoggerFactory.getLogger(ZigbeeAdoptionSlice.class);
+    }
+
+    /** Attaches an adapter-logger capture at {@code level} (restored in tearDown). */
+    private void captureAdapterLog(Level level) {
+        adapterLogCapture = new ListAppender<>();
+        adapterLogCapture.start();
+        priorAdapterLevel = adapterLogger().getLevel();
+        adapterLogger().setLevel(level);
+        adapterLogger().addAppender(adapterLogCapture);
+    }
+
+    /** Attaches a slice-logger capture (INFO — the relink line rides there). */
+    private void captureSliceLog() {
+        sliceLogCapture = new ListAppender<>();
+        sliceLogCapture.start();
+        sliceLogger().addAppender(sliceLogCapture);
+    }
+
+    /** The captured adapter log lines starting with {@code token}, in order. */
+    private List<String> adapterMessages(String token) {
+        return adapterLogCapture.list.stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith(token))
+                .toList();
+    }
+
+    /** The captured {@code zigbee.device_relinked} INFO lines, in order. */
+    private List<String> sliceRelinkLines() {
+        return sliceLogCapture.list.stream()
+                .filter(event -> event.getLevel() == Level.INFO)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("zigbee.device_relinked"))
+                .toList();
+    }
+
+    /**
+     * Rewrites the persisted sidecar with every per-device {@code lastEvidenceAt}
+     * field removed — the pre-WU-AVAIL-SEED (old-format) file shape. Tolerant of
+     * the field already being absent (the baseline world).
+     */
+    private void stripEvidenceRecencyFromSidecar() throws Exception {
+        Path sidecar = tempDir.resolve("zigbee-devices.json");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode root = mapper.readTree(Files.readString(sidecar));
+        for (JsonNode device : root.path("devices")) {
+            ((ObjectNode) device).remove("lastEvidenceAt");
+        }
+        Files.writeString(sidecar,
+                mapper.writerWithDefaultPrettyPrinter().writeValueAsString(root));
     }
 
     /**

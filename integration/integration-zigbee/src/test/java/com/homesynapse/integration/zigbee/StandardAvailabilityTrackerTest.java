@@ -10,6 +10,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -58,12 +59,19 @@ class StandardAvailabilityTrackerTest {
         transitions = new ArrayList<>();
     }
 
-    private void createTracker(Map<Long, Boolean> persisted) {
+    private void createTracker(
+            Map<Long, StandardAvailabilityTracker.Seed> persisted) {
         tracker = new StandardAvailabilityTracker(clock,
                 device -> powerSources.getOrDefault(device.value(), 0),
                 persisted,
                 (device, available) ->
                         transitions.add(device.toHexString() + ":" + available));
+    }
+
+    /** A seed entry (WU-AVAIL-SEED DP-1): both components nullable. */
+    private static StandardAvailabilityTracker.Seed seed(Boolean available,
+            Instant lastEvidenceAt) {
+        return new StandardAvailabilityTracker.Seed(available, lastEvidenceAt);
     }
 
     @Test
@@ -82,7 +90,7 @@ class StandardAvailabilityTrackerTest {
     @Test
     @DisplayName("restart-init: persisted AVAILABLE state carries forward with NO transition")
     void restartInitCarriesForwardSilently() {
-        createTracker(Map.of(BATTERY_DEVICE.value(), true));
+        createTracker(Map.of(BATTERY_DEVICE.value(), seed(true, clock.instant())));
 
         assertThat(tracker.isAvailable(BATTERY_DEVICE)).isTrue();
         assertThat(transitions)
@@ -100,7 +108,7 @@ class StandardAvailabilityTrackerTest {
     @Test
     @DisplayName("restart-init: persisted UNAVAILABLE stays unavailable until a frame arrives")
     void restartInitUnavailableUntilFrame() {
-        createTracker(Map.of(BATTERY_DEVICE.value(), false));
+        createTracker(Map.of(BATTERY_DEVICE.value(), seed(false, null)));
 
         assertThat(tracker.isAvailable(BATTERY_DEVICE)).isFalse();
 
@@ -230,12 +238,184 @@ class StandardAvailabilityTrackerTest {
     @Test
     @DisplayName("a successful command confirms reachability")
     void successfulCommandConfirms() {
-        createTracker(Map.of(MAINS_DEVICE.value(), false));
+        createTracker(Map.of(MAINS_DEVICE.value(), seed(false, null)));
 
         tracker.recordCommandResult(MAINS_DEVICE, true, clock.instant());
 
         assertThat(tracker.isAvailable(MAINS_DEVICE)).isTrue();
         assertThat(tracker.lastReason(MAINS_DEVICE))
                 .isEqualTo(AvailabilityReason.PING_SUCCESS);
+    }
+
+    // ── WU-AVAIL-SEED DP-1: the sidecar seed enters devices into tracking ──
+    // Seed semantics under test: a seeded value never counts as fresh
+    // evidence, seeding publishes nothing, the timeout clock rides the
+    // persisted instant (never boot time), and unknown recency is infinitely
+    // stale (never-false-ALIVE — false-ALIVE-avoidance wins every tie).
+
+    @Test
+    @DisplayName("DP-1/T-1: a seeded mains device with stale persisted evidence is a "
+            + "ping candidate at the FIRST evaluation")
+    void seededStaleMains_pingCandidateAtFirstEvaluation() {
+        createTracker(Map.of(MAINS_DEVICE.value(),
+                seed(true, clock.instant().minus(Duration.ofHours(3)))));
+
+        assertThat(tracker.evaluateTimeouts()).containsExactly(MAINS_DEVICE);
+        assertThat(transitions)
+                .as("candidacy is not a verdict — the ping decides")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("DP-1/T-2: a seeded battery device whose persisted evidence is older "
+            + "than 25 h times out at the FIRST evaluation — SILENCE_TIMEOUT, one "
+            + "listener call")
+    void seededStaleBattery_timesOutAtFirstEvaluation() {
+        createTracker(Map.of(BATTERY_DEVICE.value(),
+                seed(true, clock.instant().minus(Duration.ofHours(26)))));
+
+        assertThat(tracker.evaluateTimeouts()).isEmpty();
+
+        assertThat(tracker.isAvailable(BATTERY_DEVICE)).isFalse();
+        assertThat(tracker.lastReason(BATTERY_DEVICE))
+                .isEqualTo(AvailabilityReason.SILENCE_TIMEOUT);
+        assertThat(transitions).containsExactly(
+                BATTERY_DEVICE.toHexString() + ":false");
+    }
+
+    @Test
+    @DisplayName("DP-4 boundary: the battery window rides the persisted instant "
+            + "exactly — 24 h-old evidence waits, then fires when the window lapses")
+    void seededBattery_windowRidesPersistedInstant() {
+        createTracker(Map.of(BATTERY_DEVICE.value(),
+                seed(true, clock.instant().minus(Duration.ofHours(24)))));
+
+        tracker.evaluateTimeouts();
+        assertThat(tracker.isAvailable(BATTERY_DEVICE))
+                .as("24 h of persisted silence is inside the 25 h window")
+                .isTrue();
+        assertThat(transitions).isEmpty();
+
+        clock.advance(Duration.ofHours(2));
+        tracker.evaluateTimeouts();
+
+        assertThat(tracker.isAvailable(BATTERY_DEVICE)).isFalse();
+        assertThat(transitions).containsExactly(
+                BATTERY_DEVICE.toHexString() + ":false");
+    }
+
+    @Test
+    @DisplayName("DP-1/T-4: unknown recency (no persisted lastEvidenceAt) is "
+            + "infinitely stale — a mains seed is a candidate and a battery seed "
+            + "times out, both at the first evaluation")
+    void unknownRecency_isInfinitelyStale() {
+        createTracker(Map.of(
+                MAINS_DEVICE.value(), seed(true, null),
+                BATTERY_DEVICE.value(), seed(true, null)));
+
+        List<IEEEAddress> candidates = tracker.evaluateTimeouts();
+
+        assertThat(candidates).containsExactly(MAINS_DEVICE);
+        assertThat(tracker.isAvailable(BATTERY_DEVICE))
+                .as("unknown recency must never read as fresh")
+                .isFalse();
+        assertThat(tracker.lastReason(BATTERY_DEVICE))
+                .isEqualTo(AvailabilityReason.SILENCE_TIMEOUT);
+    }
+
+    @Test
+    @DisplayName("T-3: seeding publishes ZERO transitions and logs nothing — every "
+            + "seed shape (available, unavailable, unknown; with and without recency)")
+    void seeding_publishesNothing_allShapes() {
+        createTracker(Map.of(
+                BATTERY_DEVICE.value(), seed(true, clock.instant()),
+                MAINS_DEVICE.value(), seed(false, null),
+                UNKNOWN_DEVICE.value(), seed(null, null),
+                DC_DEVICE.value(), seed(null, clock.instant())));
+
+        assertThat(transitions)
+                .as("construction/seeding is silent — the anti-churn pin")
+                .isEmpty();
+        assertThat(tracker.isAvailable(BATTERY_DEVICE)).isTrue();
+        assertThat(tracker.isAvailable(MAINS_DEVICE)).isFalse();
+        assertThat(tracker.isAvailable(UNKNOWN_DEVICE)).isFalse();
+    }
+
+    @Test
+    @DisplayName("DP-1: a seeded UNKNOWN-availability device edges online on its "
+            + "first evidence — FIRST_CONTACT, exactly as an untracked device would")
+    void seededUnknownAvailability_firstEvidenceEdgesOnline() {
+        createTracker(Map.of(UNKNOWN_DEVICE.value(), seed(null, null)));
+
+        tracker.recordFrame(UNKNOWN_DEVICE, clock.instant());
+
+        assertThat(tracker.isAvailable(UNKNOWN_DEVICE)).isTrue();
+        assertThat(tracker.lastReason(UNKNOWN_DEVICE))
+                .isEqualTo(AvailabilityReason.FIRST_CONTACT);
+        assertThat(transitions).containsExactly(
+                UNKNOWN_DEVICE.toHexString() + ":true");
+    }
+
+    @Test
+    @DisplayName("DP-1: a seeded UNKNOWN-availability battery device that stays "
+            + "silent reaches an honest timeout verdict — UNKNOWN is iterated too")
+    void seededUnknownAvailability_stale_timesOutHonestly() {
+        createTracker(Map.of(BATTERY_DEVICE.value(), seed(null, null)));
+
+        tracker.evaluateTimeouts();
+
+        assertThat(tracker.isAvailable(BATTERY_DEVICE)).isFalse();
+        assertThat(tracker.lastReason(BATTERY_DEVICE))
+                .isEqualTo(AvailabilityReason.SILENCE_TIMEOUT);
+        assertThat(transitions).containsExactly(
+                BATTERY_DEVICE.toHexString() + ":false");
+    }
+
+    @Test
+    @DisplayName("T-1 boundary: a seeded mains device with FRESH persisted evidence "
+            + "is NOT a candidate at the first evaluation")
+    void seededFreshMains_notACandidate() {
+        createTracker(Map.of(MAINS_DEVICE.value(),
+                seed(true, clock.instant().minus(Duration.ofMinutes(1)))));
+
+        assertThat(tracker.evaluateTimeouts()).isEmpty();
+        assertThat(transitions).isEmpty();
+    }
+
+    @Test
+    @DisplayName("boundary: a seeded UNAVAILABLE device is never pinged and never "
+            + "re-verdicted — recovery is evidence-driven only")
+    void seededUnavailable_neverPinged_neverReverdicted() {
+        createTracker(Map.of(MAINS_DEVICE.value(),
+                seed(false, clock.instant().minus(Duration.ofDays(3)))));
+
+        assertThat(tracker.evaluateTimeouts()).isEmpty();
+        assertThat(transitions).isEmpty();
+        assertThat(tracker.isAvailable(MAINS_DEVICE)).isFalse();
+    }
+
+    @Test
+    @DisplayName("DP-1: isEvidencedAvailable distinguishes seeded-stale from "
+            + "this-process evidence — seeded false, frame true, ping-success true")
+    void evidencedAvailable_distinguishesSeededFromLive() {
+        createTracker(Map.of(
+                BATTERY_DEVICE.value(), seed(true, clock.instant()),
+                MAINS_DEVICE.value(), seed(false, null)));
+
+        assertThat(tracker.isAvailable(BATTERY_DEVICE)).isTrue();
+        assertThat(tracker.isEvidencedAvailable(BATTERY_DEVICE))
+                .as("a persisted value is not this-process evidence")
+                .isFalse();
+
+        tracker.recordFrame(BATTERY_DEVICE, clock.instant());
+        assertThat(tracker.isEvidencedAvailable(BATTERY_DEVICE))
+                .as("a frame is evidence even without a transition")
+                .isTrue();
+
+        assertThat(tracker.isEvidencedAvailable(MAINS_DEVICE)).isFalse();
+        tracker.recordCommandResult(MAINS_DEVICE, true, clock.instant());
+        assertThat(tracker.isEvidencedAvailable(MAINS_DEVICE))
+                .as("a ping reply is evidence")
+                .isTrue();
     }
 }

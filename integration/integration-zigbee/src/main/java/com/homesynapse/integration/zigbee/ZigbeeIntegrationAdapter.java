@@ -29,8 +29,10 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -303,23 +305,44 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         parameterStore = new PersistentNetworkParameterStore(dataDirectory, clock);
         protocol = new EzspCoordinatorProtocol(transport, parameterStore, clock);
         interviewQueue = new PendingInterviewQueue(clock);
-        // M9.6-AVAIL DP-1/DP-2: the availability tracker goes live. The
-        // persisted map is EMPTY, deliberately — the tracker's ctor inits
-        // sidecar-known devices SILENTLY (M-1) and transitions are
-        // edge-triggered, so a sidecar-initialized AVAILABLE against a view
-        // that boots UNKNOWN would suppress the first post-boot frame's event
-        // and starve the view (Nick's ruled trap; sidecar snapshot-init + the
-        // boot-time view reconciliation is a NAMED deferred WU). Tracker and
-        // view thus agree at boot, and the first RX frame emits the edge the
-        // view is waiting for. PowerSource resolves through the cache record —
-        // uninterviewed records carry 0 and N-5 gives every non-mains-proven
-        // device the conservative 25 h window.
+        // WU-AVAIL-SEED DP-1/DP-2 (supersedes the M9.6-AVAIL empty-map
+        // posture): the tracker seeds from the sidecar — EVERY cached device
+        // enters tracking with its last-known availability plus the DP-4
+        // persisted evidence recency, so the timeout arms can fire from the
+        // first cycle and a device silent since before the restart still
+        // reaches an honest verdict. Seeding publishes NOTHING and a seeded
+        // value never counts as fresh evidence (unknown recency = infinitely
+        // stale). The M9.6-era starve trap does not recur: the served view
+        // replays the log's last availability, which the seeded tracker state
+        // mirrors by construction (both are written by the same transition
+        // path), so a steady-state boot is event-quiet and convergence rides
+        // honest evidence or an honest timeout verdict within one window.
+        // PowerSource resolves through the cache record — uninterviewed
+        // records carry 0 and N-5 gives every non-mains-proven device the
+        // conservative 25 h window.
+        Map<Long, Boolean> persistedAvailability = cache.availabilitySnapshot();
+        Map<Long, Instant> persistedEvidence = cache.lastEvidenceSnapshot();
+        Map<Long, StandardAvailabilityTracker.Seed> availabilitySeed =
+                new HashMap<>();
+        for (ZigbeeDeviceRecord record : cache.all()) {
+            long ieee = record.ieeeAddress().value();
+            availabilitySeed.put(ieee, new StandardAvailabilityTracker.Seed(
+                    persistedAvailability.get(ieee),
+                    persistedEvidence.get(ieee)));
+        }
         availabilityPublisher = new EntityAvailabilityPublisher();
         availabilityTracker = new StandardAvailabilityTracker(clock,
                 ieee -> cache.device(ieee)
                         .map(ZigbeeDeviceRecord::powerSource).orElse(0),
-                Map.of(),
+                availabilitySeed,
                 availabilityPublisher);
+        long fromSidecar = availabilitySeed.values().stream()
+                .filter(seed -> seed.available() != null).count();
+        // DP-5(a): the once-per-boot seed glance-point (unconditional — a
+        // zero count is honest evidence the mechanism ran).
+        log.info("zigbee.availability_seeded: devices={} from_sidecar={} "
+                        + "unknown={}", availabilitySeed.size(), fromSidecar,
+                availabilitySeed.size() - fromSidecar);
         ingestion = new ZclIngestionUnit(() -> protocol.drainPendingCallbacks(),
                 new CacheDeviceResolver(), new AdapterIngestionListener(),
                 new ReportDeduplicator(clock), context.eventPublisher(), clock,
@@ -484,33 +507,58 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
      */
     private void evaluateAvailabilityTimeouts() {
         for (IEEEAddress candidate : availabilityTracker.evaluateTimeouts()) {
+            Instant pingStart = clock.instant();
+            PingOutcome outcome = pingBasic(candidate);
+            Instant pingEnd = clock.instant();
+            // WU-AVAIL-SEED DP-5(b): the per-ping instrument — the arm F-14's
+            // instruments could not see. rtt derives from the injected clock.
+            log.debug("zigbee.availability_ping: device={} outcome={} rttMs={}",
+                    candidate, outcome.token,
+                    Duration.between(pingStart, pingEnd).toMillis());
+            if (outcome == PingOutcome.OK) {
+                // A ping reply is device-originated evidence (DP-4).
+                cache.recordEvidence(candidate, pingEnd);
+            }
             availabilityTracker.recordCommandResult(candidate,
-                    pingBasic(candidate), clock.instant());
+                    outcome == PingOutcome.OK, pingEnd);
+        }
+    }
+
+    /** The DP-5(b) per-ping outcome vocabulary ({@code ok|timeout|error}). */
+    private enum PingOutcome {
+        OK("ok"), TIMEOUT("timeout"), ERROR("error");
+
+        private final String token;
+
+        PingOutcome(String token) {
+            this.token = token;
         }
     }
 
     /**
      * One availability ping: a ZCL global Read Attributes of Basic attribute
      * {@code 0x0000} (ZCLVersion) over the existing {@code zclGlobalExchange}
-     * seam. {@code false} — the honest unreachable-by-measurement verdict —
-     * covers the no-record / unknown-address cases too (a mains candidate is
-     * interviewed in practice; a device whose address we lost self-heals on
-     * its next RX, which re-indexes and re-edges). An
+     * seam. {@code TIMEOUT} is wire silence; {@code ERROR} — the honest
+     * unreachable-by-measurement verdict — covers the no-record /
+     * unknown-address cases (a mains candidate is interviewed in practice; a
+     * device whose address we lost self-heals on its next RX, which re-indexes
+     * and re-edges). Every non-OK outcome records {@code responded=false}. An
      * {@link EzspCommandTimeoutException} (the NCP itself not answering)
      * propagates to the production loop's existing watchdog arm — coordinator
      * trouble is never device evidence.
      */
-    private boolean pingBasic(IEEEAddress device) {
+    private PingOutcome pingBasic(IEEEAddress device) {
         Optional<ZigbeeDeviceRecord> record = cache.device(device);
         if (record.isEmpty() || record.get().networkAddress()
                 == ZigbeeDeviceCache.NETWORK_ADDRESS_UNKNOWN) {
-            return false;
+            return PingOutcome.ERROR;
         }
         return protocol.zclGlobalExchange(record.get().networkAddress(),
                 firstApplicationEndpoint(record.get()), 0x0000,
                 ZclCodec.COMMAND_READ_ATTRIBUTES, new byte[] {0x00, 0x00},
                 ZclCodec.COMMAND_READ_ATTRIBUTES_RESPONSE,
-                AVAILABILITY_PING_TIMEOUT_MILLIS).isPresent();
+                AVAILABILITY_PING_TIMEOUT_MILLIS).isPresent()
+                        ? PingOutcome.OK : PingOutcome.TIMEOUT;
     }
 
     /**
@@ -1079,8 +1127,12 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
             interviewQueue.onFrameReceived(device);   // class than the tracker's
             // M9.6-AVAIL DP-3: every device-originated RX is liveness — this
             // seam is the documented availability feed, pre-dedup by design
-            // (a duplicate frame is still the device talking).
-            availabilityTracker.recordFrame(device, clock.instant());
+            // (a duplicate frame is still the device talking). WU-AVAIL-SEED
+            // DP-4: the SAME instant rides the sidecar's evidence recency, so
+            // tracker and persisted clock can never disagree.
+            Instant now = clock.instant();
+            cache.recordEvidence(device, now);
+            availabilityTracker.recordFrame(device, now);
         }
     }
 
@@ -1123,14 +1175,19 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
          * nothing; edge-triggering then keeps every later report silent and
          * the new entities would sit UNKNOWN in the view until the device's
          * next offline/online cycle. When the tracker already holds the device
-         * AVAILABLE at adoption, publish the per-entity online edge now.
-         * {@code previousStatus} is {@code "unknown"} — the fresh entity
-         * subjects never carried an availability event. A device the tracker
-         * has never seen (slice-driven adoption without a prior frame) seeds
-         * nothing; its first frame edges normally.
+         * AVAILABLE on THIS-process evidence at adoption, publish the
+         * per-entity online edge now. {@code previousStatus} is
+         * {@code "unknown"} — the fresh entity subjects never carried an
+         * availability event. A device the tracker has never seen
+         * (slice-driven adoption without a prior frame) seeds nothing; its
+         * first frame edges normally. WU-AVAIL-SEED DP-1: a SIDECAR-seeded
+         * available never qualifies — the evidence gate is
+         * {@code isEvidencedAvailable}, so this seed can never manufacture an
+         * evidence-free "online" (production adoption is always
+         * announce-preceded, so the gate costs the bench flow nothing).
          */
         void seedFreshAdoption(IEEEAddress device) {
-            if (!availabilityTracker.isAvailable(device)) {
+            if (!availabilityTracker.isEvidencedAvailable(device)) {
                 return;
             }
             lastPublished.put(device.value(), true);

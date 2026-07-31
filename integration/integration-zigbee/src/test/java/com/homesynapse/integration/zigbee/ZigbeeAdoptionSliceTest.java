@@ -264,7 +264,8 @@ class ZigbeeAdoptionSliceTest {
     }
 
     @Test
-    @DisplayName("Stage 2 dedup: an IEEE match re-links — availability_changed, NO new adoption")
+    @DisplayName("Stage 2 dedup: an IEEE match re-links — ZERO availability events "
+            + "(WU-AVAIL-SEED DP-3 STOP), NO new adoption")
     void ieeeMatchRelinksNotReadopts() {
         slice.onDeviceDiscovered(snzbInterview(),
                 MeasuredCorpusValues.SNZB_PROFILE_ID);
@@ -279,7 +280,9 @@ class ZigbeeAdoptionSliceTest {
                 .as("re-pairing produces no new adoption event")
                 .hasSize(1);
         assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).toList())
-                .hasSize(1);
+                .as("the relink asserts nothing about availability — boot truth "
+                        + "is owned by the tracker seed (WU-AVAIL-SEED DP-3)")
+                .isEmpty();
         assertThat(deviceRegistry.listAllDevices()).hasSize(1);
         assertThat(slice.entityFor(SNZB, 1))
                 .as("the entity link survives the re-link")
@@ -353,13 +356,14 @@ class ZigbeeAdoptionSliceTest {
         assertThat(slice.matchedProfileIdFor(HUE))
                 .as("the re-matched profile id is recorded for the command path")
                 .contains(MeasuredCorpusValues.HUE_PROFILE_ID);
-        // A second re-link stays idempotent: availability only, never a new
-        // adoption event, never a registry write.
+        // A second re-link stays idempotent: no events at all (WU-AVAIL-SEED
+        // DP-3 STOP), never a new adoption event, never a registry write.
         slice.onDeviceDiscovered(hueInterview(),
                 MeasuredCorpusValues.HUE_PROFILE_ID);
         assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).toList()).hasSize(1);
         assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).toList())
-                .hasSize(2);
+                .as("no relink — first or repeated — publishes availability")
+                .isEmpty();
         assertThat(entityRegistry.listEntitiesByDevice(adopted.deviceId()).get(0))
                 .isEqualTo(beforeRelink);
     }

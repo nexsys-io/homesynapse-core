@@ -423,4 +423,94 @@ class ZigbeeDeviceCacheTest {
                         + "guards the cycle path, never the shutdown flush")
                 .isTrue();
     }
+
+    // ── WU-AVAIL-SEED DP-4: the lastEvidenceAt sidecar field ────────────────
+
+    @Test
+    @DisplayName("DP-4: recordEvidence persists per-device recency — ISO-8601 in the "
+            + "file, exact round-trip, and the seeding snapshot carries it")
+    void recordEvidence_roundTripsThroughFile() throws IOException {
+        cache.recordAnnounce(SNZB, 0x6B9A);
+        // A distinct instant so the file assert can only match the evidence
+        // field, never the record's own lastSeen stamp.
+        clock.advance(Duration.ofSeconds(7));
+        java.time.Instant at = clock.instant();
+        cache.recordEvidence(SNZB, at);
+        cache.setAvailability(SNZB, true);
+        cache.flush();
+
+        assertThat(Files.readString(file, StandardCharsets.UTF_8))
+                .as("the additive per-device field, ISO-8601 UTC")
+                .contains("\"lastEvidenceAt\"")
+                .contains(at.toString());
+        ZigbeeDeviceCache reloaded = new ZigbeeDeviceCache(file, clock);
+        assertThat(reloaded.lastEvidenceAt(SNZB)).contains(at);
+        assertThat(reloaded.lastEvidenceSnapshot())
+                .containsEntry(SNZB.value(), at);
+        assertThat(reloaded.lastKnownAvailability(SNZB)).contains(true);
+    }
+
+    @Test
+    @DisplayName("DP-4 compat/T-4: an old-format sidecar (no lastEvidenceAt anywhere) "
+            + "loads without throwing; recency reads absent")
+    void oldFormatSidecar_loadsWithoutEvidence() throws IOException {
+        cache.recordAnnounce(SNZB, 0x6B9A);
+        cache.setAvailability(SNZB, true);
+        cache.flush();
+        assertThat(Files.readString(file, StandardCharsets.UTF_8))
+                .as("no evidence was ever recorded — the file IS old-format")
+                .doesNotContain("lastEvidenceAt");
+
+        ZigbeeDeviceCache reloaded = new ZigbeeDeviceCache(file, clock);
+
+        assertThat(reloaded.device(SNZB)).isPresent();
+        assertThat(reloaded.lastKnownAvailability(SNZB)).contains(true);
+        assertThat(reloaded.lastEvidenceAt(SNZB))
+                .as("absent field = unknown recency, never a load failure")
+                .isEmpty();
+        assertThat(reloaded.lastEvidenceSnapshot()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("DP-4 tolerance: a malformed lastEvidenceAt value is skipped with "
+            + "ONE WARN — the record and its siblings still load")
+    void malformedEvidence_skippedWithWarn_siblingsApply() throws IOException {
+        IEEEAddress second = new IEEEAddress(0x0017880109AB12CDL);
+        cache.recordAnnounce(SNZB, 0x6B9A);
+        cache.recordAnnounce(second, 0x22FE);
+        // A distinct instant: the records' lastSeen strings must not collide
+        // with the evidence value the doctoring below replaces.
+        clock.advance(Duration.ofSeconds(7));
+        java.time.Instant at = clock.instant();
+        cache.recordEvidence(SNZB, at);
+        cache.recordEvidence(second, at);
+        cache.flush();
+        Files.writeString(file, Files.readString(file, StandardCharsets.UTF_8)
+                .replaceFirst(at.toString(), "not-a-timestamp"),
+                StandardCharsets.UTF_8);
+
+        ListAppender<ILoggingEvent> capture = new ListAppender<>();
+        capture.start();
+        Logger logger = (Logger) LoggerFactory.getLogger(ZigbeeDeviceCache.class);
+        logger.addAppender(capture);
+        try {
+            ZigbeeDeviceCache reloaded = new ZigbeeDeviceCache(file, clock);
+
+            assertThat(reloaded.all())
+                    .as("a malformed sidecar VALUE never discards the cache")
+                    .hasSize(2);
+            assertThat(reloaded.lastEvidenceSnapshot())
+                    .as("the parseable entry applies; the malformed one is skipped")
+                    .hasSize(1)
+                    .containsValue(at);
+            assertThat(capture.list.stream()
+                    .filter(event -> event.getLevel() == Level.WARN)
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .filter(m -> m.startsWith("zigbee.evidence_recency_malformed"))
+                    .count())
+                    .isEqualTo(1);
+        } finally {
+            logger.detachAppender(capture);
+        }
+    }
 }

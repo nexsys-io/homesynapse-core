@@ -31,11 +31,18 @@ import java.util.function.ToIntFunction;
  * {@code 0x02} mains 3-phase). UNKNOWN ({@code 0x00}) and every exotic class
  * therefore inherit the 25 h passive window.
  *
- * <p><strong>Restart initialization (M-1):</strong> the tracker initializes
- * each known device to its PERSISTED pre-restart availability (the cache's
- * {@code lastKnownAvailability} sidecar) and emits NO transition for it — a
- * planned restart must never produce a false unavailable→available cascade.
- * Transitions fire the injected listener only on genuine state changes.
+ * <p><strong>Restart initialization (M-1, realized by WU-AVAIL-SEED
+ * DP-1):</strong> the tracker initializes each known device from its
+ * persisted {@link Seed} — last-known availability plus evidence recency —
+ * and emits NO transition for it (a planned restart must never produce a
+ * false unavailable→available cascade; seeding publishes nothing). The seed
+ * ENTERS every persisted device into tracking so {@link #evaluateTimeouts()}
+ * iterates it from the first cycle, but a seeded value never counts as fresh
+ * evidence: the silence clock rides the persisted instant, and an absent
+ * instant (unknown recency) is INFINITELY stale — never-false-ALIVE; the
+ * lawful failure direction is a brief false-UNAVAILABLE that self-heals on
+ * the next report. Transitions fire the injected listener only on genuine
+ * state changes.
  *
  * <p>Thread-safe ({@link ReentrantLock} only, LTD-11).
  */
@@ -62,6 +69,19 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
         void onTransition(IEEEAddress device, boolean available);
     }
 
+    /**
+     * One persisted seed entry (WU-AVAIL-SEED DP-1): the sidecar's last-known
+     * availability plus DP-4's persisted evidence recency. Both components are
+     * nullable by design — {@code available} null means the device never
+     * transitioned (it seeds UNKNOWN and its first evidence edges normally);
+     * {@code lastEvidenceAt} null means unknown recency (treated as infinitely
+     * stale — an old-format sidecar must never read as fresh).
+     *
+     * @param available the persisted last-known availability, or {@code null}
+     * @param lastEvidenceAt the persisted evidence instant, or {@code null}
+     */
+    record Seed(Boolean available, Instant lastEvidenceAt) { }
+
     private static final Logger log =
             LoggerFactory.getLogger(StandardAvailabilityTracker.class);
 
@@ -71,6 +91,13 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
         State state = State.UNKNOWN;
         AvailabilityReason reason = AvailabilityReason.FIRST_CONTACT;
         Instant lastSeen;
+        /**
+         * True once THIS process observed device-originated evidence (a frame
+         * or a ping reply). A seeded entry starts false — a persisted value is
+         * never this-process evidence (DP-1) — so consumers that assert
+         * liveness (the adoption-time view seed) cannot ride the seed.
+         */
+        boolean evidenced;
     }
 
     private final Clock clock;
@@ -80,34 +107,41 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
     private final Map<Long, DeviceState> states = new HashMap<>();
 
     /**
-     * Creates the tracker, initializing from persisted pre-restart state.
+     * Creates the tracker, initializing from the persisted sidecar seed.
      *
      * @param clock the time source, never {@code null}
      * @param powerSourceLookup resolves a device's ZCL PowerSource value
      *        ({@code 0} when unknown), never {@code null}
-     * @param persistedAvailability the pre-restart availability by IEEE value
-     *        (the cache sidecar), never {@code null}
+     * @param persistedSeed the per-device seed by IEEE value (the cache
+     *        sidecar — availability + evidence recency), never {@code null};
+     *        entry values never {@code null}, their components may be
      * @param listener the transition sink, never {@code null}
      */
     StandardAvailabilityTracker(Clock clock,
             ToIntFunction<IEEEAddress> powerSourceLookup,
-            Map<Long, Boolean> persistedAvailability,
+            Map<Long, Seed> persistedSeed,
             TransitionListener listener) {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.powerSourceLookup =
                 Objects.requireNonNull(powerSourceLookup, "powerSourceLookup");
         this.listener = Objects.requireNonNull(listener, "listener");
-        Objects.requireNonNull(persistedAvailability, "persistedAvailability");
+        Objects.requireNonNull(persistedSeed, "persistedSeed");
         // M-1: carry the pre-restart state forward SILENTLY — no transitions
-        // at initialization, planned restart or not.
-        Instant now = clock.instant();
-        for (Map.Entry<Long, Boolean> entry : persistedAvailability.entrySet()) {
+        // at initialization, planned restart or not. DP-1: lastSeen is the
+        // PERSISTED evidence instant (null = unknown recency), never the boot
+        // instant — a boot-time stamp is what made the battery window reset
+        // on every restart (the F-14 aggravator).
+        for (Map.Entry<Long, Seed> entry : persistedSeed.entrySet()) {
+            Seed seed = entry.getValue();
             DeviceState state = new DeviceState();
-            state.state = entry.getValue() ? State.AVAILABLE : State.UNAVAILABLE;
-            state.reason = entry.getValue()
-                    ? AvailabilityReason.FRAME_RECEIVED
-                    : AvailabilityReason.SILENCE_TIMEOUT;
-            state.lastSeen = now;
+            if (seed.available() != null) {
+                state.state = seed.available()
+                        ? State.AVAILABLE : State.UNAVAILABLE;
+                state.reason = seed.available()
+                        ? AvailabilityReason.FRAME_RECEIVED
+                        : AvailabilityReason.SILENCE_TIMEOUT;
+            }
+            state.lastSeen = seed.lastEvidenceAt();
             states.put(entry.getKey(), state);
         }
     }
@@ -156,9 +190,38 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
     }
 
     /**
+     * True only when the device is AVAILABLE on THIS process's own evidence —
+     * a seeded value never qualifies (DP-1: never manufacture an evidence-free
+     * "available"). Pre-seed this was equivalent to {@link #isAvailable}; the
+     * distinction exists exactly for liveness-asserting consumers such as the
+     * adoption-time view seed.
+     *
+     * @param device the device, never {@code null}
+     * @return whether the device is available on in-process evidence
+     */
+    boolean isEvidencedAvailable(IEEEAddress device) {
+        Objects.requireNonNull(device, "device");
+        lock.lock();
+        try {
+            DeviceState state = states.get(device.value());
+            return state != null && state.state == State.AVAILABLE
+                    && state.evidenced;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
      * Evaluates silence timeouts (called each ingestion cycle): battery devices
      * past 25 h transition to unavailable; mains devices past 10 min are
      * returned as ping candidates for the M9.4 active-ping path.
+     *
+     * <p>DP-1: seeded entries are evaluated too — AVAILABLE and seeded-UNKNOWN
+     * states both (an UNKNOWN entry can only come from the seed; live
+     * transitions never leave one behind). Only UNAVAILABLE is skipped: an
+     * offline device is never pinged and never re-verdicted — recovery is
+     * evidence-driven. A {@code null} lastSeen (unknown recency) reads as
+     * infinite silence: unknown must never pass for fresh (never-false-ALIVE).
      *
      * @return the mains devices whose silence warrants an active ping
      */
@@ -170,19 +233,23 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
             Instant now = clock.instant();
             for (Map.Entry<Long, DeviceState> entry : states.entrySet()) {
                 DeviceState state = entry.getValue();
-                if (state.state != State.AVAILABLE || state.lastSeen == null) {
+                if (state.state == State.UNAVAILABLE) {
                     continue;
                 }
-                Duration silence = Duration.between(state.lastSeen, now);
+                boolean unknownRecency = state.lastSeen == null;
+                Duration silence = unknownRecency ? null
+                        : Duration.between(state.lastSeen, now);
                 IEEEAddress device = new IEEEAddress(entry.getKey());
                 // N-5: mains-membership test, not battery-equality — every
                 // non-mains value (UNKNOWN 0x00 included) takes the 25 h
                 // battery-conservative window.
                 if (isMainsPowered(powerSourceLookup.applyAsInt(device))) {
-                    if (silence.compareTo(MAINS_PING_SILENCE) > 0) {
+                    if (unknownRecency
+                            || silence.compareTo(MAINS_PING_SILENCE) > 0) {
                         pingCandidates.add(device);
                     }
-                } else if (silence.compareTo(BATTERY_OFFLINE_SILENCE) > 0) {
+                } else if (unknownRecency
+                        || silence.compareTo(BATTERY_OFFLINE_SILENCE) > 0) {
                     timedOut.add(device);
                 }
             }
@@ -225,6 +292,10 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
             boolean firstContact = state.state == State.UNKNOWN;
             if (available) {
                 state.lastSeen = timestamp;
+                // DP-1: any positive record is THIS-process device-originated
+                // evidence (a frame or a ping reply) — even without an edge,
+                // the seeded-stale mark clears here.
+                state.evidenced = true;
             }
             if (state.state == target) {
                 changed = false;

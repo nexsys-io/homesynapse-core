@@ -39,7 +39,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * the §8.1 M-1 persisted pre-restart availability the
  * {@link StandardAvailabilityTracker} initializes from (the frozen
  * {@link ZigbeeDeviceRecord} has no availability component; the FILE carries
- * the sidecar, tolerated-additively by this loader) — and a TOP-LEVEL
+ * the sidecar, tolerated-additively by this loader) — plus, per device, the
+ * WU-AVAIL-SEED DP-4 {@code lastEvidenceAt} (ISO-8601 UTC): the last
+ * device-originated evidence instant, persisted so a restart never orphans
+ * the availability timeout clocks. Additive and tolerated: an old-format file
+ * (absent field) loads with unknown recency; a malformed value is skipped
+ * with one WARN, never a load failure. The JSON also carries a TOP-LEVEL
  * {@code learnedZoneTypes} section (LEARN-PERSIST DP-LP-1): wire-learned IAS
  * zone-type ids keyed by IEEE hex, top-level rather than per-record so a learn
  * for a device with no record node still persists and the frozen record shape
@@ -73,6 +78,7 @@ final class ZigbeeDeviceCache {
     private final ReentrantLock lock = new ReentrantLock();
     private final Map<Long, ZigbeeDeviceRecord> devices = new LinkedHashMap<>();
     private final Map<Long, Boolean> lastKnownAvailability = new HashMap<>();
+    private final Map<Long, Instant> lastEvidenceAt = new HashMap<>();
     private final Map<Long, Long> learnedZoneTypes = new HashMap<>();
     private final Map<Integer, Long> ieeeByNetworkAddress = new HashMap<>();
 
@@ -217,6 +223,55 @@ final class ZigbeeDeviceCache {
         lock.lock();
         try {
             return Map.copyOf(lastKnownAvailability);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Records device-originated evidence recency (WU-AVAIL-SEED DP-4): a
+     * value update under the lock only — the debounced {@link #maybeFlush()}
+     * and the shutdown {@link #flush()} carry the file I/O, exactly as they do
+     * for availability. Called per frame and per answered ping; per-frame FILE
+     * writes never happen (the 30 s debounce is the write mechanism).
+     *
+     * @param ieee the evidencing device, never {@code null}
+     * @param at the evidence instant, never {@code null}
+     */
+    void recordEvidence(IEEEAddress ieee, Instant at) {
+        Objects.requireNonNull(ieee, "ieee");
+        Objects.requireNonNull(at, "at");
+        lock.lock();
+        try {
+            lastEvidenceAt.put(ieee.value(), at);
+            dirty = true;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Returns a device's persisted evidence recency.
+     *
+     * @param ieee the device, never {@code null}
+     * @return the last recorded evidence instant, or empty when never recorded
+     *         (an old-format sidecar reads empty — unknown recency)
+     */
+    Optional<Instant> lastEvidenceAt(IEEEAddress ieee) {
+        Objects.requireNonNull(ieee, "ieee");
+        lock.lock();
+        try {
+            return Optional.ofNullable(lastEvidenceAt.get(ieee.value()));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Returns the evidence-recency map snapshot (the DP-1 seed input). */
+    Map<Long, Instant> lastEvidenceSnapshot() {
+        lock.lock();
+        try {
+            return Map.copyOf(lastEvidenceAt);
         } finally {
             lock.unlock();
         }
@@ -392,6 +447,7 @@ final class ZigbeeDeviceCache {
      */
     private record WriteSnapshot(List<ZigbeeDeviceRecord> devices,
             Map<Long, Boolean> availability,
+            Map<Long, Instant> evidence,
             Map<Long, Long> learnedZoneTypes) { }
 
     private WriteSnapshot snapshotLocked(Instant now) {
@@ -401,6 +457,7 @@ final class ZigbeeDeviceCache {
         lastWrite = now;
         return new WriteSnapshot(List.copyOf(devices.values()),
                 Map.copyOf(lastKnownAvailability),
+                Map.copyOf(lastEvidenceAt),
                 Map.copyOf(learnedZoneTypes));
     }
 
@@ -462,6 +519,12 @@ final class ZigbeeDeviceCache {
             if (availability != null) {
                 node.put("lastKnownAvailability", availability);
             }
+            Instant evidence =
+                    snapshot.evidence().get(record.ieeeAddress().value());
+            if (evidence != null) {
+                // DP-4: additive, ISO-8601 UTC — absent when never recorded.
+                node.put("lastEvidenceAt", evidence.toString());
+            }
             if (record.nodeDescriptor() != null) {
                 ObjectNode descriptor = node.putObject("nodeDescriptor");
                 descriptor.put("deviceType", record.nodeDescriptor().deviceType());
@@ -506,6 +569,7 @@ final class ZigbeeDeviceCache {
         if (!Files.exists(file)) {
             return;
         }
+        int malformedEvidence = 0;
         try {
             JsonNode root = MAPPER.readTree(
                     Files.readString(file, StandardCharsets.UTF_8));
@@ -560,8 +624,25 @@ final class ZigbeeDeviceCache {
                     lastKnownAvailability.put(ieee.value(),
                             node.get("lastKnownAvailability").asBoolean());
                 }
+                if (node.hasNonNull("lastEvidenceAt")) {
+                    // DP-4 tolerance (the learnedZoneTypes posture): a
+                    // malformed VALUE degrades that device to unknown recency
+                    // — the DP-1 seed's lawful worst case — never a load
+                    // failure. Absence is the old-format path, silent.
+                    try {
+                        lastEvidenceAt.put(ieee.value(),
+                                Instant.parse(node.get("lastEvidenceAt").asText()));
+                    } catch (RuntimeException e) {
+                        malformedEvidence++;
+                    }
+                }
             }
             loadLearnedZoneTypes(root);
+            if (malformedEvidence > 0) {
+                log.warn("zigbee.evidence_recency_malformed: {} unparseable "
+                        + "lastEvidenceAt values in {} skipped; those devices "
+                        + "seed with unknown recency", malformedEvidence, file);
+            }
             log.info("zigbee.device_cache_loaded: {} devices from {}",
                     devices.size(), file);
         } catch (IOException | RuntimeException e) {
@@ -572,6 +653,7 @@ final class ZigbeeDeviceCache {
             devices.clear();
             ieeeByNetworkAddress.clear();
             lastKnownAvailability.clear();
+            lastEvidenceAt.clear();
             learnedZoneTypes.clear();
         }
     }

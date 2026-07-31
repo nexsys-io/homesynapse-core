@@ -16,6 +16,8 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
 /**
@@ -81,6 +83,8 @@ public final class ZigbeeHardwareFreeRig {
     private final Deque<byte[]> queuedCallbacks = new ArrayDeque<>();
     /** Lock-free (LTD-11): the command executor writes, the gate thread reads. */
     private final List<SentZcl> sentZcl = new java.util.concurrent.CopyOnWriteArrayList<>();
+    /** Devices the scripted NCP accepts unicasts for but that never reply (dead). */
+    private final Set<Long> silencedDevices = ConcurrentHashMap.newKeySet();
     private int reportTsn = 0x40;
 
     public ZigbeeHardwareFreeRig(TestClock clock, Supplier<DeviceRegistry> deviceRegistry,
@@ -152,6 +156,18 @@ public final class ZigbeeHardwareFreeRig {
     public void reportBrightnessLevel(int level) {
         queuedCallbacks.add(report(HUE, 0x0008,
                 attributeRecord(0x0000, 0x20, new byte[] {(byte) level})));
+    }
+
+    /**
+     * Silences a scripted device: the NCP still SRSP-accepts unicasts addressed
+     * to it (the radio path is healthy) but the device itself never replies —
+     * no ZDO responses, no read responses, no availability-ping answer. The
+     * dead-device simulation for the WU-AVAIL-SEED boot-truth legs; a silenced
+     * device's cluster-specific unicasts are not captured in
+     * {@link #sentZclFrames()} (a dead device receives nothing).
+     */
+    public void silence(long ieee) {
+        silencedDevices.add(ieee);
     }
 
     /**
@@ -263,6 +279,10 @@ public final class ZigbeeHardwareFreeRig {
                 new byte[] {0x00, parameters[13]}));    // EMBER_SUCCESS + echoed tag
 
         ScriptedDevice device = deviceForNwk(nwk);
+        if (silencedDevices.contains(device.ieee())) {
+            // A dead device: the radio accepted the unicast, nothing answers.
+            return frames;
+        }
         if (profile == EzspCoordinatorProtocol.ZDO_PROFILE_ID) {
             int tsn = message[0] & 0xFF;
             byte[] reply = zdoReply(device, cluster, tsn);

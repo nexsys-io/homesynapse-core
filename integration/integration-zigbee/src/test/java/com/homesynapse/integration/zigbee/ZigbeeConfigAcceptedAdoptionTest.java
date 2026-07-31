@@ -226,21 +226,21 @@ class ZigbeeConfigAcceptedAdoptionTest {
 
         assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).count())
                 .as("the re-link never re-adopts").isEqualTo(1);
-        // M9.6-AVAIL P2 drift (enumerated): the adoption gained the entity-grain
-        // view seed, so the stream carries TWO availability events — the seed
-        // (entity grain) plus the re-link's device-grain emission, which stays
-        // byte-untouched (DP-6: a structural projection no-op, recorded).
+        // WU-AVAIL-SEED DP-3 STOP: the re-link's device-grain emission is
+        // RETIRED — the only availability event in the stream is the
+        // adoption-time entity-grain view seed (M9.6-AVAIL), which rides
+        // genuine announce-driven evidence.
         assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).count())
-                .as("the adoption seed + the untouched re-link emission")
-                .isEqualTo(2);
+                .as("the adoption seed alone — the re-link publishes nothing")
+                .isEqualTo(1);
         assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED)
                 .filter(e -> e.subjectRef().type() == SubjectType.ENTITY).count())
                 .as("the adoption-time seed is entity-grain")
                 .isEqualTo(1);
         assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED)
                 .filter(e -> e.subjectRef().type() == SubjectType.DEVICE).count())
-                .as("the re-link's device-grain emission is untouched")
-                .isEqualTo(1);
+                .as("the evidence-free device-grain emission is dead (T-5)")
+                .isZero();
         assertThat(sliceMessages(Level.INFO, "zigbee.device_relinked"))
                 .as("the Stage-2 re-link ran").hasSize(1);
         assertThat(adapterMessages(Level.INFO, "zigbee.proposal_accepted"))

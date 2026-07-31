@@ -6,6 +6,10 @@ package com.homesynapse.lifecycle;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
@@ -59,6 +63,8 @@ final class RestartHonestyIT {
     private ZigbeeHardwareFreeRig rig;
     private HomeSynapseCore core;
     private EntityId hueEntity;
+    /** Captures the adoption slice's relink INFO line (the re-link barrier). */
+    private ListAppender<ILoggingEvent> sliceLogCapture;
 
     /** Explicit no-arg constructor for {@code -Xlint:all -Werror} builds. */
     RestartHonestyIT() {
@@ -66,6 +72,9 @@ final class RestartHonestyIT {
 
     @AfterEach
     void tearDown() {
+        if (sliceLogCapture != null) {
+            sliceLogger().detachAppender(sliceLogCapture);
+        }
         if (core != null) {
             core.stop();
         }
@@ -106,10 +115,13 @@ final class RestartHonestyIT {
         // Post-restart re-announce → re-link (IEEE match, LINKED — no re-adoption).
         // DP-a pin 2, post-DUR: the tuning persists in the projection-backed
         // registry on the SAME entity — relink rebuilds maps only (AMD-99 DP-4).
+        // WU-AVAIL-SEED DP-3 STOP retired the relink availability emission, so
+        // the barrier is the preserved relink LOG line: one from the restart's
+        // DP-6 rehydration + one from this announce-driven LINKED arm.
         rig.announce(ZigbeeHardwareFreeRig.HUE_IEEE);
         rig.deliverAndCycle();
-        awaitTrue(() -> countEventsOfType(EventTypes.AVAILABILITY_CHANGED) >= 1L,
-                "the re-link availability_changed");
+        awaitTrue(() -> relinkLogLines() >= 2L,
+                "the re-link log line (rehydration + re-announce)");
         assertThat(countEventsOfType(EventTypes.DEVICE_ADOPTED))
                 .as("re-pairing re-links; it never re-adopts")
                 .isEqualTo(1L);
@@ -129,6 +141,9 @@ final class RestartHonestyIT {
 
     private void boot(Path tempDir) throws Exception {
         clock = TestClock.createDefault();
+        sliceLogCapture = new ListAppender<>();
+        sliceLogCapture.start();
+        sliceLogger().addAppender(sliceLogCapture);
         writeConfig(tempDir);
         rig = new ZigbeeHardwareFreeRig(clock, () -> core.deviceRegistry(),
                 () -> core.registryProjection(),
@@ -273,6 +288,24 @@ final class RestartHonestyIT {
     private long countEventsOfType(String eventType) {
         return events().stream()
                 .filter(envelope -> envelope.eventType().equals(eventType)).count();
+    }
+
+    /**
+     * The adoption slice is package-private in the zigbee module — the logger
+     * is addressed by NAME (logback loggers are name-keyed).
+     */
+    private static Logger sliceLogger() {
+        return (Logger) org.slf4j.LoggerFactory.getLogger(
+                "com.homesynapse.integration.zigbee.ZigbeeAdoptionSlice");
+    }
+
+    /** The captured {@code zigbee.device_relinked} INFO lines so far. */
+    private long relinkLogLines() {
+        return sliceLogCapture.list.stream()
+                .filter(event -> event.getLevel() == Level.INFO)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("zigbee.device_relinked"))
+                .count();
     }
 
     private static String commandType(EventEnvelope envelope) {

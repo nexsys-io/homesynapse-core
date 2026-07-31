@@ -12,7 +12,6 @@ import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.device.HardwareIdentifier;
 import com.homesynapse.device.RegistryEventMapper;
 import com.homesynapse.device.RegistryProjection;
-import com.homesynapse.event.AvailabilityChangedEvent;
 import com.homesynapse.event.DeviceAdoptedEvent;
 import com.homesynapse.event.DeviceDiscoveredEvent;
 import com.homesynapse.event.DeviceRegisteredEvent;
@@ -543,16 +542,11 @@ final class ZigbeeAdoptionSlice {
         // silently mutating the registries is exactly what REG-INV-1 bans — the
         // sanctioned path for a genuine capability change is an entity_registered
         // re-emit from a real re-interview (future work, Q10).
-        publishRoot(new EventDraft(
-                EventTypes.AVAILABILITY_CHANGED,
-                1,
-                clock.instant(),
-                SubjectRef.device(device.deviceId()),
-                EventPriority.NORMAL,
-                EventOrigin.INTEGRATION,
-                new AvailabilityChangedEvent("unknown", "available"),
-                null,
-                null));
+        // WU-AVAIL-SEED DP-3 (Branch STOP, Nick's ruling): the relink publishes
+        // NO availability — the old device-grain "unknown"→"available" was an
+        // evidence-free assertion (the F-14 L1 boot burst). Boot availability
+        // is owned by the tracker seed (DP-1) and the served view's replayed
+        // log; the log line below is the relink's sole observable.
         log.info("zigbee.device_relinked: device={} deviceId={} — re-pairing, "
                 + "no new adoption", ieee, device.deviceId());
     }
