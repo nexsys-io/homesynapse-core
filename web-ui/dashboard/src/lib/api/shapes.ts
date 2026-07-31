@@ -236,6 +236,7 @@ export const validators: Record<EndpointId, Validator> = {
     const trigger = req(d, 'trigger', 'B3chain.data');
     if (!isObj(trigger)) throw new ContractError('B3chain.trigger must be object');
     strOrNull(req(trigger, 'type', 'B3chain.trigger'), 'B3chain.trigger.type'); // observed live null
+    strOrNull(req(trigger, 'firingValue', 'B3chain.trigger'), 'B3chain.trigger.firingValue'); // observed live null (all eras, 2026-07-27)
     subjectRef(req(trigger, 'subjectRef', 'B3chain.trigger'), 'B3chain.trigger.subjectRef');
     const conditions = req(d, 'conditions', 'B3chain.data');
     if (!Array.isArray(conditions)) throw new ContractError('B3chain.conditions must be array');

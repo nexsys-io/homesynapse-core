@@ -763,6 +763,73 @@ function buildLiveFleet(): MockDataset {
   return { ...defaultDataset, entities, entityState, entityDetail: {} };
 }
 
+/* THE LIVE PRESENT-BUT-NULL WIRE (FE-LIVE-V112 item 1 — the shape that actually
+ * broke). Field evidence (WCAP-2 + the 2026-07-27 devtools-chain-glance return):
+ * the live wire serves optionals as NULL BESIDE POPULATED SIBLINGS —
+ * `resultOutcome: null` with `settled: true`; `reason`, `trigger.type`,
+ * `automationName`, `firingValue` all observed null — where these mocks used to
+ * emit populated-or-ABSENT only. The real seam is TRI-STATE (absent/null/value),
+ * and the mocks were structurally blind to it: a fixture-green `.toLowerCase()`
+ * crashed the chain render on live data and killed the polling loop. Three
+ * exhibits, one per honest state:
+ *   run_ln_nulls   — every nullable key PRESENT-BUT-NULL (the crash shape);
+ *   run_ln_empty   — a real, successful, genuinely EMPTY chain (nothing failed);
+ *   run_ln_missing — listed in runs[] with NO chain: the transport serves the
+ *                    honest 404 problem (the retryable error-card case).
+ */
+function buildLiveNulls(): MockDataset {
+  const A = { automationId: 'auto_ln_rotated' };
+  // The crash shape: nulls beside populated siblings, exactly as captured.
+  const nulls = makeChain('run_ln_nulls', {
+    ...A,
+    minAgo: 3,
+    actions: [
+      makeAction('CONFIRMED', {
+        targetRef: { type: 'ENTITY', id: 'ent_livingroom_lamp' },
+        reason: null,
+        resultOutcome: null, // observed: null beside settled: true
+        settled: true,
+      }),
+      makeAction('UNCONFIRMED', {
+        targetRef: { type: 'ENTITY', id: 'ent_livingroom_lamp' },
+        command: 'set_brightness',
+        params: { brightness: 50 },
+        reason: null, // observed: the recorded reason itself can be null
+        resultOutcome: null,
+        settled: true,
+      }),
+    ],
+  });
+  nulls.automationName = null; // identity rotation (lawful wire)
+  nulls.trigger.type = null; // identity rotation (lawful wire)
+  nulls.trigger.firingValue = null; // observed null in ALL eras — the .toLowerCase() crash field
+  nulls.outcome.reason = null;
+
+  // A real, successful, genuinely empty chain — no conditions, no actions,
+  // nothing planned. Renders the honest empty note, never a blank or an error.
+  const empty = makeChain('run_ln_empty', { ...A, automationName: 'Quiet automation', minAgo: 30 });
+  empty.conditions = [];
+  empty.actions = [];
+  empty.outcome = { status: 'COMPLETED', reason: null, durationMs: 12, actionCount: 0, commandCount: 0 };
+
+  const nullsRun = makeRun('run_ln_nulls', { ...A, minAgo: 3 });
+  nullsRun.automationName = null;
+
+  return {
+    ...defaultDataset,
+    automations: [makeAutomation('auto_ln_rotated', 'Quiet automation')],
+    runs: [
+      nullsRun,
+      makeRun('run_ln_empty', { ...A, automationName: 'Quiet automation', minAgo: 30 }),
+      // Listed but chainless: the mock transport 404s its causal-chain read —
+      // the honest, retryable request-failed case (no chain fixture on purpose).
+      makeRun('run_ln_missing', { ...A, automationName: 'Quiet automation', minAgo: 55 }),
+    ],
+    causalChains: { run_ln_nulls: nulls, run_ln_empty: empty },
+    nonFiring: { auto_ln_rotated: makeNonFiring('auto_ln_rotated', 'NEVER_TRIGGERED', { automationName: 'Quiet automation' }) },
+  };
+}
+
 // Connected but empty — exercises the "empty as teaching", never a blank panel.
 function buildEmpty(): MockDataset {
   return {
@@ -800,6 +867,7 @@ export const SCENARIOS: Scenario[] = [
   { id: 'five-modes', label: 'The five failure modes', group: 'Story', blurb: 'The ruled v1.1.2 wire: timed-out, replaced, accepted-never-confirmed, still-settling, and failed — pairwise distinct, never collapsed. One is provisional (§5.9).', build: buildFiveModes },
   { id: 'verdict-vocabulary', label: 'The ten verdicts (pre-v1.1.2 wire)', group: 'Story', blurb: 'Every command_result outcome as the pre-SKIP-VIS deployed wire flattens it — the recorded-reason recovery path, kept for pre-v1.1.2 payloads until the deploy.', build: buildVerdictVocabulary },
   { id: 'field-evidence', label: 'Field evidence', group: 'Story', blurb: 'The silent-skip do-nothing run, the null-name prior-instance run, rehydrated “Available” with days-old evidence, and honest UNKNOWN since restart.', build: buildFieldEvidence },
+  { id: 'live-nulls', label: 'Live wire: present-but-null', group: 'Story', blurb: 'The tri-state seam as the live wire serves it — every nullable key present-but-null, a genuinely empty chain, and a run whose chain read 404s.', build: buildLiveNulls },
   { id: 'live-fleet', label: 'Live fleet mirror', group: 'Story', blurb: 'One entity per deployed device class with canonical attribute keys — including brightness level 0–254 plus the hub-derived percent.', build: buildLiveFleet },
   { id: 'all-origins', label: 'All event origins', group: 'Story', blurb: 'Automation, device, you, external, and the honest UNKNOWN.', build: buildAllOrigins },
   { id: 'large', label: 'Large (300 runs · 500 events)', group: 'Scale', blurb: 'Forces list virtualization + a render budget.', build: buildLarge },

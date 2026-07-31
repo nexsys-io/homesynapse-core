@@ -18,10 +18,13 @@ import {
   attrValueList,
   causalSentence,
   clockTime,
+  EMPTY_CHAIN_NOTE,
   labelFor,
+  NOT_RECORDED,
   NULL_NAME_NOTE,
   pendingHint,
   runStatusMeta,
+  triggerVerbFromValue,
   unconfirmableHint,
   type Tone,
 } from '../lib/format';
@@ -30,10 +33,21 @@ import styles from './CausalChain.module.css';
 import { t } from '../lib/i18n';
 
 export function CausalChain({ chain }: { chain: Chain }) {
-  const doNothing = isDoNothingRun(chain.outcome, chain.actions.length);
+  /* Live-wire hardening (FE-LIVE-V112 item 1): the wire has served every
+   * optional below PRESENT-BUT-NULL beside populated siblings; arrays and
+   * sub-objects are guarded the same way so a sparse payload renders honestly
+   * instead of throwing. What resolved is shown; what did not says so. */
+  const trigger = chain.trigger;
+  const conditions = chain.conditions ?? [];
+  const actions = chain.actions ?? [];
+  const outcome = chain.outcome;
+  const doNothing = outcome ? isDoNothingRun(outcome, actions.length) : false;
+  // A real, successful, genuinely empty chain: nothing planned, nothing run.
+  const genuinelyEmpty =
+    conditions.length === 0 && actions.length === 0 && (outcome?.actionCount ?? 0) === 0;
   const status = doNothing
     ? ({ label: 'Completed, nothing changed', tone: 'warn' } as const)
-    : runStatusMeta(chain.outcome.status);
+    : runStatusMeta(outcome?.status);
   return (
     <div class={styles.wrap}>
       <p class={styles.headline}>{causalSentence(chain)}</p>
@@ -43,28 +57,31 @@ export function CausalChain({ chain }: { chain: Chain }) {
 
       <ol class={styles.chain} aria-label="Step-by-step explanation, from trigger to outcome">
         {/* Trigger. `type` is null for prior-instance runs — shown honestly as
-            "recorded before the current automations", never a blank. */}
-        <Step kind="trigger" tone="info" marker="●" line={`${labelFor(chain.trigger.subjectRef.id)} ${triggerPhrase(chain.trigger.firingValue)} at ${clockTime(chain.trigger.matchedAt)}.`}>
+            "recorded before the current automations", never a blank. `firingValue`
+            is OBSERVED NULL on the live wire in all eras — the detail then says
+            "value not recorded" in words, never a blank and never "null". */}
+        <Step kind="trigger" tone="info" marker="●" line={`${labelFor(trigger?.subjectRef?.id)} ${triggerVerbFromValue(trigger?.firingValue)} at ${clockTime(trigger?.matchedAt)}.`}>
           <Detail label="Trigger">
-            {chain.trigger.type ?? 'recorded before the current automations'} · {chain.trigger.firingValue}
+            {trigger?.type ?? 'recorded before the current automations'} · {trigger?.firingValue ?? `value ${NOT_RECORDED}`}
           </Detail>
         </Step>
 
         {/* Conditions */}
-        {chain.conditions.map((c, i) => {
+        {conditions.map((c, i) => {
           const tone: Tone = !c.evaluated ? 'unknown' : c.result ? 'ok' : 'warn';
           const verdict = !c.evaluated ? 'was not checked' : c.result ? 'was true' : 'was false';
+          const observed = c.observedState ?? [];
           return (
             <Step
               key={i}
               kind="condition"
               tone={tone}
               marker={c.result ? '✓' : c.evaluated ? '✕' : '?'}
-              line={`The rule "${c.expression}" ${verdict}.`}
+              line={`The rule "${c.expression ?? NOT_RECORDED}" ${verdict}.`}
             >
-              {c.observedState.length > 0 ? (
+              {observed.length > 0 ? (
                 <Detail label="At the time">
-                  {c.observedState.map((o) => `${labelFor(o.entityId)} ${o.attribute} = ${o.value}`).join('; ')}
+                  {observed.map((o) => `${labelFor(o.entityId)} ${o.attribute} = ${o.value}`).join('; ')}
                 </Detail>
               ) : null}
             </Step>
@@ -83,7 +100,7 @@ export function CausalChain({ chain }: { chain: Chain }) {
             Each mode carries its own label + glyph; color reinforces (never hue
             alone). A not-yet-settled outcome renders visibly PROVISIONAL (§5.9) —
             calm, never a settled pill. See lib/verdicts.ts. */}
-        {chain.actions.map((a, i) => {
+        {actions.map((a, i) => {
           const v = actionVerdict(a);
           const hint =
             v.mode === 'held-dispatched' ? pendingHint(a.command)
@@ -97,7 +114,7 @@ export function CausalChain({ chain }: { chain: Chain }) {
               kind="action"
               tone={v.tone}
               marker="→"
-              line={`${actionPhrase(a.command)} ${labelFor(a.targetRef.id)}.`}
+              line={`${actionPhrase(a.command)} ${labelFor(a.targetRef?.id)}.`}
               pill={
                 <StatusPill
                   tone={v.tone}
@@ -111,7 +128,7 @@ export function CausalChain({ chain }: { chain: Chain }) {
             >
               {showHelp ? <p class={styles.hint}>{v.help}</p> : null}
               {hint ? <p class={styles.hint}>{hint}</p> : null}
-              <Detail label="Command">{a.command}{attrValueList(a.params)}</Detail>
+              <Detail label="Command">{a.command ?? NOT_RECORDED}{attrValueList(a.params)}</Detail>
               {a.reason ? <Detail label="Recorded reason">{a.reason}</Detail> : null}
               {v.resultOutcome ? (
                 <Detail label="Recorded outcome">
@@ -127,18 +144,25 @@ export function CausalChain({ chain }: { chain: Chain }) {
             actions, zero commands, empty actions[] — nothing visible happened and
             today no marker event records why. Render it honestly, never as clean
             success; the actionCount-vs-actions[] disagreement is the tell. */}
-        {isDoNothingRun(chain.outcome, chain.actions.length) ? (
+        {doNothing && outcome ? (
           <Step
             kind="action"
             tone="warn"
             marker="→"
-            line={`Nothing was changed: ${chain.outcome.actionCount === 1 ? 'the planned step' : `all ${chain.outcome.actionCount} planned steps`} ended without sending a command.`}
+            line={`Nothing was changed: ${outcome.actionCount === 1 ? 'the planned step' : `all ${outcome.actionCount} planned steps`} ended without sending a command.`}
           >
             <p class={styles.hint}>
               This usually means the devices this automation targets were unavailable, so each was
               skipped by design. The step-by-step record of these skips is not kept yet.
             </p>
           </Step>
+        ) : null}
+
+        {/* The honest EMPTY state (a real, successful, genuinely empty chain):
+            an explicit statement — never a silent blank, never an error posture,
+            because nothing failed. */}
+        {genuinelyEmpty ? (
+          <Step kind="empty" tone="unknown" marker="○" line={EMPTY_CHAIN_NOTE} />
         ) : null}
 
         {/* Terminal outcome */}
@@ -151,7 +175,7 @@ export function CausalChain({ chain }: { chain: Chain }) {
         />
       </ol>
 
-      {chain.cascade.parentRunId ? (
+      {chain.cascade?.parentRunId ? (
         <p class={styles.cascade}>
           <a href={href(`/explain/run/${chain.cascade.parentRunId}`)}>← See what triggered this run</a>
         </p>
@@ -202,14 +226,10 @@ function Detail({ label, children }: { label: string; children: ComponentChildre
   );
 }
 
-function triggerPhrase(firingValue: string): string {
-  const v = firingValue.toLowerCase();
-  if (v.includes('motion')) return 'detected motion';
-  if (v.includes('open')) return 'was opened';
-  if (v.includes('close')) return 'was closed';
-  return `changed (${firingValue})`;
-}
-function actionPhrase(command: string): string {
+/* The trigger phrase is format.triggerVerbFromValue — null-hardened there
+ * (OBSERVED NULL on the live wire in all eras); the former local duplicate of
+ * that logic was the second `.toLowerCase()` crash site and is removed. */
+function actionPhrase(command: string | null | undefined): string {
   switch (command) {
     case 'turn_on':
       return 'Turned on';
@@ -218,29 +238,39 @@ function actionPhrase(command: string): string {
     case 'dim':
       return 'Dimmed';
     default:
-      return `Ran ${command} on`;
+      // Present-but-null guard: never "Ran null on" — say what is known.
+      return command ? `Ran ${command} on` : 'Ran an unrecorded command on';
   }
 }
 function terminalLine(chain: Chain): string {
-  const s = chain.outcome.status;
-  const secs = (chain.outcome.durationMs / 1000).toFixed(1);
+  const outcome = chain.outcome;
+  if (!outcome) return `Outcome ${NOT_RECORDED}.`;
+  const actions = chain.actions ?? [];
+  const s = outcome.status;
+  // durationMs guarded: a missing duration is omitted honestly, never "0.0s"
+  // (a plausible-looking number the record does not actually carry).
+  const secs =
+    typeof outcome.durationMs === 'number' && Number.isFinite(outcome.durationMs)
+      ? (outcome.durationMs / 1000).toFixed(1)
+      : null;
   if (s === 'COMPLETED') {
     // A do-nothing run must never read as clean success (the silent-skip class).
-    if (isDoNothingRun(chain.outcome, chain.actions.length)) {
-      return `Finished in ${secs}s, but nothing was changed.`;
+    if (isDoNothingRun(outcome, actions.length)) {
+      return secs ? `Finished in ${secs}s, but nothing was changed.` : 'Finished, but nothing was changed.';
     }
     // §5.9 honesty: a COMPLETED run's action outcome can settle AFTER the run
     // finishes (a late report re-derives on the next read) — while any action is
     // still unsettled, the terminal line must not read as the final word.
-    const open = chain.actions.filter((a) => actionVerdict(a).provisional).length;
+    const open = actions.filter((a) => actionVerdict(a).provisional).length;
     if (open > 0) {
+      const inSecs = secs ? ` in ${secs}s` : '';
       return open === 1
-        ? `Done in ${secs}s — one outcome has not settled yet.`
-        : `Done in ${secs}s — ${open} outcomes have not settled yet.`;
+        ? `Done${inSecs} — one outcome has not settled yet.`
+        : `Done${inSecs} — ${open} outcomes have not settled yet.`;
     }
-    return `Done in ${secs}s.`;
+    return secs ? `Done in ${secs}s.` : 'Done.';
   }
-  if (s === 'SKIPPED') return chain.outcome.reason ? `Skipped — ${chain.outcome.reason}.` : 'Skipped.';
-  if (s === 'FAILED') return chain.outcome.reason ? `Failed — ${chain.outcome.reason}.` : 'Failed.';
+  if (s === 'SKIPPED') return outcome.reason ? `Skipped — ${outcome.reason}.` : 'Skipped.';
+  if (s === 'FAILED') return outcome.reason ? `Failed — ${outcome.reason}.` : 'Failed.';
   return `${runStatusMeta(s).label}.`;
 }

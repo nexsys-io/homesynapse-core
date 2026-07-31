@@ -20,6 +20,18 @@ import { t } from './i18n';
 
 export type Tone = 'ok' | 'warn' | 'error' | 'info' | 'unknown' | 'neutral';
 
+/* ---- The honest-absence marker (FE-LIVE-V112 item 1) ----
+ * The LIVE wire serves optionals PRESENT-BUT-NULL beside populated siblings
+ * (field evidence, 2026-07-27): the real seam is absent / null / value. Where a
+ * value is null, the surface says so in words — never a placeholder that could
+ * be mistaken for data, never the string "null", never an invented value. */
+export const NOT_RECORDED = 'not recorded';
+
+/** The genuinely-empty chain (a real, successful response with nothing planned):
+ *  an explicit, calm statement — nothing failed, and nothing is hidden. */
+export const EMPTY_CHAIN_NOTE =
+  'This run finished without recording any steps — no conditions were checked and no commands were sent.';
+
 /* ---- Names. The v1.1 contract carries an OPTIONAL entity display `name` (additive
    C8, 2026-06-26): prefer it when present; fall back to humanizing the entityId.
    (Core fills it when the config/M9 work lands — clients tolerate absence.) ---- */
@@ -27,7 +39,10 @@ export function displayName(e: { entityId: string; name?: string }): string {
   return e.name ?? labelFor(e.entityId);
 }
 
-export function labelFor(id: string): string {
+export function labelFor(id: string | null | undefined): string {
+  // Present-but-null guard: an id the wire did not resolve is said plainly,
+  // never rendered as "null" and never invented.
+  if (!id) return 'Something not on record';
   const stripped = id.replace(/^(ent_|sys_|auto_|dev_)/, '');
   if (!stripped) return id;
   return stripped
@@ -93,8 +108,9 @@ export type CommandKind = 'effect' | 'color' | 'other';
 
 /** Classify a command for confirmation-copy purposes. Effect/identify-class first —
  *  those are the measured UNCONFIRMABLE-by-report paths (an ACK is not confirmation). */
-export function commandKind(command: string): CommandKind {
-  const c = command.toLowerCase();
+export function commandKind(command: string | null | undefined): CommandKind {
+  // Null-guard (the live present-but-null class): no command string, no class.
+  const c = (command ?? '').toLowerCase();
   // Measured unconfirmable-by-report class (bench 2026-07-01: identify + color_loop).
   if (/(identify|effect|loop|blink|flash)/.test(c)) return 'effect';
   // Color-class only when the command SAYS color (set_temperature on a thermostat is
@@ -106,7 +122,7 @@ export function commandKind(command: string): CommandKind {
 /** Shown while an action is DISPATCHED (pending). Color-class capabilities legitimately
  *  confirm slowly (measured: batched color reporting) — say so calmly, so waiting reads
  *  as normal, never as failure. Returns null when there is nothing useful to add. */
-export function pendingHint(command: string): string | null {
+export function pendingHint(command: string | null | undefined): string | null {
   if (commandKind(command) === 'color') {
     return 'Color changes confirm slowly on some bulbs — this can take several seconds.';
   }
@@ -116,7 +132,7 @@ export function pendingHint(command: string): string | null {
 /** Shown when an effect/identify-class action lands UNCONFIRMED: these devices acknowledge
  *  the command but never report doing it, so an immediate honest "not confirmed" is the
  *  EXPECTED behavior — not a fault. Returns null for other command kinds. */
-export function unconfirmableHint(command: string): string | null {
+export function unconfirmableHint(command: string | null | undefined): string | null {
   if (commandKind(command) === 'effect') {
     return 'This kind of command is acknowledged but never reported back, so it cannot be confirmed.';
   }
@@ -211,7 +227,7 @@ export function healthMeta(h: IntegrationHealth): { label: string; tone: Tone } 
   }
 }
 
-export function runStatusMeta(s: RunStatus): { label: string; tone: Tone } {
+export function runStatusMeta(s: RunStatus | string | null | undefined): { label: string; tone: Tone } {
   switch (s) {
     case 'COMPLETED':
       return { label: 'Completed', tone: 'ok' };
@@ -224,6 +240,10 @@ export function runStatusMeta(s: RunStatus): { label: string; tone: Tone } {
     case 'INTERRUPTED':
       return { label: 'Interrupted', tone: 'warn' };
   }
+  // The live-wire hardening: a null status is said plainly; an unrecognized
+  // string is shown as recorded (honest fallback, never a crash, never a guess).
+  if (s == null || s === '') return { label: `Outcome ${NOT_RECORDED}`, tone: 'unknown' };
+  return { label: `Recorded as "${s}"`, tone: 'unknown' };
 }
 
 export function verdictMeta(v: NonFiringVerdict): { label: string; tone: Tone } {
@@ -291,33 +311,34 @@ export function attrValue(tv: TypedValue): string {
 }
 
 /** Render an action params object as a short trailing clause, e.g. " (brightness 82)". */
-export function attrValueList(params: Record<string, unknown>): string {
-  const entries = Object.entries(params);
+export function attrValueList(params: Record<string, unknown> | null | undefined): string {
+  const entries = Object.entries(params ?? {});
   if (entries.length === 0) return '';
   return ' (' + entries.map(([k, v]) => `${k} ${String(v)}`).join(', ') + ')';
 }
 
 /* ---- The hero device-backward sentence (the mom test) ---- */
 export function causalSentence(chain: CausalChain): string {
-  const triggerSubject = labelFor(chain.trigger.subjectRef.id);
-  const triggerVerb = triggerVerbFromValue(chain.trigger.firingValue);
-  const when = clockTime(chain.trigger.matchedAt);
+  // Live-wire hardening (FE-LIVE-V112 item 1): every field the wire has served
+  // null — or could omit — is guarded; the sentence stays honest, never invents.
+  const trigger = chain.trigger;
+  const triggerSubject = labelFor(trigger?.subjectRef?.id);
+  const triggerVerb = triggerVerbFromValue(trigger?.firingValue ?? null);
+  const when = clockTime(trigger?.matchedAt);
+  const actions = chain.actions ?? [];
+  const outcome = chain.outcome;
   // The silent-skip class: the run finished without doing anything visible —
   // say so up front, never a sentence that implies something happened.
-  if (
-    chain.actions.length === 0 &&
-    chain.outcome.actionCount > 0 &&
-    chain.outcome.commandCount === 0
-  ) {
+  if (actions.length === 0 && (outcome?.actionCount ?? 0) > 0 && (outcome?.commandCount ?? 0) === 0) {
     return `${runName(chain.automationName)} ran when ${triggerSubject} ${triggerVerb} at ${when}, but nothing was changed.`;
   }
-  const action = chain.actions[0];
-  const target = action ? labelFor(action.targetRef.id) : runName(chain.automationName);
+  const action = actions[0];
+  const target = action ? labelFor(action.targetRef?.id) : runName(chain.automationName);
   const verb = action ? commandVerb(action.command) : 'ran';
   return `${target} ${verb} because ${triggerSubject} ${triggerVerb} at ${when}.`;
 }
 
-function commandVerb(command: string): string {
+function commandVerb(command: string | null | undefined): string {
   switch (command) {
     case 'turn_on':
       return 'turned on';
@@ -326,11 +347,18 @@ function commandVerb(command: string): string {
     case 'dim':
       return 'dimmed';
     default:
-      return `ran "${command}"`;
+      // A null command is the present-but-null class: say it acted without
+      // naming a command it doesn't have — never render "null" as a verb.
+      return command ? `ran "${command}"` : 'acted';
   }
 }
 
-function triggerVerbFromValue(firingValue: string): string {
+/** The trigger verb from `firingValue` — OBSERVED NULL ON THE LIVE WIRE in all
+ *  eras (the `.toLowerCase()` crash field, 2026-07-27 chain-glance return).
+ *  Null → the plain verb with NO parenthetical: the value's absence is disclosed
+ *  in the trigger step's detail as "value not recorded", never invented here. */
+export function triggerVerbFromValue(firingValue: string | null | undefined): string {
+  if (firingValue == null || firingValue === '') return 'changed';
   const v = firingValue.toLowerCase();
   if (v.includes('motion')) return 'detected motion';
   if (v.includes('open')) return 'was opened';

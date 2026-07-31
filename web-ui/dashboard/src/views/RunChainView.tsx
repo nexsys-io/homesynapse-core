@@ -9,6 +9,7 @@ import { href } from '../lib/router';
 import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { CausalChain } from '../components/CausalChain';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 
 export function RunChainView({ runId }: { runId: string }) {
   const state = useApi(() => api.getCausalChain(runId));
@@ -18,7 +19,13 @@ export function RunChainView({ runId }: { runId: string }) {
         <a href={href('/explain/runs')}>← All runs</a>
       </p>
       <Card>
-        <Resource state={state}>{(chain) => <CausalChain chain={chain} />}</Resource>
+        {/* The error boundary is LOAD-BEARING (2026-07-27 field evidence): an
+            uncontained render throw here killed the polling loop and froze the
+            app. A fetch failure renders Resource's honest error card; a RENDER
+            failure is contained to this card — the poll loop survives both. */}
+        <ErrorBoundary resetKey={runId} onRetry={state.reload}>
+          <Resource state={state}>{(chain) => <CausalChain chain={chain} />}</Resource>
+        </ErrorBoundary>
       </Card>
     </Page>
   );

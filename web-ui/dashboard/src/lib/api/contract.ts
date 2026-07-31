@@ -270,12 +270,19 @@ export interface RunSummary {
 /** [OBSERVED LIVE NULLABILITY — same class as RunSummary.automationName]:
  *  `type` is null when the automation definition is no longer registered
  *  (StandardExplanationService.buildTrigger derives it from the registry).
- *  Tolerated + rendered honestly; clarification ask recorded with the hub. */
+ *  Tolerated + rendered honestly; clarification ask recorded with the hub.
+ *  [OBSERVED LIVE NULLABILITY, 2026-07-27 — FE-LIVE-V112 item 1]: `firingValue`
+ *  is null on the live wire in ALL eras ("what set it off" never carries a
+ *  value; minted as its own hub row, priority ruled at STATE-DIALECT
+ *  authoring). The v1.1 freeze text does not annotate it nullable — the mirror
+ *  records the observed wire (the automationName precedent); the client
+ *  tolerates null and renders the honest "value not recorded" marker, never an
+ *  invented value. Guarded only — no other action taken (the hub's ruling). */
 export interface CausalTrigger {
   type: string | null;
   subjectRef: SubjectRef;
   matchedAt: string;
-  firingValue: string;
+  firingValue: string | null;
 }
 
 export interface CausalCondition {

@@ -274,7 +274,9 @@ export function isDoNothingRun(outcome: {
  * ------------------------------------------------------------------------- */
 
 export interface ActionVerdictInput {
-  outcome: string; // ActionOutcome
+  /** ActionOutcome on a healthy wire; null/undefined tolerated (present-but-null
+   *  hardening) and rendered as the honest "Not recorded" verdict. */
+  outcome: string | null | undefined;
   reason: string | null;
   resultOutcome?: string | null;
   settled?: boolean;
@@ -288,7 +290,8 @@ export type ActionMode =
   | 'acked-silent' // mode 3
   | 'settled-failed' // mode 5
   | 'expired-restart' // wire failure-class (SD-7 residue); honest bookkeeping here
-  | 'skipped';
+  | 'skipped'
+  | 'not-recorded'; // present-but-null hardening: a null/absent outcome, said plainly
 
 /** Distinct SVG glyph per MODE (14×14, stroke style matches StatusPill).
  *  The shape half of the never-hue-alone law. */
@@ -301,6 +304,7 @@ export const MODE_GLYPHS: Record<ActionMode, string> = {
   'settled-failed': 'M3.5 3.5l7 7M10.5 3.5l-7 7', // x
   'expired-restart': 'M11.5 7A4.5 4.5 0 113.9 3.8M11.5 2.5v2h-2', // restart arc
   skipped: 'M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5', // skip-to-end
+  'not-recorded': 'M3.5 7h2M6.5 7h2M9.5 7h2', // dotted line — nothing on record
 };
 
 export interface ActionVerdict {
@@ -334,6 +338,21 @@ const KNOWN_FAILED = new Set(['rejected', 'invalid', 'unsupported', 'handler_err
 
 /** Classify one causal-chain action into its honest render mode. */
 export function actionVerdict(a: ActionVerdictInput): ActionVerdict {
+  // Present-but-null hardening (FE-LIVE-V112 item 1): a null/absent OUTCOME is
+  // not a failure and not a guess — it is said plainly. (An unrecognized
+  // non-null string still takes the conservative FAILED default below, SD-7.)
+  if (a.outcome == null || a.outcome === '') {
+    return {
+      mode: 'not-recorded',
+      label: 'Not recorded',
+      tone: 'unknown',
+      glyph: MODE_GLYPHS['not-recorded'],
+      help: 'What happened to this step was not recorded. The step itself is preserved.',
+      provisional: false,
+      recovered: false,
+      resultOutcome: a.resultOutcome ?? null,
+    };
+  }
   const hasField = a.resultOutcome !== undefined;
   const recoveredRo = hasField ? null : (a.outcome === 'FAILED' ? classifyRecordedReason(a.reason) : null);
   const ro: string | null = hasField ? (a.resultOutcome as string | null) : recoveredRo;
