@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -54,7 +55,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * <p>Thread-safe ({@link ReentrantLock} only, LTD-11). Writes snapshot the
  * serializable state under the lock and perform the file I/O outside it, so
  * reads never block on a write's I/O; a failed write suppresses further
- * attempts for {@link #WRITE_FAILURE_BACKOFF_MILLIS} (F-14).
+ * attempts for {@link #WRITE_FAILURE_BACKOFF_MILLIS} (F-14). The file lands
+ * temp-then-move (F-3), so a torn write never replaces a complete sidecar.
  */
 final class ZigbeeDeviceCache {
 
@@ -463,13 +465,22 @@ final class ZigbeeDeviceCache {
 
     private void write(WriteSnapshot snapshot) {
         // F-14: serialization and file I/O run outside the lock — reads never
-        // block on a write's I/O. Two racing writers each land a complete,
-        // valid file; last-writer-wins on the content is acceptable (an older
-        // snapshot landing last is corrected by the next dirty write).
+        // block on a write's I/O. F-3 (S-5c): the bytes land at a .tmp
+        // sibling and the final path is only ever replaced by a completed
+        // move (the PersistentNetworkParameterStore idiom), so a reader or
+        // the loader can never observe a partial file at the final path — a
+        // crash or power cut mid-write leaves the previous complete file
+        // (plus at worst a stale .tmp the next write truncates and
+        // consumes), never a torn file the loader would discard along with
+        // the availability seed. Two racing writers remain last-writer-wins
+        // on the content (an older snapshot landing last is corrected by
+        // the next dirty write).
         try {
             String json = toJson(snapshot);
             Files.createDirectories(file.toAbsolutePath().getParent());
-            Files.writeString(file, json, StandardCharsets.UTF_8);
+            Path temp = file.resolveSibling(file.getFileName() + ".tmp");
+            Files.writeString(temp, json, StandardCharsets.UTF_8);
+            Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
             lock.lock();
             try {
                 // The target proved writable — a still-armed backoff is stale.

@@ -35,6 +35,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * malformed content both degrade to unlearned, never a load failure). F-14
  * pins the write-failure backoff: a failed write arms a 60 s suppression,
  * reads stay live through it, and shutdown {@code flush()} still attempts.
+ * F-3 (S-5c) pins the atomic sidecar write: the bytes land at a {@code .tmp}
+ * sibling and only a completed move replaces the final path — alongside the
+ * loader's torn-file discard-and-WARN, the pre-fix hazard's blast radius.
  */
 class ZigbeeDeviceCacheTest {
 
@@ -512,5 +515,124 @@ class ZigbeeDeviceCacheTest {
         } finally {
             logger.detachAppender(capture);
         }
+    }
+
+    // ── S-5c (REV-1 F-3): the atomic sidecar write — temp-then-move ─────────
+
+    private Path tempSibling() {
+        return tempDir.resolve("zigbee-devices.json.tmp");
+    }
+
+    private static List<String> corruptWarnings(
+            ListAppender<ILoggingEvent> capture) {
+        return capture.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message
+                        .startsWith("zigbee.device_cache_corrupt"))
+                .toList();
+    }
+
+    @Test
+    @DisplayName("F-3 load pin: a torn (truncated) sidecar is discarded with "
+            + "ONE WARN — the availability seed is gone, honestly; never a "
+            + "partial load, never a throw")
+    void tornSidecar_discardedWithOneWarn() throws IOException {
+        cache.recordAnnounce(SNZB, 0x6B9A);
+        cache.recordEvidence(SNZB, clock.instant());
+        cache.setAvailability(SNZB, true);
+        cache.flush();
+        String complete = Files.readString(file, StandardCharsets.UTF_8);
+        // The pre-fix hazard, reproduced: a power cut mid-write leaves a
+        // prefix of the intended bytes at the final path.
+        Files.writeString(file, complete.substring(0, complete.length() / 2),
+                StandardCharsets.UTF_8);
+
+        ListAppender<ILoggingEvent> capture = attachCacheCapture();
+        ZigbeeDeviceCache reloaded;
+        try {
+            reloaded = new ZigbeeDeviceCache(file, clock);
+        } finally {
+            cacheLogger().detachAppender(capture);
+        }
+
+        assertThat(reloaded.all())
+                .as("a torn file is discarded wholesale (the Doc 08 §3.14 "
+                        + "startup reconcile rebuilds) — nothing partial "
+                        + "ever loads")
+                .isEmpty();
+        assertThat(reloaded.lastEvidenceSnapshot())
+                .as("the WU-AVAIL-SEED seed input is empty for this boot — "
+                        + "the F-3 stake, pinned")
+                .isEmpty();
+        assertThat(reloaded.availabilitySnapshot()).isEmpty();
+        assertThat(corruptWarnings(capture)).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("F-3: the write lands COMPLETE at the .tmp sibling before "
+            + "the final path is touched — a blocked move leaves the final "
+            + "path untouched, and recovery consumes the stale temp")
+    void writeLandsAtTempSibling_blockedMoveLeavesFinalUntouched()
+            throws IOException {
+        // Freeze the crash window between the temp write and the move: the
+        // final path exists as a NON-EMPTY DIRECTORY, so Files.move(...,
+        // REPLACE_EXISTING) fails deterministically on every platform AFTER
+        // the temp bytes landed. No faked power cut — the mechanism itself
+        // is inspected mid-flight.
+        Files.createDirectories(file);
+        Files.createFile(file.resolve("occupant"));
+        cache.recordAnnounce(SNZB, 0x6B9A);
+        cache.recordEvidence(SNZB, clock.instant());
+
+        cache.flush();
+
+        assertThat(Files.isRegularFile(tempSibling()))
+                .as("the bytes must land at the .tmp sibling FIRST — the "
+                        + "pre-fix in-place write never creates one")
+                .isTrue();
+        ZigbeeDeviceCache fromTemp = new ZigbeeDeviceCache(tempSibling(), clock);
+        assertThat(fromTemp.device(SNZB))
+                .as("the temp holds the COMPLETE document — its own loader "
+                        + "parses it whole")
+                .isPresent();
+        assertThat(fromTemp.lastEvidenceSnapshot()).hasSize(1);
+        assertThat(Files.isDirectory(file))
+                .as("the final path is only ever replaced by a COMPLETED "
+                        + "move — the failed move touched nothing")
+                .isTrue();
+        assertThat(Files.exists(file.resolve("occupant"))).isTrue();
+
+        // Recovery: unblock, flush again — the stale temp is truncated,
+        // rewritten, and consumed by the completed move.
+        Files.delete(file.resolve("occupant"));
+        Files.delete(file);
+        cache.flush();
+        assertThat(Files.isRegularFile(file)).isTrue();
+        assertThat(Files.exists(tempSibling()))
+                .as("the completed move consumed the temp")
+                .isFalse();
+        assertThat(new ZigbeeDeviceCache(file, clock).device(SNZB)).isPresent();
+    }
+
+    @Test
+    @DisplayName("F-3: a completed write replaces the previous complete file "
+            + "wholesale and leaves no .tmp residue — the final path holds "
+            + "old-complete or new-complete, never between")
+    void completedMove_replacesWholesale_leavesNoTempResidue()
+            throws IOException {
+        cache.recordAnnounce(SNZB, 0x6B9A);
+        cache.flush();
+        String previous = Files.readString(file, StandardCharsets.UTF_8);
+
+        cache.recordAnnounce(new IEEEAddress(0x0017880109AB12CDL), 0x22FE);
+        cache.flush();
+
+        assertThat(Files.readString(file, StandardCharsets.UTF_8))
+                .isNotEqualTo(previous);
+        assertThat(new ZigbeeDeviceCache(file, clock).all()).hasSize(2);
+        assertThat(Files.exists(tempSibling()))
+                .as("no residue beside the sidecar after a completed move")
+                .isFalse();
     }
 }
