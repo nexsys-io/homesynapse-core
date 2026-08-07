@@ -95,12 +95,22 @@ final class HeroLoopHardwareFreeIT {
         // NOT motion (asserted explicitly below).
         rig.reportOccupied(false);
         rig.deliverAndCycle();
-        awaitTrue(() -> !reportedValues("occupied").isEmpty(),
-                "the occupied=false baseline report");
+        try {
+            awaitTrue(() -> !reportedValues("occupied").isEmpty(),
+                    "the occupied=false baseline report");
+        } catch (AssertionError timeout) {
+            dumpForkCapture("the occupied=false baseline report (orig :98)");
+            throw timeout;
+        }
         rig.reportOccupied(true);
         rig.deliverAndCycle();
-        awaitTrue(() -> reportedValues("occupied").contains("true"),
-                "the occupied=true motion edge");
+        try {
+            awaitTrue(() -> reportedValues("occupied").contains("true"),
+                    "the occupied=true motion edge");
+        } catch (AssertionError timeout) {
+            dumpForkCapture("the occupied=true motion edge (orig :102)");
+            throw timeout;
+        }
         assertThat(events().stream()
                 .filter(event -> event.eventType().equals(EventTypes.STATE_REPORTED))
                 .map(EventEnvelope::payload)
@@ -112,8 +122,13 @@ final class HeroLoopHardwareFreeIT {
         // Step 3 — the engine fires: real trigger → run → command_issued(turn_on) →
         // dispatch → router → the REAL zigbee handler → the scripted NCP receives
         // the byte-asserted OnOff frame.
-        awaitTrue(() -> sentFrame(0x0006, 0x01).isPresent(),
-                "the On frame reaching the scripted NCP");
+        try {
+            awaitTrue(() -> sentFrame(0x0006, 0x01).isPresent(),
+                    "the On frame reaching the scripted NCP");
+        } catch (AssertionError timeout) {
+            dumpForkCapture("the On frame reaching the scripted NCP (orig :115)");
+            throw timeout;
+        }
         ZigbeeHardwareFreeRig.SentZcl onFrame = sentFrame(0x0006, 0x01).orElseThrow();
         assertThat(onFrame.networkAddress()).isEqualTo(ZigbeeHardwareFreeRig.HUE_NWK);
         assertThat(onFrame.destinationEndpoint())
@@ -620,5 +635,65 @@ final class HeroLoopHardwareFreeIT {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("interrupted awaiting the hero loop", ex);
         }
+    }
+
+    /**
+     * DURd-A2 (DIAGNOSTIC BRANCH — never merges): the generalized fork capture.
+     * Fires only when one of the three instrumented awaits exhausts, printing
+     * the discriminating state to stdout BEFORE the original AssertionError is
+     * rethrown — stdout lands in the test-reports artifact the hub reads. Pure
+     * observation: no added awaits, no ordering changes on the pass path, no
+     * time APIs (§4c). The capture body is exception-guarded so a capture
+     * failure can never mask or replace the real timeout signature.
+     *
+     * <p>The fork it discriminates (the A2 packet): H-E predicts
+     * {@code state_projection} not LIVE (or checkpoint trailing the motion
+     * report) + zero {@code state_changed} + labels intact + zero
+     * {@code command_issued}; the residual-label arm predicts labels wiped; an
+     * engine stall predicts {@code state_changed} present + labels intact +
+     * zero {@code command_issued}.</p>
+     */
+    private void dumpForkCapture(String timedOutAwait) {
+        StringBuilder sb = new StringBuilder("\n=== DURD-A2 FORK CAPTURE ===\n");
+        try {
+            sb.append("timedOutAwait=").append(timedOutAwait).append('\n');
+            for (SubscriberSnapshot snapshot : core.eventBus().subscribers()) {
+                sb.append("subscriber=").append(snapshot.subscriberId())
+                        .append(" mode=").append(snapshot.mode())
+                        .append(" checkpoint=").append(snapshot.checkpoint())
+                        .append('\n');
+            }
+            sb.append("stateChangedCount=")
+                    .append(countEventsOfType(EventTypes.STATE_CHANGED)).append('\n');
+            sb.append("automationTriggeredCount=")
+                    .append(countEventsOfType(EventTypes.AUTOMATION_TRIGGERED))
+                    .append('\n');
+            sb.append("commandIssuedCount=")
+                    .append(countEventsOfType(EventTypes.COMMAND_ISSUED)).append('\n');
+            sb.append("motionEntityStateReportedCount=")
+                    .append(events().stream()
+                            .filter(event -> event.eventType()
+                                    .equals(EventTypes.STATE_REPORTED))
+                            .filter(event -> event.subjectRef().id()
+                                    .equals(snzbEntity.value()))
+                            .count())
+                    .append('\n');
+            sb.append("snzbLabels=")
+                    .append(core.entityRegistry().findEntity(snzbEntity)
+                            .map(Entity::labels).map(Object::toString)
+                            .orElse("ENTITY-ABSENT"))
+                    .append('\n');
+            sb.append("hueLabels=")
+                    .append(core.entityRegistry().findEntity(hueEntity)
+                            .map(Entity::labels).map(Object::toString)
+                            .orElse("ENTITY-ABSENT"))
+                    .append('\n');
+            sb.append("storeLatestPosition=")
+                    .append(core.eventStore().latestPosition()).append('\n');
+        } catch (RuntimeException captureFailure) {
+            sb.append("capture-failed=").append(captureFailure).append('\n');
+        }
+        sb.append("=== END DURD-A2 FORK CAPTURE ===");
+        System.out.println(sb);
     }
 }
