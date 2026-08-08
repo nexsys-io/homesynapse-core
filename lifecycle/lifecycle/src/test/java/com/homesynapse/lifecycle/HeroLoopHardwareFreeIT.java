@@ -483,7 +483,8 @@ final class HeroLoopHardwareFreeIT {
             if (subscriberMode("automation_engine") == SubscriberMode.LIVE
                     && subscriberMode("command_dispatch_service") == SubscriberMode.LIVE
                     && subscriberMode("pending_command_ledger") == SubscriberMode.LIVE
-                    && subscriberMode("integration_supervisor") == SubscriberMode.LIVE) {
+                    && subscriberMode("integration_supervisor") == SubscriberMode.LIVE
+                    && subscriberMode("state_projection") == SubscriberMode.LIVE) {
                 return;
             }
             sleepBriefly();

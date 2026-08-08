@@ -423,14 +423,17 @@ final class RunPipelineReplaySafetyTest {
             SubscriberMode dispatch = subscriberMode("command_dispatch_service");
             SubscriberMode ledger = subscriberMode("pending_command_ledger");
             SubscriberMode router = subscriberMode("integration_supervisor");
+            SubscriberMode projection = subscriberMode("state_projection");
             failOnSuspended("automation_engine", automation);
             failOnSuspended("command_dispatch_service", dispatch);
             failOnSuspended("pending_command_ledger", ledger);
             failOnSuspended("integration_supervisor", router);
+            failOnSuspended("state_projection", projection);
             if (automation == SubscriberMode.LIVE
                     && dispatch == SubscriberMode.LIVE
                     && ledger == SubscriberMode.LIVE
-                    && router == SubscriberMode.LIVE) {
+                    && router == SubscriberMode.LIVE
+                    && projection == SubscriberMode.LIVE) {
                 return;
             }
             sleepBriefly();
