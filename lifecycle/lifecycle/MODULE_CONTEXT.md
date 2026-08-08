@@ -217,6 +217,12 @@ dependencies {
 - **M3.6d-b complete** — `HomeSynapseCore` composition-root facade, 12-step bootstrap, reverse shutdown. `SystemLifecycleManager` merger with `HomeSynapseCore` is post-M3.6 cleanup. Two open-rocks (OR-M3-15 `DerivationRule` placeholder, OR-M3-16 `ProjectionAdvancer` placeholder) will be resolved before M3.7.
 - Configuration dependency provides timeout values, grace periods, watchdog intervals
 
+### M9.5-DURd-B′ (2026-08-08) — the IT readiness contract now gates all FIVE runtime subscribers
+
+- **The delta (test-only; commit `ca0f41d`, CI #208 = the gate of record):** the four readiness-await copies — `awaitRuntimeSubscribersLive()` in `HeroLoopHardwareFreeIT` / `RestartHonestyIT` / `ZigbeeReplaySafetyIT`, and `RunPipelineReplaySafetyTest`'s per-id-locals + `failOnSuspended` variant — now conjoin **`state_projection` LIVE** alongside `automation_engine` / `command_dispatch_service` / `pending_command_ledger` / `integration_supervisor`. +10/−4; poll bounds, throws, and every assertion message byte-unchanged.
+- **Why (the DURd record):** `start()` already HARD-gates `awaitProjectionLive()` + `awaitRegistryProjectionLive()` pre-return (:589–:590; ~30 s bound, throws) — the conjunct RE-confirms liveness at the tests' own synchronization point, so a post-boot LIVE→SUSPENDED trip (the only exit from LIVE) reds readiness honestly instead of surfacing as a downstream await timeout. The #206 CI-red mechanism remains UNCONFIRMED-PROBABLE-H-E; the record lives in the hivemind's DURd return (§B′/§B′-AUDIT) and the CI-red evidence read's §11 closure.
+- **Rule for future ITs:** a new lifecycle test that copies the readiness helper carries all FIVE ids. Known stale-by-enumeration (left frozen by B′; pre-existing class): the variant's throw-message parenthetical (four ids) and its helper javadoc (three ids).
+
 ### M6.2 deliverables (2026-06-11) — PayloadCipher seam threading (Doc 15 §3.8 / CARRY 1)
 
 - **`HomeSynapseCore` gains the nullable `PayloadCipher` seam.** New final field `payloadCipher` + a 5-arg primary constructor; the existing 4-arg constructor delegates with `null` so every existing caller (`HomeSynapseCoreTest`, `HomeSynapseE2eHarness`) compiles and stays GREEN. The field is HELD only — no `start()` step touches it; M6.3 forwards it into the persistence write path and makes it required.
