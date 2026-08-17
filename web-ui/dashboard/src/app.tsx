@@ -10,6 +10,7 @@ import { API_MODE } from './lib/api';
 import { AppShell } from './components/AppShell';
 import { AuthGate } from './components/AuthGate';
 import { DevPanel } from './components/DevPanel';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { OverviewView } from './views/OverviewView';
 import { DevicesView } from './views/DevicesView';
 import { HealthView } from './views/HealthView';
@@ -41,7 +42,35 @@ export function App() {
 
 function Shell() {
   const route = useHashRoute();
-  return <AppShell active={route.name}>{renderView(route)}</AppShell>;
+  return (
+    <AppShell active={route.name}>
+      {/* THE ERROR-POSTURE LAW, ENFORCED AT THE CLASS (NEW-2; G1 rehearsal §6.3):
+          the boundary wraps the WHOLE view switch, inside AppShell, so ANY view's
+          render throw degrades to the honest render-failure card while the nav,
+          the status footer, and the poll loop (PollProvider, above) stay alive.
+          The 2026-07-27 / 2026-08-16 incident class — an uncontained throw
+          killing the view and freezing the app behind a stale spinner — is
+          unreachable by construction: no view renders outside this boundary.
+
+          resetKey is the full route identity (name + params), so navigating to
+          any other view — or another id within a view — resets a tripped
+          boundary; a crash never follows the user. "Try again" resets the
+          boundary, which remounts the view; useApi refetches on mount, so no
+          onRetry wiring is needed at this level. Views may still mount their
+          own inner boundary for tighter retry semantics (RunChainView does —
+          reload without remount); this outer mount is the floor, not a cap. */}
+      <ErrorBoundary resetKey={routeKey(route)}>{renderView(route)}</ErrorBoundary>
+    </AppShell>
+  );
+}
+
+/** Stable identity for a route INSTANCE (name + ordered params). */
+function routeKey(route: Route): string {
+  const params = Object.keys(route.params)
+    .sort()
+    .map((k) => `${k}=${route.params[k]}`)
+    .join('&');
+  return `${route.name}?${params}`;
 }
 
 function renderView(route: Route) {

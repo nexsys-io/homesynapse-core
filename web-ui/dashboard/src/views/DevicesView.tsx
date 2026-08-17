@@ -13,7 +13,7 @@ import {
   availabilityMeta,
   attrValue,
   brightnessDisplay,
-  clockTime,
+  clockTimeWithDate,
   displayName,
   labelFor,
   timeAgo,
@@ -138,8 +138,12 @@ function EntityDetail({ id }: { id: string }) {
           <dd>{timeAgo(s.lastChanged)}</dd>
         </div>
         <div class="kvRow">
+          {/* NEW-6: date-qualified (a report can be days old — a bare clock time
+              reads as today), and derived from the SAME parse as the prose above,
+              so the row and the sentence can never contradict (DX-20). An
+              unreadable stamp renders honest absence — never a 1970 misread. */}
           <dt>Last reported</dt>
-          <dd>{clockTime(s.lastReported)}</dd>
+          <dd>{clockTimeWithDate(s.lastReported)}</dd>
         </div>
       </dl>
     </div>

@@ -17,7 +17,7 @@ import { href } from '../lib/router';
 import {
   attrValueList,
   causalSentence,
-  clockTime,
+  clockTimeWithDate,
   EMPTY_CHAIN_NOTE,
   labelFor,
   NOT_RECORDED,
@@ -60,7 +60,9 @@ export function CausalChain({ chain }: { chain: Chain }) {
             "recorded before the current automations", never a blank. `firingValue`
             is OBSERVED NULL on the live wire in all eras — the detail then says
             "value not recorded" in words, never a blank and never "null". */}
-        <Step kind="trigger" tone="info" marker="●" line={`${labelFor(trigger?.subjectRef?.id)} ${triggerVerbFromValue(trigger?.firingValue)} at ${clockTime(trigger?.matchedAt)}.`}>
+        {/* NEW-6: matchedAt is date-qualified — a run can be days old, and a bare
+            clock time on an old run reads as today. */}
+        <Step kind="trigger" tone="info" marker="●" line={`${labelFor(trigger?.subjectRef?.id)} ${triggerVerbFromValue(trigger?.firingValue)} at ${clockTimeWithDate(trigger?.matchedAt)}.`}>
           <Detail label="Trigger">
             {trigger?.type ?? 'recorded before the current automations'} · {trigger?.firingValue ?? `value ${NOT_RECORDED}`}
           </Detail>

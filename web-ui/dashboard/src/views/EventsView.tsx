@@ -8,7 +8,7 @@
 import { api, ApiProblem } from '../lib/api';
 import type { EventSummary } from '../lib/api/contract';
 import { useApi } from '../lib/poll';
-import { clockTime, originMeta, timeAgo } from '../lib/format';
+import { clockTimeWithDate, originMeta, timeAgo } from '../lib/format';
 import { t } from '../lib/i18n';
 import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
@@ -47,8 +47,9 @@ export function EventsView() {
                   const o = originMeta(e.origin);
                   return (
                     <li key={e.eventId} class={styles.row}>
+                      {/* NEW-6: date-qualified — the feed can span days. */}
                       <time class={styles.time} title={e.occurredAt}>
-                        {clockTime(e.occurredAt)}
+                        {clockTimeWithDate(e.occurredAt)}
                       </time>
                       <div class={styles.body}>
                         <span class={styles.summary}>{e.summary}</span>

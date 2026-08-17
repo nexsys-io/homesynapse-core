@@ -209,10 +209,14 @@ function makeNonFiring(
     lastRelevantRunId: verdict === 'CONDITION_NOT_MET' || verdict === 'ACTED_BUT_UNCONFIRMED' ? 'run_demo_ref' : null,
     explanation: EXPLAIN[verdict],
     triggerSummary: 'This runs when Hallway Motion detects motion, after sunset.',
+    // OBSERVED LIVE SHAPE (2026-08-16, §4.5): the wire nulls the WHOLE object
+    // when there is no evaluation on record — the scenario fleet carries the
+    // real tri-state (object with values · whole-object null), not the
+    // always-populated shape that manufactured DX-16's false type.
     lastEvaluation:
       verdict === 'CONDITION_NOT_MET'
         ? { at: iso(30), conditionsResult: 'after sunset = false' }
-        : { at: null, conditionsResult: null },
+        : null,
     // v1.1.2 (SKIP-VIS DP-2): null on every non-silent-skip construction
     // (never false); the silent-skip case overrides with true.
     noCommandsIssued: null,

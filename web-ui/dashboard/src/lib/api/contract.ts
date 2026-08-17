@@ -346,8 +346,19 @@ export interface NonFiringExplanation {
   explanation: string;
   triggerSummary: string;
   /** v1.1.2 VALUE note (SKIP-VIS DP-3b): `at` carries the same eventTime-present
-   *  correction as runs[].triggeredAt (pre-fix wires understate it by durationMs). */
-  lastEvaluation: { at: string | null; conditionsResult: string | null };
+   *  correction as runs[].triggeredAt (pre-fix wires understate it by durationMs).
+   *  [OBSERVED LIVE NULLABILITY, 2026-08-16 — G1 rehearsal §4.5, DX-16]: the
+   *  deployed server serves `"lastEvaluation": null` (200 OK, byte-complete body
+   *  on record) for a NEVER_TRIGGERED automation with no evaluation on record.
+   *  The freeze text writes the object form with nullable INSIDES only; the wire
+   *  nulls the WHOLE object. Per the automationName/firingValue precedent the
+   *  mirror records the observed wire — the server is the frozen contract's
+   *  reality; this is a CLIENT-TYPE correction toward it, not a contract change.
+   *  A freeze-text clarification ask is recorded with the hub (FE lane return
+   *  2026-08-17). The non-nullable declaration was DX-16's defect: it concealed
+   *  the need for a guard and the always-populated mock manufactured the false
+   *  type (H8's origin exhibit). */
+  lastEvaluation: { at: string | null; conditionsResult: string | null } | null;
   /** v1.1.2 ADDITIVE (CORE-P2 → SKIP-VIS DP-2): TRUE exactly when the governing
    *  COMPLETED run's terminal payload shows actionCount > 0 with commandCount == 0
    *  (the silent-skip class — §3.9 all-skipped runs emit nothing; the payload

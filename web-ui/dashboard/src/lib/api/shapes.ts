@@ -274,6 +274,17 @@ export const validators: Record<EndpointId, Validator> = {
     oneOf(req(d, 'verdict', 'B3nf.data'), VERDICT, 'B3nf.data.verdict');
     isStr(req(d, 'explanation', 'B3nf.data'), 'B3nf.data.explanation');
     isStr(req(d, 'triggerSummary', 'B3nf.data'), 'B3nf.data.triggerSummary');
+    // v1.1 base field, OBSERVED OBJECT-NULL ON THE LIVE WIRE (2026-08-16, G1
+    // rehearsal §4.5 / DX-16): the deployed server serves "lastEvaluation": null.
+    // Object-OR-null; when object, `at`/`conditionsResult` are string|null.
+    // This validator previously skipped the field entirely — the omission that
+    // let the always-populated mock conceal the divergence (H8's origin).
+    const le = req(d, 'lastEvaluation', 'B3nf.data');
+    if (le !== null) {
+      if (!isObj(le)) throw new ContractError('B3nf.data.lastEvaluation: expected object or null');
+      strOrNull(req(le, 'at', 'B3nf.lastEvaluation'), 'B3nf.lastEvaluation.at');
+      strOrNull(req(le, 'conditionsResult', 'B3nf.lastEvaluation'), 'B3nf.lastEvaluation.conditionsResult');
+    }
     // v1.1.2 ADDITIVE (SKIP-VIS DP-2): noCommandsIssued serializes as true or
     // JSON null — NEVER false (absent ≠ false is the additive-nullable idiom;
     // the core constructs only Boolean.TRUE or null). Absence is lawful

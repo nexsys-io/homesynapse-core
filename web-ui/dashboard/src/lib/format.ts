@@ -52,30 +52,64 @@ export function labelFor(id: string | null | undefined): string {
 }
 
 /* ---- Time, in human words ---- */
+
+/** ONE parse for every displayed instant — the seconds-as-ms guard (NEW-6 /
+ *  the STATE-DIALECT law). The contract carries instants as ISO-8601 STRINGS;
+ *  the live /state wire currently serves fractional epoch-SECOND numbers
+ *  behind the same field. `new Date(<number>)` reads epoch-MILLISECONDS, so
+ *  such a value landed in 1970 and formatted as a plausible clock time — the
+ *  arithmetically-proven misread ("Last reported 9:40 AM" beside prose
+ *  "last heard from —", DX-20's self-contradiction). The rule: NEVER coerce a
+ *  non-string instant; every surface derives from this one parse, so the
+ *  prose and the row can no longer disagree. (Consuming the /state dialect
+ *  properly is FE-LIVE-V112 item (h) — a separate charter; until it lands the
+ *  surface says honest absence, never a fabricated time.) */
+export function parseInstant(isoOrNull: string | null | undefined): Date | null {
+  if (typeof isoOrNull !== 'string' || isoOrNull === '') return null;
+  const d = new Date(isoOrNull);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 export function timeAgo(isoOrNull: string | null | undefined, now = Date.now()): string {
-  if (!isoOrNull) return 'never';
-  const t = Date.parse(isoOrNull);
-  if (Number.isNaN(t)) return '—';
-  const s = Math.round((now - t) / 1000);
+  if (isoOrNull == null || isoOrNull === '') return 'never';
+  const d = parseInstant(isoOrNull);
+  if (!d) return '—';
+  const s = Math.round((now - d.getTime()) / 1000);
   if (s < 5) return 'just now';
   if (s < 60) return `${s} sec ago`;
   const m = Math.round(s / 60);
   if (m < 60) return `${m} min ago`;
   const h = Math.round(m / 60);
   if (h < 24) return `${h} hr ago`;
-  const d = Math.round(h / 24);
-  return `${d} day${d === 1 ? '' : 's'} ago`;
+  const d2 = Math.round(h / 24);
+  return `${d2} day${d2 === 1 ? '' : 's'} ago`;
 }
 
 export function clockTime(isoOrNull: string | null | undefined): string {
-  if (!isoOrNull) return '—';
-  const t = new Date(isoOrNull);
-  if (Number.isNaN(t.getTime())) return '—';
+  const t = parseInstant(isoOrNull);
+  if (!t) return '—';
   return t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+/** Clock time, DATE-QUALIFIED when the instant is not from today (NEW-6): a
+ *  bare "9:40 AM" on a report that is days old reads as this morning — a
+ *  false claim on the availability-honesty surface. Same-day stamps stay
+ *  clock-only; another day carries the date; another year carries the year. */
+export function clockTimeWithDate(isoOrNull: string | null | undefined, now = Date.now()): string {
+  const t = parseInstant(isoOrNull);
+  if (!t) return '—';
+  const time = t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const n = new Date(now);
+  const sameDay =
+    t.getFullYear() === n.getFullYear() && t.getMonth() === n.getMonth() && t.getDate() === n.getDate();
+  if (sameDay) return time;
+  const sameYear = t.getFullYear() === n.getFullYear();
+  const date = t.toLocaleDateString([], sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+  return `${time} on ${date}`;
+}
+
 /* ---- Command outcome (the trust win) ---- */
-export function outcomeMeta(o: ActionOutcome): { label: string; tone: Tone; help: string } {
+export function outcomeMeta(o: ActionOutcome | string | null | undefined): { label: string; tone: Tone; help: string } {
   switch (o) {
     case 'CONFIRMED':
       return { label: 'Confirmed', tone: 'ok', help: 'The device reported it actually did it.' };
@@ -94,6 +128,10 @@ export function outcomeMeta(o: ActionOutcome): { label: string; tone: Tone; help
     case 'SKIPPED':
       return { label: 'Skipped', tone: 'unknown', help: 'This step did not run.' };
   }
+  // Open-vocabulary hardening (NEW-3 sweep; the §4a law: a value the mapping
+  // does not cover renders honest-can't-know — never success, never a crash).
+  if (o == null || o === '') return { label: `Outcome ${NOT_RECORDED}`, tone: 'unknown', help: 'No outcome was recorded for this step.' };
+  return { label: `Recorded as "${o}"`, tone: 'unknown', help: 'The device reported an outcome this dashboard does not recognize yet — shown as recorded.' };
 }
 
 /* ---- Measured confirmation-rendering semantics (AMD-97, ratified 2026-07-01) ----
@@ -140,7 +178,7 @@ export function unconfirmableHint(command: string | null | undefined): string | 
 }
 
 /* ---- Event origin (never a silent blank) ---- */
-export function originMeta(o: Origin): { label: string; tone: Tone; phrase: string } {
+export function originMeta(o: Origin | string | null | undefined): { label: string; tone: Tone; phrase: string } {
   switch (o) {
     case 'AUTOMATION':
       return { label: 'Automation', tone: 'info', phrase: 'by an automation' };
@@ -153,6 +191,11 @@ export function originMeta(o: Origin): { label: string; tone: Tone; phrase: stri
     case 'UNKNOWN':
       return { label: 'Unknown', tone: 'unknown', phrase: "and we're not sure what caused it" };
   }
+  // Open-vocabulary hardening (NEW-3 sweep): B1 is unbuilt on the live wire, so
+  // its value set is unverifiable today — an off-vocabulary origin renders in
+  // the honest register when the endpoint ships, never a crash.
+  if (o == null || o === '') return { label: `Origin ${NOT_RECORDED}`, tone: 'unknown', phrase: "and we're not sure what caused it" };
+  return { label: `Recorded as "${o}"`, tone: 'unknown', phrase: "and we're not sure what caused it" };
 }
 
 /* Availability honesty (Rosonway §5.3, measured): AVAILABLE is what the system
@@ -160,7 +203,7 @@ export function originMeta(o: Origin): { label: string; tone: Tone; phrase: stri
  * `lastReported` is lawful, so AVAILABLE must NEVER be presented as proof of
  * live radio contact. The help strings say what the flag actually means; the
  * evidence-with-age line (availabilityEvidence) carries the age. */
-export function availabilityMeta(a: Availability): { label: string; tone: Tone; help: string } {
+export function availabilityMeta(a: Availability | string | null | undefined): { label: string; tone: Tone; help: string } {
   switch (a) {
     case 'AVAILABLE':
       return {
@@ -181,6 +224,9 @@ export function availabilityMeta(a: Availability): { label: string; tone: Tone; 
         help: 'An honest state, normal right after a restart — it settles on the device’s first report.',
       };
   }
+  // Open-vocabulary hardening (NEW-3 sweep, the closed-switch class).
+  if (a == null || a === '') return { label: `Status ${NOT_RECORDED}`, tone: 'unknown', help: 'No availability was recorded for this device.' };
+  return { label: `Recorded as "${a}"`, tone: 'unknown', help: 'The hub reported a status this dashboard does not recognize yet — shown as recorded.' };
 }
 
 /* ---- Availability as EVIDENCE WITH AGE — never the flag alone. ----
@@ -191,30 +237,42 @@ export function availabilityMeta(a: Availability): { label: string; tone: Tone; 
  * availability rendering pairs the flag with the last-evidence age — the flag says
  * what the system last CONCLUDED; the age says how old the evidence is. */
 export function availabilityEvidence(
-  a: Availability,
+  a: Availability | string | null | undefined,
   lastReported: string | null | undefined,
   now = Date.now(),
 ): string {
-  const age = lastReported ? timeAgo(lastReported, now) : null;
+  // ONE parse governs the whole surface (NEW-6 / DX-20): the age renders only
+  // when the stamp actually parses, so "last heard from —" is unreachable and
+  // the prose can never contradict the Last-reported row (both derive from
+  // parseInstant). Three honest branches: readable age · a report whose time
+  // is not usably recorded · no report at all.
+  const t = parseInstant(lastReported);
+  const age = t ? timeAgo(lastReported, now) : null;
+  const unreadableStamp = lastReported != null && !t;
   switch (a) {
     case 'AVAILABLE':
-      return age
-        ? `Available — last heard from ${age}.`
-        : 'Available — no report received yet.';
+      if (age) return `Available — last heard from ${age}.`;
+      if (unreadableStamp) return 'Available — the time of the last report is not recorded.';
+      return 'Available — no report received yet.';
     case 'UNAVAILABLE':
-      return age
-        ? `Offline — last heard from ${age}. Devices are rechecked every few minutes.`
-        : 'Offline — no report has been received. Devices are rechecked every few minutes.';
+      if (age) return `Offline — last heard from ${age}. Devices are rechecked every few minutes.`;
+      if (unreadableStamp) return 'Offline — the time of the last report is not recorded. Devices are rechecked every few minutes.';
+      return 'Offline — no report has been received. Devices are rechecked every few minutes.';
     case 'UNKNOWN':
       // Honest state after a restart (AMD-99): rehydrated from the log, waiting
       // for the first fresh report. Calm — it resolves on the first report.
-      return age
-        ? `Not determined yet — the last report on record is from ${age}. This settles after the next report.`
-        : 'Not determined yet — waiting for the device’s first report. This is normal right after a restart.';
+      if (age) return `Not determined yet — the last report on record is from ${age}. This settles after the next report.`;
+      if (unreadableStamp) return 'Not determined yet — the time of the last report is not recorded. This settles after the next report.';
+      return 'Not determined yet — waiting for the device’s first report. This is normal right after a restart.';
   }
+  // Open-vocabulary hardening: an off-vocabulary status still gets an honest
+  // evidence sentence — never the string "undefined" on a trust surface.
+  return age
+    ? `Status recorded as "${String(a)}" — last heard from ${age}.`
+    : `Status recorded as "${String(a)}" — no readable report time on record.`;
 }
 
-export function healthMeta(h: IntegrationHealth): { label: string; tone: Tone } {
+export function healthMeta(h: IntegrationHealth | string | null | undefined): { label: string; tone: Tone } {
   switch (h) {
     case 'HEALTHY':
       return { label: 'Healthy', tone: 'ok' };
@@ -225,6 +283,9 @@ export function healthMeta(h: IntegrationHealth): { label: string; tone: Tone } 
     case 'UNKNOWN':
       return { label: 'Unknown', tone: 'unknown' };
   }
+  // Open-vocabulary hardening (NEW-3 sweep, the closed-switch class).
+  if (h == null || h === '') return { label: `Health ${NOT_RECORDED}`, tone: 'unknown' };
+  return { label: `Recorded as "${h}"`, tone: 'unknown' };
 }
 
 export function runStatusMeta(s: RunStatus | string | null | undefined): { label: string; tone: Tone } {
@@ -246,7 +307,7 @@ export function runStatusMeta(s: RunStatus | string | null | undefined): { label
   return { label: `Recorded as "${s}"`, tone: 'unknown' };
 }
 
-export function verdictMeta(v: NonFiringVerdict): { label: string; tone: Tone } {
+export function verdictMeta(v: NonFiringVerdict | string | null | undefined): { label: string; tone: Tone } {
   switch (v) {
     case 'CONDITION_NOT_MET':
       return { label: 'A condition was not met', tone: 'warn' };
@@ -257,6 +318,12 @@ export function verdictMeta(v: NonFiringVerdict): { label: string; tone: Tone } 
     case 'DISABLED':
       return { label: 'It is turned off', tone: 'unknown' };
   }
+  // Open-vocabulary hardening (NEW-3 sweep; the runStatusMeta precedent + the
+  // §4a law): a value this mapping does not cover renders in the honest
+  // register — never a crash (`.tone` of undefined was a live crash class),
+  // never invented meaning, never success.
+  if (v == null || v === '') return { label: `Verdict ${NOT_RECORDED}`, tone: 'unknown' };
+  return { label: `Recorded as "${v}"`, tone: 'unknown' };
 }
 
 /* ---- Names for runs whose automation is no longer on record ----
@@ -324,7 +391,9 @@ export function causalSentence(chain: CausalChain): string {
   const trigger = chain.trigger;
   const triggerSubject = labelFor(trigger?.subjectRef?.id);
   const triggerVerb = triggerVerbFromValue(trigger?.firingValue ?? null);
-  const when = clockTime(trigger?.matchedAt);
+  // Date-qualified (NEW-6): a run can be days old; "at 9:40 AM" alone would
+  // read as this morning. Same-day runs stay clock-only (the mom-test budget).
+  const when = clockTimeWithDate(trigger?.matchedAt);
   const actions = chain.actions ?? [];
   const outcome = chain.outcome;
   // The silent-skip class: the run finished without doing anything visible —

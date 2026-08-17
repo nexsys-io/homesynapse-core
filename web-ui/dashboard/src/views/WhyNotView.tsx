@@ -9,7 +9,7 @@ import { api } from '../lib/api';
 import type { AutomationSummary, NonFiringExplanation } from '../lib/api/contract';
 import { useApi } from '../lib/poll';
 import { href } from '../lib/router';
-import { verdictMeta, clockTime } from '../lib/format';
+import { verdictMeta, clockTimeWithDate } from '../lib/format';
 import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { StatusPill } from '../components/StatusPill';
@@ -81,11 +81,17 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
                     <dt>What would make it run</dt>
                     <dd class={styles.left}>{nf.triggerSummary}</dd>
                   </div>
-                  {nf.lastEvaluation.at ? (
+                  {/* OBSERVED LIVE NULLABILITY (2026-08-16, §4.5): the wire serves
+                      `lastEvaluation: null` — the null case renders ABSENCE (the
+                      row simply doesn't render), never fabrication, never a
+                      throw. This exact dereference, unguarded, was DX-16's crash
+                      (`can't access property "at"`). Date-qualified stamp per
+                      NEW-6: an evaluation can be >24 h old. */}
+                  {nf.lastEvaluation?.at ? (
                     <div class="kvRow">
                       <dt>Last checked</dt>
                       <dd>
-                        {clockTime(nf.lastEvaluation.at)}
+                        {clockTimeWithDate(nf.lastEvaluation.at)}
                         {nf.lastEvaluation.conditionsResult ? ` · ${nf.lastEvaluation.conditionsResult}` : ''}
                       </dd>
                     </div>

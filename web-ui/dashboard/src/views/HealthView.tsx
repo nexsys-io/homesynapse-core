@@ -13,7 +13,7 @@ import { StatusPill } from '../components/StatusPill';
 import type { Tone } from '../lib/format';
 import { t } from '../lib/i18n';
 
-function projectionMeta(mode: ProjectionMode): { tone: Tone; label: string; plain: string } {
+function projectionMeta(mode: ProjectionMode | string | null | undefined): { tone: Tone; label: string; plain: string } {
   switch (mode) {
     case 'LIVE':
       return { tone: 'ok', label: 'Live', plain: t('health.live') };
@@ -22,6 +22,15 @@ function projectionMeta(mode: ProjectionMode): { tone: Tone; label: string; plai
     case 'REPLAY':
       return { tone: 'warn', label: 'Starting up', plain: 'Rebuilding current state from the activity log.' };
   }
+  // Open-vocabulary hardening (NEW-3 sweep, the closed-switch class): an
+  // off-vocabulary mode string previously returned undefined and `.tone`
+  // crashed the HEALTH surface — the one place that must stay honest when
+  // something is odd. Render what was recorded, in the honest register.
+  return {
+    tone: 'unknown',
+    label: mode == null || mode === '' ? 'State not recorded' : `Recorded as "${mode}"`,
+    plain: 'The hub reported a state this dashboard does not recognize yet. Nothing here is hidden — this is what it said.',
+  };
 }
 
 export function HealthView() {

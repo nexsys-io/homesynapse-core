@@ -372,7 +372,10 @@ export const nonFiring: Record<string, NonFiringExplanation> = {
     lastRelevantRunId: null,
     explanation: 'Nothing set it off. Hallway Motion has not detected motion in the last hour.',
     triggerSummary: 'This runs when Hallway Motion detects motion, after sunset.',
-    lastEvaluation: { at: null, conditionsResult: null },
+    // OBSERVED LIVE SHAPE (2026-08-16, G1 rehearsal §4.5 / DX-16): the wire
+    // serves the WHOLE object null for NEVER_TRIGGERED — the mock carries the
+    // real tri-state so a fixture-green build cannot hide the null again.
+    lastEvaluation: null,
     noCommandsIssued: null,
   },
   auto_frontdoor_welcome: {
