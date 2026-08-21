@@ -79,12 +79,15 @@ log "bundled ${JAR_COUNT} jars"
 # by another first-party jar, e.g. jdk.jfr in event-bus, was invisible). We
 # union with a known-good floor so the image never under-links (some modules
 # are reached reflectively and jdeps cannot see them).
+# jdeps emits 'Warning: split package:' lines on STDOUT under this all-roots
+# shape (each jar is both a root and a --class-path member) — the grep -Ex
+# whitelists the pure comma-joined module-deps line; nothing else can enter.
 log "computing JDK module set via jdeps over the full jar set …"
 JDEPS_MODS="$(
     find "${IMAGE}/lib" -maxdepth 1 -name '*.jar' -print0 | sort -z \
         | xargs -0 "${JDEPS}" --print-module-deps --ignore-missing-deps \
             --multi-release "${JFEATURE}" --class-path "${IMAGE}/lib/*" \
-        2>/dev/null || true
+        2>/dev/null | grep -Ex '[a-zA-Z0-9._]+(,[a-zA-Z0-9._]+)*' || true
 )"
 # Floor: modules commonly reached via reflection/service loading that jdeps may
 # miss. jdk.jfr rides the floor too (belt AND suspenders with the full-jar-set
