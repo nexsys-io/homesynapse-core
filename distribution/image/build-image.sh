@@ -72,17 +72,24 @@ JAR_COUNT="$(find "${IMAGE}/lib" -name '*.jar' | wc -l | tr -d ' ')"
 log "bundled ${JAR_COUNT} jars"
 
 # ── 2. jlink a minimal JDK-module runtime ───────────────────────────────────
-# Determine the java.* modules the app actually needs. jdeps on the full jar
-# set gives the closure; we union with a known-good floor so the image never
-# under-links (some modules are reached reflectively and jdeps cannot see them).
-log "computing JDK module set via jdeps …"
+# Determine the JDK modules the app actually needs. EVERY bundled jar is a
+# jdeps root, so the closure covers the whole classpath (F-23: the previous
+# single-root invocation analysed only the app jar — --class-path is where
+# jdeps RESOLVES classes, not what it ANALYSES — so a JDK module used solely
+# by another first-party jar, e.g. jdk.jfr in event-bus, was invisible). We
+# union with a known-good floor so the image never under-links (some modules
+# are reached reflectively and jdeps cannot see them).
+log "computing JDK module set via jdeps over the full jar set …"
 JDEPS_MODS="$(
-    "${JDEPS}" --print-module-deps --ignore-missing-deps --multi-release "${JFEATURE}" \
-        --class-path "${IMAGE}/lib/*" \
-        $(find "${IMAGE}/lib" -name 'homesynapse-app*.jar' | head -1) 2>/dev/null || true
+    find "${IMAGE}/lib" -maxdepth 1 -name '*.jar' -print0 | sort -z \
+        | xargs -0 "${JDEPS}" --print-module-deps --ignore-missing-deps \
+            --multi-release "${JFEATURE}" --class-path "${IMAGE}/lib/*" \
+        2>/dev/null || true
 )"
-# Floor: modules commonly reached via reflection/service loading that jdeps may miss.
-FLOOR="java.base,java.logging,java.naming,java.sql,java.management,java.xml,java.net.http,java.security.jgss,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.unsupported,jdk.zipfs,jdk.management"
+# Floor: modules commonly reached via reflection/service loading that jdeps may
+# miss. jdk.jfr rides the floor too (belt AND suspenders with the full-jar-set
+# jdeps above) — JFR event registration is exactly the reflective-reach class.
+FLOOR="java.base,java.logging,java.naming,java.sql,java.management,java.xml,java.net.http,java.security.jgss,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.unsupported,jdk.zipfs,jdk.management,jdk.jfr"
 ADD_MODULES="$(printf '%s,%s' "${JDEPS_MODS:-java.base}" "${FLOOR}" \
     | tr ',' '\n' | sed '/^$/d' | sort -u | paste -sd, -)"
 log "jlink --add-modules ${ADD_MODULES}"
@@ -94,6 +101,19 @@ log "jlink --add-modules ${ADD_MODULES}"
     --dedup-legal-notices=error-if-not-same-content \
     --output "${IMAGE}/runtime"
 log "jlinked runtime → $(du -sh "${IMAGE}/runtime" | cut -f1)"
+
+# ── 2b. Floor-presence assert — every requested module IS in the runtime ────
+# passes-but-false input: a module listed but broken at link — bounded by
+# jlink's own --dedup-legal-notices=error-if-not-same-content and the R-1
+# runtime probe downstream.
+LINKED="$("${IMAGE}/runtime/bin/java" --list-modules | cut -d@ -f1)" \
+    || die "runtime --list-modules failed — the jlinked image is broken"
+MISSING=""
+for m in $(printf '%s' "${ADD_MODULES}" | tr ',' ' '); do
+    printf '%s\n' "${LINKED}" | grep -qxF "${m}" || MISSING="${MISSING} ${m}"
+done
+[ -z "${MISSING}" ] || die "jlinked runtime is MISSING requested module(s):${MISSING}"
+log "floor-presence assert green: all $(printf '%s\n' "${ADD_MODULES}" | tr ',' '\n' | grep -c .) requested modules present in the runtime"
 
 # ── 3. Launcher — the Doc 12 / LTD-01 contract ──────────────────────────────
 # Applies the Locked JVM flags, uses the bundled JRE, runs the app on the

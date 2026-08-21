@@ -76,7 +76,55 @@ else
     bad "health probe never went green"; dump_logs
 fi
 
-# ╔══ 4. PAIRING TOKEN MINTED + LOCKED DOWN ══════════════════════════════════╗
+# ╔══ 4. EVENT WRITE PATH IS LIVE ════════════════════════════════════════════╗
+# The F-23 class: an artifact can boot, go RUNNING, and serve health/auth/
+# dashboard while the event-sourced spine is dead (jdk.jfr absent from the
+# jlinked runtime — every publish's metrics emission throws uncaught). Assert
+# the property, not the proxy: this boot PERSISTED events, and the service
+# logs carry ZERO uncaught-throw signatures on the jdk.jfr/BusMetrics paths.
+# passes-but-false input: an artifact that persists events but throws only on
+# swallowed JFR paths (probe 2 exists for it); a runtime whose boot
+# legitimately persists zero rows (P6 refutes this at source — if P6 fails,
+# this check's form is wrong: STOP).
+# ── probe 1: the events DB under the pinned data path has ≥1 committed row ──
+if ! command -v sqlite3 >/dev/null 2>&1; then
+    bad "sqlite3 unavailable — cannot probe the events DB (install sqlite3)"
+elif [ ! -f "${HS_DB_FILE}" ]; then
+    bad "events DB absent at ${HS_DB_FILE} — nothing persisted this boot"; dump_logs
+else
+    EVENT_ROWS="$(sqlite3 "file:${HS_DB_FILE}?mode=ro" 'SELECT COUNT(*) FROM events;' 2>/dev/null || true)"
+    case "${EVENT_ROWS}" in
+        ''|*[!0-9]*) bad "events row count unreadable at ${HS_DB_FILE} (got '${EVENT_ROWS}')"; dump_logs ;;
+        0) bad "event write path DEAD — 0 events rows after a healthy-looking boot"; dump_logs ;;
+        *) ok "event write path persisted ${EVENT_ROWS} event row(s) this boot (${HS_DB_FILE})" ;;
+    esac
+fi
+# ── probe 2: zero uncaught-throw signatures in the service logs ─────────────
+# Pinned real signature (H3 journal, 6×/boot on the broken artifact):
+#   java.lang.NoClassDefFoundError: jdk/jfr/Event
+#   Caused by: java.lang.ClassNotFoundException: jdk.jfr.Event
+# The unescaped dot nets BOTH jdk/jfr and jdk.jfr spellings; the bare
+# NoClassDefFoundError arm is the generic second net.
+THROW_RE='NoClassDefFoundError|jdk.jfr|BusMetrics'
+THROW_HITS=0
+LOG_SOURCES=0
+if have_systemd; then
+    JHITS="$(journalctl -u "${HS_UNIT}" -b --no-pager 2>/dev/null | grep -icE "${THROW_RE}" || true)"
+    THROW_HITS=$((THROW_HITS + ${JHITS:-0})); LOG_SOURCES=$((LOG_SOURCES + 1))
+fi
+if [ -f /var/log/homesynapse-stdout.log ]; then
+    SHITS="$(grep -icE "${THROW_RE}" /var/log/homesynapse-stdout.log || true)"
+    THROW_HITS=$((THROW_HITS + ${SHITS:-0})); LOG_SOURCES=$((LOG_SOURCES + 1))
+fi
+if [ "${LOG_SOURCES}" -eq 0 ]; then
+    bad "no log source to scan (no journal, no /var/log/homesynapse-stdout.log) — the throw probe cannot run"
+elif [ "${THROW_HITS}" -eq 0 ]; then
+    ok "zero uncaught-throw signatures across ${LOG_SOURCES} log source(s) (grep -icE '${THROW_RE}' = 0)"
+else
+    bad "${THROW_HITS} uncaught-throw signature line(s) in service logs (pattern: ${THROW_RE})"; dump_logs
+fi
+
+# ╔══ 5. PAIRING TOKEN MINTED + LOCKED DOWN ══════════════════════════════════╗
 if [ -s "${HS_TOKEN_FILE}" ]; then
     ok "first-run pairing token minted at ${HS_TOKEN_FILE}"
     OWNER="$(stat -c '%U' "${HS_TOKEN_FILE}" 2>/dev/null || echo '?')"
@@ -88,7 +136,7 @@ else
     bad "no pairing token at ${HS_TOKEN_FILE}"
 fi
 
-# ╔══ 5. AUTH IS ENFORCED (INV-SE-02) ════════════════════════════════════════╗
+# ╔══ 6. AUTH IS ENFORCED (INV-SE-02) ════════════════════════════════════════╗
 # An UNauthenticated request to the API must be rejected (401/403), proving the
 # surface is never open even on loopback.
 UNAUTH="$(curl -sS -o /dev/null -m 5 -w '%{http_code}' "http://${HS_BIND}:${HS_PORT}/api/v1/entities" 2>/dev/null)"; [ -n "${UNAUTH}" ] || UNAUTH=000
@@ -98,7 +146,7 @@ case "${UNAUTH}" in
     *) bad "unexpected unauth status ${UNAUTH}" ;;
 esac
 
-# ╔══ 6. DASHBOARD SERVE PATH (DASH-SERVE: B-1/B-2/B-3) ══════════════════════╗
+# ╔══ 7. DASHBOARD SERVE PATH (DASH-SERVE: B-1/B-2/B-3) ══════════════════════╗
 # The static shell must serve WITHOUT auth (posture (A)): packaging (B-2),
 # mount (B-1), and the exemption (B-3) are one seam — any broken hop blanks
 # the browser. Asserted on every push so the seam class stays detected (L4).
@@ -115,7 +163,7 @@ else
     bad "dashboard serve path broken — B-1/B-2/B-3 class: GET /dashboard/ returned ${DASH_SHELL}, expected 200"
 fi
 
-# ╔══ 7. STOP ════════════════════════════════════════════════════════════════╗
+# ╔══ 8. STOP ════════════════════════════════════════════════════════════════╗
 if [ "${MODE}" = "systemd" ]; then
     systemctl stop "${HS_UNIT}" && ok "service stopped" || bad "service stop"
     sleep 2
@@ -125,7 +173,7 @@ else
     pgrep -u "${HS_USER}" -f "${HS_LAUNCHER}" >/dev/null && bad "process survived SIGTERM" || ok "process exited on SIGTERM"
 fi
 
-# ╔══ 8. UNINSTALL (data preserved) ══════════════════════════════════════════╗
+# ╔══ 9. UNINSTALL (data preserved) ══════════════════════════════════════════╗
 if [ "${MODE}" = "systemd" ]; then
     if command -v apt-get >/dev/null 2>&1; then apt-get remove -y homesynapse >/dev/null 2>&1 || dpkg -r homesynapse
     else dpkg -r homesynapse; fi

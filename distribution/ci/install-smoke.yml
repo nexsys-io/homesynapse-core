@@ -64,6 +64,12 @@ jobs:
       - name: Assemble .deb
         run: distribution/deb/build-deb.sh
 
+      - name: Install smoke prerequisites (sqlite3)
+        run: |
+          # sqlite3 backs run-smoke's event write-path row-count probe (R-1).
+          # update-smoke's own install below stays for step self-sufficiency.
+          sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3
+
       - name: Install-smoke (install → boot → probe → assert → uninstall)
         run: sudo --preserve-env=JAVA_HOME distribution/smoke/run-smoke.sh
 
