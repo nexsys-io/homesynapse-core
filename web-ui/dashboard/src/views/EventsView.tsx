@@ -20,11 +20,16 @@ export function EventsView() {
   const state = useApi(() => api.listEvents({ sort: 'DESC', limit: 50 }));
 
   // The M7.5c live gap, degraded gracefully (FE-1): Core does not serve GET /api/v1/events
-  // until M7.5c, so a live backend answers 404 not-found here. That is an EXPECTED state on
+  // until M7.5c, so a live hub answers a ROUTER-level 404 here. That is an EXPECTED state on
   // a current hub — render it as calm teaching, never as an error. (Mock mode always serves
-  // the endpoint, so this renders only against a real pre-M7.5c Core.) Keyed on the SLUG
-  // (v1.1.1 — the wire `type` is the URI form).
-  if (state.status === 'error' && state.error instanceof ApiProblem && state.error.slug === 'not-found') {
+  // the endpoint, so this renders only against a real pre-M7.5c Core.)
+  // NEW-7 (a): keyed on the OBSERVED wire discriminator (path ∧ 404 ∧ application/json-not-
+  // problem+json — client.ts `isUnservedEndpoint404`, sitting record 2026-08-20 §6 row 5).
+  // The earlier `slug === 'not-found'` keying was an inference the live wire refuted (the
+  // rehearsal 404 rendered the generic card): a problem+json `not-found` would mean the
+  // endpoint EXISTS and something was not found — that case now keeps the honest generic
+  // card + Try again, as every OTHER 404 does.
+  if (state.status === 'error' && state.error instanceof ApiProblem && state.error.isUnservedEndpoint) {
     return (
       <Page title="Activity" lede="Recent things that happened in your home, newest first." meta={state.meta}>
         <Card>

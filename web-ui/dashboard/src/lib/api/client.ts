@@ -4,8 +4,9 @@
  * Transport-agnostic. The same typed endpoint layer (endpoints.ts) runs over a
  * REAL transport (fetch) or the MOCK transport (mock/) — the swap is ONE switch
  * in index.ts. Cross-cutting contract concerns live here: bearer auth, RFC 9457
- * problem+json, ETag/If-None-Match (304), and first-class detection of the
- * 503 `state-store-replaying` boot state.
+ * problem+json, ETag/If-None-Match (304), first-class detection of the
+ * 503 `state-store-replaying` boot state, and the unserved-endpoint 404
+ * discriminator (NEW-7 (a)).
  */
 import { problemSlug, type Envelope, type PaginationMeta, type ProblemDetail, type ResponseMeta } from './contract';
 import { validateAgainstContract, ContractError, type EndpointId } from './shapes';
@@ -74,6 +75,61 @@ export class ApiProblem extends Error {
   get isOffline() {
     return this.status === 0 || this.slug === 'network-unreachable';
   }
+  /** A FROZEN-UNBUILT endpoint the hub does not serve in this release (NEW-7 (a));
+   *  client-minted from the wire discriminator below — never from a body. */
+  get isUnservedEndpoint() {
+    return this.slug === UNSERVED_ENDPOINT_SLUG;
+  }
+}
+
+/* ---- NEW-7 (a): THE UNSERVED-ENDPOINT DISCRIMINATOR (observed live 2026-08-20) ----
+ * Sitting record §6 row 5: `GET /api/v1/events?sort=DESC&limit=50` on the deployed
+ * c091f7c hub answered 404 with `Content-Type: application/json` (159 B) — NOT
+ * `application/problem+json`. Three facts make the verdict safe WITHOUT the body:
+ *   (1) the PATH carries the premise — `/api/v1/events` has no route in this
+ *       release (B1 is frozen-unbuilt), so no handler exists to author a 404
+ *       there; a 404 on it can only be the router's "no such route";
+ *   (2) the MEDIA TYPE excludes the two other shapes a 404 can take — Core's
+ *       exception-path problems are `application/problem+json`
+ *       (RestFilters.java:551), and a non-JSON 404 (text/html) is not this;
+ *   (3) the STATUS is 404. Anything else keeps the generic honest card.
+ * Known and deliberate: Core's ENDPOINT-level problems (EndpointResponses.java
+ * `problem()` → `ctx.json`) go out as application/json with a problem-shaped
+ * body — so on a ROUTED path the media type alone would not separate "not in
+ * this release" from "not found"; that is why the path set below does the
+ * separating, and why it MUST SHRINK the moment an endpoint goes live (the
+ * mock→real swap removes the path here in the same change).
+ *
+ * Keyed ONLY on (path ∧ status ∧ media type). The 404 BODY was not captured and
+ * is never consulted — a body-keyed detector would be a guess (H8).
+ * HEADERS-ON-RECORD fixture: fixtures/wire-2026-08-20-events-404-headers.ts. */
+export const UNSERVED_ENDPOINT_SLUG = 'endpoint-not-in-this-release';
+
+/** The paths this client knows are FROZEN-UNBUILT on the live hub. Only the path
+ *  OBSERVED answering the router 404 is listed (B1); B2 `/api/v1/health` is
+ *  composed client-side from A4+A5 and was not observed, so it is not guessed in.
+ *  REMOVE a path here when Core ships it — the swap and this edit are one change. */
+const FROZEN_UNBUILT_PATHS: ReadonlySet<string> = new Set(['/api/v1/events']);
+
+/** The media type of a Content-Type header, parameters stripped, lower-cased. */
+export function mediaType(contentType: string | undefined): string {
+  return (contentType ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
+}
+
+export function isUnservedEndpoint404(path: string, status: number, contentType: string | undefined): boolean {
+  return status === 404 && FROZEN_UNBUILT_PATHS.has(path) && mediaType(contentType) === 'application/json';
+}
+
+function unservedEndpointProblem(path: string): ProblemDetail {
+  // Plain, calm, name-light. The Activity view renders its own teaching copy
+  // (i18n `events.notServedYet.*`); this title/detail is the honest fallback if
+  // any other surface ever shows this problem through the generic card.
+  return {
+    type: UNSERVED_ENDPOINT_SLUG,
+    title: 'This part of the dashboard is not in this release yet',
+    status: 404,
+    detail: `The hub does not serve ${path} yet. Nothing is wrong — it arrives with a later update.`,
+  };
 }
 
 function buildPath(path: string, query?: RawRequest['query']): string {
@@ -126,7 +182,11 @@ export function createClient(opts: ClientOptions): ApiClient {
       }
 
       if (res.status < 200 || res.status >= 300) {
-        const problem = toProblem(res);
+        // The router-level 404 on a frozen-unbuilt path is a teaching state, not an
+        // error (NEW-7 (a)) — decided on the wire discriminator BEFORE any body read.
+        const problem = isUnservedEndpoint404(path, res.status, res.headers['content-type'])
+          ? unservedEndpointProblem(path)
+          : toProblem(res);
         const err = new ApiProblem(problem);
         if ((err.isAuthRequired || err.isForbidden) && opts.onAuthError) opts.onAuthError(err);
         throw err;

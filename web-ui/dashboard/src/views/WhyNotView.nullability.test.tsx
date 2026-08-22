@@ -18,6 +18,7 @@ import { render, cleanup, act } from '@testing-library/preact';
 import { WhyNotView } from './WhyNotView';
 import { api } from '../lib/api';
 import { WIRE_20260816_NONFIRING_BENCH_HERO } from '../lib/api/fixtures/wire-2026-08-16-nonfiring';
+import { WIRE_20260820_NEVER_TRIGGERED_BENCH_HERO } from '../lib/api/fixtures/wire-2026-08-20-never-triggered';
 import { validateAgainstContract } from '../lib/api/shapes';
 import { RENDER_ERROR_TITLE } from '../components/ErrorBoundary';
 
@@ -27,9 +28,10 @@ afterEach(() => {
 });
 
 const FIX = WIRE_20260816_NONFIRING_BENCH_HERO;
+const FIX_0820 = WIRE_20260820_NEVER_TRIGGERED_BENCH_HERO;
 
-async function renderDetail(data: unknown) {
-  vi.spyOn(api, 'getNonFiring').mockResolvedValue({ data, meta: FIX.meta } as never);
+async function renderDetail(data: unknown, meta: typeof FIX.meta = FIX.meta) {
+  vi.spyOn(api, 'getNonFiring').mockResolvedValue({ data, meta } as never);
   const utils = render(<WhyNotView automationId={(data as { automationId?: string }).automationId ?? 'auto_x'} />);
   await act(async () => {}); // flush the resolved fetch and the rerender
   return utils;
@@ -54,6 +56,45 @@ describe('the REAL 2026-08-16 wire body (lastEvaluation: null) renders honestly'
   it('the mirror REJECTS a malformed lastEvaluation (neither object nor null)', () => {
     const bad = { data: { ...FIX.data, lastEvaluation: 'yesterday' }, meta: FIX.meta };
     expect(() => validateAgainstContract('B3:nonFiring', bad)).toThrow();
+  });
+});
+
+/* The 2026-08-20 capture (the NEW-2/3 build, a different deployment) is the SECOND
+ * real-wire body of the same null arm — filed as cross-deployment stability, not
+ * as a third arm (fixtures.stability.test.ts is the drift detector). Here: the
+ * view renders it to the SAME honest never-triggered surface as the 08-16 body.
+ * Disclosed: green-by-construction on a stable wire (the render path has no
+ * branch on any of the three values that differ). */
+describe('the REAL 2026-08-20 wire body (second deployment, same null arm) renders the same honest surface', () => {
+  /** The header's "Updated …" stamp is the one surface string that legitimately
+   *  differs between the two captures (it derives from meta.timestamp); mask it
+   *  so the comparison is the explanation surface, not the freshness stamp. */
+  const withoutFreshness = (text: string) => text.replace(/Updated .*? ago/, 'Updated <stamp>');
+
+  it('renders the (b)-arm "why didn\'t it?" copy — verdict pill, explanation, NO "Last checked" row, no spinner, no throw', async () => {
+    const { container } = await renderDetail(FIX_0820.data, FIX_0820.meta);
+    const text = container.textContent ?? '';
+    expect(text).toContain('Nothing set it off');
+    expect(text).toContain("Automation 'bench-hero' has not been triggered");
+    expect(text).toContain('What would make it run');
+    expect(text).toContain('state change');
+    expect(text).not.toContain('Last checked');
+    expect(text).not.toContain('It did run'); // lastRelevantRunId null → never the ran-fine pill
+    expect(text).not.toContain('Ran, but sent nothing'); // noCommandsIssued null → never the silent-skip pill
+    expect(text).not.toContain('null'); // never the string "null" on a surface
+    expect(text).not.toContain(RENDER_ERROR_TITLE);
+    expect(text).not.toContain('Loading…');
+  });
+
+  it('renders text-identical to the 2026-08-16 body once the freshness stamp is masked — the surface does not see the deployment', async () => {
+    const a = await renderDetail(FIX.data, FIX.meta);
+    const textA = withoutFreshness(a.container.textContent ?? '');
+    cleanup();
+    vi.restoreAllMocks();
+    const b = await renderDetail(FIX_0820.data, FIX_0820.meta);
+    const textB = withoutFreshness(b.container.textContent ?? '');
+    expect(textB).toBe(textA);
+    expect(textA).toContain('Updated <stamp>'); // the mask actually matched (the stamp rendered)
   });
 });
 
