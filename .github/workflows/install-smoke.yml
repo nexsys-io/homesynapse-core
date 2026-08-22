@@ -19,7 +19,7 @@ name: install-smoke
 on:
   push:
     branches: [ main, develop ]
-    paths: [ 'distribution/**', 'app/**', 'lifecycle/**', 'api/**', 'gradle/**', 'build-logic/**' ]
+    paths: [ 'distribution/**', 'app/**', 'lifecycle/**', 'api/**', 'gradle/**', 'build-logic/**', '.github/workflows/install-smoke.yml' ]
   pull_request:
     branches: [ main ]
     paths: [ 'distribution/**', 'app/**', 'lifecycle/**', 'api/**' ]
@@ -30,39 +30,85 @@ permissions:
 
 jobs:
   install-smoke:
-    name: Build image + .deb, install-smoke on a clean machine
-    runs-on: ubuntu-latest          # hosted Ubuntu runs systemd → real service install
+    name: Build image + .deb, install-smoke on a clean ${{ matrix.arch }} machine
+    # Two architectures, ONE instrument: both legs run the same scripts byte-for-
+    # byte; only the runner differs (hs_deb_arch reads dpkg --print-architecture
+    # on it). ubuntu-24.04-arm is GitHub-hosted and free for public repositories.
+    # fail-fast: false — one leg's red never hides the other's verdict.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}   # hosted Ubuntu runs systemd → real service install
     timeout-minutes: 25
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'corretto'   # matches ci.yml / LTD-10 pinning
           java-version: '21'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Set up Node 22 (dashboard packaging — installDist now builds the SPA)
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Static lint (shell scripts parse-clean)
+      - name: Static lint (shell scripts parse-clean + the version-grammar fixtures)
         run: |
           set -e
           for f in $(find distribution -name '*.sh'); do bash -n "$f"; done
           echo "all shell scripts parsed clean"
+          # F-V1: hs_version's bare-id wrapping + the build-image grammar regex, fixture-paired.
+          bash distribution/smoke/version-grammar-test.sh
 
       - name: Build runtime image (Gradle installDist → jlink)
         run: distribution/image/build-image.sh
 
       - name: Assemble .deb
         run: distribution/deb/build-deb.sh
+
+      - name: Arch-truth assert (.deb Architecture == ${{ matrix.arch }})
+        run: |
+          # passes-but-false input: an amd64 jlink image packaged under an arm64 label
+          # would pass every later check on the same runner — the control field is the
+          # cheapest honest discriminator; the boot in run-smoke is the second.
+          DEB="$(ls -1t distribution/deb/build/homesynapse_*.deb | head -1)"
+          ACTUAL="$(dpkg-deb --field "${DEB}" Architecture)"
+          if [ "${ACTUAL}" != "${{ matrix.arch }}" ]; then
+            echo "::error::arch-truth assert FAILED: ${DEB} carries Architecture='${ACTUAL}', this leg is '${{ matrix.arch }}'"
+            exit 1
+          fi
+          echo "arch-truth assert green: ${DEB} Architecture=${ACTUAL} == matrix.arch=${{ matrix.arch }}"
+
+      - name: Version-grammar echo (hs_version is tag-shaped; the .deb carries it)
+        run: |
+          # The same regex build-image.sh asserts at its capture site — one instrument,
+          # two rigs (copy, don't retype; version-grammar-test.sh pins the three carriers).
+          V="$(bash -c '. "distribution/common.sh"; hs_version')"
+          echo "hs_version=${V}"
+          printf '%s' "${V}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "::error::version of record '${V}' is not tag-shaped (expected ^[0-9]+\.[0-9]+\.[0-9]+)"; exit 1; }
+          DEB="$(ls -1t distribution/deb/build/homesynapse_*.deb | head -1)"
+          STAMPED="$(dpkg-deb --field "${DEB}" Version)"
+          IMAGE_STAMP="$(cat distribution/image/build/opt/homesynapse/VERSION)"
+          printf '%s' "${STAMPED}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "::error::${DEB} carries Version='${STAMPED}', which is not tag-shaped"; exit 1; }
+          [ "${STAMPED}" = "${IMAGE_STAMP}" ] \
+            || { echo "::error::${DEB} carries Version='${STAMPED}' but the image VERSION file says '${IMAGE_STAMP}'"; exit 1; }
+          [ "${STAMPED}" = "${V}" ] \
+            || echo "::warning::hs_version now says '${V}' but the build stamped '${STAMPED}' — the tree changed between build and echo (a -dirty suffix?)"
+          echo "version-grammar echo green: ${V} (tag-shaped; .deb Version=${STAMPED}; image VERSION=${IMAGE_STAMP})"
 
       - name: Install smoke prerequisites (sqlite3)
         run: |
@@ -83,7 +129,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: distribution-artifacts
+          name: distribution-artifacts-${{ matrix.arch }}
           path: |
             distribution/image/build/homesynapse_*.tar.gz
             distribution/deb/build/homesynapse_*.deb

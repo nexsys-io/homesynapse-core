@@ -43,6 +43,22 @@ GRADLE_TASK=":app:homesynapse-app:installDist"
 log() { printf '[build-image] %s\n' "$*" >&2; }
 die() { printf '[build-image] ERROR: %s\n' "$*" >&2; exit 1; }
 
+# ── Version-of-record grammar assert (F-V1) ─────────────────────────────────
+# hs_version (common.sh) wraps every bare commit id as 0.1.0+g<id>; a bare id that
+# leaks through (7c9e4fa — the 2026-08-22 Block-0 build) sorts ABOVE every 0.x.y
+# in dpkg, so every later wrapped build becomes an apt "downgrade". Asserted HERE,
+# outside any $( ) (a die inside a substitution cannot abort the script) and
+# before the version is used anywhere; the install-smoke workflow echoes the
+# same regex after the .deb is assembled — one instrument, two rigs.
+# passes-but-false input: a tag named like a version but semantically wrong
+# (e.g. an old tag reachable from HEAD) — bounded by the repo carrying no tags
+# today and by the R-9 install-rehearsal cadence.
+case "${VERSION}" in
+    *[!0-9A-Za-z.+~-]*|'') die "version of record '${VERSION}' is not a Debian-safe version string" ;;
+esac
+printf '%s' "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' \
+    || die "version of record '${VERSION}' is not tag-shaped (expected ^[0-9]+\.[0-9]+\.[0-9]+ — hs_version must wrap bare ids as 0.1.0+g<id>)"
+
 # ── 0. Toolchain preflight ──────────────────────────────────────────────────
 JAVA_HOME="${JAVA_HOME:-}"
 [ -n "${JAVA_HOME}" ] || die "JAVA_HOME must point at a JDK 21 (Corretto in CI)."

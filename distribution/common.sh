@@ -54,14 +54,19 @@ hs_version() {
     if command -v git >/dev/null 2>&1 && git -C "${_d}" rev-parse >/dev/null 2>&1; then
         _v="$(git -C "${_d}" describe --tags --always --dirty 2>/dev/null)"
         if [ -n "${_v}" ]; then
-            # A Debian Version field MUST start with a digit (dpkg-deb rejects otherwise).
-            # A tag-derived describe (1.2.3, 1.2.3-5-gabc1234) already does; a bare commit
-            # id from an untagged repo (git describe --always -> b85e1ed) does NOT, so wrap
-            # it as a 0.1.0 upstream + the +g<id> git build-metadata convention. This is the
-            # install-smoke gate-4 fix: SHAs starting with a-f assembled an invalid .deb.
+            # A Debian Version field MUST start with a digit (dpkg-deb rejects otherwise),
+            # and a bare commit id sorts as a NUMBER: 7c9e4fa orders ABOVE every 0.x.y, so
+            # once it ships every later build is an apt "downgrade" (F-V1). So wrap EVERY
+            # non-tag-shaped describe output as 0.1.0+g<id>: a tag-shaped describe (1.2.3,
+            # 1.2.3-5-gabc1234, 1.2.3-dirty) always carries a dot; a bare id (7c9e4fa,
+            # 7c9e4fa-dirty) never does -- the dot is the discriminator. The previous arm
+            # wrapped only a-f-leading ids: the 2026-08-22 Block-0 build printed
+            # version=7c9e4fa BARE while the H3 artifact was 0.1.0+gd26777c. Tags must be
+            # digit-leading (1.2.3, never v1.2.3): build-image.sh asserts the grammar
+            # ^[0-9]+\.[0-9]+\.[0-9]+ on the result; smoke/version-grammar-test.sh pins this arm.
             case "${_v}" in
-                [0-9]*) printf '%s' "${_v}" ;;
-                *)      printf '0.1.0+g%s' "${_v}" ;;
+                *.*) printf '%s' "${_v}" ;;
+                *)   printf '0.1.0+g%s' "${_v}" ;;
             esac
             return
         fi
