@@ -894,6 +894,13 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             // AB-1: build the local auth surface BEFORE binding any socket.
             OpaqueTokenStore tokenStore = new OpaqueTokenStore(configDir, clock);
             tokenStore.ensureInitialToken();
+            // R-6 TOKEN-OPS: consume config/token_ops.request (rotate | revoke <keyId> |
+            // mint <name>) — the operator path for rotation, the one that needs no
+            // token to present. Immediately after the initial mint, under the store's
+            // own lock, before any socket binds; the store deletes the request BEFORE
+            // executing it (a crash never replays it) and logs the summary WARN — the
+            // root keeps no reference to the report.
+            tokenStore.processOperatorRequests();
             AuthMiddleware authMiddleware = new StandardAuthMiddleware(tokenStore);
             RateLimiter rateLimiter = new StandardRateLimiter(clock);
 
@@ -934,6 +941,13 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             RestFilters.installAdminEndpoints(
                     app, eventBus, this, stateQueryService, stateProjection::cursorPosition,
                     persistenceFactory.eventStore()::latestPosition, PROJECTION_VERSION, clock);
+            // R-6: the token-admin surface (GET/POST /internal/tokens, DELETE
+            // /internal/tokens/{keyId}) for full-access token-holders — the pairing
+            // wizard's future hand-off. Same ordering class as the admin reads (auth →
+            // readiness → admin): behind installAuth, outside the readiness gate. The
+            // SAME store instance the auth filter validates against, so a revoke here
+            // is a 403 on the very next request.
+            RestFilters.installTokenAdminEndpoints(app, tokenStore, clock);
             // M7.5a: the run-query (causal read) endpoints. The ExplanationService is a pure
             // log-derived projection (reads the EventStore + the registry for best-effort
             // names); it is Object-erased on the gateway so com.homesynapse.automation stays

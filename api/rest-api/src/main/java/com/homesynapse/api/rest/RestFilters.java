@@ -220,6 +220,49 @@ public final class RestFilters {
     }
 
     /**
+     * Registers the R-6 token-admin surface (2026-08-22) on the given Javalin
+     * application instance — for full-access token-holders and the pairing
+     * wizard's future hand-off:
+     * <ul>
+     *   <li>{@code GET /internal/tokens} — every stored token's public summary
+     *       (never a hash, never a raw token)</li>
+     *   <li>{@code POST /internal/tokens} — mint; the raw token is returned ONCE</li>
+     *   <li>{@code DELETE /internal/tokens/{keyId}} — revoke (204 / 404)</li>
+     * </ul>
+     *
+     * <p>Same {@code /internal/*} class as {@link #installAdminEndpoints}: behind
+     * the {@link #installAuth(Object, AuthMiddleware, RateLimiter) catch-all auth
+     * filter}, outside the readiness gate; each handler then requires
+     * {@link ApiKeyClaims#fullAccess()} as the second layer (403 otherwise). No
+     * {@code meta.viewPosition}/ETag — these are not projection reads. Register
+     * AFTER {@code installAuth} (the lifecycle composition root does so). The
+     * operator path that needs NO token ({@code rotate} after a disclosure) is the
+     * request file consumed by {@link OpaqueTokenStore#processOperatorRequests()},
+     * not this surface. See {@link TokenAdminEndpoints}.</p>
+     *
+     * @param javalinApp the Javalin application instance (must be a
+     *                   {@link io.javalin.Javalin}); never {@code null}
+     * @param store      the token store the auth filter validates against —
+     *                   the SAME instance, so a revoke here is a 403 on the next
+     *                   request; never {@code null}
+     * @param clock      injected clock for {@code meta.timestamp}; never {@code null}
+     * @throws ClassCastException if {@code javalinApp} is not a
+     *         {@link io.javalin.Javalin} instance
+     */
+    public static void installTokenAdminEndpoints(Object javalinApp,
+                                                  OpaqueTokenStore store,
+                                                  Clock clock) {
+        Objects.requireNonNull(javalinApp, "javalinApp");
+        Objects.requireNonNull(store, "store");
+        Objects.requireNonNull(clock, "clock");
+        Javalin app = (Javalin) javalinApp;
+        TokenAdminEndpoints endpoints = new TokenAdminEndpoints(store, clock);
+        app.get(TokenAdminEndpoints.COLLECTION_PATH, endpoints.listHandler());
+        app.post(TokenAdminEndpoints.COLLECTION_PATH, endpoints.mintHandler());
+        app.delete(TokenAdminEndpoints.ITEM_PATH, endpoints.revokeHandler());
+    }
+
+    /**
      * Registers the M7.5a run-query (causal read) endpoints on the given Javalin
      * application instance:
      * <ul>

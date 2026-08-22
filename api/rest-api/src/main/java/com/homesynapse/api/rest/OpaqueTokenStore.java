@@ -6,9 +6,15 @@ package com.homesynapse.api.rest;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
@@ -16,9 +22,11 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -54,11 +62,30 @@ import org.slf4j.LoggerFactory;
  * in-place mutation of a token's secret and no default/shared bootstrap secret
  * (zero-config stays authenticated, INV-SE-02).</p>
  *
- * <p><strong>Thread safety.</strong> {@link #validate(String)} and
- * {@link #claimsFor(String)} read a {@link ConcurrentHashMap} and are safe for
- * concurrent virtual-thread invocation; mutations ({@link #mint}, {@link #revoke},
- * {@link #ensureInitialToken}) serialize on a {@link ReentrantLock} (LTD-11 — never
- * {@code synchronized}) and rewrite the backing file atomically.</p>
+ * <p><strong>The operator path (R-6, closes F-S5).</strong> The store file has ONE
+ * lawful writer — the running service — so a second process editing
+ * {@code api_tokens} offline is a lost-update race by construction. Operators
+ * therefore never edit the store: they write an <em>operator request</em> file,
+ * {@code config/token_ops.request} (one verb per line: {@code rotate},
+ * {@code revoke <keyId>}, {@code mint <display name>}), and restart. The
+ * composition root calls {@link #processOperatorRequests()} immediately after
+ * {@link #ensureInitialToken()}; the request is deleted BEFORE any verb executes,
+ * so a crash mid-batch can never replay it. {@link #rotate(String)} is the
+ * all-sessions rotation — the remediation for a disclosed credential — and the
+ * revoked rows stay in the store as history ({@code revoked=1}); nothing is ever
+ * deleted from the store. Read-only inspection rides {@link #summaries()}, which
+ * never exposes a hash or a raw token.</p>
+ *
+ * <p><strong>Thread safety.</strong> {@link #validate(String)},
+ * {@link #claimsFor(String)} and {@link #summaries()} read a
+ * {@link ConcurrentHashMap} and are safe for concurrent virtual-thread invocation;
+ * mutations ({@link #mint}, {@link #revoke}, {@link #rotate},
+ * {@link #ensureInitialToken}, {@link #processOperatorRequests}) serialize on a
+ * {@link ReentrantLock} (LTD-11 — never {@code synchronized}) and rewrite the
+ * backing file atomically (a same-directory {@code .tmp} sibling, fsynced, then
+ * {@code ATOMIC_MOVE} — a crash mid-rewrite leaves the previous file intact; the
+ * alternative, a truncated store, would read as EMPTY on the next boot and
+ * silently mint a fresh pairing token).</p>
  *
  * @see AuthMiddleware
  * @see StandardAuthMiddleware
@@ -72,6 +99,15 @@ public final class OpaqueTokenStore {
     /** Name of the one-time pairing artifact written on first run (raw token). */
     static final String INITIAL_TOKEN_ARTIFACT = "initial_api_token";
 
+    /**
+     * Name of the operator request file under the config directory (R-6). Written
+     * by the operator (root via {@code homesynapse-token}, or the service user on a
+     * bench), consumed exactly once at startup by {@link #processOperatorRequests()}.
+     * It must be READABLE by the service user (owner, or mode ≥ 0640) and the config
+     * directory must be writable by it (deletion) — both hold on the packaged path.
+     */
+    static final String OPERATOR_REQUEST_FILE = "token_ops.request";
+
     /** Raw token entropy in bytes (256-bit). */
     private static final int TOKEN_BYTES = 32;
 
@@ -82,10 +118,21 @@ public final class OpaqueTokenStore {
     private static final String SCOPE_DELIMITER = ",";
     private static final long NEVER_EXPIRES = -1L;
 
+    /** Same-directory temp sibling suffix for the atomic rewrite (the AtomicYamlWriter idiom). */
+    private static final String TEMP_SUFFIX = ".tmp";
+
+    /** Owner-only mode for both secret-bearing files on POSIX (the config dir's 0700 is the fence). */
+    private static final String OWNER_ONLY = "rw-------";
+
+    /** POSIX permission calls are guarded — the build and the desk run on Windows too. */
+    private static final boolean POSIX =
+            FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
+
     private static final Logger LOG = LoggerFactory.getLogger(OpaqueTokenStore.class);
 
     private final Path tokenFile;
     private final Path artifactFile;
+    private final Path requestFile;
     private final Clock clock;
     private final SecureRandom random = new SecureRandom();
     private final ReentrantLock writeLock = new ReentrantLock();
@@ -108,6 +155,64 @@ public final class OpaqueTokenStore {
     }
 
     /**
+     * Read-only view of one stored token for operators and the token-admin
+     * endpoints: the public key id and its claims — NEVER the hash, NEVER a raw
+     * token. {@code expiresAt} and {@code siteId} are {@code null} when unset.
+     *
+     * @param keyId       the public key identifier (not a secret)
+     * @param displayName the human-readable label bound at mint time
+     * @param createdAt   the mint instant
+     * @param expiresAt   the expiry instant, or {@code null} for a non-expiring token
+     * @param scopes      the granted scopes ({@code ["*"]} = full access); unmodifiable
+     * @param siteId      the site scope, or {@code null} for an unscoped token
+     * @param revoked     {@code true} once revoked — the row stays as history
+     */
+    public record TokenSummary(
+            String keyId,
+            String displayName,
+            Instant createdAt,
+            Instant expiresAt,
+            List<String> scopes,
+            String siteId,
+            boolean revoked) {
+
+        /** Normalizes {@code scopes} to an unmodifiable copy. */
+        public TokenSummary {
+            Objects.requireNonNull(keyId, "keyId");
+            Objects.requireNonNull(displayName, "displayName");
+            Objects.requireNonNull(createdAt, "createdAt");
+            scopes = (scopes == null) ? List.of() : List.copyOf(scopes);
+        }
+    }
+
+    /**
+     * What one {@link #processOperatorRequests()} pass did. A zero report (all
+     * counts 0, {@code skipped} empty) means no request file was present — or one
+     * was present but could not be read or removed and therefore executed NOTHING.
+     *
+     * @param rotated the number of {@code rotate} lines executed
+     * @param revoked the number of {@code revoke} lines that revoked an active token
+     * @param minted  the number of {@code mint} lines executed
+     * @param skipped one entry per line that executed nothing — {@code "line N: <reason>"}
+     *                (an unknown verb, a missing argument, a revoke of an unknown or
+     *                already-revoked key). The operator's text is NEVER echoed — a raw
+     *                token pasted where a key id belongs must not reach the journal —
+     *                except a key id that already exists in the store (public by
+     *                construction). Unmodifiable.
+     */
+    public record OperatorRequestReport(int rotated, int revoked, int minted, List<String> skipped) {
+
+        /** Normalizes {@code skipped} to an unmodifiable copy. */
+        public OperatorRequestReport {
+            skipped = (skipped == null) ? List.of() : List.copyOf(skipped);
+        }
+
+        private static OperatorRequestReport none() {
+            return new OperatorRequestReport(0, 0, 0, List.of());
+        }
+    }
+
+    /**
      * Opens (or initializes empty) the token store rooted at {@code configDir}.
      * Loads any existing {@code api_tokens} file; a malformed line is skipped with
      * a WARN (a dropped token simply fails to authenticate — fail-closed — and
@@ -123,6 +228,7 @@ public final class OpaqueTokenStore {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.tokenFile = configDir.resolve(TOKEN_FILE_NAME);
         this.artifactFile = configDir.resolve(INITIAL_TOKEN_ARTIFACT);
+        this.requestFile = configDir.resolve(OPERATOR_REQUEST_FILE);
         load();
     }
 
@@ -167,18 +273,46 @@ public final class OpaqueTokenStore {
     }
 
     /**
+     * A point-in-time snapshot of every stored token (active AND revoked — the
+     * revoked rows are history), sorted by {@code createdAt} then {@code keyId}.
+     * Carries no hash and no raw token; safe to print and to serialize.
+     *
+     * @return the summaries; never {@code null}; unmodifiable
+     */
+    public List<TokenSummary> summaries() {
+        List<TokenSummary> out = new ArrayList<>(byHash.size());
+        for (TokenRecord r : byHash.values()) {
+            out.add(new TokenSummary(r.keyId(), r.displayName(), r.createdAt(),
+                    r.expiresAt(), r.scopes(), r.siteId(), r.revoked()));
+        }
+        out.sort(Comparator.comparing(TokenSummary::createdAt)
+                .thenComparing(TokenSummary::keyId));
+        return List.copyOf(out);
+    }
+
+    /**
      * Mints a new token. The raw token is returned <em>once</em> — only its hash
      * is persisted.
      *
      * @param displayName human-readable label; never {@code null}
      * @param scopes      granted scopes ({@code ["*"]} for full access);
-     *                    never {@code null}
+     *                    never {@code null}; no scope may be blank or contain the
+     *                    store's scope delimiter ({@code ,}) — such a scope would
+     *                    persist as one value and reload as two
      * @param siteId      site scoping, or {@code null} for an unscoped token
      * @return the raw bearer token (shown once); never {@code null}
+     * @throws IllegalArgumentException if a scope is blank or contains {@code ,}
      */
     public String mint(String displayName, List<String> scopes, String siteId) {
         Objects.requireNonNull(displayName, "displayName");
         Objects.requireNonNull(scopes, "scopes");
+        for (String scope : scopes) {
+            if (scope == null || scope.isBlank() || scope.contains(SCOPE_DELIMITER)) {
+                throw new IllegalArgumentException(
+                        "a scope must be non-blank and must not contain '" + SCOPE_DELIMITER
+                                + "' (the persisted scope delimiter)");
+            }
+        }
         writeLock.lock();
         try {
             String rawToken = randomUrlSafe(TOKEN_BYTES);
@@ -221,8 +355,60 @@ public final class OpaqueTokenStore {
     }
 
     /**
+     * All-sessions rotation — the remediation for a disclosed credential: mints
+     * ONE new full-access, unscoped token under {@code displayName}, revokes EVERY
+     * other active token, persists the store ONCE, and writes the new raw token to
+     * the {@code initial_api_token} artifact so delivery rides the existing
+     * pairing path. The revoked rows stay as history — nothing is deleted. After
+     * this call exactly one token is active. The new token is minted BEFORE the
+     * others are revoked so a concurrent {@link #validate(String)} never observes a
+     * store with zero active tokens.
+     *
+     * @param displayName the label for the new token; never {@code null}
+     * @return the new raw bearer token (shown once); never {@code null}
+     */
+    public String rotate(String displayName) {
+        Objects.requireNonNull(displayName, "displayName");
+        writeLock.lock();
+        try {
+            String rawToken = randomUrlSafe(TOKEN_BYTES);
+            String newHash = sha256Hex(rawToken);
+            byHash.put(newHash, new TokenRecord(
+                    randomUrlSafe(KEY_ID_BYTES), displayName, clock.instant(), null,
+                    List.of(ApiKeyClaims.SCOPE_ALL), null, false));
+            for (var entry : byHash.entrySet()) {
+                TokenRecord r = entry.getValue();
+                if (!newHash.equals(entry.getKey()) && !r.revoked()) {
+                    entry.setValue(revokedCopy(r));
+                }
+            }
+            persist();
+            try {
+                writeArtifact(rawToken);
+            } catch (UncheckedIOException e) {
+                // The rotation IS durable (every prior token revoked, the new hash stored)
+                // but the new token cannot be delivered: name the state and the recovery
+                // before rethrowing — the raw value is never logged.
+                LOG.warn("rotation persisted — every prior token is revoked — but the new token "
+                        + "could not be delivered to {}; fix the path and run rotate again",
+                        artifactFile);
+                throw e;
+            }
+            return rawToken;
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /**
      * Revokes a token by its public {@code key_id} (rotation = mint-new then
      * revoke-old; no in-place secret mutation).
+     *
+     * <p>If the {@code initial_api_token} artifact still carries the token just
+     * revoked, a WARN says so: a client — or the packaged readiness probe, which
+     * authenticates with that artifact — reading it would be rejected. The
+     * artifact is left in place (deleting it would only trade a clear 403 for a
+     * probe timeout); {@code mint}/{@code rotate} refresh it.</p>
      *
      * @param keyId the public key identifier
      * @return {@code true} if a matching active token was revoked
@@ -234,9 +420,14 @@ public final class OpaqueTokenStore {
             for (var entry : byHash.entrySet()) {
                 TokenRecord r = entry.getValue();
                 if (keyId.equals(r.keyId()) && !r.revoked()) {
-                    entry.setValue(new TokenRecord(r.keyId(), r.displayName(), r.createdAt(),
-                            r.expiresAt(), r.scopes(), r.siteId(), true));
+                    entry.setValue(revokedCopy(r));
                     persist();
+                    if (artifactCarriesDeadToken()) {
+                        LOG.warn("the pairing artifact at {} now carries a token that no longer "
+                                + "validates (key {} revoked); a client or the packaged readiness "
+                                + "probe reading it will be rejected — refresh it with mint/rotate, "
+                                + "or remove it", artifactFile, keyId);
+                    }
                     return true;
                 }
             }
@@ -244,6 +435,143 @@ public final class OpaqueTokenStore {
         } finally {
             writeLock.unlock();
         }
+    }
+
+    /**
+     * Consumes the operator request file ({@value #OPERATOR_REQUEST_FILE}) — the
+     * operator path for rotation (R-6). Under the write lock:
+     * <ol>
+     *   <li>no file → a zero report, no log;</li>
+     *   <li>file present but UNREADABLE by the service user → WARN, zero report,
+     *       the file is left in place (the store's own never-brick-startup posture;
+     *       the operator fixes ownership/mode and restarts);</li>
+     *   <li>file read → it is DELETED FIRST; if the delete fails → WARN, zero
+     *       report, nothing executes (fail closed — an unremovable request would
+     *       replay on every start);</li>
+     *   <li>then each non-blank, non-{@code #} line executes: {@code rotate} →
+     *       {@link #rotate(String)} named {@code operator-rotated-<instant>};
+     *       {@code revoke <keyId>} → {@link #revoke(String)} (a {@code false}
+     *       return is a {@code skipped} entry); {@code mint <display name…>} →
+     *       {@link #mint} full-access/unscoped + the artifact; anything else →
+     *       {@code skipped}.</li>
+     * </ol>
+     * ONE WARN summary is logged whenever a request was consumed — counts plus
+     * the ARTIFACT PATH, never a token value (this path logs no secret; the
+     * initial-mint WARN in {@link #ensureInitialToken()} is the ruled exception).
+     *
+     * @return what executed; never {@code null}
+     */
+    public OperatorRequestReport processOperatorRequests() {
+        writeLock.lock();
+        try {
+            if (!Files.exists(requestFile)) {
+                return OperatorRequestReport.none();
+            }
+            List<String> lines;
+            try {
+                lines = Files.readAllLines(requestFile, StandardCharsets.UTF_8);
+            } catch (IOException e) {
+                LOG.warn("token_ops request at {} is unreadable by the service user; no operation "
+                        + "executed (the file must be owned by the service user or mode >= 0640): {}",
+                        requestFile, e.toString());
+                return OperatorRequestReport.none();
+            }
+            try {
+                Files.delete(requestFile);
+            } catch (IOException e) {
+                LOG.warn("token_ops request at {} could not be removed; no operation executed "
+                        + "(an unremovable request would replay on every start): {}",
+                        requestFile, e.toString());
+                return OperatorRequestReport.none();
+            }
+            int rotated = 0;
+            int revoked = 0;
+            int minted = 0;
+            List<String> skipped = new ArrayList<>();
+            int lineNumber = 0;
+            for (String raw : lines) {
+                lineNumber++;
+                String line = raw.strip();
+                if (line.isEmpty() || line.startsWith("#")) {
+                    continue;
+                }
+                String[] parts = line.split("\\s+", 2);
+                String verb = parts[0];
+                String argument = (parts.length > 1) ? parts[1].strip() : "";
+                String where = "line " + lineNumber + ": ";
+                // Skipped entries are logged: never echo the operator's text (a raw token
+                // pasted where a key id belongs would land in the journal) — only a key
+                // id the store already knows, which is public by construction.
+                switch (verb) {
+                    case "rotate" -> {
+                        rotate("operator-rotated-" + clock.instant());
+                        rotated++;
+                    }
+                    case "revoke" -> {
+                        if (argument.isEmpty()) {
+                            skipped.add(where + "revoke: missing keyId");
+                        } else if (revoke(argument)) {
+                            revoked++;
+                        } else if (claimsFor(argument).isPresent()) {
+                            skipped.add(where + "revoke " + argument + ": already revoked");
+                        } else {
+                            skipped.add(where + "revoke: no such keyId (argument not echoed)");
+                        }
+                    }
+                    case "mint" -> {
+                        if (argument.isEmpty()) {
+                            skipped.add(where + "mint: missing display name");
+                        } else {
+                            writeArtifact(mint(argument, List.of(ApiKeyClaims.SCOPE_ALL), null));
+                            minted++;
+                        }
+                    }
+                    default -> skipped.add(where + "unknown verb (line not echoed)");
+                }
+            }
+            LOG.warn("token operator request applied: rotated={} revoked={} minted={} skipped={} "
+                    + "— a minted token, if any, is at {}",
+                    rotated, revoked, minted, skipped, artifactFile);
+            return new OperatorRequestReport(rotated, revoked, minted, skipped);
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /**
+     * {@code true} when the {@code initial_api_token} artifact exists and the
+     * token it carries no longer validates (revoked, expired, or unknown) — the
+     * state a bare {@code revoke} of the pairing key leaves behind. Package-private
+     * so the predicate behind {@link #revoke}'s WARN is unit-pinned.
+     */
+    boolean artifactCarriesDeadToken() {
+        if (!Files.exists(artifactFile)) {
+            return false;
+        }
+        String artifactToken;
+        try {
+            artifactToken = Files.readString(artifactFile, StandardCharsets.UTF_8).trim();
+        } catch (IOException e) {
+            LOG.debug("pairing artifact at {} unreadable during the revoke check: {}",
+                    artifactFile, e.toString());
+            return false;
+        }
+        return validate(artifactToken).isEmpty();
+    }
+
+    private static TokenRecord revokedCopy(TokenRecord r) {
+        return new TokenRecord(r.keyId(), r.displayName(), r.createdAt(),
+                r.expiresAt(), r.scopes(), r.siteId(), true);
+    }
+
+    /**
+     * The resolved path of the store file ({@code configDir/api_tokens}) — for
+     * operator output only; the file holds hashes, never tokens.
+     *
+     * @return the store path; never {@code null}; the file may not exist yet
+     */
+    public Path storePath() {
+        return tokenFile;
     }
 
     /** @return the count of active (non-revoked, non-expired) tokens. */
@@ -302,7 +630,11 @@ public final class OpaqueTokenStore {
                 keyId, displayName, createdAt, expiresAt, scopes, siteId, revoked));
     }
 
-    /** Rewrites the whole token file. Caller holds the write lock. */
+    /**
+     * Rewrites the whole token file ATOMICALLY (the class javadoc's promise, made
+     * true by R-6): the previous file survives any failed write. Caller holds the
+     * write lock.
+     */
     private void persist() {
         StringBuilder sb = new StringBuilder();
         for (var entry : byHash.entrySet()) {
@@ -317,20 +649,53 @@ public final class OpaqueTokenStore {
                     .append(r.siteId() == null ? "" : encode(r.siteId())).append(FIELD_DELIMITER)
                     .append(r.revoked() ? "1" : "0").append('\n');
         }
-        try {
-            Files.writeString(tokenFile, sb.toString(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            throw new UncheckedIOException("failed to persist token store at " + tokenFile, e);
-        }
+        writeOwnerOnlyAtomically(tokenFile, sb.toString(), "failed to persist token store at ");
     }
 
     private void writeArtifact(String rawToken) {
+        writeOwnerOnlyAtomically(artifactFile, rawToken + System.lineSeparator(),
+                "failed to write initial token artifact at ");
+    }
+
+    /**
+     * Temp-then-{@code ATOMIC_MOVE} (the {@code AtomicYamlWriter} idiom, same
+     * directory only): create the {@code .tmp} sibling — owner-only from the first
+     * byte on POSIX — write, fsync, re-assert {@code rw-------}, then rename over
+     * {@code target}. A failure at any step removes the temp best-effort and leaves
+     * the previous {@code target} byte-identical. Non-POSIX (Windows) skips the
+     * permission calls; the packaged config dir's 0700 is the fence, this is the
+     * belt (the artifact and the store previously took umask-default 0644).
+     */
+    private static void writeOwnerOnlyAtomically(Path target, String content, String failurePrefix) {
+        Path tmp = target.resolveSibling(target.getFileName() + TEMP_SUFFIX);
         try {
-            Files.writeString(artifactFile, rawToken + System.lineSeparator(),
-                    StandardCharsets.UTF_8);
+            Files.deleteIfExists(tmp);
+            Set<StandardOpenOption> options = Set.of(StandardOpenOption.CREATE_NEW,
+                    StandardOpenOption.WRITE);
+            try (FileChannel channel = POSIX
+                    ? FileChannel.open(tmp, options, PosixFilePermissions.asFileAttribute(
+                            PosixFilePermissions.fromString(OWNER_ONLY)))
+                    : FileChannel.open(tmp, options)) {
+                ByteBuffer buffer = ByteBuffer.wrap(content.getBytes(StandardCharsets.UTF_8));
+                while (buffer.hasRemaining()) {
+                    channel.write(buffer);
+                }
+                channel.force(true);
+            }
+            if (POSIX) {
+                // The creation mode is masked by the process umask (a strict umask can strip
+                // owner bits too); re-assert after the write so the moved file is exactly
+                // rw------- regardless of the umask the service runs under.
+                Files.setPosixFilePermissions(tmp, PosixFilePermissions.fromString(OWNER_ONLY));
+            }
+            Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
-            throw new UncheckedIOException(
-                    "failed to write initial token artifact at " + artifactFile, e);
+            try {
+                Files.deleteIfExists(tmp);
+            } catch (IOException cleanup) {
+                e.addSuppressed(cleanup);
+            }
+            throw new UncheckedIOException(failurePrefix + target, e);
         }
     }
 

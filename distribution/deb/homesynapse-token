@@ -1,23 +1,203 @@
 #!/bin/sh
-# homesynapse-token — print the first-run pairing token (installed to /usr/bin).
-# The post-M9 pairing wizard's CLI handoff point; for now, the operator's way to
-# read the one-time bearer token the engine minted on first start.
+# homesynapse-token — the operator's token tool (installed to /usr/bin).
+#
+#   homesynapse-token                 print the first-run pairing token (the original verb)
+#   homesynapse-token status          list every stored token (read-only; runs the runtime's
+#                                     `token status` as the service user)
+#   homesynapse-token rotate          REVOKE EVERY token, mint ONE new full-access token (root)
+#   homesynapse-token revoke <keyId>  revoke one token by its public key id (root)
+#   homesynapse-token mint <name>     mint one additional full-access token (root)
+#
+# The mutating verbs never touch config/api_tokens — the running service is its ONLY
+# lawful writer (an offline edit is a lost-update race). They append one line to
+# config/token_ops.request (owner homesynapse, mode 0600: the service user must be
+# able to READ it; deletion needs the 0700 config dir, which it owns) and restart
+# the service, which consumes the request at startup — deleted BEFORE execution, so
+# a crash never replays it. A minted token is delivered to config/initial_api_token;
+# read it with the no-arg form, on this terminal only. Self-contained: distribution/
+# is NOT present at install time; paths mirror distribution/common.sh and
+# debian/postinst — keep them in sync. Procedure: distribution/docs/token-rotation.md.
 set -eu
 TOKEN_FILE="${HOMESYNAPSE_TOKEN_FILE:-/var/lib/homesynapse/config/initial_api_token}"
+HS_USER="homesynapse"
+HS_GROUP="homesynapse"
+HS_HOME="/var/lib/homesynapse"
+HS_CONFIG="${HS_HOME}/config"
+HS_REQUEST="${HS_CONFIG}/token_ops.request"
+HS_LAUNCHER="/opt/homesynapse/bin/homesynapse"
+HS_UNIT="homesynapse.service"
 
-if [ ! -e "${TOKEN_FILE}" ]; then
-    echo "No pairing token at ${TOKEN_FILE}."
-    echo "Either the service has not completed its first start yet, or a client"
-    echo "has already paired and the token file was removed."
-    exit 1
-fi
-if [ ! -r "${TOKEN_FILE}" ]; then
-    echo "Pairing token exists at ${TOKEN_FILE} but is not readable by this user." >&2
-    echo "Re-run with sudo." >&2
-    exit 1
+usage() {
+    cat <<'EOF'
+usage: homesynapse-token [status | rotate | revoke <keyId> | mint <name>]
+  (no verb)       print the first-run pairing token from config/initial_api_token
+  status          list every stored token (key id, name, created, expires, scopes,
+                  site, state) and the active/revoked counts. Read-only; runs the
+                  runtime's `token status` as the service user.
+  rotate          REVOKE EVERY token and mint ONE new full-access token — the
+                  remediation for a disclosed credential. Every client re-pairs.
+  revoke <keyId>  revoke one token by its public key id (`status` lists them).
+  mint <name>     mint one additional full-access token under <name>.
+rotate / revoke / mint require root. They append one line to
+  /var/lib/homesynapse/config/token_ops.request (owner homesynapse, mode 0600 —
+  the service user must be able to read it) and restart homesynapse.service,
+  which applies the request at startup. A minted token is delivered to
+  config/initial_api_token — read it with `sudo homesynapse-token`, here only.
+CAUTION: the packaged readiness probe (the unit's ExecStartPost) authenticates
+  with the token in config/initial_api_token. `revoke` of THAT key without a
+  `mint`/`rotate` leaves the probe rejected (403) and the restart FAILS — use
+  `rotate`, or `mint` first.
+Procedure and the bench recipe: distribution/docs/token-rotation.md (source tree).
+EOF
+}
+
+# The original no-arg verb — output unchanged (the postinst banner names it).
+print_token() {
+    if [ ! -e "${TOKEN_FILE}" ]; then
+        echo "No pairing token at ${TOKEN_FILE}."
+        echo "Either the service has not completed its first start yet, or a client"
+        echo "has already paired and the token file was removed."
+        exit 1
+    fi
+    if [ ! -r "${TOKEN_FILE}" ]; then
+        echo "Pairing token exists at ${TOKEN_FILE} but is not readable by this user." >&2
+        echo "Re-run with sudo." >&2
+        exit 1
+    fi
+
+    echo "Pairing token file : ${TOKEN_FILE}"
+    echo "Bearer token       : $(tr -d ' \r\n' < "${TOKEN_FILE}")"
+    echo
+    echo "Pair a client with this token, then delete the file:  sudo rm ${TOKEN_FILE}"
+}
+
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "homesynapse-token $1 requires root. Re-run with sudo." >&2
+        exit 1
+    fi
+}
+
+# $1 = one request line. Append-safe: an existing request keeps its owner/mode and
+# gains a line; a new file is created owner-only for the service user. Never
+# masked — a failed install/append is this script's non-zero exit (set -e).
+queue_request() {
+    if [ ! -d "${HS_CONFIG}" ]; then
+        echo "Config directory ${HS_CONFIG} is missing — is HomeSynapse Core installed?" >&2
+        exit 1
+    fi
+    # Root writes into a directory the service user owns: never follow a symlink
+    # or append to anything but a regular file there (fs.protected_symlinks only
+    # guards sticky world-writable dirs).
+    if [ -L "${HS_REQUEST}" ] || { [ -e "${HS_REQUEST}" ] && [ ! -f "${HS_REQUEST}" ]; }; then
+        echo "Refusing to write ${HS_REQUEST}: it exists and is not a regular file." >&2
+        exit 1
+    fi
+    if [ ! -e "${HS_REQUEST}" ]; then
+        install -o "${HS_USER}" -g "${HS_GROUP}" -m 0600 /dev/null "${HS_REQUEST}"
+    fi
+    printf '%s\n' "$1" >> "${HS_REQUEST}"
+    # A pre-existing file written by hand (root-owned, or 0644) is made readable by
+    # the service user here, so the service's unreadable-request arm never fires
+    # for a request this tool queued.
+    chown "${HS_USER}:${HS_GROUP}" "${HS_REQUEST}"
+    chmod 0600 "${HS_REQUEST}"
+}
+
+# $1 = the verb just queued.
+apply_request() {
+    if [ -d /run/systemd/system ]; then
+        if [ "$1" = rotate ]; then
+            # The unit's ExecStartPost probe (health-probe.sh) reads
+            # config/initial_api_token ONCE, the instant the JVM is exec'd — before
+            # the service has applied this request — and never re-reads a loaded
+            # value. With the pre-rotation artifact in place it would present the
+            # token `rotate` is about to revoke, get 403, and FAIL the start. With
+            # no artifact it polls the file until the service writes the NEW one
+            # (rotate re-creates it before the socket binds). The probe's path is
+            # hard-coded there, so this is the hard-coded path too. A rotate whose
+            # restart fails (see the journal) is re-run once the cause is fixed.
+            rm -f "${HS_CONFIG}/initial_api_token"
+        fi
+        # Blocks until the unit's ExecStartPost health probe passes. A failing
+        # probe is this command's non-zero exit; never swallowed.
+        systemctl restart "${HS_UNIT}"
+        # Consumption is asserted, not assumed: the service deletes the request
+        # BEFORE executing it, so a file still here means it executed NOTHING
+        # (it could not read or remove the file) and said why in the journal.
+        if [ -e "${HS_REQUEST}" ]; then
+            echo "Request NOT consumed — still at ${HS_REQUEST}. The service logged why:" >&2
+            echo "  journalctl -u ${HS_UNIT} -b --no-pager | grep token_ops" >&2
+            exit 1
+        fi
+        echo "Request applied at restart. A minted token, if any, is at ${TOKEN_FILE} — view it with: sudo homesynapse-token"
+    else
+        echo "Request queued at ${HS_REQUEST}."
+        echo "Restart the service to apply it (the request is consumed at the next start)."
+    fi
+}
+
+if [ $# -eq 0 ]; then
+    print_token
+    exit 0
 fi
 
-echo "Pairing token file : ${TOKEN_FILE}"
-echo "Bearer token       : $(tr -d ' \r\n' < "${TOKEN_FILE}")"
-echo
-echo "Pair a client with this token, then delete the file:  sudo rm ${TOKEN_FILE}"
+case "$1" in
+    status)
+        [ $# -eq 1 ] || { usage >&2; exit 2; }
+        # The store is homesynapse-owned 0600 inside a 0700 dir: run AS the service
+        # user. Already root → runuser (util-linux, always present); otherwise sudo
+        # (not a package dependency, but the operator's own way to root).
+        # HOMESYNAPSE_HOME mirrors the unit.
+        if [ "$(id -u)" -eq 0 ]; then
+            exec runuser -u "${HS_USER}" -- env HOMESYNAPSE_HOME="${HS_HOME}" "${HS_LAUNCHER}" token status
+        fi
+        exec sudo -u "${HS_USER}" env HOMESYNAPSE_HOME="${HS_HOME}" "${HS_LAUNCHER}" token status
+        ;;
+    rotate)
+        [ $# -eq 1 ] || { usage >&2; exit 2; }
+        require_root rotate
+        queue_request "rotate"
+        apply_request rotate
+        ;;
+    revoke)
+        [ $# -eq 2 ] || { usage >&2; exit 2; }
+        case "$2" in
+            ""|*[!A-Za-z0-9_-]*)
+                echo "revoke: <keyId> must be a non-empty URL-safe Base64 key id (see: sudo homesynapse-token status)" >&2
+                exit 2 ;;
+        esac
+        require_root revoke
+        queue_request "revoke $2"
+        apply_request revoke
+        ;;
+    mint)
+        [ $# -ge 2 ] || { usage >&2; exit 2; }
+        shift
+        NAME="$*"
+        # A literal newline in the variable — NOT $(printf '\n'), which command
+        # substitution strips to "" and would make the pattern match every name.
+        NL='
+'
+        case "${NAME}" in
+            *"${NL}"*)
+                echo "mint: <name> must not contain a newline" >&2
+                exit 2 ;;
+        esac
+        if [ -z "$(printf '%s' "${NAME}" | tr -d ' \t')" ]; then
+            echo "mint: <name> must not be blank" >&2
+            exit 2
+        fi
+        require_root mint
+        queue_request "mint ${NAME}"
+        apply_request mint
+        ;;
+    -h|--help)
+        usage
+        exit 2
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

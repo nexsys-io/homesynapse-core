@@ -68,6 +68,9 @@ final class GetEntityEndpointTest {
         endpoint.apply(ctx);
 
         assertThat(ctx.statusSet).isEqualTo(404);
+        // R-C (F-V2): an endpoint-level problem goes out as application/problem+json
+        // (Doc 09 §3.8), not the application/json that Javalin's json(...) sets.
+        assertThat(ctx.headers).containsEntry("Content-Type", "application/problem+json");
         @SuppressWarnings("unchecked")
         Map<String, Object> body = (Map<String, Object>) ctx.body;
         assertThat(body)

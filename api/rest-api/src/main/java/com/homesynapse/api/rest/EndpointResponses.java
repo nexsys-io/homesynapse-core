@@ -22,14 +22,29 @@ import java.util.Map;
  */
 final class EndpointResponses {
 
+    /** The RFC 9457 media type every non-2xx body carries (Doc 09 §3.8). */
+    static final String PROBLEM_JSON = "application/problem+json";
+
     private EndpointResponses() {
         // utility class
     }
 
     /**
      * Writes an RFC 9457 problem detail response onto the given context.
-     * Sets the status, the JSON body, and no headers (callers may add
-     * headers afterwards if needed).
+     * Sets the status, the JSON body, and the {@code Content-Type:
+     * application/problem+json} header (R-C / F-V2, 2026-08-22 — the media type
+     * is the contract's discriminator, Doc 09 §3.8; before this the endpoint-level
+     * problems reached the wire as {@code application/json} while only the
+     * exception path sent {@code problem+json}). Callers may add further headers
+     * afterwards.
+     *
+     * <p>The header is set AFTER {@link EndpointContext#json(Object)} on purpose:
+     * Javalin's {@code Context.json(...)} sets {@code application/json} itself
+     * (6.7.0 bytecode: {@code json → contentType(APPLICATION_JSON) → result}),
+     * so a header written before it would be overwritten. Jetty routes a
+     * {@code setHeader("Content-Type", …)} to {@code setContentType}, which is
+     * why a plain response header carries the override — the same order the
+     * exception path uses in {@code RestFilters.writeProblem}.</p>
      *
      * @param ctx     the response sink; never {@code null}
      * @param type    the problem type; supplies status, title, and type URI;
@@ -40,6 +55,7 @@ final class EndpointResponses {
     static void problem(EndpointContext ctx, ProblemType type, String detail) {
         ctx.status(type.defaultStatus());
         ctx.json(problemBody(type, detail));
+        ctx.header("Content-Type", PROBLEM_JSON);
     }
 
     /**

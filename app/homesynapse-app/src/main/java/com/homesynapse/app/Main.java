@@ -56,6 +56,14 @@ public final class Main {
         // this is the single sanctioned place to source the real clock.
         Clock clock = Clock.systemUTC();
 
+        // R-6 TOKEN-OPS: the read-only `token status` runtime mode. Dispatched BEFORE
+        // the directory creation below and before resolveHomeId's home_id write —
+        // the CLI mode performs NO writes (the store constructor only loads). It
+        // reuses the clock sourced above so this stays the single sanctioned place.
+        if (args.length >= 1 && "token".equals(args[0])) {
+            System.exit(TokenCli.run(args, resolveBaseDir().resolve("config"), clock));
+        }
+
         Path baseDir = resolveBaseDir();
         Path configDir = baseDir.resolve("config");
         Path dbPath = baseDir.resolve("data").resolve("homesynapse-events.db");
