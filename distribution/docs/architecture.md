@@ -116,22 +116,41 @@ ssh pi 'sudo apt install ./homesynapse_<ver>_arm64.deb'   # --allow-downgrades: 
 The tarball in the same artifact is the dpkg-free path (`sudo ../install/install.sh <tarball>`) and the
 input to `../update/update.sh`; both verify `MANIFEST.sha256` before trusting an image.
 
-### The version string (post-F-V1)
+### The version string (post-R-V)
 
-`hs_version` (`../common.sh`) resolves: explicit `HS_VERSION` → a `VERSION` file → `git describe
---tags --always --dirty` → `0.1.0-skeleton`. A describe output with a dot is tag-derived and passes
-through (`1.2.3`, `1.2.3-5-gabc1234`, `1.2.3-dirty`); a bare commit id never has one and is wrapped
-as `0.1.0+g<id>` (`0.1.0+g7c9e4fa`, `0.1.0+g7c9e4fa-dirty`). Tags must be digit-leading (`1.2.3`,
-never `v1.2.3`): `build-image.sh` dies on any version of record that is not
-`^[0-9]+\.[0-9]+\.[0-9]+`.
+`hs_version` (`../common.sh`) resolves: explicit `HS_VERSION` → **git** (`git describe --tags
+--always --dirty` — the commit decides, whatever the cwd) → a `VERSION` file beside the script or
+one level up (the git-less carrier: a tarball export, a container without git; the tracked
+`distribution/VERSION` reads `0.1.0-skeleton`) → `0.1.0-skeleton`. Under the build scripts'
+`bash -c '. common.sh; hs_version'` idiom `$0` is `bash`, so `build-image.sh` and `build-deb.sh`
+pass `HS_DIST_DIR="${DIST}"` to pin the lookup dir; the install-smoke echo step passes
+`HS_DIST_DIR=distribution` the same way — one instrument.
 
-**Why.** The previous arm wrapped only a–f-leading ids. A digit-leading id shipped bare (`7c9e4fa`,
-the 2026-08-22 Block-0 build), and dpkg orders `7c9e4fa` above every `0.x.y` — so the next wrapped
-build (`0.1.0+g…`) is a *downgrade* to apt.
+A describe output with a dot is tag-derived and passes through (`1.2.3`, `1.2.3-5-gabc1234`,
+`1.2.3-dirty`); a bare commit id never has one and is wrapped as
+**`0.1.0+git<YYYYMMDD.HHMMSS>.g<id>`** — the committer date in UTC (`git log -1 --format=%cd
+--date=format-local:%Y%m%d.%H%M%S` under `TZ=UTC`): `0.1.0+git20260822.143100.g7c9e4fa`,
+`0.1.0+git20260822.143100.g7c9e4fa-dirty`. A missing or malformed date yields the empty string,
+which `build-image.sh` refuses (fail-closed — never a lawful-looking `0.1.0+g<id>`, which would
+sort below every `+git` build). Tags must be digit-leading (`1.2.3`, never `v1.2.3`):
+`build-image.sh` dies on any version of record that is not `^[0-9]+\.[0-9]+\.[0-9]+`, and the
+echo step additionally refuses `0.1.0-skeleton` — the fallback passes the grammar but is never
+lawful in CI (`actions/checkout` leaves `.git`).
+
+**Why this shape orders.** dpkg sorts `+git…` above `+g…` because `g` is a proper prefix of
+`git`, so every R-V build sorts above every legacy `0.1.0+g<id>` artifact; two R-V builds order by
+committer time, monotone along `main` (a rebase re-stamps the committer date — the right clock
+for ordering); the scheme is depth-free (`rev-list --count` is a constant 1 on a shallow CI
+checkout; the commit carries its own date) and reproducible (commit date, never build date).
+`../smoke/version-grammar-test.sh` asserts the ordering rows at `dpkg --compare-versions` itself
+when the host has dpkg. The previous arm (`0.1.0+g<id>`, post-F-V1) did not order between builds
+— `g7c9e4fa` and `gd26777c` compare as strings — so "`--allow-downgrades` exactly once" would
+have broken on the second install (R-7 audit §2 H-2). Before F-V1 a digit-leading id shipped
+bare (`7c9e4fa`, the 2026-08-22 Block-0 build), and dpkg orders `7c9e4fa` above every `0.x.y`.
 
 **One-time cost, disclosed.** A card carrying a bare-id version (`dpkg-query -W -f '${Version}\n'
 homesynapse` prints `7c9e4fa`) needs `sudo apt install --allow-downgrades ./homesynapse_<ver>_arm64.deb`
-exactly once to move onto the corrected scheme (`dpkg -i` proceeds with a downgrade warning).
-Between two untagged builds the `+g<id>` suffixes do not order monotonically either — commit ids
-are not sequence numbers — so moving between untagged builds may need the same flag; the clean
-fix is a tag.
+exactly once to move onto the scheme (`dpkg -i` proceeds with a downgrade warning); no later
+install needs the flag. Tags begin at the first release, with a tagging rule written then — a
+tag at HEAD today would describe as bare `0.1.0`, which dpkg sorts **below** every `0.1.0+…`
+artifact.

@@ -17,6 +17,8 @@ availability/cost).
 in CI via a matrix; run the install-smoke on amd64 every commit and the arm64 smoke under
 emulation on a schedule. Move to **(c)** if/when an arm64 runner is approved. *Decision needed
 before the first release image; not blocking the skeleton.*
+**(c) taken at R-7 (2026-08-22):** `ubuntu-24.04-arm`, GitHub-hosted, free for public repos;
+first arm64 leg 3m01s wall-clock (install-smoke #33).
 
 ### E2 — Make bind host / port operator-configurable (Core)
 **Context.** `HomeSynapseConfig.HOME_DEFAULT` hard-codes loopback `127.0.0.1:7070`; the current

@@ -32,7 +32,7 @@ REPO="$(CDPATH= cd -- "${DIST}/.." && pwd)"
 # shellcheck source=../common.sh
 . "${DIST}/common.sh"
 
-VERSION="$(HS_VERSION="${HS_VERSION:-}" bash -c '. "'"${DIST}"'/common.sh"; hs_version')"
+VERSION="$(HS_VERSION="${HS_VERSION:-}" HS_DIST_DIR="${DIST}" bash -c '. "'"${DIST}"'/common.sh"; hs_version')"
 ARCH="$(hs_deb_arch)"
 OUT="${HERE}/build"
 IMAGE="${OUT}${HS_OPT}"          # build/opt/homesynapse — staged at its install path
@@ -44,20 +44,23 @@ log() { printf '[build-image] %s\n' "$*" >&2; }
 die() { printf '[build-image] ERROR: %s\n' "$*" >&2; exit 1; }
 
 # ── Version-of-record grammar assert (F-V1) ─────────────────────────────────
-# hs_version (common.sh) wraps every bare commit id as 0.1.0+g<id>; a bare id that
-# leaks through (7c9e4fa — the 2026-08-22 Block-0 build) sorts ABOVE every 0.x.y
-# in dpkg, so every later wrapped build becomes an apt "downgrade". Asserted HERE,
-# outside any $( ) (a die inside a substitution cannot abort the script) and
+# hs_version (common.sh) wraps every bare commit id as 0.1.0+git<date>.g<id>; a bare
+# id that leaks through (7c9e4fa — the 2026-08-22 Block-0 build) sorts ABOVE every
+# 0.x.y in dpkg, so every later wrapped build becomes an apt "downgrade". Asserted
+# HERE, outside any $( ) (a die inside a substitution cannot abort the script) and
 # before the version is used anywhere; the install-smoke workflow echoes the
 # same regex after the .deb is assembled — one instrument, two rigs.
-# passes-but-false input: a tag named like a version but semantically wrong
-# (e.g. an old tag reachable from HEAD) — bounded by the repo carrying no tags
-# today and by the R-9 install-rehearsal cadence.
+# passes-but-false input: the git-less fallback 0.1.0-skeleton (distribution/VERSION,
+# reached only when git is absent or the tree is not a repository) is tag-shaped
+# and Debian-safe, so it passes both checks below. In CI it is never lawful
+# (actions/checkout leaves .git, so the commit decides) and the twins' echo step
+# fences it ([ "${V}" != "0.1.0-skeleton" ]). A tag named like a version but
+# semantically wrong is a hypothetical — the repository carries no tags.
 case "${VERSION}" in
     *[!0-9A-Za-z.+~-]*|'') die "version of record '${VERSION}' is not a Debian-safe version string" ;;
 esac
 printf '%s' "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' \
-    || die "version of record '${VERSION}' is not tag-shaped (expected ^[0-9]+\.[0-9]+\.[0-9]+ — hs_version must wrap bare ids as 0.1.0+g<id>)"
+    || die "version of record '${VERSION}' is not tag-shaped (expected ^[0-9]+\.[0-9]+\.[0-9]+ — hs_version must wrap bare ids as 0.1.0+git<date>.g<id>)"
 
 # ── 0. Toolchain preflight ──────────────────────────────────────────────────
 JAVA_HOME="${JAVA_HOME:-}"

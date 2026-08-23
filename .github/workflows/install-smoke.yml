@@ -53,14 +53,14 @@ jobs:
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
-          distribution: 'corretto'   # matches ci.yml / LTD-10 pinning
+          distribution: 'corretto'   # matches ci.yml / LTD-01 pinning
           java-version: '21'
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v5
 
       - name: Set up Node 22 (dashboard packaging — installDist now builds the SPA)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
 
@@ -69,8 +69,20 @@ jobs:
           set -e
           for f in $(find distribution -name '*.sh'); do bash -n "$f"; done
           echo "all shell scripts parsed clean"
-          # F-V1: hs_version's bare-id wrapping + the build-image grammar regex, fixture-paired.
+          # F-V1/R-V: hs_version's scheme + order and the build-image grammar regex, fixture-paired.
           bash distribution/smoke/version-grammar-test.sh
+          # R-7b: every directive in the unit must be one systemd knows — an unknown key is
+          # IGNORED at load, silently (LogDirectory= vs LogsDirectory=, found at R-9). On a
+          # runner with no install the "Command … is not executable" lines are expected and
+          # must not fail the step; only an unknown directive does. (`! grep` would not fail
+          # the step under set -e — bash ignores -e for an inverted command — hence the if.)
+          command -v systemd-analyze >/dev/null || { echo "::error::systemd-analyze is missing on this runner"; exit 1; }
+          systemd-analyze --man=no verify distribution/systemd/homesynapse.service 2>&1 | tee /tmp/unit-verify.log
+          if grep -q 'Unknown key name' /tmp/unit-verify.log; then
+            echo "::error::the unit carries a directive systemd does not know (see 'Unknown key name' above)"
+            exit 1
+          fi
+          echo "unit directives verified"
 
       - name: Build runtime image (Gradle installDist → jlink)
         run: distribution/image/build-image.sh
@@ -95,10 +107,15 @@ jobs:
         run: |
           # The same regex build-image.sh asserts at its capture site — one instrument,
           # two rigs (copy, don't retype; version-grammar-test.sh pins the three carriers).
-          V="$(bash -c '. "distribution/common.sh"; hs_version')"
+          # HS_DIST_DIR pins the lookup dir exactly as the build scripts pass it.
+          V="$(HS_DIST_DIR=distribution bash -c '. "distribution/common.sh"; hs_version')"
           echo "hs_version=${V}"
           printf '%s' "${V}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+' \
             || { echo "::error::version of record '${V}' is not tag-shaped (expected ^[0-9]+\.[0-9]+\.[0-9]+)"; exit 1; }
+          # The git-less fallback is tag-shaped and Debian-safe, so it passes the regex — the
+          # passes-but-false input. In CI it is never lawful: actions/checkout leaves .git.
+          [ "${V}" != "0.1.0-skeleton" ] \
+            || { echo "::error::version of record is the git-less fallback '0.1.0-skeleton' — never lawful in CI (actions/checkout leaves .git)"; exit 1; }
           DEB="$(ls -1t distribution/deb/build/homesynapse_*.deb | head -1)"
           STAMPED="$(dpkg-deb --field "${DEB}" Version)"
           IMAGE_STAMP="$(cat distribution/image/build/opt/homesynapse/VERSION)"
@@ -108,7 +125,10 @@ jobs:
             || { echo "::error::${DEB} carries Version='${STAMPED}' but the image VERSION file says '${IMAGE_STAMP}'"; exit 1; }
           [ "${STAMPED}" = "${V}" ] \
             || echo "::warning::hs_version now says '${V}' but the build stamped '${STAMPED}' — the tree changed between build and echo (a -dirty suffix?)"
-          echo "version-grammar echo green: ${V} (tag-shaped; .deb Version=${STAMPED}; image VERSION=${IMAGE_STAMP})"
+          # The .deb's sha256 is the origin hash the install packets compare their desktop
+          # and card copies against — the artifact channel is hash-verifiable from this log.
+          DEB_SHA="$(sha256sum "${DEB}" | cut -c1-64)"
+          echo "version-grammar echo green: ${V} (scheme 0.1.0+git<YYYYMMDD.HHMMSS>.g<sha>; .deb Version=${STAMPED}; image VERSION=${IMAGE_STAMP}; sha256 ${DEB_SHA}  ${DEB##*/})"
 
       - name: Install smoke prerequisites (sqlite3)
         run: |
@@ -127,7 +147,7 @@ jobs:
 
       - name: Upload artifacts (image, .deb, logs)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: distribution-artifacts-${{ matrix.arch }}
           path: |

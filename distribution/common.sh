@@ -45,33 +45,54 @@ HS_PORT="7070"        # PLAN-M3 §10
 HS_HEALTH_PATH="${HS_HEALTH_PATH:-/health}"
 
 # ── Version ─────────────────────────────────────────────────────────────────
-# Resolution order: explicit env → distribution/VERSION → git describe → default.
-_dist_dir() { CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || echo "."; }
+# Resolution order: explicit env → git (the commit decides, whatever the cwd) →
+# distribution/VERSION → ../VERSION (the git-less carrier: a tarball export, a
+# container without git) → default. HS_DIST_DIR pins the lookup dir when this file
+# is sourced under `bash -c` ($0 is then `bash`, not a path, so _dist_dir would
+# resolve the CWD — the build scripts pass HS_DIST_DIR="${DIST}" for that reason).
+_dist_dir() {
+    if [ -n "${HS_DIST_DIR:-}" ]; then printf '%s' "${HS_DIST_DIR}"; return; fi
+    CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || echo "."
+}
 hs_version() {
     if [ -n "${HS_VERSION:-}" ]; then printf '%s' "${HS_VERSION}"; return; fi
     _d="$(_dist_dir)"
-    if [ -f "${_d}/VERSION" ]; then tr -d ' \n' < "${_d}/VERSION"; return; fi
-    if [ -f "${_d}/../VERSION" ]; then tr -d ' \n' < "${_d}/../VERSION"; return; fi
     if command -v git >/dev/null 2>&1 && git -C "${_d}" rev-parse >/dev/null 2>&1; then
         _v="$(git -C "${_d}" describe --tags --always --dirty 2>/dev/null)"
         if [ -n "${_v}" ]; then
-            # A Debian Version field MUST start with a digit (dpkg-deb rejects otherwise),
-            # and a bare commit id sorts as a NUMBER: 7c9e4fa orders ABOVE every 0.x.y, so
-            # once it ships every later build is an apt "downgrade" (F-V1). So wrap EVERY
-            # non-tag-shaped describe output as 0.1.0+g<id>: a tag-shaped describe (1.2.3,
-            # 1.2.3-5-gabc1234, 1.2.3-dirty) always carries a dot; a bare id (7c9e4fa,
-            # 7c9e4fa-dirty) never does -- the dot is the discriminator. The previous arm
-            # wrapped only a-f-leading ids: the 2026-08-22 Block-0 build printed
-            # version=7c9e4fa BARE while the H3 artifact was 0.1.0+gd26777c. Tags must be
+            # The scheme (R-V, nexsys-hivemind context/audits/2026-08-22_R7_intake_two-layer-audit_v55-beat-6.md §2 H-2):
+            # a tag-shaped describe (1.2.3, 1.2.3-5-gabc1234, 1.2.3-dirty) always carries a
+            # dot and passes through; a bare id (7c9e4fa, 7c9e4fa-dirty) never does and is
+            # wrapped as 0.1.0+git<YYYYMMDD.HHMMSS>.g<id>, the committer date in UTC.
+            # WHY it orders: a Debian Version must start with a digit (a bare id sorts as a
+            # NUMBER above every 0.x.y — F-V1, the 2026-08-22 Block-0 build printed 7c9e4fa
+            # BARE); the former 0.1.0+g<id> form did not order between builds (dpkg compares
+            # g7c9e4fa and gd26777c as strings); +git… sorts ABOVE every +g… build because g
+            # is a proper prefix of git; two +git builds order by committer time, monotone
+            # along main (a rebase re-stamps %cd, which is the right clock for ordering);
+            # depth-free (rev-list --count is a constant 1 on a shallow CI checkout; the
+            # commit carries its own date); reproducible (commit date, never build date).
+            # A -dirty suffix rides through (…g<id>-dirty). FAIL-CLOSED: a missing or
+            # malformed date prints '' — build-image.sh dies on it and dpkg-deb rejects an
+            # empty Version — never 0.1.0+g<id>, which is lawful-looking but sorts BELOW
+            # every +git build and would re-open the downgrade trap. Tags must be
             # digit-leading (1.2.3, never v1.2.3): build-image.sh asserts the grammar
             # ^[0-9]+\.[0-9]+\.[0-9]+ on the result; smoke/version-grammar-test.sh pins this arm.
             case "${_v}" in
                 *.*) printf '%s' "${_v}" ;;
-                *)   printf '0.1.0+g%s' "${_v}" ;;
+                *)
+                    _cd="$(TZ=UTC git -C "${_d}" log -1 --format=%cd --date=format-local:%Y%m%d.%H%M%S 2>/dev/null || true)"
+                    case "${_cd}" in
+                        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9])
+                            printf '0.1.0+git%s.g%s' "${_cd}" "${_v}" ;;
+                        *) printf '' ;;
+                    esac ;;
             esac
             return
         fi
     fi
+    if [ -f "${_d}/VERSION" ]; then tr -d ' \n' < "${_d}/VERSION"; return; fi
+    if [ -f "${_d}/../VERSION" ]; then tr -d ' \n' < "${_d}/../VERSION"; return; fi
     printf '0.1.0-skeleton'
 }
 

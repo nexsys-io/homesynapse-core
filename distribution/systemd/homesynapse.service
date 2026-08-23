@@ -28,7 +28,7 @@ Group=homesynapse
 # Mode 0700 because the event store and the first-run pairing token live here.
 StateDirectory=homesynapse
 StateDirectoryMode=0700
-LogDirectory=homesynapse
+LogsDirectory=homesynapse
 ConfigurationDirectory=homesynapse
 ConfigurationDirectoryMode=0750
 WorkingDirectory=/var/lib/homesynapse

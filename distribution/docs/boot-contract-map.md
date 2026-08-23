@@ -67,19 +67,29 @@ config dir is created `0700` owned by `homesynapse`, so the token is unreadable 
 users regardless. (A Core change to write the token `0600` explicitly is **escalation E6** —
 defence in depth.)
 
-## Health / readiness — why an authed probe, no `Type=notify`
+## Health / readiness — an unauthenticated loopback `/health` probe, no `Type=notify`
 
-1. **Every path is authenticated.** `RestFilters.installAuth` registers a `before(*)` filter
-   covering `/api/*`, `/internal/*`, and every other path (INV-SE-02). There is **no**
-   unauthenticated health endpoint. ⇒ the readiness probe authenticates with the first-run
-   token against a cheap `GET /api/v1/entities`: `200` = ready, `503` = up-but-not-ready,
-   `401/403` = auth fault. (A dedicated unauthenticated loopback `/health` is **escalation E3**.)
-2. **`sd_notify` cannot work today.** `SystemdHealthReporter` is implemented but (a) the
-   composition root doesn't select it yet ("…responsibility (lifecycle / M13)") and (b) it
-   throws on JDK 21 — *"AF_UNIX SOCK_DGRAM is unsupported (JEP 380 stream-only) … deferred to
-   M13."* `NoOpHealthReporter` is the live path. ⇒ the unit is `Type=exec` with an
-   `ExecStartPost` HTTP probe, **not** `Type=notify`/`WatchdogSec`. The M13 flip is staged and
-   commented in the unit (OR-M13-SDNOTIFY).
+1. **Every data path is authenticated; `/health` is the one loopback exemption.**
+   `RestFilters.installAuth` registers a `before(*)` filter covering `/api/*`, `/internal/*`,
+   and every other path (INV-SE-02). Since R-9 (2026-08-22) the filter exempts exactly
+   `GET`/`HEAD /health` for **loopback callers only** (R-H1): `200` ⇔ the state projection is
+   `LIVE`, `503` = up-but-not-ready (body `{"status":"<mode>"}`, `Cache-Control: no-store`);
+   off loopback the same path still needs a token. ⇒ the unit's readiness gate is
+   `ExecStartPost=… health-probe.sh --wait --timeout 90 --health-path /health` — it reads
+   **no** token, so the first-run pairing artifact may be deleted after pairing without
+   affecting any restart; a `401/403` on `/health` is a start failure, never a silent pass.
+   The authenticated `GET /api/v1/entities` probe survives only as `run-smoke.sh` check 3,
+   which proves the minted token validates. **Escalation E3 is CLOSED at R-9** — return:
+   `nexsys-hivemind/context/audits/2026-08-22_R9_E3-HEALTH_return.md`.
+2. **`sd_notify` cannot work today, and the `Type=notify` block is a DANGER note, not a
+   staged flip.** `SystemdHealthReporter` is implemented but (a) the composition root doesn't
+   select it yet ("…responsibility (lifecycle / M13)") and (b) it throws on JDK 21 — *"AF_UNIX
+   SOCK_DGRAM is unsupported (JEP 380 stream-only) … deferred to M13."* `NoOpHealthReporter`
+   is the live path. ⇒ the unit is `Type=exec` with the `ExecStartPost` HTTP probe, **not**
+   `Type=notify`/`WatchdogSec`. Enabling the commented block today bricks the service (systemd
+   holds the unit `activating` until `TimeoutStartSec`, then start-limits it — OR-M13-SDNOTIFY
+   is HELD; R10-IN-L); the unit's own comment carries the mechanism and the precondition (a
+   working sd_notify transport proven on the target JDK).
 
 ## Exit codes → restart policy
 
