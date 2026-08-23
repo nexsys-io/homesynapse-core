@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,6 +19,7 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -40,6 +42,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * permission-mechanism tests are POSIX-gated AND non-root-gated via
  * {@link Assumptions} — root ignores directory write bits and container CI may
  * run as root; the desk runs on Windows.</p>
+ *
+ * <p>R-H2 (R-9, 2026-08-22) adds the last-full-access-token guard:
+ * {@code revoke} returns {@link OpaqueTokenStore.RevokeOutcome} and REFUSES to
+ * revoke the only active full-access token (the self-lockout class); a scoped
+ * token revokes freely, an expired full-access row does not count as active,
+ * {@code rotate} is never refused, and the request-file {@code revoke} arm
+ * reports the refusal as a {@code skipped} entry. Fixtures that revoke a
+ * full-access token therefore mint a second one first — asserting the
+ * {@code REVOKED} outcome so a refusal can never make them vacuous.</p>
  */
 @DisplayName("OpaqueTokenStore -- file-backed opaque bearer tokens")
 final class OpaqueTokenStoreTest {
@@ -79,6 +90,10 @@ final class OpaqueTokenStoreTest {
 
     private static OpaqueTokenStore.OperatorRequestReport zeroReport() {
         return new OpaqueTokenStore.OperatorRequestReport(0, 0, 0, List.of());
+    }
+
+    private static String b64(String value) {
+        return Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8));
     }
 
     @Test
@@ -134,16 +149,19 @@ final class OpaqueTokenStoreTest {
     }
 
     @Test
-    @DisplayName("a revoked token no longer validates")
+    @DisplayName("a revoked token no longer validates — REVOKED while a second full-access token "
+            + "is active; an already-revoked or unknown key is NOT_FOUND")
     void revokedTokenRejected() {
         OpaqueTokenStore store = new OpaqueTokenStore(configDir, FIXED_CLOCK);
         String token = store.mint("ops", List.of(ApiKeyClaims.SCOPE_ALL), null);
+        store.mint("keeper", List.of(ApiKeyClaims.SCOPE_ALL), null);
         String keyId = store.validate(token).orElseThrow().keyId();
 
-        assertThat(store.revoke(keyId)).isTrue();
+        assertThat(store.revoke(keyId)).isEqualTo(OpaqueTokenStore.RevokeOutcome.REVOKED);
         assertThat(store.validate(token)).isEmpty();
-        // Re-revoking an already-revoked key reports no change.
-        assertThat(store.revoke(keyId)).isFalse();
+        // Re-revoking an already-revoked key reports no change; so does an unknown key.
+        assertThat(store.revoke(keyId)).isEqualTo(OpaqueTokenStore.RevokeOutcome.NOT_FOUND);
+        assertThat(store.revoke("no-such-key")).isEqualTo(OpaqueTokenStore.RevokeOutcome.NOT_FOUND);
     }
 
     @Test
@@ -279,8 +297,10 @@ final class OpaqueTokenStoreTest {
         OpaqueTokenStore store = new OpaqueTokenStore(configDir, FIXED_CLOCK);
         String a = store.mint("a", List.of(ApiKeyClaims.SCOPE_ALL), null);
         String keyA = keyIdOf(store, a);
+        // mint BEFORE revoke — the doc's single-restart one-liner order; lines execute in
+        // order, so the revoke of keyA is no longer the last full-access token (R-H2).
         Files.writeString(requestFile(),
-                "# rotation batch\n\nrevoke " + keyA + "\n   mint   Ops laptop  \n");
+                "# rotation batch\n\n   mint   Ops laptop  \nrevoke " + keyA + "\n");
 
         OpaqueTokenStore.OperatorRequestReport report = store.processOperatorRequests();
 
@@ -426,13 +446,14 @@ final class OpaqueTokenStoreTest {
         OpaqueTokenStore store = new OpaqueTokenStore(configDir, FIXED_CLOCK);
         String a = store.mint("a", List.of(ApiKeyClaims.SCOPE_ALL), null);
         String b = store.mint("b", List.of("entities:read"), "site-2");
-        store.revoke(keyIdOf(store, a));
+        store.mint("c", List.of(ApiKeyClaims.SCOPE_ALL), null);
+        assertThat(store.revoke(keyIdOf(store, a))).isEqualTo(OpaqueTokenStore.RevokeOutcome.REVOKED);
 
         assertThat(Files.exists(tokenFile().resolveSibling("api_tokens.tmp"))).isFalse();
         assertThat(Files.exists(tokenFile())).isTrue();
 
         OpaqueTokenStore reopened = new OpaqueTokenStore(configDir, FIXED_CLOCK);
-        assertThat(reopened.summaries()).hasSize(2);
+        assertThat(reopened.summaries()).hasSize(3);
         assertThat(reopened.validate(a)).isEmpty();
         assertThat(reopened.validate(b)).hasValueSatisfying(identity ->
                 assertThat(identity.keyId()).isEqualTo(keyIdOf(store, b)));
@@ -490,11 +511,117 @@ final class OpaqueTokenStoreTest {
         assertThat(store.artifactCarriesDeadToken()).as("no artifact yet").isFalse();
         String pairing = store.ensureInitialToken().orElseThrow();
         assertThat(store.artifactCarriesDeadToken()).as("fresh artifact validates").isFalse();
+        // A second full-access token so the revoke below is a real revoke (R-H2).
+        store.mint("keeper", List.of(ApiKeyClaims.SCOPE_ALL), null);
 
-        assertThat(store.revoke(keyIdOf(store, pairing))).isTrue();
+        assertThat(store.revoke(keyIdOf(store, pairing)))
+                .isEqualTo(OpaqueTokenStore.RevokeOutcome.REVOKED);
         assertThat(store.artifactCarriesDeadToken()).as("artifact token revoked").isTrue();
 
         store.rotate("fresh");
         assertThat(store.artifactCarriesDeadToken()).as("rotate rewrote the artifact").isFalse();
+    }
+
+    // ── R-H2 (R-9, 2026-08-22): the last-full-access-token guard ───────
+
+    @Test
+    @DisplayName("revoke REFUSES the last active full-access token: nothing persisted (the store "
+            + "file is byte-identical), the token still validates, the row stays active")
+    void revokeRefusesTheLastActiveFullAccessToken() throws Exception {
+        OpaqueTokenStore store = new OpaqueTokenStore(configDir, FIXED_CLOCK);
+        String only = store.mint("only", List.of(ApiKeyClaims.SCOPE_ALL), null);
+        String keyId = keyIdOf(store, only);
+        byte[] before = Files.readAllBytes(tokenFile());
+
+        assertThat(store.revoke(keyId))
+                .isEqualTo(OpaqueTokenStore.RevokeOutcome.REFUSED_LAST_FULL_ACCESS);
+
+        assertThat(Files.readAllBytes(tokenFile())).isEqualTo(before);
+        assertThat(store.validate(only)).isPresent();
+        assertThat(store.activeKeyCount()).isEqualTo(1);
+        assertThat(store.summaries()).singleElement()
+                .satisfies(s -> assertThat(s.revoked()).isFalse());
+        // A scoped sibling does not change the verdict — it grants nothing administrative.
+        store.mint("reader", List.of("entities:read"), null);
+        assertThat(store.revoke(keyId))
+                .isEqualTo(OpaqueTokenStore.RevokeOutcome.REFUSED_LAST_FULL_ACCESS);
+        assertThat(store.validate(only)).isPresent();
+    }
+
+    @Test
+    @DisplayName("a scoped (non-*) token revokes even when it is the last token of any kind — the "
+            + "guard is about full access only")
+    void scopedTokenRevokesEvenWhenLast() {
+        OpaqueTokenStore store = new OpaqueTokenStore(configDir, FIXED_CLOCK);
+        String scoped = store.mint("reader", List.of("entities:read"), "site-1");
+
+        assertThat(store.revoke(keyIdOf(store, scoped)))
+                .isEqualTo(OpaqueTokenStore.RevokeOutcome.REVOKED);
+
+        assertThat(store.validate(scoped)).isEmpty();
+        assertThat(store.activeKeyCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("an EXPIRED full-access row does not count as active (the activeKeyCount "
+            + "predicate): the last LIVE full-access token is still refused; the expired row "
+            + "itself revokes freely")
+    void expiredFullAccessRowDoesNotRescueTheLastLiveOne() throws Exception {
+        // mint() never sets an expiry, so the expired row is written in the store's own
+        // documented format (8 tab-separated fields, Base64'd free text, -1 = never expires).
+        Instant now = FIXED_CLOCK.instant();
+        String expiredRow = String.join("\t",
+                "expiredKey", "0".repeat(64), b64("expired"),
+                Long.toString(now.minusSeconds(3600).toEpochMilli()),
+                Long.toString(now.minusSeconds(60).toEpochMilli()),
+                b64(ApiKeyClaims.SCOPE_ALL), "", "0") + "\n";
+        Files.writeString(tokenFile(), expiredRow);
+        OpaqueTokenStore store = new OpaqueTokenStore(configDir, FIXED_CLOCK);
+        assertThat(store.summaries()).hasSize(1);
+        assertThat(store.activeKeyCount()).isZero();
+        String live = store.mint("live", List.of(ApiKeyClaims.SCOPE_ALL), null);
+        assertThat(store.activeKeyCount()).isEqualTo(1);
+
+        assertThat(store.revoke(keyIdOf(store, live)))
+                .isEqualTo(OpaqueTokenStore.RevokeOutcome.REFUSED_LAST_FULL_ACCESS);
+
+        assertThat(store.validate(live)).isPresent();
+        assertThat(store.revoke("expiredKey")).isEqualTo(OpaqueTokenStore.RevokeOutcome.REVOKED);
+        assertThat(store.summaries()).filteredOn(s -> s.keyId().equals("expiredKey"))
+                .singleElement().satisfies(s -> assertThat(s.revoked()).isTrue());
+    }
+
+    @Test
+    @DisplayName("rotate is never refused: on a single-token store it mints first and leaves "
+            + "exactly one active token (it revokes via revokedCopy, never through revoke())")
+    void rotateIsNeverRefusedOnASingleTokenStore() {
+        OpaqueTokenStore store = new OpaqueTokenStore(configDir, FIXED_CLOCK);
+        String only = store.mint("only", List.of(ApiKeyClaims.SCOPE_ALL), null);
+
+        String fresh = store.rotate("rotated");
+
+        assertThat(store.validate(only)).isEmpty();
+        assertThat(store.validate(fresh)).isPresent();
+        assertThat(store.activeKeyCount()).isEqualTo(1);
+        assertThat(store.summaries()).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("the request file's `revoke` of the last full-access key is a skipped entry "
+            + "(revoked=0), the token stays live, the file is still consumed")
+    void operatorRequestRevokeOfTheLastFullAccessKeyIsSkipped() throws Exception {
+        OpaqueTokenStore store = new OpaqueTokenStore(configDir, FIXED_CLOCK);
+        String only = store.mint("only", List.of(ApiKeyClaims.SCOPE_ALL), null);
+        String keyId = keyIdOf(store, only);
+        Files.writeString(requestFile(), "revoke " + keyId + "\n");
+
+        OpaqueTokenStore.OperatorRequestReport report = store.processOperatorRequests();
+
+        assertThat(report.revoked()).isZero();
+        assertThat(report.skipped()).containsExactly(
+                "line 1: revoke " + keyId + ": refused — the last active full-access token (use rotate)");
+        assertThat(Files.exists(requestFile())).isFalse();
+        assertThat(store.validate(only)).isPresent();
+        assertThat(store.activeKeyCount()).isEqualTo(1);
     }
 }

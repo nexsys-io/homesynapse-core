@@ -16,6 +16,8 @@ import com.homesynapse.state.StateQueryService;
 import io.javalin.Javalin;
 import io.javalin.http.Context;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.time.Clock;
 import java.util.LinkedHashMap;
 import java.util.Locale;
@@ -29,7 +31,7 @@ import java.util.function.LongSupplier;
  * handlers onto the embedded HTTP server.
  *
  * <p>The filter and handler implementations ({@link ReadinessFilter},
- * {@link ListEntitiesEndpoint}, {@link GetEntityEndpoint},
+ * {@link HealthEndpoint}, {@link ListEntitiesEndpoint}, {@link GetEntityEndpoint},
  * {@link GetEntityStateEndpoint}, {@link DlqStatusEndpoint},
  * {@link ProjectionStatusEndpoint}) are package-private per DEC-M3-16 —
  * their Javalin-specific signatures must not appear in the rest-api
@@ -60,6 +62,7 @@ import java.util.function.LongSupplier;
  * it creates are documented as thread-safe in their own Javadoc.</p>
  *
  * @see ReadinessFilter
+ * @see HealthEndpoint
  * @see ListEntitiesEndpoint
  * @see GetEntityEndpoint
  * @see GetEntityStateEndpoint
@@ -94,6 +97,45 @@ public final class RestFilters {
         Objects.requireNonNull(readinessSource, "readinessSource");
         Javalin app = (Javalin) javalinApp;
         app.before("/api/*", new ReadinessFilter(readinessSource));
+    }
+
+    /**
+     * Registers the R-9 unauthenticated loopback readiness bit — {@code GET /health}
+     * and {@code HEAD /health} — served by ONE {@link HealthEndpoint} over the same
+     * {@link ReadinessSource} the {@link #installReadinessGate readiness gate} reads
+     * (200 ⇔ {@code SubscriberMode.LIVE}, 503 otherwise, body
+     * {@code {"status":"<mode>"}}). Closes escalation E3: the packaged unit's
+     * {@code ExecStartPost} probe no longer needs the pairing artifact.
+     *
+     * <p>Register AFTER {@link #installAuth(Object, AuthMiddleware, RateLimiter)} —
+     * the exemption lives in the filter ({@code isHealthProbeRequest}: GET/HEAD,
+     * the exact path, a LOOPBACK literal only — R-H1), not here: this method
+     * registers a route, never a filter, so auth-before-bind (AB-1) is unchanged.
+     * The route is NOT under the {@code /api/*} readiness gate by path; the handler
+     * evaluates the same predicate itself.</p>
+     *
+     * <p>{@code HEAD} is registered explicitly (verified at the Javalin 6.7.0
+     * bytecode, {@code DefaultTasks}' HTTP task): a HEAD with no HEAD entry but a
+     * GET entry is answered with a bare 200 WITHOUT running the GET handler — a
+     * passes-but-false "ready" during REPLAY for any HEAD-based prober. With its
+     * own entry the same handler runs; Jetty drops the body for HEAD.</p>
+     *
+     * @param javalinApp      the Javalin application instance (must be a
+     *                        {@link io.javalin.Javalin}); never {@code null}
+     * @param readinessSource the source of the projection's lifecycle mode — the
+     *                        same instance handed to the readiness gate; never
+     *                        {@code null}
+     * @throws ClassCastException if {@code javalinApp} is not a
+     *         {@link io.javalin.Javalin} instance
+     */
+    public static void installHealthEndpoint(Object javalinApp,
+                                             ReadinessSource readinessSource) {
+        Objects.requireNonNull(javalinApp, "javalinApp");
+        Objects.requireNonNull(readinessSource, "readinessSource");
+        Javalin app = (Javalin) javalinApp;
+        HealthEndpoint health = new HealthEndpoint(readinessSource);
+        app.get(HealthEndpoint.PATH, health);
+        app.head(HealthEndpoint.PATH, health);
     }
 
     /**
@@ -436,24 +478,33 @@ public final class RestFilters {
      * <em>any</em> route resolves, covering {@code /api/*}, {@code /internal/*},
      * and every other path (INV-SE-02; the {@code /internal/*} admin routes sit
      * outside the readiness gate but MUST still be authenticated) — with EXACTLY
-     * ONE exemption: the posture-(A) static-shell allowlist (DASH-SERVE, ruled
-     * 2026-07-26), {@code GET}/{@code HEAD} on {@code /}, {@code /dashboard}, and
-     * {@code /dashboard/**} ({@link #isPublicShellRequest}). The exemption's own
-     * invariant: no DATA route is ever unauthenticated; the shell is inert public
-     * bytes (the same trust class as a downloaded app binary); removing the single
-     * early-return in {@code authorize()} restores the unconditional guard
-     * (one-line-reversible). It is registered <em>before</em>
-     * {@link #installReadinessGate(Object, ReadinessSource)} so it precedes the
-     * {@code /api/*} readiness gate.
+     * TWO exemptions, each with its own invariant:
+     * <ul>
+     *   <li>the posture-(A) static-shell allowlist (DASH-SERVE, ruled 2026-07-26):
+     *       {@code GET}/{@code HEAD} on {@code /}, {@code /dashboard}, and
+     *       {@code /dashboard/**} ({@link #isPublicShellRequest}) — the shell is
+     *       inert public bytes (the same trust class as a downloaded app binary);</li>
+     *   <li>the loopback readiness probe (R-9 / E3-HEALTH, R-H1 LOOPBACK-ONLY, ruled
+     *       2026-08-22): {@code GET}/{@code HEAD} on exactly {@code /health} from a
+     *       LOOPBACK address literal ({@link #isHealthProbeRequest}) — a readiness
+     *       bit for the unit's {@code ExecStartPost} probe: one enum word, no data;
+     *       off loopback it needs a token like any route.</li>
+     * </ul>
+     * The shared invariant: no DATA route is ever unauthenticated. The two
+     * early-returns in {@code authorize()} are independently reversible — removing
+     * either restores the unconditional guard for its path. It is registered
+     * <em>before</em> {@link #installReadinessGate(Object, ReadinessSource)} so it
+     * precedes the {@code /api/*} readiness gate.
      *
      * <p>Per request, in order:</p>
      * <ol>
      *   <li><strong>Canonicalize the path</strong> and reject {@code ..} /
      *       encoded-traversal / control sequences <em>before</em> the auth decision
      *       (R-δ AX-1 / CVE-2023-27482) → 400.</li>
-     *   <li><strong>Exempt the static shell</strong> — a {@code GET}/{@code HEAD}
-     *       shell request returns here (no identity, no rate-limit key); every
-     *       other request continues.</li>
+     *   <li><strong>Exempt the static shell, then the loopback probe</strong> — a
+     *       {@code GET}/{@code HEAD} shell request, or a {@code GET}/{@code HEAD}
+     *       {@code /health} from loopback, returns here (no identity, no rate-limit
+     *       key); every other request continues.</li>
      *   <li><strong>Authenticate</strong> via {@link AuthMiddleware} → 401 (missing/
      *       malformed header) or 403 (invalid/expired/revoked token).</li>
      *   <li><strong>Rate-limit</strong> the authenticated key via {@link RateLimiter}
@@ -492,10 +543,14 @@ public final class RestFilters {
                     "request path contains an illegal traversal or control sequence");
         }
         // Order is load-bearing: traversal/control rejection FIRST (a
-        // `GET /dashboard/../internal/dlq` dies at the gate before the exemption
-        // can see it), exemption second, authentication third, rate-limit fourth.
+        // `GET /dashboard/../internal/dlq` dies at the gate before either exemption
+        // can see it), the two exemptions second, authentication third, rate-limit
+        // fourth. Each early-return is independently reversible.
         if (isPublicShellRequest(ctx.method().name(), ctx.path())) {
             return;   // posture (A): the static shell serves without auth; no identity, no rate-limit key
+        }
+        if (isHealthProbeRequest(ctx.method().name(), ctx.path(), ctx.ip())) {
+            return;   // R-9: the loopback readiness bit — one enum word, no data; no identity, no rate-limit key
         }
         ApiKeyIdentity identity = authMiddleware.authenticate(ctx.header("Authorization"));
         RateLimitResult limit = rateLimiter.check(identity.keyId());
@@ -533,6 +588,129 @@ public final class RestFilters {
             return false;
         }
         return "/".equals(path) || "/dashboard".equals(path) || path.startsWith("/dashboard/");
+    }
+
+    /**
+     * The R-9 loopback readiness-probe exemption (R-H1 LOOPBACK-ONLY, ruled
+     * 2026-08-22): TRUE exactly for GET/HEAD on EXACTLY {@code /health} (no prefix,
+     * no trailing slash — {@code /health/}, {@code /healthz}, {@code /api/health}
+     * stay guarded) from a LOOPBACK address literal ({@link #isLoopbackLiteral}).
+     * Off loopback — the future LAN opt-in — {@code /health} needs a token like any
+     * route: a LAN monitoring tool authenticates like any client. Null anything →
+     * false. Runs strictly AFTER {@code isPathSafe}, like the shell exemption.
+     *
+     * <p>Disclosed residue (the DASH-SERVE form): an exempted request bypasses
+     * rate-limiting (no key); the surface is loopback-bound by default; a reverse
+     * proxy or tunnel on the same host (the bench's {@code cloudflared} →
+     * {@code 127.0.0.1:7070}) presents AS loopback, so {@code /health} is reachable
+     * through it unauthenticated — the disclosure is one enum word, and the shell is
+     * already reachable the same way.</p>
+     *
+     * @param method        the HTTP method name ({@code ctx.method().name()} — the
+     *                      Javalin-6 {@code HandlerType} enum's exact names)
+     * @param path          the decoded request path
+     * @param remoteAddress the peer address as Jetty reports it — Javalin's
+     *                      {@code ctx.ip()}, i.e. the default context resolver's
+     *                      {@code HttpServletRequest.getRemoteAddr()}: always a
+     *                      literal, an IPv6 one possibly bracketed
+     * @return {@code true} exactly when the request is the loopback readiness probe
+     */
+    static boolean isHealthProbeRequest(String method, String path, String remoteAddress) {
+        if (!"GET".equals(method) && !"HEAD".equals(method)) {
+            return false;
+        }
+        if (!HealthEndpoint.PATH.equals(path)) {
+            return false;
+        }
+        return isLoopbackLiteral(remoteAddress);
+    }
+
+    /**
+     * {@code true} exactly when {@code address} is an IP address LITERAL of the
+     * loopback range — {@code 127/8} as a strict dotted quad, or an IPv6 literal
+     * that is loopback ({@code ::1}, {@code 0:0:0:0:0:0:0:1}, the IPv4-mapped
+     * {@code ::ffff:127.0.0.1}), optionally bracketed ({@code [::1]} — Jetty's
+     * {@code getRemoteAddr()} form for IPv6) and/or carrying a {@code %zone}.
+     *
+     * <p>A hostname is NEVER handed to {@link InetAddress}: a resolver call from the
+     * auth filter would be a DNS-triggered stall on every request. The IPv4 arm is
+     * parsed here (exactly four decimal octets, no leading zeros, first octet 127)
+     * without touching {@code InetAddress} at all. The IPv6 arm admits only the
+     * literal charset ({@code [0-9A-Fa-f:.]}, first char a hex digit or {@code :}):
+     * for such a colon-bearing string JDK 21's {@code InetAddress.getAllByName}
+     * either parses a literal or throws {@link UnknownHostException} — it never
+     * consults a resolver (the literal branch at {@code InetAddress.java:1635–:1663}).
+     * Null, blank, or empty after stripping → false (the JDK maps an EMPTY host to
+     * loopback — it must never be passed). Nothing here throws.</p>
+     *
+     * @param address the peer address literal, may be {@code null}
+     * @return {@code true} for a loopback literal; {@code false} for anything else
+     */
+    static boolean isLoopbackLiteral(String address) {
+        if (address == null) {
+            return false;
+        }
+        String literal = address;
+        int end = literal.length() - 1;
+        if (end >= 1 && literal.charAt(0) == '[' && literal.charAt(end) == ']') {
+            literal = literal.substring(1, end);
+        }
+        int zone = literal.indexOf('%');
+        if (zone >= 0) {
+            literal = literal.substring(0, zone);
+        }
+        if (literal.isEmpty()) {
+            return false;
+        }
+        if (literal.indexOf(':') < 0) {
+            return isLoopbackDottedQuad(literal);
+        }
+        char first = literal.charAt(0);
+        if (!isAsciiHexDigit(first) && first != ':') {
+            return false;
+        }
+        for (int i = 0; i < literal.length(); i++) {
+            char c = literal.charAt(i);
+            if (!isAsciiHexDigit(c) && c != ':' && c != '.') {
+                return false;
+            }
+        }
+        try {
+            return InetAddress.getByName(literal).isLoopbackAddress();
+        } catch (UnknownHostException e) {
+            return false;
+        }
+    }
+
+    /** Strict dotted quad: exactly four decimal octets 0–255, no leading zeros, first octet 127. */
+    private static boolean isLoopbackDottedQuad(String literal) {
+        String[] octets = literal.split("\\.", -1);
+        if (octets.length != 4) {
+            return false;
+        }
+        for (int i = 0; i < octets.length; i++) {
+            String octet = octets[i];
+            if (octet.isEmpty() || octet.length() > 3
+                    || (octet.length() > 1 && octet.charAt(0) == '0')) {
+                return false;
+            }
+            int value = 0;
+            for (int j = 0; j < octet.length(); j++) {
+                char c = octet.charAt(j);
+                if (c < '0' || c > '9') {
+                    return false;
+                }
+                value = value * 10 + (c - '0');
+            }
+            if (value > 255 || (i == 0 && value != 127)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isAsciiHexDigit(char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
     }
 
     /**

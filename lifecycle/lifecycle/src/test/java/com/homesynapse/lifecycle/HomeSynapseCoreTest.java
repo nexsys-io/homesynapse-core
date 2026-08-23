@@ -264,8 +264,20 @@ final class HomeSynapseCoreTest {
     private static HttpResponse<String> send(int port, String method, String path,
                                              String bearerToken)
             throws IOException, InterruptedException {
+        return sendTo("127.0.0.1", port, method, path, bearerToken);
+    }
+
+    /**
+     * {@link #send} against an explicit host — the R-9 off-loopback arm binds the
+     * runtime to a site-local address and must reach it THERE (an IPv6 literal is
+     * bracketed for the URI).
+     */
+    private static HttpResponse<String> sendTo(String host, int port, String method,
+                                               String path, String bearerToken)
+            throws IOException, InterruptedException {
+        String authority = host.contains(":") ? "[" + host + "]" : host;
         HttpRequest.Builder builder = HttpRequest.newBuilder(
-                        URI.create("http://127.0.0.1:" + port + path))
+                        URI.create("http://" + authority + ":" + port + path))
                 .method(method, HttpRequest.BodyPublishers.noBody())
                 .timeout(Duration.ofSeconds(5));
         if (bearerToken != null) {
@@ -358,6 +370,85 @@ final class HomeSynapseCoreTest {
         // yields 404/401/200 here — never 400 (the order IS the security property;
         // the exact status is its instrument).
         assertThat(get(port, "/dashboard/%2e%2e/internal/dlq", null).statusCode()).isEqualTo(400);
+    }
+
+    // ── R-9 / E3-HEALTH — the unauthenticated loopback readiness bit ──
+
+    @Test
+    @DisplayName("headerless GET /health on loopback is 200 {\"status\":\"LIVE\"} (HEAD too) while "
+            + "every neighbour stays guarded: POST /health, /health/, /healthz, /api/*, "
+            + "/internal/* are 401 and the encoded traversal is exactly 400")
+    void healthServesHeaderlessOnLoopbackWhileDataRoutesStayGuarded(@TempDir Path tempDir)
+            throws Exception {
+        Path configDir = tempDir.resolve("config");
+        core = new HomeSynapseCore(
+                tempDir.resolve("homesynapse-events.db"), configDir,
+                HomeSynapseConfig.testing(),
+                Clock.fixed(Instant.parse("2026-08-22T00:00:00Z"), ZoneOffset.UTC),
+                TEST_HOME_ID);
+        core.start();
+        int port = core.boundHttpPort();
+        // start() gates on the projection reaching LIVE (the :376 pin), so the readiness
+        // bit is 200 from the first request.
+        assertThat(core.mode()).isEqualTo(SubscriberMode.LIVE);
+
+        HttpResponse<String> health = get(port, "/health", null);
+        assertThat(health.statusCode()).isEqualTo(200);
+        assertThat(health.body().strip()).isEqualTo("{\"status\":\"LIVE\"}");
+        assertThat(health.headers().firstValue("Cache-Control")).hasValue("no-store");
+        assertThat(health.headers().firstValue("X-HomeSynapse-Projection-State")).isEmpty();
+
+        // HEAD is served by the SAME handler, registered explicitly: Javalin 6's automatic
+        // HEAD-for-GET answers 200 WITHOUT running the handler (DefaultTasks, the HTTP task's
+        // fallback), which would read "ready" during REPLAY. Jetty drops the body for HEAD.
+        HttpResponse<String> head = send(port, "HEAD", "/health", null);
+        assertThat(head.statusCode()).isEqualTo(200);
+        assertThat(head.body()).isEmpty();
+
+        // A token works too — a monitoring tool off loopback authenticates like any client.
+        String token = Files.readString(configDir.resolve("initial_api_token")).trim();
+        assertThat(get(port, "/health", token).statusCode()).isEqualTo(200);
+
+        // The exemption is exact-path + GET/HEAD: everything else is the full auth path.
+        assertThat(send(port, "POST", "/health", null).statusCode()).isEqualTo(401);
+        assertThat(get(port, "/health/", null).statusCode()).isEqualTo(401);
+        assertThat(get(port, "/healthz", null).statusCode()).isEqualTo(401);
+        assertThat(get(port, "/api/v1/entities", null).statusCode()).isEqualTo(401);
+        assertThat(get(port, "/internal/dlq", null).statusCode()).isEqualTo(401);
+        // EXACTLY 400: the traversal gate precedes the new exemption too (the DASH-SERVE
+        // reorder-mutant killer, mirrored on the health path).
+        assertThat(get(port, "/dashboard/%2e%2e/health", null).statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    @DisplayName("R-H1 LOOPBACK-ONLY: bound to a site-local address, headerless GET/HEAD /health "
+            + "are 401 (a LAN caller needs a token) and the same GET with the token is 200")
+    void healthStaysGuardedOffLoopback(@TempDir Path tempDir) throws Exception {
+        // Skipped when the host has no usable non-loopback site-local interface (the CC-1
+        // refusal test's own gate); no new production code — HomeSynapseConfig.bindHost is
+        // the documented LAN opt-in.
+        Optional<InetAddress> siteLocal = firstNonLoopbackSiteLocal();
+        assumeTrue(siteLocal.isPresent(),
+                "no non-loopback site-local address available to bind");
+        String host = siteLocal.get().getHostAddress();
+        Path configDir = tempDir.resolve("config");
+        HomeSynapseConfig testing = HomeSynapseConfig.testing();
+        core = new HomeSynapseCore(
+                tempDir.resolve("homesynapse-events.db"), configDir,
+                new HomeSynapseConfig(testing.persistence(), testing.eventBus(),
+                        testing.httpPort(), testing.checkpointPolicy(), host),
+                Clock.fixed(Instant.parse("2026-08-22T00:00:00Z"), ZoneOffset.UTC),
+                TEST_HOME_ID);
+        core.start();
+        int port = core.boundHttpPort();
+        String token = Files.readString(configDir.resolve("initial_api_token")).trim();
+
+        // The filter sees the caller's own site-local address, not a loopback literal.
+        assertThat(sendTo(host, port, "GET", "/health", null).statusCode()).isEqualTo(401);
+        assertThat(sendTo(host, port, "HEAD", "/health", null).statusCode()).isEqualTo(401);
+        assertThat(sendTo(host, port, "GET", "/health", token).statusCode()).isEqualTo(200);
+        // The data-route fence holds off loopback exactly as on it.
+        assertThat(sendTo(host, port, "GET", "/api/v1/entities", null).statusCode()).isEqualTo(401);
     }
 
     @Test

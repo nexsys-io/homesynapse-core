@@ -41,7 +41,7 @@ if [ ! -x "${HS_LAUNCHER}" ]; then
     log "v1 not installed — installing from ${V1}"
     "${DIST}/install/install.sh" "${V1}"
 fi
-"${HS_OPT}/libexec/health-probe.sh" --wait --timeout 90 --token-file "${HS_TOKEN_FILE}" \
+"${HS_OPT}/libexec/health-probe.sh" --wait --timeout 90 --health-path "${HS_HEALTH_PATH}" \
     || die "v1 not ready before update"
 
 # ── 2. Snapshot ─────────────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ log "derived v2=${V2}"
 
 # ── 4a. Update + assert preservation ────────────────────────────────────────
 "${DIST}/update/update.sh" "${V2_TARBALL}" || die "update.sh failed"
-"${HS_OPT}/libexec/health-probe.sh" --wait --timeout 90 --token-file "${HS_TOKEN_FILE}" \
+"${HS_OPT}/libexec/health-probe.sh" --wait --timeout 90 --health-path "${HS_HEALTH_PATH}" \
     || die "service not ready after update"
 
 POST_COUNT="$(count)"; POST_HOME="$(home)"; POST_INTEG="$(integ)"

@@ -303,9 +303,11 @@ final class TokenAdminEndpointsTest {
     }
 
     @Test
-    @DisplayName("self-revocation is allowed: the caller revokes its own key, the response "
-            + "completes 204, and the token is dead for every later request")
+    @DisplayName("self-revocation is allowed while another full-access token is active: the caller "
+            + "revokes its own key, the response completes 204, and the token is dead for every "
+            + "later request")
     void selfRevocationCompletes() {
+        store.mint("keeper", List.of(ApiKeyClaims.SCOPE_ALL), null);
         RecordingEndpointContext ctx = new RecordingEndpointContext()
                 .withPathParam("keyId", admin.keyId());
 
@@ -315,6 +317,33 @@ final class TokenAdminEndpointsTest {
         assertThat(store.validate(adminToken)).isEmpty();
         assertThat(audit).containsExactly(
                 "token admin: actor=" + admin.keyId() + " verb=revoke target=" + admin.keyId());
+    }
+
+    @Test
+    @DisplayName("DELETE of the caller's ONLY active full-access key is 409 problem+json "
+            + "token-revoke-refused (R-H2, the self-lockout class): no audit line, nothing "
+            + "mutated, the token still validates")
+    void revokeOfTheLastFullAccessKeyIs409() {
+        RecordingEndpointContext ctx = new RecordingEndpointContext()
+                .withPathParam("keyId", admin.keyId());
+
+        endpoints.revoke(ctx, admin);
+
+        assertThat(ctx.statusSet).isEqualTo(409);
+        assertThat(ctx.headers)
+                .containsEntry("Content-Type", EndpointResponses.PROBLEM_JSON)
+                .containsEntry("Cache-Control", "no-store");
+        Map<String, Object> body = asMap(ctx.body);
+        assertThat(body)
+                .containsEntry("type", ProblemType.TOKEN_REVOKE_REFUSED.typeUri())
+                .containsEntry("status", 409)
+                .containsEntry("title", "Token Revoke Refused");
+        assertThat(ProblemType.TOKEN_REVOKE_REFUSED.typeUri()).endsWith("/token-revoke-refused");
+        assertThat((String) body.get("detail")).contains(admin.keyId()).contains("rotate");
+        assertThat(store.validate(adminToken)).isPresent();
+        assertThat(store.summaries()).filteredOn(s -> s.keyId().equals(admin.keyId()))
+                .singleElement().satisfies(s -> assertThat(s.revoked()).isFalse());
+        assertThat(audit).isEmpty();
     }
 
     @SuppressWarnings("unchecked")

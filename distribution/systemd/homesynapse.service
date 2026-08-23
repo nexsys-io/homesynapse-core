@@ -5,12 +5,12 @@
 # loopback-bound, authenticated service. Paths mirror distribution/common.sh and
 # the Locked boot contract (Doc 12 §3.2 / LTD-01 / LTD-13).
 #
-# READINESS TODAY (skeleton): real sd_notify is deferred to M13 — OpenJDK 21 has
-# no AF_UNIX SOCK_DGRAM (JEP 380 is stream-only), so SystemdHealthReporter throws
-# and NoOpHealthReporter is the live path. Therefore this unit is Type=exec and
-# proves readiness with a loopback HTTP probe in ExecStartPost. The Type=notify +
-# WatchdogSec block at the bottom is the M13 flip (OR-M13-SDNOTIFY) — staged and
-# commented so enabling it is a two-line edit, not a redesign.
+# READINESS TODAY: real sd_notify is deferred (OR-M13-SDNOTIFY, held) — OpenJDK 21
+# has no AF_UNIX SOCK_DGRAM (JEP 380 is stream-only), so SystemdHealthReporter
+# throws and NoOpHealthReporter is the live path. Therefore this unit is Type=exec
+# and proves readiness with the UNauthenticated loopback /health probe in
+# ExecStartPost (E3 closed at R-9). The Type=notify + WatchdogSec block at the
+# bottom is NOT a staged flip — read its DANGER note before touching it.
 Description=HomeSynapse Core — local-first smart-home engine
 Documentation=file:/opt/homesynapse/VERSION
 After=network-online.target
@@ -43,11 +43,14 @@ EnvironmentFile=-/etc/homesynapse/homesynapse.env
 
 ExecStart=/opt/homesynapse/bin/homesynapse
 
-# Readiness gate: block `systemctl start` until the loopback API answers RUNNING.
-# The probe authenticates with the first-run token (every path is auth-gated
-# today) and treats HTTP 200 = ready, 503 = up-but-not-ready, conn-refused = not
-# up yet. If readiness never arrives, the unit fails and Restart= kicks in.
-ExecStartPost=/opt/homesynapse/libexec/health-probe.sh --wait --timeout 90
+# Readiness gate: block `systemctl start` until the loopback /health answers ready.
+# The probe hits the UNauthenticated loopback /health (E3 closed at R-9): HTTP 200 =
+# ready (the state projection is LIVE), 503 = up-but-not-ready (keep waiting),
+# conn-refused = not up yet; a 401/403 on /health is a start FAILURE (exit 3), never
+# a silent pass. The first-run token is NOT read by the unit — the pairing artifact
+# may be deleted after pairing without affecting any restart. If readiness never
+# arrives, the unit fails and Restart= kicks in.
+ExecStartPost=/opt/homesynapse/libexec/health-probe.sh --wait --timeout 90 --health-path /health
 
 # Graceful stop: Main installs a SIGTERM shutdown hook (Doc 12 §7, 30s internal
 # grace). Give systemd's stop timeout the Doc-12 budget.
@@ -97,13 +100,26 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=homesynapse
 
-# ── M13 FLIP (OR-M13-SDNOTIFY) — enable when real sd_notify lands ────────────
-# Replace `Type=exec` above with `Type=notify`, delete the ExecStartPost probe
-# line (READY=1 then gates start), and uncomment:
+# ── DANGER — do NOT flip to Type=notify (OR-M13-SDNOTIFY is HELD) ────────────
+# The sd_notify shape below is kept ONLY as a record of the eventual unit; it is
+# NOT a two-line edit. Enabling it today BRICKS the service: Type=notify makes
+# systemd set $NOTIFY_SOCKET, the composition root then constructs
+# SystemdHealthReporter, whose transport ctor throws on OpenJDK 21 (no AF_UNIX
+# SOCK_DGRAM), and the catch degrades to NoOpHealthReporter — so READY=1 is NEVER
+# sent: systemd holds the unit `activating` until TimeoutStartSec=120, fails it,
+# Restart=on-failure retries, and StartLimitBurst=5 per 300 s lands it
+# start-limited DOWN in roughly ten minutes. WatchdogSec=60 independently SIGABRTs
+# the process at 60 s (no WATCHDOG=1 ever arrives). Precondition: a WORKING
+# sd_notify transport in platform-systemd, proven on the target JDK — until then
+# Type=notify / WatchdogSec= brick the unit. Source: nexsys-hivemind
+# context/audits/2026-08-22_R10-IN-L_liveness-and-notify-transport_return.md §3 f1.
+# The eventual shape, inert while commented:
+#   Type=notify             ; replaces Type=exec — READY=1 then gates the start
 #   NotifyAccess=main
 #   WatchdogSec=60          ; C12-03 liveness — health loop pets WATCHDOG=1 at 30s
 #   Restart=on-watchdog
-# The health-probe stays useful for the smoke harness regardless.
+# The ExecStartPost /health probe stays correct regardless and remains the smoke's
+# instrument. Map: distribution/docs/boot-contract-map.md.
 
 [Install]
 WantedBy=multi-user.target

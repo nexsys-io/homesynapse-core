@@ -148,6 +148,19 @@ public enum ProblemType {
     IDEMPOTENCY_KEY_CONFLICT("idempotency-key-conflict", 409, "Idempotency Key Conflict"),
 
     /**
+     * The token revoke was refused: the key is the last active full-access token.
+     *
+     * <p>Returned by {@code DELETE /internal/tokens/{keyId}} when revoking the key
+     * would leave the store with no active full-access token — every client, and
+     * every later call to that surface, locked out (the self-lockout class; R-H2,
+     * R-9 2026-08-22). Nothing is mutated and nothing is audited. Rotate instead:
+     * {@code rotate} mints the replacement first and retires the rest. 409 because
+     * the request conflicts with the store's current state — the
+     * {@link #IDEMPOTENCY_KEY_CONFLICT} class, not a validation failure.</p>
+     */
+    TOKEN_REVOKE_REFUSED("token-revoke-refused", 409, "Token Revoke Refused"),
+
+    /**
      * The target device is orphaned — its integration connection has been lost.
      *
      * <p>Returned when a command is issued to an entity whose parent device has

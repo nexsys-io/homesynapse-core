@@ -5,14 +5,14 @@
 # /opt/homesynapse/libexec/health-probe.sh and runs where the distribution/ tree
 # is NOT present, so it sources nothing and hard-codes safe defaults.
 #
-# Readiness model (current artifact, every path auth-gated — auth runs before(*)):
-#   HTTP 200  → RUNNING and ready            → exit 0
-#   HTTP 503  → up but projection not ready   → keep waiting (with --wait)
-#   HTTP 401/403 (only once token is loaded)  → auth/config fault → exit 3
-#   no answer (000 / refused)                 → not up yet         → keep waiting
+# Readiness model (E3 closed at R-9: /health is UNauthenticated on loopback):
+#   HTTP 200  → the state projection is LIVE     → exit 0
+#   HTTP 503  → up but projection not ready      → keep waiting (with --wait)
+#   HTTP 401/403 (only once a token is loaded)   → auth/config fault → exit 3
+#   no answer (000 / refused)                    → not up yet         → keep waiting
 #
-# Forward-compatible: pass --health-path /health (an UNauthenticated endpoint, if
-# Core ever adds one — escalation E3) and the probe skips the token entirely.
+# The unit + install/update probes pass --health-path /health (no token read);
+# run-smoke.sh check 3 keeps the authed default to prove the token validates.
 #
 # Usage:
 #   health-probe.sh [--wait] [--timeout N] [--host H] [--port P]

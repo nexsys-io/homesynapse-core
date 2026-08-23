@@ -76,6 +76,14 @@ import org.slf4j.LoggerFactory;
  * deleted from the store. Read-only inspection rides {@link #summaries()}, which
  * never exposes a hash or a raw token.</p>
  *
+ * <p><strong>The last-full-access-token guard (R-H2, R-9 2026-08-22).</strong>
+ * {@link #revoke(String)} REFUSES to revoke the only active full-access token
+ * ({@link RevokeOutcome#REFUSED_LAST_FULL_ACCESS}): at HTTP that is a 409, at the
+ * request file a {@code skipped} entry — never a silent no-op. No operator act can
+ * therefore leave the store with zero active full-access tokens; replacing the
+ * last one is what {@link #rotate(String)} is for (it mints first and revokes the
+ * rest directly, never through {@code revoke}).</p>
+ *
  * <p><strong>Thread safety.</strong> {@link #validate(String)},
  * {@link #claimsFor(String)} and {@link #summaries()} read a
  * {@link ConcurrentHashMap} and are safe for concurrent virtual-thread invocation;
@@ -195,10 +203,10 @@ public final class OpaqueTokenStore {
      * @param minted  the number of {@code mint} lines executed
      * @param skipped one entry per line that executed nothing — {@code "line N: <reason>"}
      *                (an unknown verb, a missing argument, a revoke of an unknown or
-     *                already-revoked key). The operator's text is NEVER echoed — a raw
-     *                token pasted where a key id belongs must not reach the journal —
-     *                except a key id that already exists in the store (public by
-     *                construction). Unmodifiable.
+     *                already-revoked key, or a revoke the R-H2 guard refused). The
+     *                operator's text is NEVER echoed — a raw token pasted where a key
+     *                id belongs must not reach the journal — except a key id that
+     *                already exists in the store (public by construction). Unmodifiable.
      */
     public record OperatorRequestReport(int rotated, int revoked, int minted, List<String> skipped) {
 
@@ -210,6 +218,24 @@ public final class OpaqueTokenStore {
         private static OperatorRequestReport none() {
             return new OperatorRequestReport(0, 0, 0, List.of());
         }
+    }
+
+    /**
+     * What {@link #revoke(String)} did (R-H2, R-9 2026-08-22 — the
+     * last-full-access-token guard).
+     */
+    public enum RevokeOutcome {
+        /** A matching active token was revoked and the store persisted. */
+        REVOKED,
+        /** No active token carries that key id — unknown, or already revoked. */
+        NOT_FOUND,
+        /**
+         * The key is the ONLY active (non-revoked, non-expired) full-access token:
+         * revoking it would lock every client — and every later
+         * {@code /internal/tokens} call — out (the self-lockout class). Nothing
+         * was persisted; {@link #rotate(String)} is the way to replace it.
+         */
+        REFUSED_LAST_FULL_ACCESS
     }
 
     /**
@@ -404,37 +430,80 @@ public final class OpaqueTokenStore {
      * Revokes a token by its public {@code key_id} (rotation = mint-new then
      * revoke-old; no in-place secret mutation).
      *
+     * <p><strong>R-H2 — the last-full-access-token guard (R-9, 2026-08-22).</strong>
+     * If the key is the ONLY active (non-revoked, non-expired — the
+     * {@link #activeKeyCount()} predicate) full-access token, the revoke is
+     * REFUSED: nothing is persisted, ONE WARN names the key id (public by
+     * construction — never material), and
+     * {@link RevokeOutcome#REFUSED_LAST_FULL_ACCESS} is returned. A scoped token
+     * always revokes; an expired full-access row neither counts as active nor
+     * resists its own revoke. {@link #rotate(String)} is never refused (it mints
+     * first and revokes the rest directly, never through this method) — it is the
+     * remediation when the last token must go.</p>
+     *
      * <p>If the {@code initial_api_token} artifact still carries the token just
-     * revoked, a WARN says so: a client — or the packaged readiness probe, which
-     * authenticates with that artifact — reading it would be rejected. The
-     * artifact is left in place (deleting it would only trade a clear 403 for a
-     * probe timeout); {@code mint}/{@code rotate} refresh it.</p>
+     * revoked, a WARN says so: a client reading it would be rejected. The artifact
+     * is left in place; {@code mint}/{@code rotate} refresh it. (Since R-9 the
+     * packaged readiness probe reads {@code /health} and never the artifact, so
+     * this is a pairing concern only, not an availability one.)</p>
      *
      * @param keyId the public key identifier
-     * @return {@code true} if a matching active token was revoked
+     * @return what happened; never {@code null}
      */
-    public boolean revoke(String keyId) {
+    public RevokeOutcome revoke(String keyId) {
         Objects.requireNonNull(keyId, "keyId");
         writeLock.lock();
         try {
             for (var entry : byHash.entrySet()) {
                 TokenRecord r = entry.getValue();
                 if (keyId.equals(r.keyId()) && !r.revoked()) {
+                    if (isLastActiveFullAccess(r)) {
+                        LOG.warn("refusing to revoke the last active full-access token {}; use rotate",
+                                keyId);
+                        return RevokeOutcome.REFUSED_LAST_FULL_ACCESS;
+                    }
                     entry.setValue(revokedCopy(r));
                     persist();
                     if (artifactCarriesDeadToken()) {
                         LOG.warn("the pairing artifact at {} now carries a token that no longer "
-                                + "validates (key {} revoked); a client or the packaged readiness "
-                                + "probe reading it will be rejected — refresh it with mint/rotate, "
-                                + "or remove it", artifactFile, keyId);
+                                + "validates (key {} revoked); a client reading it will be "
+                                + "rejected — refresh it with mint/rotate, or remove it",
+                                artifactFile, keyId);
                     }
-                    return true;
+                    return RevokeOutcome.REVOKED;
                 }
             }
-            return false;
+            return RevokeOutcome.NOT_FOUND;
         } finally {
             writeLock.unlock();
         }
+    }
+
+    /**
+     * The R-H2 predicate, evaluated under the write lock: {@code candidate} is an
+     * ACTIVE full-access row and no OTHER active full-access row exists. An expired
+     * full-access row grants nothing and never rescues the last live one; an expired
+     * candidate is not "active" and so revokes freely. Reference identity on
+     * purpose — "other rows", not "rows with different fields".
+     */
+    private boolean isLastActiveFullAccess(TokenRecord candidate) {
+        Instant now = clock.instant();
+        if (!isActiveFullAccess(candidate, now)) {
+            return false;
+        }
+        for (TokenRecord r : byHash.values()) {
+            if (r != candidate && isActiveFullAccess(r, now)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The {@link #activeKeyCount()} predicate narrowed to full-access rows. */
+    private static boolean isActiveFullAccess(TokenRecord r, Instant now) {
+        return !r.revoked()
+                && (r.expiresAt() == null || now.isBefore(r.expiresAt()))
+                && r.scopes().contains(ApiKeyClaims.SCOPE_ALL);
     }
 
     /**
@@ -450,10 +519,10 @@ public final class OpaqueTokenStore {
      *       replay on every start);</li>
      *   <li>then each non-blank, non-{@code #} line executes: {@code rotate} →
      *       {@link #rotate(String)} named {@code operator-rotated-<instant>};
-     *       {@code revoke <keyId>} → {@link #revoke(String)} (a {@code false}
-     *       return is a {@code skipped} entry); {@code mint <display name…>} →
-     *       {@link #mint} full-access/unscoped + the artifact; anything else →
-     *       {@code skipped}.</li>
+     *       {@code revoke <keyId>} → {@link #revoke(String)} ({@code NOT_FOUND} and
+     *       the R-H2 {@code REFUSED_LAST_FULL_ACCESS} are {@code skipped} entries);
+     *       {@code mint <display name…>} → {@link #mint} full-access/unscoped + the
+     *       artifact; anything else → {@code skipped}.</li>
      * </ol>
      * ONE WARN summary is logged whenever a request was consumed — counts plus
      * the ARTIFACT PATH, never a token value (this path logs no secret; the
@@ -510,12 +579,22 @@ public final class OpaqueTokenStore {
                     case "revoke" -> {
                         if (argument.isEmpty()) {
                             skipped.add(where + "revoke: missing keyId");
-                        } else if (revoke(argument)) {
-                            revoked++;
-                        } else if (claimsFor(argument).isPresent()) {
-                            skipped.add(where + "revoke " + argument + ": already revoked");
                         } else {
-                            skipped.add(where + "revoke: no such keyId (argument not echoed)");
+                            switch (revoke(argument)) {
+                                case REVOKED -> revoked++;
+                                // The key id is public by construction (it is in the store).
+                                case REFUSED_LAST_FULL_ACCESS -> skipped.add(where + "revoke "
+                                        + argument + ": refused — the last active full-access "
+                                        + "token (use rotate)");
+                                case NOT_FOUND -> {
+                                    if (claimsFor(argument).isPresent()) {
+                                        skipped.add(where + "revoke " + argument + ": already revoked");
+                                    } else {
+                                        skipped.add(where
+                                                + "revoke: no such keyId (argument not echoed)");
+                                    }
+                                }
+                            }
                         }
                     }
                     case "mint" -> {

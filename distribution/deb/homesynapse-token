@@ -37,16 +37,17 @@ usage: homesynapse-token [status | rotate | revoke <keyId> | mint <name>]
   rotate          REVOKE EVERY token and mint ONE new full-access token — the
                   remediation for a disclosed credential. Every client re-pairs.
   revoke <keyId>  revoke one token by its public key id (`status` lists them).
+                  Refused (and reported in the journal) when it would revoke the
+                  last active full-access token — use `rotate`.
   mint <name>     mint one additional full-access token under <name>.
 rotate / revoke / mint require root. They append one line to
   /var/lib/homesynapse/config/token_ops.request (owner homesynapse, mode 0600 —
   the service user must be able to read it) and restart homesynapse.service,
   which applies the request at startup. A minted token is delivered to
   config/initial_api_token — read it with `sudo homesynapse-token`, here only.
-CAUTION: the packaged readiness probe (the unit's ExecStartPost) authenticates
-  with the token in config/initial_api_token. `revoke` of THAT key without a
-  `mint`/`rotate` leaves the probe rejected (403) and the restart FAILS — use
-  `rotate`, or `mint` first.
+NOTE: the unit's readiness probe reads the unauthenticated loopback /health (E3,
+  R-9) — it never reads config/initial_api_token, so deleting the artifact after
+  pairing is safe; and `revoke` of the last active full-access token is refused.
 Procedure and the bench recipe: distribution/docs/token-rotation.md (source tree).
 EOF
 }
@@ -104,21 +105,10 @@ queue_request() {
     chmod 0600 "${HS_REQUEST}"
 }
 
-# $1 = the verb just queued.
+# $1 = the verb just queued (informational — since R-9 every verb applies the same
+# way: the unit's probe reads /health, not the artifact, so nothing is removed here).
 apply_request() {
     if [ -d /run/systemd/system ]; then
-        if [ "$1" = rotate ]; then
-            # The unit's ExecStartPost probe (health-probe.sh) reads
-            # config/initial_api_token ONCE, the instant the JVM is exec'd — before
-            # the service has applied this request — and never re-reads a loaded
-            # value. With the pre-rotation artifact in place it would present the
-            # token `rotate` is about to revoke, get 403, and FAIL the start. With
-            # no artifact it polls the file until the service writes the NEW one
-            # (rotate re-creates it before the socket binds). The probe's path is
-            # hard-coded there, so this is the hard-coded path too. A rotate whose
-            # restart fails (see the journal) is re-run once the cause is fixed.
-            rm -f "${HS_CONFIG}/initial_api_token"
-        fi
         # Blocks until the unit's ExecStartPost health probe passes. A failing
         # probe is this command's non-zero exit; never swallowed.
         systemctl restart "${HS_UNIT}"

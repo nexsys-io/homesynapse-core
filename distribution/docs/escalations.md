@@ -31,7 +31,8 @@ by default; bind is an explicit, documented opt-in). The env keys are already re
 `homesynapse.env.example`. *Prioritise ahead of the M9 wizard build.*
 
 ### E3 — Unauthenticated loopback `/health` (or `/livez` + `/readyz`) endpoint (Core)
-**Context.** Every path is auth-gated (`before(*)`), so the readiness probe must authenticate
+**Status: CLOSED at R-9 (2026-08-22).** Option (a) landed: `GET`/`HEAD /health` — exempted from the auth filter for LOOPBACK callers only (R-H1), 200 ⇔ the state projection is LIVE, 503 otherwise, body `{"status":"<mode>"}` — is the unit's `ExecStartPost` path and every install/update probe's; the helper no longer touches the pairing artifact. Return: `nexsys-hivemind/context/audits/2026-08-22_R9_E3-HEALTH_return.md`.
+**Context (as filed).** Every path is auth-gated (`before(*)`), so the readiness probe must authenticate
 with the full-access first-run token — a heavy credential for a liveness check, and it breaks
 once the operator deletes the token post-pairing.
 **Options.** (a) Add an unauthenticated, **loopback-only** `/health` returning lifecycle phase

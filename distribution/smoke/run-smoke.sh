@@ -69,11 +69,23 @@ if [ "${MODE}" = "systemd" ]; then
     systemctl is-enabled --quiet "${HS_UNIT}" && ok "unit is enabled (starts on boot)" || bad "unit not enabled"
 fi
 
-# ╔══ 3. READINESS PROBE (authed loopback) ═══════════════════════════════════╗
+# ╔══ 3. READINESS PROBE (authed loopback — the minted token validates) ══════╗
 if "${HS_OPT}/libexec/health-probe.sh" --wait --timeout 90 --token-file "${HS_TOKEN_FILE}"; then
     ok "loopback health probe green (HTTP 200 RUNNING)"
 else
     bad "health probe never went green"; dump_logs
+fi
+
+# ╔══ 3b. UNAUTHENTICATED LOOPBACK /health (the unit's probe path, E3) ═══════╗
+# The SAME probe binary the unit's ExecStartPost runs, with the SAME path and NO
+# token file (H13: one instrument, two rigs). 200 = the state projection is LIVE.
+# passes-but-false input: a /health that returns 200 regardless of projection
+# mode — bounded by HealthEndpointTest's 503 pin and by check 3's authed 200 (the
+# gate and the endpoint read one ReadinessSource).
+if "${HS_OPT}/libexec/health-probe.sh" --wait --timeout 30 --health-path "${HS_HEALTH_PATH}"; then
+    ok "unauthenticated loopback /health green (HTTP 200 — the unit's probe path, E3)"
+else
+    bad "unauthenticated loopback ${HS_HEALTH_PATH} never went green"; dump_logs
 fi
 
 # ╔══ 4. EVENT WRITE PATH IS LIVE ════════════════════════════════════════════╗

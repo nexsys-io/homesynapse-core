@@ -40,7 +40,7 @@ The helper `homesynapse-token` (installed to `/usr/bin` by the `.deb` and by
 | `sudo homesynapse-token` | prints the token in `config/initial_api_token` (the original verb) | no |
 | `sudo homesynapse-token status` | lists every stored token: key id, name, created, expires, scopes, site, state (`active` / `revoked` / `expired`) and the counts. Read-only — runs the runtime's `homesynapse token status` **as the service user** (the store is `homesynapse`-owned 0600 inside a 0700 dir; `runuser` when already root, `sudo -u` otherwise). Never prints a token or a hash. | no |
 | `sudo homesynapse-token rotate` | **all-sessions rotation** — the remediation for a disclosed credential: revokes EVERY active token and mints ONE new full-access token, delivered to `config/initial_api_token`. Every client re-pairs with the new token. | yes |
-| `sudo homesynapse-token revoke <keyId>` | revokes ONE token by its public key id (`status` lists them). Leaves the others alone. | yes |
+| `sudo homesynapse-token revoke <keyId>` | revokes ONE token by its public key id (`status` lists them). Leaves the others alone. **Refused when it would revoke the LAST active full-access token** (R-H2, R-9 — the self-lockout class): the summary WARN reports `revoked=0` with a `skipped` entry `line N: revoke <keyId>: refused — the last active full-access token (use rotate)`; use `rotate`. | yes |
 | `sudo homesynapse-token mint <name>` | mints ONE additional full-access token labelled `<name>`, delivered to `config/initial_api_token`. | yes |
 
 **The mechanism behind the three mutating verbs.** Each appends one line (`rotate` ·
@@ -68,38 +68,16 @@ refuses to boot over a bad request.
 each client (the dashboard's token prompt, `curl -H "Authorization: Bearer …"`, the bench's
 `api_token` reader — whatever consumed the old one).
 
-### The readiness-probe caveat (packaged path)
+### History — the readiness-probe caveat (R-6 → R-9)
 
-The unit's `ExecStartPost=/opt/homesynapse/libexec/health-probe.sh --wait --timeout 90`
-authenticates with the token in `config/initial_api_token` (`health-probe.sh:25`, `:85–:99`).
-Two consequences, both pre-existing and both worth knowing before you type a verb:
-
-- **`revoke <keyId>` of the key the artifact carries, without a `mint`/`rotate`, takes the
-  service down at the restart:** the probe reads the artifact, gets 403, exits 3, and
-  systemd marks the unit failed. The service logs a WARN at the revoke naming the stranded
-  artifact. Prefer `rotate` (it rewrites the artifact), or run `mint <name>` first and
-  `revoke <oldKey>` second (two restarts — the artifact already carries the new token when
-  the second restart's probe runs). A single-restart batch is the root one-liner
-  `printf 'mint ops\nrevoke <oldKey>\n' > /var/lib/homesynapse/config/token_ops.request && chown homesynapse:homesynapse /var/lib/homesynapse/config/token_ops.request && chmod 0600 /var/lib/homesynapse/config/token_ops.request && systemctl restart homesynapse.service`
-  (lines execute in order; `mint` rewrites the artifact before `revoke` runs).
-- **Deleting the artifact after pairing (the install banner's advice) makes the NEXT
-  restart wait out the probe's 90 s timeout and fail**, because the probe has no token to
-  present (`health-probe.sh:96–:98`, `:116–:124`). On the packaged path, keep the artifact
-  (it is `homesynapse`-owned 0600 inside a 0700 directory) until the readiness probe no
-  longer needs it — that is escalation E3 (an unauthenticated loopback `/health`) in
-  `escalations.md`. `rotate` re-creates a deleted artifact.
-- **The probe reads the artifact ONCE, the instant the JVM is exec'd** (`Type=exec`; the
-  `ExecStartPost` control process starts concurrently with the service), and never
-  re-reads a loaded value (`health-probe.sh:85–:93`, the `:87` cache). A `rotate` restart
-  with the pre-rotation artifact in place would therefore present the token the service is
-  about to revoke → 403 → exit 3 → the start job fails, although the rotation itself
-  persisted (systemd's `Restart=on-failure` brings the service back ~10 s later with the
-  new artifact). The helper closes this: `homesynapse-token rotate` removes the artifact
-  before the restart, so the probe polls the file until the service writes the NEW one
-  (rotate rewrites it before the socket binds). If a `rotate` restart still fails, the
-  journal names the cause; fix it and run `rotate` again — the artifact stays absent until
-  a rotation succeeds. Root cause (the probe caching a file-sourced token) is the next
-  distribution WU's, beside E3.
+From R-6 (2026-08-22, the first cut of this page) until R-9 the unit's `ExecStartPost` probe
+authenticated with the token in `config/initial_api_token`, so a bare `revoke` of that key, a
+deleted artifact, or a `rotate` whose restart failed each ended in a start-limited unit (the
+R-6/R-8 audit's H-1). Since R-9 the unit probes the unauthenticated loopback `/health`
+(`--health-path /health`) and reads NO token: deleting the artifact after pairing is lawful
+again, the helper no longer touches it, and a `mint`/`revoke` batch in one restart is clean —
+`printf 'mint ops\nrevoke <oldKey>\n' > /var/lib/homesynapse/config/token_ops.request && chown homesynapse:homesynapse /var/lib/homesynapse/config/token_ops.request && chmod 0600 /var/lib/homesynapse/config/token_ops.request && systemctl restart homesynapse.service`
+(lines execute in order; `mint` first so the `revoke` is never the last full-access token).
 
 ## The bench / dev recipe (no helper)
 
@@ -153,8 +131,8 @@ minted; `rotate` does neither. Use it only when `rotate` cannot run.
   When in doubt, `rotate` afterwards; it costs one re-pair.
 - **The artifact is a secret.** It is `homesynapse`-owned 0600 (the service writes both
   secret-bearing files owner-only as of R-6) inside a 0700 config dir. It may be deleted
-  after pairing — see the readiness-probe caveat above before doing so on a packaged host —
-  and `rotate` / `mint` re-create it.
+  after pairing — lawful on a packaged host since R-9: the unit's probe reads `/health`,
+  never the artifact (see the History note above) — and `rotate` / `mint` re-create it.
 - **Logs never carry a token** except the ruled first-run WARN (`Minted the initial
   HomeSynapse API token … Token: …`) — the request path logs counts and the artifact path
   only, and the HTTP admin path logs key ids only.
@@ -172,7 +150,7 @@ projection reads. `Cache-Control: no-store` on every response.
 |---|---|---|
 | `GET /internal/tokens` | — | `200 { "data": { "tokens": [ { "keyId", "displayName", "createdAt", "expiresAt" \| null, "scopes", "siteId" \| null, "revoked" } ] }, "meta": { "timestamp" } }` — hashes and raw tokens never appear |
 | `POST /internal/tokens` | `{ "displayName": "…", "scopes"?: ["*"], "siteId"?: "…" }` | `201 { "data": { "keyId", "token" }, "meta": { "timestamp" } }` — the raw token is returned ONCE; `displayName` blank/missing → 400; `scopes` defaults to `["*"]` |
-| `DELETE /internal/tokens/{keyId}` | — | `204` when an active token was revoked; `404` otherwise. Self-revocation is allowed — the response completes, every later request with that token is 403 |
+| `DELETE /internal/tokens/{keyId}` | — | `204` when an active token was revoked; `404` otherwise; `409` `token-revoke-refused` when the key is the LAST active full-access token (R-H2 — nothing mutated, no audit line; `rotate` instead). Self-revocation is allowed while another full-access token is active — the response completes, every later request with that token is 403 |
 
 Every mint/revoke writes one INFO audit line to the journal:
 `token admin: actor=<callerKeyId> verb=<mint|revoke> target=<keyId>` — key ids only.

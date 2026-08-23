@@ -57,7 +57,7 @@ start_service() {
     else
         HOMESYNAPSE_HOME="${HS_HOME_ENV}" setpriv --reuid "${HS_USER}" --regid "${HS_GROUP}" \
             --clear-groups "${HS_LAUNCHER}" >/var/log/homesynapse-stdout.log 2>&1 &
-        "${HS_OPT}/libexec/health-probe.sh" --wait --timeout 90 --token-file "${HS_TOKEN_FILE}"
+        "${HS_OPT}/libexec/health-probe.sh" --wait --timeout 90 --health-path "${HS_HEALTH_PATH}"
     fi
 }
 
@@ -74,7 +74,7 @@ log "image swapped ${OLD_VERSION} → ${NEW_VERSION} (rollback snapshot at ${PRE
 
 # ── 4. Start + readiness, with auto-rollback ────────────────────────────────
 if have_systemd; then systemctl daemon-reload || true; fi
-if start_service && "${HS_OPT}/libexec/health-probe.sh" --wait --timeout 90 --token-file "${HS_TOKEN_FILE}"; then
+if start_service && "${HS_OPT}/libexec/health-probe.sh" --wait --timeout 90 --health-path "${HS_HEALTH_PATH}"; then
     POST_COUNT="$(event_count)"; POST_HOME="$(home_id)"
     log "READY on ${NEW_VERSION}.  events: ${PRE_COUNT} → ${POST_COUNT}   home_id: ${POST_HOME:-<none>}"
     # Identity + store continuity guards (non-fatal warnings here; the smoke asserts hard).

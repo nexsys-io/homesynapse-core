@@ -930,6 +930,12 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             // DASH-SERVE: the human entrypoint — http://host:port/ lands on the SPA.
             // Covered by the same GET/HEAD shell exemption (posture (A)).
             app.get("/", ctx -> ctx.redirect("/dashboard/"));
+            // R-9 / E3-HEALTH: the unauthenticated loopback readiness bit (GET/HEAD
+            // /health — 200 iff the projection is LIVE) takes the packaged probe off
+            // the pairing artifact. `this` is the same ReadinessSource the /api/* gate
+            // below reads; the route sits outside that gate by path and behind
+            // installAuth's loopback-only exemption (R-H1) — never a filter bypass.
+            RestFilters.installHealthEndpoint(app, this);
             RestFilters.installReadinessGate(app, this);
             RestFilters.installEntityQueryEndpoints(
                     app, stateQueryService, stateProjection::cursorPosition, clock);

@@ -86,7 +86,7 @@ else
     HOMESYNAPSE_HOME="${HS_HOME_ENV}" setpriv --reuid "${HS_USER}" --regid "${HS_GROUP}" \
         --clear-groups "${HS_LAUNCHER}" >/var/log/homesynapse-stdout.log 2>&1 &
     log "launched pid $!; probing readiness …"
-    "${PROBE}" --wait --timeout 90 --token-file "${HS_TOKEN_FILE}" \
+    "${PROBE}" --wait --timeout 90 --health-path "${HS_HEALTH_PATH}" \
         || die "service did not become ready"
 fi
 

@@ -81,7 +81,12 @@ final class StandardAuthMiddlewareTest {
     @DisplayName("a revoked token is 403 FORBIDDEN")
     void revokedTokenIs403() {
         String token = store.mint("ops", List.of(ApiKeyClaims.SCOPE_ALL), null);
-        store.revoke(middleware.authenticate("Bearer " + token).keyId());
+        // R-H2 (R-9): the store REFUSES to revoke the last active full-access token, so a
+        // second one keeps this a real revoke — asserted, because a refused revoke would
+        // leave the token valid and this test vacuous.
+        store.mint("keeper", List.of(ApiKeyClaims.SCOPE_ALL), null);
+        assertThat(store.revoke(middleware.authenticate("Bearer " + token).keyId()))
+                .isEqualTo(OpaqueTokenStore.RevokeOutcome.REVOKED);
 
         assertThatThrownBy(() -> middleware.authenticate("Bearer " + token))
                 .isInstanceOfSatisfying(ApiException.class, e ->

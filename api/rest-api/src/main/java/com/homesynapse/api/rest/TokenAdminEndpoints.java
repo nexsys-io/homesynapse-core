@@ -37,10 +37,13 @@ import org.slf4j.LoggerFactory;
  *       never again; a blank/missing {@code displayName} → 400; {@code scopes}
  *       defaults to {@code ["*"]};</li>
  *   <li>{@code DELETE /internal/tokens/{keyId}} → 204 when an active token was
- *       revoked, 404 otherwise. <strong>Self-revocation is allowed</strong>: the
- *       caller may revoke its own token; the response still completes (the auth
- *       filter already ran for this request) and every later request with that
- *       token is 403.</li>
+ *       revoked, 404 otherwise — except 409 {@code token-revoke-refused} when the
+ *       key is the LAST active full-access token (R-H2, R-9 2026-08-22: the
+ *       self-lockout class; the store refuses, nothing is mutated, no audit line —
+ *       rotate instead). <strong>Self-revocation is allowed</strong> while another
+ *       full-access token is active: the caller may revoke its own token; the
+ *       response still completes (the auth filter already ran for this request)
+ *       and every later request with that token is 403.</li>
  * </ul>
  *
  * <h2>Authorization — two layers (INV-SE-02)</h2>
@@ -255,8 +258,9 @@ final class TokenAdminEndpoints {
     }
 
     /**
-     * Pure {@code DELETE} logic: 204 when an active token was revoked, 404
-     * otherwise; the audit line on success.
+     * Pure {@code DELETE} logic: 204 when an active token was revoked (+ the audit
+     * line), 404 when no active token carries the key, 409 when the store refused
+     * the last active full-access token (R-H2 — nothing mutated, nothing audited).
      *
      * @param ctx    the request/response SPI; never {@code null}
      * @param caller the authenticated identity, or {@code null} when absent
@@ -272,13 +276,18 @@ final class TokenAdminEndpoints {
                     "keyId path parameter is required");
             return;
         }
-        if (!store.revoke(keyId)) {
-            EndpointResponses.problem(ctx, ProblemType.NOT_FOUND,
+        switch (store.revoke(keyId)) {
+            case REVOKED -> {
+                audit(caller.keyId(), "revoke", keyId);
+                ctx.status(204);
+            }
+            case NOT_FOUND -> EndpointResponses.problem(ctx, ProblemType.NOT_FOUND,
                     "No active token with keyId " + keyId);
-            return;
+            case REFUSED_LAST_FULL_ACCESS -> EndpointResponses.problem(ctx,
+                    ProblemType.TOKEN_REVOKE_REFUSED,
+                    "Token " + keyId + " is the last active full-access token; "
+                            + "rotate instead of revoking");
         }
-        audit(caller.keyId(), "revoke", keyId);
-        ctx.status(204);
     }
 
     /** A scope token: non-blank, no {@code ,} (the persisted delimiter), no whitespace, no control characters. */

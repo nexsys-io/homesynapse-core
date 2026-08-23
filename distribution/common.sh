@@ -37,11 +37,12 @@ HS_TOKEN_FILE="${HS_CONFIG_DIR}/initial_api_token"   # one-line move to $HS_ETC 
 # ── Network surface (HomeSynapseConfig.HOME_DEFAULT) ────────────────────────
 HS_BIND="127.0.0.1"   # loopback default — LAN bind is an explicit Core opt-in (AB-1)
 HS_PORT="7070"        # PLAN-M3 §10
-# Readiness probe target. Today every path is auth-gated (auth runs before(*)),
-# so the probe authenticates with the first-run token against a cheap GET.
-# Forward-compatible: if Core later adds an unauthenticated loopback /health
-# (see escalation E3), set HS_HEALTH_PATH=/health and the probe skips the token.
-HS_HEALTH_PATH="${HS_HEALTH_PATH:-/api/v1/entities}"
+# Readiness probe target. Core serves an UNauthenticated loopback /health (E3
+# closed at R-9, 2026-08-22): 200 = the state projection is LIVE, 503 = up but
+# not ready; the probe sends no token for it. The authenticated path
+# (/api/v1/entities + --token-file) is what run-smoke.sh check 3 still probes,
+# BY NAME, to prove the minted token validates.
+HS_HEALTH_PATH="${HS_HEALTH_PATH:-/health}"
 
 # ── Version ─────────────────────────────────────────────────────────────────
 # Resolution order: explicit env → distribution/VERSION → git describe → default.
