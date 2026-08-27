@@ -31,7 +31,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, act } from '@testing-library/preact';
 import { EventsView } from './EventsView';
 import { api } from '../lib/api';
-import { t } from '../lib/i18n';
+import { BRAND, t } from '../lib/i18n';
 import {
   ApiProblem,
   createClient,
@@ -150,7 +150,7 @@ describe('the client mints the unserved-endpoint problem from the headers alone'
     const p = await rejectionFor(HEADERS_404);
     expect(p.problem.title).toBe('This part of the dashboard is not in this release yet');
     expect(p.problem.detail).toContain('Nothing is wrong');
-    expect(p.problem.title + (p.problem.detail ?? '')).not.toContain('HomeSynapse');
+    expect(p.problem.title + (p.problem.detail ?? '')).not.toContain(BRAND.productName);
   });
 });
 
