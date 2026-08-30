@@ -52,6 +52,12 @@ Note: the stale Javadoc on `isHttpExposed()`/`boundHttpPort()` ("AB-3 does not e
 predates AB-1; `start()` **does** bind the surface at Phase 5 now. Confirmed by reading the
 method body, not the comment.
 
+## Serial coordinator access — the measured device posture
+
+| Decision | Value | Source |
+|---|---|---|
+| Serial-device posture (Zigbee coordinator) | class-based `DeviceAllow=char-ttyUSB rw` + `DeviceAllow=char-ttyACM rw` (majors 188/166 — class rules survive replug renumbering where a node path would not) + `SupplementaryGroups=dialout` + `PrivateDevices=no` / `DevicePolicy=closed`, measured R-3a 2026-08-30 (`zigbee.network_resumed: channel=20 panId=0x774c` on the held card). What STAYS hardened: `ProtectSystem=strict`, `PrivateTmp=yes`, the syscall filter (`SystemCallFilter=@system-service` / `SystemCallErrorNumber=EPERM`), `RestrictAddressFamilies` — all unchanged. | the provenance comment above the device lines in `distribution/systemd/homesynapse.service`; measurement: nexsys-hivemind `context/audits/2026-08-30_R3a_rehearsal_operator-record.md` §7/§9 |
+
 ## First-run pairing token
 
 | Decision | Value | Source |

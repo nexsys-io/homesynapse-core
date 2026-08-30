@@ -88,12 +88,20 @@ MemoryDenyWriteExecute=no
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
-# RAMP (post-M9): the Zigbee coordinator is a serial device. PrivateDevices=yes
-# blocks /dev access, so loosen it then and allowlist the coordinator, e.g.:
-#   PrivateDevices=no
-#   DeviceAllow=/dev/ttyUSB0 rw
-#   SupplementaryGroups=dialout
-PrivateDevices=yes
+# Serial coordinator access — MEASURED on the held card (R-3a rehearsal,
+# 2026-08-30, drop-in 10-serial-coordinator.conf; nexsys-hivemind
+# context/audits/2026-08-30_R3a_rehearsal_operator-record.md): the packaged
+# service resumed the six-device network under exactly these lines
+# (`zigbee.network_resumed: channel=20 panId=0x774c`). Class rules
+# (`char-ttyUSB`/`char-ttyACM`, majors 188/166) survive replug renumbering
+# where a node path would not; `DevicePolicy=closed` keeps only the standard
+# pseudo-devices; `SupplementaryGroups=dialout` matches the node's
+# root:dialout 0660.
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-ttyACM rw
+SupplementaryGroups=dialout
 
 # Journald capture (Console output is plain text per Doc 12 §0.3).
 StandardOutput=journal
