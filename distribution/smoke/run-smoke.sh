@@ -144,6 +144,13 @@ if [ -s "${HS_TOKEN_FILE}" ]; then
     # Config dir must not be world/other-accessible (secrets are 0600-class).
     CMODE="$(stat -c '%a' "${HS_CONFIG_DIR}" 2>/dev/null || echo '?')"
     case "${CMODE}" in *0|*00) ok "config dir mode ${CMODE} (no world access)";; *) bad "config dir mode ${CMODE} allows other access";; esac
+    # OR-TOKEN-MODE-644: the mint writes 0600 at HEAD (OpaqueTokenStore.writeOwnerOnlyAtomically);
+    # this check makes CI structurally able to SEE a regression — the 2026-08-13 vintage
+    # shipped 644 and stayed green (the card-sitting F-S10).
+    FMODE="$(stat -c '%a' "${HS_TOKEN_FILE}" 2>/dev/null || echo '?')"
+    [ "${FMODE}" = "600" ] && ok "pairing token mode 600 (owner-only)" || bad "pairing token mode ${FMODE}, expected 600"
+    FMODE="$(stat -c '%a' "${HS_CONFIG_DIR}/api_tokens" 2>/dev/null || echo '?')"
+    [ "${FMODE}" = "600" ] && ok "token store (api_tokens) mode 600 (owner-only)" || bad "token store (api_tokens) mode ${FMODE}, expected 600"
 else
     bad "no pairing token at ${HS_TOKEN_FILE}"
 fi

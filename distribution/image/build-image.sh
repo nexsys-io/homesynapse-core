@@ -72,7 +72,7 @@ for t in "${JLINK}" "${JDEPS}" "${JAVA}"; do
     [ -x "${t}" ] || die "missing JDK tool: ${t}"
 done
 JFEATURE="$("${JAVA}" -version 2>&1 | awk -F'"' '/version/{split($2,a,"."); print (a[1]=="1"?a[2]:a[1])}')"
-[ "${JFEATURE}" = "21" ] || log "WARNING: JDK feature version is ${JFEATURE}, expected 21 (reproducibility/LTD-10)."
+[ "${JFEATURE}" = "21" ] || log "WARNING: JDK feature version is ${JFEATURE}, expected 21 (reproducibility/LTD-01)."
 
 log "version=${VERSION} arch=${ARCH} jdk=${JFEATURE}"
 rm -rf "${OUT}"

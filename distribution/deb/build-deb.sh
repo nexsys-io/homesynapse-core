@@ -21,7 +21,7 @@ DIST="$(CDPATH= cd -- "${HERE}/.." && pwd)"
 # shellcheck source=../common.sh
 . "${DIST}/common.sh"
 
-VERSION="$(HS_DIST_DIR="${DIST}" bash -c '. "'"${DIST}"'/common.sh"; hs_version')"
+VERSION="$(HS_VERSION="${HS_VERSION:-}" HS_DIST_DIR="${DIST}" bash -c '. "'"${DIST}"'/common.sh"; hs_version')"
 ARCH="$(hs_deb_arch)"
 IMAGE_BUILD="${DIST}/image/build"
 IMAGE_TREE="${IMAGE_BUILD}/opt/homesynapse"
