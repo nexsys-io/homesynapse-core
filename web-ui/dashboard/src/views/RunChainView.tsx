@@ -10,9 +10,13 @@ import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { CausalChain } from '../components/CausalChain';
 import { ErrorBoundary } from '../components/ErrorBoundary';
+import { useRefResolver } from '../lib/registry';
 
 export function RunChainView({ runId }: { runId: string }) {
   const state = useApi(() => api.getCausalChain(runId));
+  // FE-HONEST-1 (§10-J): the registry census backs the loud unresolvable-ref
+  // rendering. Until it is in (or if it is incomplete), nothing is accused.
+  const resolveRef = useRefResolver();
   return (
     <Page title="Why this happened" lede={undefined} meta={state.meta}>
       <p style={{ marginTop: 'calc(-1 * var(--hs-space-2))' }}>
@@ -24,7 +28,7 @@ export function RunChainView({ runId }: { runId: string }) {
             app. A fetch failure renders Resource's honest error card; a RENDER
             failure is contained to this card — the poll loop survives both. */}
         <ErrorBoundary resetKey={runId} onRetry={state.reload}>
-          <Resource state={state}>{(chain) => <CausalChain chain={chain} />}</Resource>
+          <Resource state={state}>{(chain) => <CausalChain chain={chain} resolveRef={resolveRef} />}</Resource>
         </ErrorBoundary>
       </Card>
     </Page>

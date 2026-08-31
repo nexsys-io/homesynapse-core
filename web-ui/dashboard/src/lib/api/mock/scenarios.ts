@@ -853,6 +853,53 @@ function buildEmpty(): MockDataset {
   };
 }
 
+/* ---- FE-HONEST-1 (§10-J): the dangling-ref exhibit ---- */
+/* The R-4 custody-clone class (F-R4-2): a rule whose `entity_ref`s belong to a
+ * DIFFERENT hub's registry — the run record exists, but no entity in THIS
+ * registry matches its refs. The old surface paraphrased over it ("it fires on
+ * state change"); the law is a LOUD render: the named ULID, "not in this hub's
+ * registry", visually failing. The trigger ULID below is the field exhibit,
+ * verbatim (R-4 §10-J). */
+function buildDanglingRef(): MockDataset {
+  const GHOST_TRIGGER = '01KX1PB9AAB4VB3E10BD477TV3'; // the R-4 exhibit ULID
+  const GHOST_TARGET = '01KX1PB9AAB4VB3E10BD477TVX';
+  const chain = makeChain('run_dangling', {
+    automationId: 'auto_dangling',
+    automationName: 'Occupancy light (imported)',
+    triggerId: GHOST_TRIGGER,
+    targetId: GHOST_TARGET,
+    outcome: 'UNCONFIRMED',
+    minAgo: 45,
+  });
+  return {
+    ...defaultDataset,
+    automations: [
+      ...defaultDataset.automations,
+      makeAutomation('auto_dangling', 'Occupancy light (imported)', { lastRunId: 'run_dangling' }),
+    ],
+    runs: [
+      makeRun('run_dangling', {
+        automationId: 'auto_dangling',
+        automationName: 'Occupancy light (imported)',
+        minAgo: 45,
+      }),
+      ...defaultDataset.runs,
+    ],
+    causalChains: { ...defaultDataset.causalChains, run_dangling: chain },
+    nonFiring: {
+      ...defaultDataset.nonFiring,
+      // The concealment exhibit AS THE WIRE SERVES IT TODAY: a triggerSummary in
+      // friendly words with no ref to check (the non-firing read carries none —
+      // the CONTRACT-GAP PROPOSAL in the FE-HONEST-1 return is what would let
+      // this surface go loud too).
+      auto_dangling: makeNonFiring('auto_dangling', 'NEVER_TRIGGERED', {
+        automationName: 'Occupancy light (imported)',
+        triggerSummary: 'This runs when a state changes.',
+      }),
+    },
+  };
+}
+
 /* ---- The registry ---- */
 export interface Scenario {
   id: string;
@@ -872,6 +919,7 @@ export const SCENARIOS: Scenario[] = [
   { id: 'verdict-vocabulary', label: 'The ten verdicts (pre-v1.1.2 wire)', group: 'Story', blurb: 'Every command_result outcome as the pre-SKIP-VIS deployed wire flattens it — the recorded-reason recovery path, kept for pre-v1.1.2 payloads until the deploy.', build: buildVerdictVocabulary },
   { id: 'field-evidence', label: 'Field evidence', group: 'Story', blurb: 'The silent-skip do-nothing run, the null-name prior-instance run, rehydrated “Available” with days-old evidence, and honest UNKNOWN since restart.', build: buildFieldEvidence },
   { id: 'live-nulls', label: 'Live wire: present-but-null', group: 'Story', blurb: 'The tri-state seam as the live wire serves it — every nullable key present-but-null, a genuinely empty chain, and a run whose chain read 404s.', build: buildLiveNulls },
+  { id: 'dangling-ref', label: 'Dangling ref (loud)', group: 'Story', blurb: 'The R-4 custody-clone class: a run whose entity refs are not in this hub’s registry — rendered loud on the chain, never paraphrased away.', build: buildDanglingRef },
   { id: 'live-fleet', label: 'Live fleet mirror', group: 'Story', blurb: 'One entity per deployed device class with canonical attribute keys — including brightness level 0–254 plus the hub-derived percent.', build: buildLiveFleet },
   { id: 'all-origins', label: 'All event origins', group: 'Story', blurb: 'Automation, device, you, external, and the honest UNKNOWN.', build: buildAllOrigins },
   { id: 'large', label: 'Large (300 runs · 500 events)', group: 'Scale', blurb: 'Forces list virtualization + a render budget.', build: buildLarge },

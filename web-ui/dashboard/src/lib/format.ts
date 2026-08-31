@@ -51,6 +51,46 @@ export function labelFor(id: string | null | undefined): string {
     .join(' ');
 }
 
+/* ---- Unresolvable refs render LOUD (FE-HONEST-1 — the §10-J law) ----
+ * R-4 field evidence (2026-08-30): the explain surface concealed a dangling
+ * `entity_ref` it could see — friendly prose over a rule pointing at an entity
+ * this hub's registry does not hold. The law: an unresolvable ref renders the
+ * NAMED ULID plus "not in this hub's registry", visually failing — never a
+ * paraphrase that hides it. The claim is only made on a complete registry
+ * census (lib/registry.ts); anything less renders neutral. */
+
+/** Structural mirror of registry.RefResolution (kept import-free — format is a leaf). */
+export interface RefLook {
+  kind: 'named' | 'known' | 'dangling' | 'unverified';
+  name?: string;
+}
+
+/** The one phrase for the unresolvable-ref state — test-locked. */
+export const UNRESOLVED_REF_PHRASE = 'not in this hub’s registry';
+export const UNRESOLVED_REF_PILL = 'Not in registry';
+export const UNRESOLVED_REF_HELP =
+  'This rule points at an entity that is not in this hub’s registry, so it cannot reach a real device. It may belong to another hub’s records or to a device that was removed.';
+
+/** Name an entity ref for an explain surface: the registry name when the census
+ *  resolves it; the ULID VERBATIM when it is dangling (never prettified — the
+ *  raw id is what correlates with the log); the humanized fallback otherwise. */
+export function refLabel(id: string | null | undefined, res: RefLook): string {
+  if (!id) return 'Something not on record';
+  if (res.kind === 'named' && res.name) return res.name;
+  if (res.kind === 'dangling') return id;
+  return labelFor(id);
+}
+
+/** The loud trigger line: the named ULID + the registry fact + the recorded time. */
+export function danglingTriggerLine(id: string, verb: string, when: string): string {
+  return `Entity ${id} — ${UNRESOLVED_REF_PHRASE} — ${verb} at ${when}.`;
+}
+
+/** The loud action line: what was attempted, at a ref the registry cannot resolve. */
+export function danglingTargetLine(phrase: string, id: string): string {
+  return `${phrase} entity ${id} — ${UNRESOLVED_REF_PHRASE}.`;
+}
+
 /* ---- Time, in human words ---- */
 
 /** ONE parse for every displayed instant — the seconds-as-ms guard (NEW-6 /
@@ -107,6 +147,24 @@ export function clockTimeWithDate(isoOrNull: string | null | undefined, now = Da
   const date = t.toLocaleDateString([], sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
   return `${time} on ${date}`;
 }
+
+/* ---- The Last-reported cell (FE-HONEST-1 — the §10-G/I store-truth law) ----
+ * Three honest states, ONE parse (DX-20): a readable stamp renders date-qualified;
+ * a stamp that is ON RECORD but unreadable says so (never "not recorded" — the
+ * store holds the row; the wire dialect is the gap); no stamp at all renders the
+ * honest absence marker. */
+export function lastReportedCell(lastReported: string | null | undefined): string {
+  if (lastReported == null || lastReported === '') return '—';
+  const t = parseInstant(lastReported);
+  if (!t) return 'On record — unreadable by this dashboard';
+  return clockTimeWithDate(lastReported);
+}
+
+/** The device LIST carries no report time (frozen A1), so it makes NO freshness
+ *  claim (§10-I: "Current" with no evidence was a lie by omission). This title
+ *  explains the em-dash — test-locked. */
+export const LIST_FRESHNESS_NO_CLAIM_TITLE =
+  'Whether this reading is current is not shown in this list — open the device to see when it last reported.';
 
 /* ---- Command outcome (the trust win) ---- */
 export function outcomeMeta(o: ActionOutcome | string | null | undefined): { label: string; tone: Tone; help: string } {
@@ -252,17 +310,17 @@ export function availabilityEvidence(
   switch (a) {
     case 'AVAILABLE':
       if (age) return `Available — last heard from ${age}.`;
-      if (unreadableStamp) return 'Available — the time of the last report is not recorded.';
+      if (unreadableStamp) return 'Available — a report time is on record, but this dashboard cannot read it yet.';
       return 'Available — no report received yet.';
     case 'UNAVAILABLE':
       if (age) return `Offline — last heard from ${age}. Devices are rechecked every few minutes.`;
-      if (unreadableStamp) return 'Offline — the time of the last report is not recorded. Devices are rechecked every few minutes.';
+      if (unreadableStamp) return 'Offline — a report time is on record, but this dashboard cannot read it yet. Devices are rechecked every few minutes.';
       return 'Offline — no report has been received. Devices are rechecked every few minutes.';
     case 'UNKNOWN':
       // Honest state after a restart (AMD-99): rehydrated from the log, waiting
       // for the first fresh report. Calm — it resolves on the first report.
       if (age) return `Not determined yet — the last report on record is from ${age}. This settles after the next report.`;
-      if (unreadableStamp) return 'Not determined yet — the time of the last report is not recorded. This settles after the next report.';
+      if (unreadableStamp) return 'Not determined yet — a report time is on record, but this dashboard cannot read it yet. This settles after the next report.';
       return 'Not determined yet — waiting for the device’s first report. This is normal right after a restart.';
   }
   // Open-vocabulary hardening: an off-vocabulary status still gets an honest
@@ -385,11 +443,20 @@ export function attrValueList(params: Record<string, unknown> | null | undefined
 }
 
 /* ---- The hero device-backward sentence (the mom test) ---- */
-export function causalSentence(chain: CausalChain): string {
+export function causalSentence(
+  chain: CausalChain,
+  // FE-HONEST-1 (§10-J): the headline must not paraphrase over a dangling ref.
+  // With a complete-census resolver, an unresolvable id appears VERBATIM with
+  // the registry fact; without one (the default), nothing is accused.
+  resolve: (id: string | null | undefined) => RefLook = () => ({ kind: 'unverified' }),
+): string {
   // Live-wire hardening (FE-LIVE-V112 item 1): every field the wire has served
   // null — or could omit — is guarded; the sentence stays honest, never invents.
   const trigger = chain.trigger;
-  const triggerSubject = labelFor(trigger?.subjectRef?.id);
+  const trigId = trigger?.subjectRef?.id;
+  const trigRes = resolve(trigId);
+  const triggerSubject =
+    trigId && trigRes.kind === 'dangling' ? `entity ${trigId} (${UNRESOLVED_REF_PHRASE})` : refLabel(trigId, trigRes);
   const triggerVerb = triggerVerbFromValue(trigger?.firingValue ?? null);
   // Date-qualified (NEW-6): a run can be days old; "at 9:40 AM" alone would
   // read as this morning. Same-day runs stay clock-only (the mom-test budget).
@@ -402,7 +469,13 @@ export function causalSentence(chain: CausalChain): string {
     return `${runName(chain.automationName)} ran when ${triggerSubject} ${triggerVerb} at ${when}, but nothing was changed.`;
   }
   const action = actions[0];
-  const target = action ? labelFor(action.targetRef?.id) : runName(chain.automationName);
+  const targetId = action?.targetRef?.id;
+  const targetRes = resolve(targetId);
+  const target = action
+    ? targetId && targetRes.kind === 'dangling'
+      ? `Entity ${targetId} (${UNRESOLVED_REF_PHRASE})`
+      : refLabel(targetId, targetRes)
+    : runName(chain.automationName);
   const verb = action ? commandVerb(action.command) : 'ran';
   return `${target} ${verb} because ${triggerSubject} ${triggerVerb} at ${when}.`;
 }

@@ -18,21 +18,37 @@ import {
   attrValueList,
   causalSentence,
   clockTimeWithDate,
+  danglingTargetLine,
+  danglingTriggerLine,
   EMPTY_CHAIN_NOTE,
-  labelFor,
   NOT_RECORDED,
   NULL_NAME_NOTE,
   pendingHint,
+  refLabel,
   runStatusMeta,
   triggerVerbFromValue,
   unconfirmableHint,
+  UNRESOLVED_REF_HELP,
+  UNRESOLVED_REF_PHRASE,
+  UNRESOLVED_REF_PILL,
   type Tone,
 } from '../lib/format';
+import { UNVERIFIED_RESOLVER, type RefResolver } from '../lib/registry';
 import { actionVerdict, isDoNothingRun } from '../lib/verdicts';
 import styles from './CausalChain.module.css';
 import { t } from '../lib/i18n';
 
-export function CausalChain({ chain }: { chain: Chain }) {
+export function CausalChain({
+  chain,
+  resolveRef = UNVERIFIED_RESOLVER,
+}: {
+  chain: Chain;
+  /** FE-HONEST-1 (the §10-J law): registry resolution for every entity ref this
+   *  surface renders. A 'dangling' resolution (complete census, id absent)
+   *  renders LOUD — the named ULID + "not in this hub's registry", error tone.
+   *  Default is the no-claim resolver: without a census, nothing is accused. */
+  resolveRef?: RefResolver;
+}) {
   /* Live-wire hardening (FE-LIVE-V112 item 1): the wire has served every
    * optional below PRESENT-BUT-NULL beside populated siblings; arrays and
    * sub-objects are guarded the same way so a sparse payload renders honestly
@@ -50,7 +66,7 @@ export function CausalChain({ chain }: { chain: Chain }) {
     : runStatusMeta(outcome?.status);
   return (
     <div class={styles.wrap}>
-      <p class={styles.headline}>{causalSentence(chain)}</p>
+      <p class={styles.headline}>{causalSentence(chain, resolveRef)}</p>
 
       {/* The null-name class (prior-instance runs): say why calmly, never invent a name. */}
       {chain.automationName === null ? <p class={styles.hint}>{NULL_NAME_NOTE}</p> : null}
@@ -62,11 +78,29 @@ export function CausalChain({ chain }: { chain: Chain }) {
             "value not recorded" in words, never a blank and never "null". */}
         {/* NEW-6: matchedAt is date-qualified — a run can be days old, and a bare
             clock time on an old run reads as today. */}
-        <Step kind="trigger" tone="info" marker="●" line={`${labelFor(trigger?.subjectRef?.id)} ${triggerVerbFromValue(trigger?.firingValue)} at ${clockTimeWithDate(trigger?.matchedAt)}.`}>
-          <Detail label="Trigger">
-            {trigger?.type ?? 'recorded before the current automations'} · {trigger?.firingValue ?? `value ${NOT_RECORDED}`}
-          </Detail>
-        </Step>
+        {(() => {
+          const trigId = trigger?.subjectRef?.id;
+          const trigRes = resolveRef(trigId);
+          const trigDangling = !!trigId && trigRes.kind === 'dangling';
+          return (
+            <Step
+              kind="trigger"
+              tone={trigDangling ? 'error' : 'info'}
+              marker={trigDangling ? '!' : '●'}
+              line={
+                trigDangling
+                  ? danglingTriggerLine(trigId, triggerVerbFromValue(trigger?.firingValue), clockTimeWithDate(trigger?.matchedAt))
+                  : `${refLabel(trigId, trigRes)} ${triggerVerbFromValue(trigger?.firingValue)} at ${clockTimeWithDate(trigger?.matchedAt)}.`
+              }
+              pill={trigDangling ? <StatusPill tone="error" label={UNRESOLVED_REF_PILL} title={UNRESOLVED_REF_HELP} size="sm" /> : undefined}
+            >
+              {trigDangling ? <p class={styles.hint}>{UNRESOLVED_REF_HELP}</p> : null}
+              <Detail label="Trigger">
+                {trigger?.type ?? 'recorded before the current automations'} · {trigger?.firingValue ?? `value ${NOT_RECORDED}`}
+              </Detail>
+            </Step>
+          );
+        })()}
 
         {/* Conditions */}
         {conditions.map((c, i) => {
@@ -83,7 +117,13 @@ export function CausalChain({ chain }: { chain: Chain }) {
             >
               {observed.length > 0 ? (
                 <Detail label="At the time">
-                  {observed.map((o) => `${labelFor(o.entityId)} ${o.attribute} = ${o.value}`).join('; ')}
+                  {observed
+                    .map((o) => {
+                      const r = resolveRef(o.entityId);
+                      const loud = r.kind === 'dangling' ? ` (${UNRESOLVED_REF_PHRASE})` : '';
+                      return `${refLabel(o.entityId, r)}${loud} ${o.attribute} = ${o.value}`;
+                    })
+                    .join('; ')}
                 </Detail>
               ) : null}
             </Step>
@@ -104,6 +144,9 @@ export function CausalChain({ chain }: { chain: Chain }) {
             calm, never a settled pill. See lib/verdicts.ts. */}
         {actions.map((a, i) => {
           const v = actionVerdict(a);
+          const targetId = a.targetRef?.id;
+          const targetRes = resolveRef(targetId);
+          const targetDangling = !!targetId && targetRes.kind === 'dangling';
           const hint =
             v.mode === 'held-dispatched' ? pendingHint(a.command)
             : v.mode === 'timed-out' || v.mode === 'acked-silent' ? unconfirmableHint(a.command)
@@ -114,20 +157,30 @@ export function CausalChain({ chain }: { chain: Chain }) {
             <Step
               key={i}
               kind="action"
-              tone={v.tone}
-              marker="→"
-              line={`${actionPhrase(a.command)} ${labelFor(a.targetRef?.id)}.`}
+              tone={targetDangling ? 'error' : v.tone}
+              marker={targetDangling ? '!' : '→'}
+              line={
+                targetDangling
+                  ? danglingTargetLine(actionPhrase(a.command), targetId)
+                  : `${actionPhrase(a.command)} ${refLabel(targetId, targetRes)}.`
+              }
               pill={
-                <StatusPill
-                  tone={v.tone}
-                  label={v.label}
-                  title={v.help}
-                  size="sm"
-                  glyph={v.glyph}
-                  provisional={v.provisional}
-                />
+                <>
+                  {targetDangling ? (
+                    <StatusPill tone="error" label={UNRESOLVED_REF_PILL} title={UNRESOLVED_REF_HELP} size="sm" />
+                  ) : null}
+                  <StatusPill
+                    tone={v.tone}
+                    label={v.label}
+                    title={v.help}
+                    size="sm"
+                    glyph={v.glyph}
+                    provisional={v.provisional}
+                  />
+                </>
               }
             >
+              {targetDangling ? <p class={styles.hint}>{UNRESOLVED_REF_HELP}</p> : null}
               {showHelp ? <p class={styles.hint}>{v.help}</p> : null}
               {hint ? <p class={styles.hint}>{hint}</p> : null}
               <Detail label="Command">{a.command ?? NOT_RECORDED}{attrValueList(a.params)}</Detail>

@@ -13,9 +13,10 @@ import {
   availabilityMeta,
   attrValue,
   brightnessDisplay,
-  clockTimeWithDate,
   displayName,
   labelFor,
+  lastReportedCell,
+  LIST_FRESHNESS_NO_CLAIM_TITLE,
   timeAgo,
 } from '../lib/format';
 import { t } from '../lib/i18n';
@@ -41,7 +42,23 @@ export function DevicesView() {
               onActivate={(r) => setSelected({ entityId: r.entityId, name: r.name })}
               emptyLabel="No devices paired yet."
               columns={[
-                { key: 'name', header: 'Device', render: (r) => <strong>{displayName(r)}</strong> },
+                {
+                  // §10-H (FE-HONEST-1): these rows are ENTITIES — a device can
+                  // expose several. The old 'Device' header put an entity ULID
+                  // under a device label, so a row could not be correlated with
+                  // a `device_adopted` log line. Label it truthfully and show
+                  // the raw entity id, which IS what the log carries.
+                  key: 'name',
+                  header: 'Entity',
+                  render: (r) => (
+                    <div>
+                      <strong>{displayName(r)}</strong>
+                      <div style={{ fontSize: 'var(--hs-text-xs)', color: 'var(--hs-text-muted)', fontFamily: 'var(--hs-font-mono, monospace)' }}>
+                        {r.entityId}
+                      </div>
+                    </div>
+                  ),
+                },
                 {
                   key: 'status',
                   header: 'Status',
@@ -59,7 +76,15 @@ export function DevicesView() {
                     r.stale ? (
                       <StatusPill tone="warn" label="Stale" title="This reading may be out of date." size="sm" />
                     ) : (
-                      <span style={{ color: 'var(--hs-text-muted)' }}>Current</span>
+                      // §10-I (FE-HONEST-1): the frozen A1 row carries NO report
+                      // time, so this list has no evidence for a freshness claim.
+                      // "Current" here contradicted a detail that said the report
+                      // time was not recorded — a claim with no evidence. The
+                      // list now claims nothing; the device page carries the
+                      // evidence-with-age truth.
+                      <span style={{ color: 'var(--hs-text-muted)' }} title={LIST_FRESHNESS_NO_CLAIM_TITLE}>
+                        —
+                      </span>
                     ),
                 },
               ]}
@@ -134,6 +159,12 @@ function EntityDetail({ id }: { id: string }) {
           </>
         )}
         <div class="kvRow">
+          {/* §10-H: the raw entity id, verbatim — the token that correlates a
+              row with the hub's own log lines. Monospace, copyable. */}
+          <dt>Entity ID</dt>
+          <dd style={{ fontFamily: 'var(--hs-font-mono, monospace)', fontSize: 'var(--hs-text-xs)' }}>{s.entityId}</dd>
+        </div>
+        <div class="kvRow">
           <dt>Last changed</dt>
           <dd>{timeAgo(s.lastChanged)}</dd>
         </div>
@@ -143,7 +174,10 @@ function EntityDetail({ id }: { id: string }) {
               so the row and the sentence can never contradict (DX-20). An
               unreadable stamp renders honest absence — never a 1970 misread. */}
           <dt>Last reported</dt>
-          <dd>{clockTimeWithDate(s.lastReported)}</dd>
+          {/* §10-G store-truth: three honest states — readable (date-qualified),
+              on-record-but-unreadable (the store HOLDS the row; say so — never
+              "not recorded"), or no report at all. One parse (DX-20). */}
+          <dd>{lastReportedCell(s.lastReported)}</dd>
         </div>
       </dl>
     </div>

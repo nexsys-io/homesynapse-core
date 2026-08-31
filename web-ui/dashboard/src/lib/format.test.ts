@@ -9,13 +9,20 @@ import {
   availabilityMeta,
   brightnessDisplay,
   causalSentence,
+  danglingTargetLine,
+  danglingTriggerLine,
   labelFor,
+  lastReportedCell,
+  LIST_FRESHNESS_NO_CLAIM_TITLE,
   NULL_NAME_NOTE,
   outcomeMeta,
   originMeta,
+  refLabel,
   runName,
   runStatusMeta,
   timeAgo,
+  UNRESOLVED_REF_PHRASE,
+  UNRESOLVED_REF_PILL,
   verdictMeta,
 } from './format';
 import { causalChains } from './api/mock/mockData';
@@ -152,5 +159,63 @@ describe('the silent-skip run sentence (do-nothing runs never read as success)',
     const s = causalSentence(chain);
     expect(s).toMatch(/nothing was changed\.$/);
     expect(s).not.toMatch(/turned on/);
+  });
+});
+
+/* ---- FE-HONEST-1: the loud unresolvable-ref register (§10-J) + store-truth
+ * Last-reported (§10-G/I). These locks are the point of the lane: the copy that
+ * surfaces a dangling ref, and the copy that stops the evidence-free freshness
+ * claim, must not quietly soften. */
+const ULID = '01KX1PB9AAB4VB3E10BD477TV3'; // the R-4 §10-J field exhibit, verbatim
+
+describe('the loud unresolvable-ref register (§10-J)', () => {
+  it('names the ULID verbatim and says "not in this hub’s registry" — never a paraphrase', () => {
+    const line = danglingTriggerLine(ULID, 'changed', '9:42 PM');
+    expect(line).toContain(ULID);
+    expect(line).toContain(UNRESOLVED_REF_PHRASE);
+    expect(UNRESOLVED_REF_PHRASE).toBe('not in this hub’s registry');
+    const act = danglingTargetLine('Turned on', ULID);
+    expect(act).toContain(ULID);
+    expect(act).toContain(UNRESOLVED_REF_PHRASE);
+    expect(UNRESOLVED_REF_PILL).toBe('Not in registry');
+  });
+
+  it('refLabel: registry name > verbatim ULID when dangling > humanized fallback; never accuses unverified', () => {
+    expect(refLabel(ULID, { kind: 'named', name: 'Hallway Motion' })).toBe('Hallway Motion');
+    expect(refLabel(ULID, { kind: 'dangling' })).toBe(ULID); // verbatim — correlates with the log
+    expect(refLabel('ent_hallway_light', { kind: 'unverified' })).toBe('Hallway Light');
+    expect(refLabel(null, { kind: 'unverified' })).toBe('Something not on record');
+  });
+
+  it('the headline goes loud with a dangling resolver — and stays neutral without one', () => {
+    const chain = structuredClone(causalChains['run_eh_001']!);
+    chain.trigger.subjectRef = { type: 'ENTITY', id: ULID };
+    const loud = causalSentence(chain, () => ({ kind: 'dangling' }));
+    expect(loud).toContain(ULID);
+    expect(loud).toContain(UNRESOLVED_REF_PHRASE);
+    // No resolver wired (no census): no accusation — the pre-existing neutral render.
+    const neutral = causalSentence(chain);
+    expect(neutral).not.toContain(UNRESOLVED_REF_PHRASE);
+  });
+});
+
+describe('store-truth Last-reported (§10-G) and the no-claim list (§10-I)', () => {
+  it('a readable stamp renders; an on-record-but-unreadable stamp says so — never "not recorded"', () => {
+    expect(lastReportedCell(null)).toBe('—');
+    expect(lastReportedCell(new Date().toISOString())).not.toBe('—');
+    // The /state dialect class: the wire serves a non-string where the contract
+    // says ISO string. The store HOLDS the row — the cell must say "on record".
+    expect(lastReportedCell(1756500000.123 as unknown as string)).toBe('On record — unreadable by this dashboard');
+  });
+
+  it('availabilityEvidence distinguishes no-report from unreadable-report (store truth)', () => {
+    expect(availabilityEvidence('AVAILABLE', null)).toBe('Available — no report received yet.');
+    expect(availabilityEvidence('AVAILABLE', 1756500000.123 as unknown as string)).toBe(
+      'Available — a report time is on record, but this dashboard cannot read it yet.',
+    );
+  });
+
+  it('the list makes no freshness claim it cannot evidence', () => {
+    expect(LIST_FRESHNESS_NO_CLAIM_TITLE).toContain('open the device');
   });
 });

@@ -83,11 +83,16 @@ describe('availabilityEvidence — the prose and the row can no longer contradic
     expect(s).toContain('last heard from 4 days ago');
   });
 
-  it('an UNREADABLE lastReported never renders "last heard from —" — it says the time is not recorded', () => {
+  it('an UNREADABLE lastReported never renders "last heard from —" — it says the stamp is ON RECORD but unreadable', () => {
+    // FE-HONEST-1 (§10-G): the store HOLDS the row — "not recorded" was itself a
+    // false claim on the unreadable-dialect path. The register is now store-truth:
+    // on record, but not readable by this dashboard yet.
     const s = fmt.availabilityEvidence('UNAVAILABLE', EPOCH_SECONDS);
     expect(s).not.toContain('—.');
     expect(s).not.toContain('last heard from —');
-    expect(s.toLowerCase()).toContain('not recorded');
+    expect(s.toLowerCase()).toContain('on record');
+    expect(s.toLowerCase()).toContain('cannot read');
+    expect(s.toLowerCase()).not.toContain('not recorded');
   });
 
   it('the unreadable-stamp sentence is distinct from the honest no-report-yet sentence', () => {
