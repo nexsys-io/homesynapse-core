@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -355,6 +356,105 @@ class EzspProtocolTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> protocol.permitJoin(255))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // ------------------------------------------------------------------
+    // F-R4-1 T8: lookupIeee — the ONE new silicon surface (0x0061)
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("F-R4-1 T8: lookupIeee encodes the nodeId u16 LE on 0x0061 and decodes "
+            + "status 0x00 + EUI64 LE (bellows lookupEui64ByNodeId, v4 lineage inherited "
+            + "by v13 — unmeasured until R-4b)")
+    void lookupIeee_encodesNodeIdAndDecodesEui64() {
+        connect(13);
+        startSessionOrFail();
+        long ieee = 0x00124B0012345678L;
+        ncp.onEzspCommand(command -> {
+            if (!isLegacyVersion(command) && frameIdOf(command)
+                    == EzspCoordinatorProtocol.FRAME_LOOKUP_EUI64_BY_NODE_ID) {
+                byte[] parameters = new byte[9];
+                parameters[0] = 0x00;                   // EMBER_SUCCESS
+                for (int i = 0; i < 8; i++) {
+                    parameters[1 + i] = (byte) (ieee >> (8 * i));
+                }
+                return List.of(extendedResponse(command[0] & 0xFF,
+                        EzspCoordinatorProtocol.FRAME_LOOKUP_EUI64_BY_NODE_ID,
+                        parameters));
+            }
+            return defaultHandler(command);
+        });
+
+        Optional<IEEEAddress> resolved = protocol.lookupIeee(0x6B9A);
+
+        assertThat(resolved).contains(new IEEEAddress(ieee));
+        byte[] command = lastCommandWithFrameId(
+                EzspCoordinatorProtocol.FRAME_LOOKUP_EUI64_BY_NODE_ID);
+        assertThat(command).isNotNull();
+        assertThat(extendedParameters(command))
+                .as("the request is the nodeId u16 LE")
+                .containsExactly(0x9A, 0x6B);
+        assertThat(countCommands(EzspCoordinatorProtocol.FRAME_LOOKUP_EUI64_BY_NODE_ID))
+                .isEqualTo(1);
+        assertThat(EzspCoordinatorProtocol.FRAME_LOOKUP_EUI64_BY_NODE_ID)
+                .as("bellows v4 commands.py: lookupEui64ByNodeId = 0x61")
+                .isEqualTo(0x0061);
+    }
+
+    @Test
+    @DisplayName("F-R4-1 T8: a non-success status resolves EMPTY and WARNs "
+            + "zigbee.lookup_eui64_failed with the status byte — never a throw, "
+            + "never a zeroed address")
+    void lookupIeee_nonSuccessStatusIsEmpty() {
+        connect(13);
+        startSessionOrFail();
+        ncp.onEzspCommand(command -> {
+            if (!isLegacyVersion(command) && frameIdOf(command)
+                    == EzspCoordinatorProtocol.FRAME_LOOKUP_EUI64_BY_NODE_ID) {
+                // EMBER_ERR_FATAL + a zeroed EUI64: the not-in-table shape.
+                return List.of(extendedResponse(command[0] & 0xFF,
+                        EzspCoordinatorProtocol.FRAME_LOOKUP_EUI64_BY_NODE_ID,
+                        new byte[] {0x01, 0, 0, 0, 0, 0, 0, 0, 0}));
+            }
+            return defaultHandler(command);
+        });
+
+        assertThat(protocol.lookupIeee(0x9999)).isEmpty();
+        assertThat(protocolMessages("zigbee.lookup_eui64_failed"))
+                .containsExactly("zigbee.lookup_eui64_failed: nwk=0x9999 status=0x1");
+    }
+
+    @Test
+    @DisplayName("F-R4-1 T8: a success status with a truncated EUI64 is a format error "
+            + "(the lookupNodeIdByEui64 precedent), and the nodeId range is validated")
+    void lookupIeee_shortResponseIsFormatError_andRangeValidated() {
+        connect(13);
+        startSessionOrFail();
+        ncp.onEzspCommand(command -> {
+            if (!isLegacyVersion(command) && frameIdOf(command)
+                    == EzspCoordinatorProtocol.FRAME_LOOKUP_EUI64_BY_NODE_ID) {
+                return List.of(extendedResponse(command[0] & 0xFF,
+                        EzspCoordinatorProtocol.FRAME_LOOKUP_EUI64_BY_NODE_ID,
+                        new byte[] {0x00, 0x78, 0x56}));
+            }
+            return defaultHandler(command);
+        });
+
+        assertThatThrownBy(() -> protocol.lookupIeee(0x6B9A))
+                .isInstanceOf(EzspFormatException.class)
+                .hasMessageContaining("lookupEui64ByNodeId");
+        assertThatThrownBy(() -> protocol.lookupIeee(-1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> protocol.lookupIeee(0x10000))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /** The captured protocol-logger lines starting with {@code prefix}, in order. */
+    private List<String> protocolMessages(String prefix) {
+        return custodyLogCapture.list.stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith(prefix))
+                .toList();
     }
 
     // ------------------------------------------------------------------

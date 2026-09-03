@@ -42,13 +42,19 @@ import java.util.function.Supplier;
  *
  * <p>Unknown clusters (the measured 0xFC01/0xFC04/0xFC57 deltas), unknown
  * senders, and unadopted endpoints are skipped with structured logs — never
- * ingestion failures.
+ * ingestion failures. F-R4-1 (R-10 Row 10 (a)): an unknown sender ALSO raises
+ * {@link IngestionListener#onRejoinCandidate(int, int)} before its skip — the
+ * silent-rejoiner admission hook (H-ii); the adapter gates it on the
+ * permit-join window and admits through the SAME announce path.
  *
- * <p>M9.4-TCJ §A.2: {@code trustCenterJoinHandler} (0x0024) and
- * {@code childJoinHandler} (0x0023) callbacks are routed to LOG-ONLY handlers —
- * honest join observability (including failed joins, which never announce).
- * Adoption/interview remain triggered ONLY by Device_annce; the join handlers
- * never synthesize a device, an interview, or an event.
+ * <p>M9.4-TCJ §A.2, as AMENDED by F-R4-1: {@code trustCenterJoinHandler}
+ * (0x0024) and {@code childJoinHandler} (0x0023) callbacks are routed to
+ * LOG-ONLY handlers — honest join observability (including failed joins,
+ * which never announce). The join handlers never synthesize a device, an
+ * interview, or an event; the ONE amendment: an ACCEPTED rejoin raises
+ * {@link IngestionListener#onRejoinCandidate(IEEEAddress, int)} (H-i), an
+ * admission TRIGGER the adapter gates on the open window and the adoption
+ * maps — never a bypass of interview → proposal → adopted.
  *
  * <p>Dedup guards ONLY the unsolicited 0x0A report channel (F-4, M9.4b §6.1);
  * the 0x01 Read-Attributes-Response — the readback/VERIFY channel, AMD-97
@@ -120,6 +126,45 @@ final class ZclIngestionUnit {
          * @param device the sending device
          */
         void onFrame(IEEEAddress device);
+
+        /**
+         * F-R4-1 (R-10 Row 10 (a)) — interview-on-rejoin, hook H-ii, the
+         * evidenced case: a Home Automation frame arrived from a network
+         * address the device cache cannot resolve — the silent rejoiner (a
+         * mains router that holds the network key rejoins on its own
+         * authority, usually before the service listens, and never announces;
+         * R-3a: the mains fleet silent after the outage; R-4 D-g: the
+         * Hue-class device spoke ONLY as {@code ingestion_unknown_sender}
+         * inside a 254 s window). Raised on EVERY such frame, BEFORE the
+         * unknown-sender WARN, which continues as today — this unit detects,
+         * the adapter decides: the permit-join window is the FIRST gate
+         * (closed ⇒ noted once per nwk per invocation and ignored for
+         * adoption), then the once-per-nwk IEEE resolution (the cache's
+         * NWK→IEEE view, then the coordinator's address table), then the
+         * SAME {@code recordAnnounce} + {@code schedule} an announce takes.
+         * Doctrine: relink ≠ adopt — an admission TRIGGER into the interview
+         * → proposal → adopted path, never a bypass; the frame itself is
+         * still skipped.
+         *
+         * @param networkAddress the unresolvable 16-bit sender address
+         * @param clusterId the frame's cluster (the log's device-class hint)
+         */
+        void onRejoinCandidate(int networkAddress, int clusterId);
+
+        /**
+         * F-R4-1 hook H-i, the cheap secondary on the same path: the Trust
+         * Center reported an ACCEPTED rejoin (0x0024 {@code SECURED_REJOIN} /
+         * {@code UNSECURED_REJOIN}, not denied) — the callback carries the
+         * EUI64, so no lookup is needed. The adapter gates on the open window
+         * and on the adoption maps (a device already adopted never re-enters
+         * — today's relink path is untouched), then admits through the SAME
+         * announce path. Denied joins, fresh joins (the announce follows), and
+         * leaves never reach here — the M9.4-TCJ §A.2 pin's surviving half.
+         *
+         * @param device the rejoined device's IEEE address, never {@code null}
+         * @param networkAddress the device's 16-bit network address
+         */
+        void onRejoinCandidate(IEEEAddress device, int networkAddress);
     }
 
     /** Sends one ZCL frame; {@code true} = the NCP accepted it (the F-7a response seam). */
@@ -273,12 +318,19 @@ final class ZclIngestionUnit {
 
     /**
      * M9.4-TCJ §A.2 — {@code trustCenterJoinHandler} (0x0024) observability.
-     * <strong>THE PIN:</strong> adoption/interview remain triggered ONLY by
-     * Device_annce ({@link #handleAnnounce}); this handler NEVER creates a
-     * device, NEVER schedules an interview, NEVER feeds availability, and NEVER
+     * <strong>THE PIN, AS AMENDED BY F-R4-1 (R-10 Row 10 (a), 2026-09-02):</strong>
+     * this handler NEVER creates a device, NEVER feeds availability, and NEVER
      * publishes an event — it renders join outcomes visible, including the
-     * failed joins that never announce. A device that fails key exchange must
-     * never render as joined.
+     * failed joins that never announce; a device that fails key exchange must
+     * never render as joined. The amendment covers exactly ONE case: an
+     * ACCEPTED rejoin ({@code SECURED_REJOIN}/{@code UNSECURED_REJOIN}, not
+     * denied) raises {@link IngestionListener#onRejoinCandidate(IEEEAddress,
+     * int)} — an admission TRIGGER the adapter gates on the open permit-join
+     * window and on the adoption maps, then feeds into the SAME
+     * {@link #handleAnnounce} path (cache + queue). This handler itself still
+     * schedules nothing: a fresh join waits for its announce, a denied join
+     * and a leave stay observability-only. Every other sentence of the pin
+     * stands.
      */
     private void handleTrustCenterJoin(EzspFrame frame) {
         Optional<EzspCoordinatorProtocol.TrustCenterJoin> parsed =
@@ -298,6 +350,11 @@ final class ZclIngestionUnit {
             log.info("zigbee.device_join: device={} nwk=0x{} status={} decision={}",
                     join.newNodeEui64(), Integer.toHexString(join.newNodeId()),
                     join.statusName(), join.decisionName());
+            if (join.rejoined()) {
+                // F-R4-1 H-i: the accepted-rejoin admission trigger — the
+                // adapter owns the window and adoption-map gates.
+                listener.onRejoinCandidate(join.newNodeEui64(), join.newNodeId());
+            }
             return;
         }
         // DENY_JOIN or an unknown status: honest failed-join surfacing — the
@@ -386,6 +443,11 @@ final class ZclIngestionUnit {
         Optional<IEEEAddress> device =
                 resolver.deviceForNetworkAddress(message.sender());
         if (device.isEmpty()) {
+            // F-R4-1 H-ii: the silent-rejoiner admission trigger, raised
+            // BEFORE the skip — the adapter owns the window gate, the
+            // once-per-nwk resolution, and the admission; this frame is
+            // still skipped exactly as before.
+            listener.onRejoinCandidate(message.sender(), message.clusterId());
             log.warn("zigbee.ingestion_unknown_sender: nwk=0x{} cluster=0x{}; "
                             + "frame skipped",
                     Integer.toHexString(message.sender()),

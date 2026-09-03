@@ -155,4 +155,47 @@ class PendingInterviewQueueTest {
         assertThat(queue.due()).hasSize(1);
         assertThat(queue.due().get(0).networkAddress()).isEqualTo(0x1234);
     }
+
+    // ── F-R4-1 (R-10 Row 10 (a)): the admission source rides the queue entry ─
+
+    @Test
+    @DisplayName("F-R4-1: schedule(ieee, nwk) records the ANNOUNCE source (the "
+            + "pre-existing callers byte-unchanged); the rejoin overload records REJOIN; "
+            + "the tokens are the device_proposed log vocabulary")
+    void scheduleRecordsTheAdmissionSource() {
+        queue.schedule(IEEE, NWK);
+        assertThat(queue.due()).extracting(PendingInterviewQueue.Pending::source)
+                .containsExactly(PendingInterviewQueue.Source.ANNOUNCE);
+
+        queue.schedule(IEEE, NWK, PendingInterviewQueue.Source.REJOIN);
+        assertThat(queue.due()).extracting(PendingInterviewQueue.Pending::source)
+                .containsExactly(PendingInterviewQueue.Source.REJOIN);
+
+        assertThat(PendingInterviewQueue.Source.ANNOUNCE.token()).isEqualTo("announce");
+        assertThat(PendingInterviewQueue.Source.REJOIN.token()).isEqualTo("rejoin");
+    }
+
+    @Test
+    @DisplayName("F-R4-1: the source survives a failed attempt and a wake, and a later "
+            + "re-announce owns the provenance (put-replace resets it to ANNOUNCE)")
+    void sourceSurvivesFailureAndWake_reannounceOwnsProvenance() {
+        queue.schedule(IEEE, NWK, PendingInterviewQueue.Source.REJOIN);
+
+        queue.recordFailure(IEEE);
+        clock.advance(Duration.ofSeconds(5));
+        assertThat(queue.due()).extracting(PendingInterviewQueue.Pending::source)
+                .as("the retry keeps the admission source")
+                .containsExactly(PendingInterviewQueue.Source.REJOIN);
+
+        queue.recordFailure(IEEE);
+        queue.onFrameReceived(IEEE);
+        assertThat(queue.due()).extracting(PendingInterviewQueue.Pending::source)
+                .as("the wake keeps the admission source")
+                .containsExactly(PendingInterviewQueue.Source.REJOIN);
+
+        queue.schedule(IEEE, NWK);
+        assertThat(queue.due()).extracting(PendingInterviewQueue.Pending::source)
+                .as("a rejoin is a fresh contact; a later announce is the newer truth")
+                .containsExactly(PendingInterviewQueue.Source.ANNOUNCE);
+    }
 }

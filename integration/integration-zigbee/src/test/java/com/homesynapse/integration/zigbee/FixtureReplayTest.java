@@ -110,6 +110,15 @@ class FixtureReplayTest {
             @Override
             public void onFrame(IEEEAddress device) {
             }
+
+            @Override
+            public void onRejoinCandidate(int networkAddress, int clusterId) {
+                // Fixture replay opens no window: never an admission here.
+            }
+
+            @Override
+            public void onRejoinCandidate(IEEEAddress device, int networkAddress) {
+            }
         }, deduplicator, publisher, clock, (frame, networkAddress) -> true);
     }
 

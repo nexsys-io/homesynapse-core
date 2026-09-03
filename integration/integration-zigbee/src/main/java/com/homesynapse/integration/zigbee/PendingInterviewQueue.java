@@ -45,6 +45,33 @@ final class PendingInterviewQueue {
             LoggerFactory.getLogger(PendingInterviewQueue.class);
 
     /**
+     * How an interview entered the queue (F-R4-1, R-10 Row 10 (a)) — the
+     * proposal's provenance, which rides the {@code zigbee.device_proposed}
+     * LOG LINE and nothing else: never an event payload (the frozen event-log
+     * contract; an additive payload key is a follow-on proposal, not this WU).
+     */
+    enum Source {
+        /** A ZDP Device_annce — the M9.3 path, unchanged. */
+        ANNOUNCE("announce"),
+        /**
+         * Interview-on-rejoin: an accepted 0x0024 rejoin or an unknown-sender
+         * frame resolved inside an open permit-join window (F-R4-1).
+         */
+        REJOIN("rejoin");
+
+        private final String token;
+
+        Source(String token) {
+            this.token = token;
+        }
+
+        /** The log vocabulary ({@code source=announce|rejoin}). */
+        String token() {
+            return token;
+        }
+    }
+
+    /**
      * One pending interview's schedule state.
      *
      * @param ieeeAddress the device, never {@code null}
@@ -53,9 +80,11 @@ final class PendingInterviewQueue {
      * @param nextEligibleAt when the next attempt may run; {@code null} while parked
      * @param enqueuedAt when the interview entered the queue (the expiry basis)
      * @param parked {@code true} once retries are exhausted — resume on frame only
+     * @param source how the interview was admitted (F-R4-1), never {@code null}
      */
     record Pending(IEEEAddress ieeeAddress, int networkAddress, int failedAttempts,
-            Instant nextEligibleAt, Instant enqueuedAt, boolean parked) {
+            Instant nextEligibleAt, Instant enqueuedAt, boolean parked,
+            Source source) {
     }
 
     private final Clock clock;
@@ -72,19 +101,36 @@ final class PendingInterviewQueue {
     }
 
     /**
-     * Schedules (or re-schedules) an interview, immediately eligible. A
-     * re-announce resets the retry ladder — a rejoin is a fresh device contact.
+     * Schedules (or re-schedules) an announce-admitted interview, immediately
+     * eligible. A re-announce resets the retry ladder — a rejoin is a fresh
+     * device contact — and owns the provenance ({@link Source#ANNOUNCE}).
      *
      * @param ieeeAddress the device, never {@code null}
      * @param networkAddress the device's current 16-bit network address
      */
     void schedule(IEEEAddress ieeeAddress, int networkAddress) {
+        schedule(ieeeAddress, networkAddress, Source.ANNOUNCE);
+    }
+
+    /**
+     * Schedules (or re-schedules) an interview with its admission source
+     * (F-R4-1), immediately eligible. The map is keyed by IEEE — a device
+     * holds at most ONE entry, so a second admission is structurally a
+     * put-replace (the ladder resets; the newer admission owns the
+     * provenance), never a duplicate.
+     *
+     * @param ieeeAddress the device, never {@code null}
+     * @param networkAddress the device's current 16-bit network address
+     * @param source how the interview was admitted, never {@code null}
+     */
+    void schedule(IEEEAddress ieeeAddress, int networkAddress, Source source) {
         Objects.requireNonNull(ieeeAddress, "ieeeAddress");
+        Objects.requireNonNull(source, "source");
         lock.lock();
         try {
             Instant now = clock.instant();
             pending.put(ieeeAddress.value(), new Pending(ieeeAddress,
-                    networkAddress, 0, now, now, false));
+                    networkAddress, 0, now, now, false, source));
         } finally {
             lock.unlock();
         }
@@ -133,14 +179,14 @@ final class PendingInterviewQueue {
                         + "wake-frame resume", ieeeAddress);
                 pending.put(ieeeAddress.value(), new Pending(entry.ieeeAddress(),
                         entry.networkAddress(), failures, null,
-                        entry.enqueuedAt(), true));
+                        entry.enqueuedAt(), true, entry.source()));
                 return;
             }
             Instant next = clock.instant()
                     .plusMillis(RETRY_BACKOFF_MILLIS[failures - 1]);
             pending.put(ieeeAddress.value(), new Pending(entry.ieeeAddress(),
                     entry.networkAddress(), failures, next, entry.enqueuedAt(),
-                    false));
+                    false, entry.source()));
         } finally {
             lock.unlock();
         }
@@ -162,7 +208,7 @@ final class PendingInterviewQueue {
             }
             pending.put(ieeeAddress.value(), new Pending(entry.ieeeAddress(),
                     entry.networkAddress(), entry.failedAttempts(),
-                    clock.instant(), entry.enqueuedAt(), false));
+                    clock.instant(), entry.enqueuedAt(), false, entry.source()));
         } finally {
             lock.unlock();
         }

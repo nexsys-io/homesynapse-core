@@ -53,10 +53,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * callbacks become honest log-only observability.
  *
  * <p><strong>The north star:</strong> a device that fails key exchange must never
- * render as joined. Adoption stays Device_annce-gated; the join handler NEVER
- * creates a device, NEVER schedules an interview, NEVER publishes an event —
- * scenarios §A.3/§A.4 pin the never-synthesize contract, §A.5 pins that the
- * existing announce→interview→discovery chain fires exactly once beside it.
+ * render as joined. The join handler NEVER creates a device and NEVER publishes
+ * an event — and NEVER schedules an interview WITHOUT an open permit-join
+ * window, for a device already in the adoption maps, or on a denied join.
+ * <strong>Re-pinned at F-R4-1 (R-10 Row 10 (a), 2026-09-02):</strong> the
+ * M9.4-TCJ §A.2 pin ("adoption stays Device_annce-gated; the join handler
+ * NEVER schedules an interview") is AMENDED for exactly one case — an ACCEPTED
+ * rejoin ({@code SECURED_REJOIN}/{@code UNSECURED_REJOIN}) during an open
+ * window is an admission TRIGGER into the SAME announce path, pinned in
+ * {@code ZigbeeInterviewOnRejoinTest}; every other sentence of the pin stands
+ * and is pinned here. Scenarios §A.3/§A.4 pin the never-synthesize contract for
+ * a fresh join and a denied join, §A.5 pins that the existing
+ * announce→interview→discovery chain fires exactly once beside it.
  *
  * <p>Frame ids, policy decisions, and callback layouts are BENCH-VERIFY
  * (bellows-derived): assertions bind to the SAME named constants the production
@@ -223,8 +231,11 @@ class ZigbeeTrustCenterJoinTest {
     // ── §A-3 secured join ⇒ one INFO, ZERO synthesis ────────────────────────
 
     @Test
-    @DisplayName("§A-3: a scripted secured 0x0024 logs one INFO zigbee.device_join and "
-            + "synthesizes NOTHING — zero devices, zero interviews, zero events")
+    @DisplayName("§A-3: a scripted fresh UNSECURED_JOIN 0x0024 logs one INFO "
+            + "zigbee.device_join and synthesizes NOTHING — zero devices, zero "
+            + "interviews, zero events (F-R4-1 re-pin: a fresh join never schedules — "
+            + "the announce that follows does; only an accepted REJOIN inside an open "
+            + "window admits)")
     void securedJoin_logsInfo_synthesizesNothing() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> tcjHandler(ncp, command, List.of(
@@ -245,7 +256,9 @@ class ZigbeeTrustCenterJoinTest {
                 .as("the join handler NEVER creates a device").isEmpty();
         assertThat(countFrames(ncp,
                 EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
-                .as("the join handler NEVER starts an interview").isZero();
+                .as("a fresh join never starts an interview — the F-R4-1 amended pin "
+                        + "admits only an accepted REJOIN inside an open window")
+                .isZero();
         assertThat(publisher.published())
                 .as("the join handler NEVER publishes an event").isEmpty();
     }
@@ -255,7 +268,8 @@ class ZigbeeTrustCenterJoinTest {
     @Test
     @DisplayName("§A-4: a scripted denied 0x0024 logs one WARN zigbee.device_join_failed "
             + "and synthesizes NOTHING — a device that fails key exchange must never "
-            + "render as joined")
+            + "render as joined (the F-R4-1 amended pin's surviving half: a DENIED "
+            + "join never schedules, window or no window)")
     void deniedJoin_logsWarn_synthesizesNothing() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> tcjHandler(ncp, command, List.of(

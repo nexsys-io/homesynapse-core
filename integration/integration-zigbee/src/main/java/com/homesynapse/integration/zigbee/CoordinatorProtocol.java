@@ -5,6 +5,7 @@
 package com.homesynapse.integration.zigbee;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Abstraction over Zigbee protocol operations above the transport layer.
@@ -72,6 +73,26 @@ public interface CoordinatorProtocol {
      * surface (never-false-ALIVE).
      */
     void enablePreconfiguredKeyJoins();
+
+    /**
+     * Resolves a 16-bit network address to the device's IEEE address from the
+     * coordinator's own address table (F-R4-1 — interview-on-rejoin, R-10
+     * Row 10 (a)): the admission hop for a device that rejoined on its own
+     * authority and never announced, so its frames reach the adapter as an
+     * unknown sender. Coordinator-neutral (INV-CE-04): the EZSP binding rides
+     * {@code lookupEui64ByNodeId}; a ZNP coordinator binds its own table read.
+     *
+     * <p>Empty when the coordinator holds no entry for the address (a
+     * non-success status) — the caller treats a miss as an unresolved
+     * candidate, never a synthesized identity. A coordinator that does not
+     * answer surfaces as the unchecked command timeout (the
+     * {@link #permitJoin(int)} precedent: no new checked throw on this surface).
+     *
+     * @param networkAddress the 16-bit network address (0x0000–0xFFFF)
+     * @return the device's IEEE address, or empty when the coordinator holds no
+     *         entry for the address
+     */
+    Optional<IEEEAddress> lookupIeee(int networkAddress);
 
     /**
      * Sends a ZCL frame to the target device.

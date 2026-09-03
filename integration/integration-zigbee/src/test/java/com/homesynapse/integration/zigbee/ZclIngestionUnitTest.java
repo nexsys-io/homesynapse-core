@@ -54,6 +54,8 @@ class ZclIngestionUnitTest {
     private Map<Long, EntityId> entities;
     private List<ZdoCodec.DeviceAnnounce> announces;
     private List<IEEEAddress> framesSeen;
+    private List<NwkHook> nwkHooks;
+    private List<IeeeHook> ieeeHooks;
     private List<ZclFrame> sentFrames;
     private List<Integer> sentTargets;
     private boolean sendAccepted;
@@ -66,6 +68,12 @@ class ZclIngestionUnitTest {
 
     /** One write-through sink invocation (LEARN-PERSIST DP-LP-3). */
     private record SinkCall(IEEEAddress device, long zclId) { }
+
+    /** One F-R4-1 H-ii signal: an unknown-sender frame's (nwk, cluster). */
+    private record NwkHook(int networkAddress, int clusterId) { }
+
+    /** One F-R4-1 H-i signal: an accepted rejoin's (EUI64, nwk). */
+    private record IeeeHook(IEEEAddress device, int networkAddress) { }
 
     @BeforeEach
     void setUp() {
@@ -81,6 +89,8 @@ class ZclIngestionUnitTest {
                 EntityId.of(UlidFactory.generate(clock)));
         announces = new ArrayList<>();
         framesSeen = new ArrayList<>();
+        nwkHooks = new ArrayList<>();
+        ieeeHooks = new ArrayList<>();
         sentFrames = new ArrayList<>();
         sentTargets = new ArrayList<>();
         sendAccepted = true;
@@ -118,6 +128,17 @@ class ZclIngestionUnitTest {
                     @Override
                     public void onFrame(IEEEAddress device) {
                         framesSeen.add(device);
+                    }
+
+                    @Override
+                    public void onRejoinCandidate(int networkAddress, int clusterId) {
+                        nwkHooks.add(new NwkHook(networkAddress, clusterId));
+                    }
+
+                    @Override
+                    public void onRejoinCandidate(IEEEAddress device,
+                            int networkAddress) {
+                        ieeeHooks.add(new IeeeHook(device, networkAddress));
                     }
                 };
         ingestion = new ZclIngestionUnit(() -> {
@@ -233,6 +254,97 @@ class ZclIngestionUnitTest {
 
         ingestion.processCycle();
 
+        assertThat(publisher.published()).isEmpty();
+    }
+
+    // ── F-R4-1 (R-10 Row 10 (a)): the two admission hooks, DETECTION only ───
+
+    @Test
+    @DisplayName("F-R4-1 H-ii: an unknown-sender HA frame raises the rejoin-candidate "
+            + "hook with its (nwk, cluster) BEFORE the unknown-sender WARN, which "
+            + "continues as today — the frame is still skipped, nothing is published")
+    void unknownSenderRaisesRejoinHookThenSkips() {
+        enqueueReport(0x9999, 1, 0x0406,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x18, 0x01});
+
+        ingestion.processCycle();
+
+        assertThat(nwkHooks).containsExactly(new NwkHook(0x9999, 0x0406));
+        assertThat(ieeeHooks).isEmpty();
+        assertThat(ingestionMessages(Level.WARN, "zigbee.ingestion_unknown_sender"))
+                .containsExactly("zigbee.ingestion_unknown_sender: nwk=0x9999 "
+                        + "cluster=0x406; frame skipped");
+        assertThat(framesSeen).as("an unknown sender is never liveness").isEmpty();
+        assertThat(publisher.published()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("F-R4-1 H-ii: a KNOWN sender never raises the hook (the resolver hit "
+            + "is the gate), and a non-HA-profile frame is dropped before the resolver")
+    void knownSenderAndNonHaFrameNeverRaiseRejoinHook() {
+        enqueueReport(SNZB_NWK, 1, 0x0406,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x18, 0x01});
+        pendingFrames.add(incomingFrame(0xA1E0, 0x0021, 242, 0x9999,
+                new byte[] {0x11, 0x00, 0x00}));
+
+        ingestion.processCycle();
+
+        assertThat(nwkHooks).isEmpty();
+        assertThat(ieeeHooks).isEmpty();
+        assertThat(framesSeen).contains(SNZB);
+    }
+
+    @Test
+    @DisplayName("F-R4-1 H-i: an accepted 0x0024 SECURED_REJOIN raises the EUI64 hook "
+            + "beside the device_join INFO; an accepted UNSECURED_REJOIN does too")
+    void acceptedRejoinRaisesIeeeHook() {
+        pendingFrames.add(trustCenterJoinFrame(SNZB.value(), SNZB_NWK,
+                EzspCoordinatorProtocol.DEVICE_UPDATE_SECURED_REJOIN,
+                EzspCoordinatorProtocol.JOIN_DECISION_NO_ACTION));
+        pendingFrames.add(trustCenterJoinFrame(SNZB.value(), SNZB_NWK,
+                EzspCoordinatorProtocol.DEVICE_UPDATE_UNSECURED_REJOIN,
+                EzspCoordinatorProtocol.JOIN_DECISION_USE_PRECONFIGURED_KEY));
+
+        ingestion.processCycle();
+
+        assertThat(ieeeHooks).containsExactly(
+                new IeeeHook(SNZB, SNZB_NWK), new IeeeHook(SNZB, SNZB_NWK));
+        assertThat(nwkHooks).isEmpty();
+        assertThat(ingestionMessages(Level.INFO, "zigbee.device_join:"))
+                .containsExactly(
+                        "zigbee.device_join: device=0x00124B0012345678 nwk=0x6b9a "
+                                + "status=SECURED_REJOIN decision=NO_ACTION",
+                        "zigbee.device_join: device=0x00124B0012345678 nwk=0x6b9a "
+                                + "status=UNSECURED_REJOIN decision=USE_PRECONFIGURED_KEY");
+        assertThat(publisher.published()).isEmpty();
+        assertThat(framesSeen).as("a join callback is never availability").isEmpty();
+    }
+
+    @Test
+    @DisplayName("F-R4-1 H-i: a fresh UNSECURED_JOIN (the announce follows), a DENIED "
+            + "rejoin, a DEVICE_LEFT, and a malformed 0x0024 never raise the hook — "
+            + "the M9.4-TCJ pin's surviving half")
+    void freshJoinDeniedLeftAndMalformedNeverRaiseIeeeHook() {
+        pendingFrames.add(trustCenterJoinFrame(SNZB.value(), SNZB_NWK,
+                EzspCoordinatorProtocol.DEVICE_UPDATE_UNSECURED_JOIN,
+                EzspCoordinatorProtocol.JOIN_DECISION_USE_PRECONFIGURED_KEY));
+        pendingFrames.add(trustCenterJoinFrame(SNZB.value(), SNZB_NWK,
+                EzspCoordinatorProtocol.DEVICE_UPDATE_SECURED_REJOIN,
+                EzspCoordinatorProtocol.JOIN_DECISION_DENY_JOIN));
+        pendingFrames.add(trustCenterJoinFrame(SNZB.value(), SNZB_NWK,
+                EzspCoordinatorProtocol.DEVICE_UPDATE_DEVICE_LEFT,
+                EzspCoordinatorProtocol.JOIN_DECISION_NO_ACTION));
+        pendingFrames.add(new EzspFrame(
+                EzspCoordinatorProtocol.FRAME_TRUST_CENTER_JOIN_HANDLER, true,
+                new byte[] {0x01, 0x02, 0x03}));
+
+        ingestion.processCycle();
+
+        assertThat(ieeeHooks).isEmpty();
+        assertThat(nwkHooks).isEmpty();
+        assertThat(ingestionMessages(Level.INFO, "zigbee.device_join:")).hasSize(1);
+        assertThat(ingestionMessages(Level.WARN, "zigbee.device_join_failed")).hasSize(1);
+        assertThat(ingestionMessages(Level.INFO, "zigbee.device_left")).hasSize(1);
         assertThat(publisher.published()).isEmpty();
     }
 
@@ -877,6 +989,22 @@ class ZclIngestionUnitTest {
         announce[11] = (byte) 0x80;
         return incomingFrame(0x0000, ZdoCodec.CLUSTER_DEVICE_ANNOUNCE, 0,
                 SNZB_NWK, announce);
+    }
+
+    /** A 0x0024 trustCenterJoinHandler callback: nodeId, EUI64, status, decision, parent. */
+    private static EzspFrame trustCenterJoinFrame(long ieee, int nwk, int status,
+            int decision) {
+        byte[] parameters = new byte[14];
+        parameters[0] = (byte) (nwk & 0xFF);
+        parameters[1] = (byte) ((nwk >> 8) & 0xFF);
+        for (int i = 0; i < 8; i++) {
+            parameters[2 + i] = (byte) (ieee >> (8 * i));
+        }
+        parameters[10] = (byte) status;
+        parameters[11] = (byte) decision;
+        return new EzspFrame(
+                EzspCoordinatorProtocol.FRAME_TRUST_CENTER_JOIN_HANDLER, true,
+                parameters);
     }
 
     private static EzspFrame incomingFrame(int profile, int cluster, int srcEp,

@@ -113,6 +113,29 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     static final int FRAME_INCOMING_MESSAGE_HANDLER = 0x0045;
     static final int FRAME_LOOKUP_NODE_ID_BY_EUI64 = 0x0060;
 
+    // ── F-R4-1: the interview-on-rejoin admission hop (BENCH-VERIFY block) ──
+    // BELLOWS-DERIVED, NOT SILICON-VERIFIED — THE ONE NEW SILICON SURFACE of
+    // F-R4-1 (R-10 Row 10 (a)). R-4b's first ⏺ (the lookup returning the
+    // Hue-class device's EUI64 for its live nwk) is criterion 0; a silicon
+    // disagreement is a one-constant/one-layout edit HERE, binding code and
+    // tests together (the 0x0019/0x90 model).
+
+    /**
+     * EZSP {@code lookupEui64ByNodeId}: resolves an unknown sender's 16-bit
+     * address to its EUI64 from the NCP's address table. Re-derived
+     * 2026-09-02 against bellows {@code ezsp/v4/commands.py} —
+     * {@code "lookupEui64ByNodeId": (0x61, {"nodeId": t.EmberNodeId},
+     * {"status": t.EmberStatus, "eui64": t.EUI64})} — inherited UNCHANGED
+     * through v13 ({@code v13/commands.py} extends v12 … v4 and neither
+     * defines nor overrides it); v14 widens the status to {@code sl_Status}
+     * (the {@code decodeStatus} width seam; outside the acceptance band).
+     * Request: nodeId u16 LE. Response: status (the version-keyed width) +
+     * EUI64 u64 LE. Cross-references re-derived in the same pass:
+     * {@code lookupNodeIdByEui64} 0x60, {@code getEui64} 0x26,
+     * {@code permitJoining} 0x22 — all matching the pinned constants above.
+     */
+    static final int FRAME_LOOKUP_EUI64_BY_NODE_ID = 0x0061;
+
     /** The ZDO/ZDP profile id (endpoint 0). */
     static final int ZDO_PROFILE_ID = 0x0000;
     /** The Home Automation profile id. */
@@ -1095,6 +1118,17 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
                     || status == DEVICE_UPDATE_UNSECURED_REJOIN);
         }
 
+        /**
+         * True for an ACCEPTED rejoin — {@code SECURED_REJOIN} or
+         * {@code UNSECURED_REJOIN}, not denied (F-R4-1 H-i): the device already
+         * holds network custody and will NOT announce. A fresh
+         * {@code UNSECURED_JOIN} is excluded — its announce follows.
+         */
+        boolean rejoined() {
+            return joinStarted() && (status == DEVICE_UPDATE_SECURED_REJOIN
+                    || status == DEVICE_UPDATE_UNSECURED_REJOIN);
+        }
+
         /** The status byte's vocabulary name, or its hex when unknown. */
         String statusName() {
             return switch (status) {
@@ -1569,6 +1603,59 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
                         + "requires a joined device");
             }
             return nodeId;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * F-R4-1 — the interview-on-rejoin admission hop over
+     * {@code lookupEui64ByNodeId} ({@link #FRAME_LOOKUP_EUI64_BY_NODE_ID};
+     * BELLOWS-DERIVED, NOT SILICON-VERIFIED — R-4b's criterion 0). Request:
+     * nodeId u16 LE; response: status (the version-keyed width) + EUI64 u64 LE.
+     * A non-success status is a MISS (empty) and logs ONE WARN
+     * {@code zigbee.lookup_eui64_failed} naming the status byte — the
+     * instrument R-4b reads if the hop disagrees with silicon; the adapter
+     * bounds the calls to once per nwk per window epoch. A success status with
+     * a truncated EUI64 is a dialect defect, not a miss
+     * ({@link EzspFormatException} — the {@link #lookupNetworkAddress}
+     * precedent); an unanswering NCP surfaces as the command timeout, which the
+     * adapter's production loop routes to the watchdog (coordinator trouble is
+     * never device evidence).
+     */
+    @Override
+    public Optional<IEEEAddress> lookupIeee(int networkAddress) {
+        if (networkAddress < 0 || networkAddress > 0xFFFF) {
+            throw new IllegalArgumentException(
+                    "networkAddress must be 0x0000-0xFFFF, got " + networkAddress);
+        }
+        lock.lock();
+        try {
+            requireNegotiated();
+            EzspFrame response = executeLocked(FRAME_LOOKUP_EUI64_BY_NODE_ID,
+                    new byte[] {(byte) (networkAddress & 0xFF),
+                            (byte) ((networkAddress >> 8) & 0xFF)},
+                    DEFAULT_COMMAND_TIMEOUT_MILLIS);
+            byte[] parameters = response.parameters();
+            int status = codec.decodeStatus(parameters, 0);
+            if (status != 0) {
+                log.warn("zigbee.lookup_eui64_failed: nwk=0x{} status=0x{}",
+                        Integer.toHexString(networkAddress),
+                        Integer.toHexString(status));
+                return Optional.empty();
+            }
+            int offset = codec.statusWidthBytes();
+            if (parameters.length < offset + 8) {
+                throw new EzspFormatException(
+                        "lookupEui64ByNodeId response too short: "
+                                + parameters.length + " bytes, expected "
+                                + (offset + 8));
+            }
+            long eui64 = 0;
+            for (int i = 0; i < 8; i++) {
+                eui64 |= (long) (parameters[offset + i] & 0xFF) << (8 * i);
+            }
+            return Optional.of(new IEEEAddress(eui64));
         } finally {
             lock.unlock();
         }

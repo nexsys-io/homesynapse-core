@@ -193,9 +193,9 @@ final class ZigbeeAdoptionSlice {
     }
 
     /**
-     * Stage 1+2: detection and proposal. Publishes {@code device_discovered}
-     * for a new device; re-links a known IEEE with {@code availability_changed}
-     * and NO new adoption event (re-pairing after power loss).
+     * Stage 1+2 for an announce-admitted interview — the pre-F-R4-1 shape,
+     * byte-equivalent for every existing caller: delegates with
+     * {@link PendingInterviewQueue.Source#ANNOUNCE}.
      *
      * @param interview the interview result, never {@code null}
      * @param matchedProfileId the matched profile id; {@code null} when none
@@ -203,7 +203,28 @@ final class ZigbeeAdoptionSlice {
      */
     DiscoveryOutcome onDeviceDiscovered(InterviewResult interview,
             String matchedProfileId) {
+        return onDeviceDiscovered(interview, matchedProfileId,
+                PendingInterviewQueue.Source.ANNOUNCE);
+    }
+
+    /**
+     * Stage 1+2: detection and proposal. Publishes {@code device_discovered}
+     * for a new device; re-links a known IEEE with {@code availability_changed}
+     * and NO new adoption event (re-pairing after power loss).
+     *
+     * <p>F-R4-1 (R-10 Row 10 (a)): the admission {@code source} renders on the
+     * {@code zigbee.device_proposed} LOG LINE only — the event payload is
+     * byte-unchanged (the frozen event-log contract).
+     *
+     * @param interview the interview result, never {@code null}
+     * @param matchedProfileId the matched profile id; {@code null} when none
+     * @param source how the interview was admitted, never {@code null}
+     * @return the stage-2 outcome
+     */
+    DiscoveryOutcome onDeviceDiscovered(InterviewResult interview,
+            String matchedProfileId, PendingInterviewQueue.Source source) {
         Objects.requireNonNull(interview, "interview");
+        Objects.requireNonNull(source, "source");
         IEEEAddress ieee = interview.ieeeAddress();
         Optional<Device> existing = deviceRegistry.findByHardwareIdentifier(
                 HARDWARE_NAMESPACE, ieee.toHexString());
@@ -251,10 +272,10 @@ final class ZigbeeAdoptionSlice {
                 null,
                 null));
         log.info("zigbee.device_proposed: device={} manufacturer={} model={} "
-                        + "profile={} status={}",
+                        + "profile={} status={} source={}",
                 ieee, sentinel(interview.manufacturerName()),
                 sentinel(interview.modelIdentifier()), matchedProfileId,
-                interview.interviewStatus());
+                interview.interviewStatus(), source.token());
         return DiscoveryOutcome.PROPOSED;
     }
 

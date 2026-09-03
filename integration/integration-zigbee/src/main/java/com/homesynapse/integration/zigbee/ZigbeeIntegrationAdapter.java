@@ -213,6 +213,24 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
      * cross-thread visibility.
      */
     private volatile Instant permitJoinDeadline;
+    /**
+     * F-R4-1 (R-10 Row 10 (a)) — the once-per-(invocation, nwk) note for the
+     * silent-rejoiner hook (H-ii) while the door is closed. Keyed by the 16-bit
+     * network address (bounded by construction: at most 65536 entries) and
+     * CLEARED on every {@link #openPermitJoinWindow()} — a window epoch is the
+     * admission scope, so a device noted while closed is re-evaluated when the
+     * operator reopens. Run-thread confined: written by the ingestion cycle
+     * and the window-open call, which share the production run thread (driven
+     * mode: the gate thread, sequentially) — never a wall clock (SK-INV-02).
+     */
+    private final Set<Integer> rejoinWindowClosedNoted = new HashSet<>();
+    /**
+     * The network addresses whose coordinator lookup already ran this window
+     * epoch — hit or miss (F-R4-1 §3): the unknown-sender branch is hot, so
+     * the protocol lookup runs LAST and at most once per nwk per epoch. Same
+     * bound, same clearing, same confinement as the note above.
+     */
+    private final Set<Integer> rejoinLookupAttempted = new HashSet<>();
 
     /**
      * The canonical constructor (M9.6-RO shape). Exactly one transport source is
@@ -487,7 +505,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     void runCycleOnce() {
         ingestion.processCycle();
         for (PendingInterviewQueue.Pending due : interviewQueue.due()) {
-            interviewDevice(due.ieeeAddress());
+            interviewDevice(due.ieeeAddress(), due.source());
         }
         interviewQueue.expireStale();
         evaluateAvailabilityTimeouts();
@@ -766,6 +784,11 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         protocol.enablePreconfiguredKeyJoins();   // §A.1: policy → transient key
         protocol.permitJoin(duration);
         permitJoinDeadline = clock.instant().plusSeconds(duration);
+        // F-R4-1: a window (re)open is a fresh admission epoch — the closed-
+        // door notes and the once-per-nwk lookup set clear, so a silent
+        // rejoiner noted while the door was closed is re-evaluated now.
+        rejoinWindowClosedNoted.clear();
+        rejoinLookupAttempted.clear();
         log.info("zigbee.permit_join_opened: duration={}s", duration);
     }
 
@@ -863,7 +886,13 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         return protocol;
     }
 
-    private void interviewDevice(IEEEAddress ieee) {
+    /**
+     * One interview attempt for a due queue entry; {@code source} is the
+     * entry's admission provenance (F-R4-1 — announce or rejoin), which the
+     * proposal renders on its LOG LINE only, never in an event payload.
+     */
+    private void interviewDevice(IEEEAddress ieee,
+            PendingInterviewQueue.Source source) {
         try {
             InterviewResult interview = protocol.interview(ieee);
             DeviceProfile matchedProfile = profileRegistry.findProfile(interview)
@@ -873,7 +902,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
             cache.recordInterview(interview, matchedProfileId);
             interviewQueue.complete(ieee);
             ZigbeeAdoptionSlice.DiscoveryOutcome outcome =
-                    adoption.onDeviceDiscovered(interview, matchedProfileId);
+                    adoption.onDeviceDiscovered(interview, matchedProfileId, source);
             adoptIfAccepted(interview, outcome, matchedProfile);
         } catch (RuntimeException failure) {
             log.warn("zigbee.interview_failed: device={}: {}", ieee,
@@ -1133,6 +1162,100 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
             Instant now = clock.instant();
             cache.recordEvidence(device, now);
             availabilityTracker.recordFrame(device, now);
+        }
+
+        /**
+         * F-R4-1 hook H-ii (the evidenced case): the window is the FIRST
+         * gate, the once-per-nwk set the second, the coordinator lookup LAST
+         * and at most once per nwk per window epoch (the branch is hot —
+         * every frame from every unknown device lands here).
+         */
+        @Override
+        public void onRejoinCandidate(int networkAddress, int clusterId) {
+            if (!isPermitJoinActive()) {
+                if (rejoinWindowClosedNoted.add(networkAddress)) {
+                    log.info("zigbee.rejoin_ignored_window_closed: nwk=0x{} "
+                                    + "cluster=0x{}",
+                            Integer.toHexString(networkAddress),
+                            Integer.toHexString(clusterId));
+                }
+                return;
+            }
+            // Resolution order (F-R4-1 §3): (1) the cache's NWK→IEEE view — a
+            // structural miss on this arm, re-checked so the method stands on
+            // its own; (2) the coordinator's address table, once per nwk per
+            // epoch, hit or miss; (3) a miss is an unresolved candidate —
+            // never a synthesized identity, never a ZDO IEEE_addr_req (a
+            // second over-the-air surface is a second WU).
+            Optional<IEEEAddress> resolved =
+                    cache.deviceForNetworkAddress(networkAddress);
+            if (resolved.isEmpty()) {
+                if (!rejoinLookupAttempted.add(networkAddress)) {
+                    return;   // already asked this epoch: nothing new to say
+                }
+                try {
+                    resolved = protocol.lookupIeee(networkAddress);
+                } catch (EzspCommandException | EzspFormatException
+                        | IllegalStateException failure) {
+                    // A rejected or malformed exchange is an unresolved
+                    // candidate. An unanswering NCP (the command timeout) and
+                    // a dead transport propagate to the production loop's
+                    // watchdog arms — coordinator trouble is never device
+                    // evidence.
+                    log.warn("zigbee.rejoin_candidate_unresolved: nwk=0x{} "
+                                    + "cluster=0x{} reason={}",
+                            Integer.toHexString(networkAddress),
+                            Integer.toHexString(clusterId), failure.getMessage());
+                    return;
+                }
+                if (resolved.isEmpty()) {
+                    log.warn("zigbee.rejoin_candidate_unresolved: nwk=0x{} "
+                                    + "cluster=0x{} reason=lookup_miss",
+                            Integer.toHexString(networkAddress),
+                            Integer.toHexString(clusterId));
+                    return;
+                }
+            }
+            admitRejoinCandidate(resolved.get(), networkAddress, "unknown_sender");
+        }
+
+        /** F-R4-1 hook H-i: the callback carried the EUI64 — window gate, then admit. */
+        @Override
+        public void onRejoinCandidate(IEEEAddress device, int networkAddress) {
+            if (!isPermitJoinActive()) {
+                // The ingestion unit's zigbee.device_join INFO is the
+                // once-per-event observable; the closed door is DEBUG-noted
+                // and ignored for adoption.
+                log.debug("zigbee.rejoin_candidate_ignored: device={} nwk=0x{} "
+                                + "source=tc_join reason=window_closed",
+                        device, Integer.toHexString(networkAddress));
+                return;
+            }
+            admitRejoinCandidate(device, networkAddress, "tc_join");
+        }
+
+        /**
+         * The admission (F-R4-1 §1/§4/§5): relink ≠ adopt — a device already
+         * in the adoption maps never re-enters (today's relink path is
+         * untouched; DEBUG-noted); otherwise EXACTLY the announce path's two
+         * calls ({@link #onDeviceAnnounce}), with the rejoin provenance on the
+         * queue entry — it renders on the proposal's LOG LINE, never in an
+         * event payload. The queue is keyed by IEEE, so a later announce is a
+         * put-replace, never a duplicate.
+         */
+        private void admitRejoinCandidate(IEEEAddress device, int networkAddress,
+                String source) {
+            if (adoption.deviceIdFor(device).isPresent()) {
+                log.debug("zigbee.rejoin_candidate_ignored: device={} nwk=0x{} "
+                                + "source={} reason=already_adopted",
+                        device, Integer.toHexString(networkAddress), source);
+                return;
+            }
+            cache.recordAnnounce(device, networkAddress);
+            interviewQueue.schedule(device, networkAddress,
+                    PendingInterviewQueue.Source.REJOIN);
+            log.info("zigbee.rejoin_candidate: device={} nwk=0x{} source={}",
+                    device, Integer.toHexString(networkAddress), source);
         }
     }
 
