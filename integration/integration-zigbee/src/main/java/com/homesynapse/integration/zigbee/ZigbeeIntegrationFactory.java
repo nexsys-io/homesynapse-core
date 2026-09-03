@@ -101,9 +101,12 @@ public final class ZigbeeIntegrationFactory implements ZigbeeAdapterFactory {
 
     /**
      * The bundled {@code integrations.zigbee} config schema fragment (Doc 08 §9),
-     * read from this module's classpath — the W10 registration input the
-     * composition root passes to {@code registerIntegrationSchema("zigbee", …)}
-     * after Phase 6 (Doc 12: integration schemas defer past core composition).
+     * read from this module's classpath — the input the composition root passes to
+     * {@code HomeSynapseCore.registerIntegrationSchema("zigbee", …)} BEFORE
+     * {@code start()} (PKG-SEC-2: static text, composed into the root schema ahead
+     * of Phase-1 validation; the former W10 post-Phase-6 registration is retired).
+     * Every {@code default} the fragment declares is operative from Phase 1 on —
+     * see the resource's {@code $comment} for the permit-join consequence.
      *
      * @return the schema JSON text, never {@code null}
      */

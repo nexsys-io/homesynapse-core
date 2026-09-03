@@ -170,7 +170,7 @@ The `api` scope for event-model ensures the `HomeSynapseException` and `Configur
 
 | Constraint | Description |
 |---|---|
-| **LTD-09** | YAML 1.2 via SnakeYAML Engine, JSON Schema validation via `networknt:json-schema-validator`, config in `/etc/homesynapse/`. YAML 1.2 eliminates the NO→false, on→boolean coercion bugs of YAML 1.1. |
+| **LTD-09** | YAML 1.2 via SnakeYAML Engine, JSON Schema validation via `networknt:json-schema-validator`, config under `PlatformPaths.configDir()`. LTD-09's FHS target is `/etc/homesynapse/` (`LinuxSystemPaths`, NOT yet wired at the composition root — distribution escalation E4); the MEASURED root today is `$HOMESYNAPSE_HOME/config` = `/var/lib/homesynapse/config/` (`homesynapse.yaml` + `integrations/zigbee.yaml` via `!include` — the R-4 record's D-f finding; corrected in the PKG-SEC-2 sweep, 2026-09-03). YAML 1.2 eliminates the NO→false, on→boolean coercion bugs of YAML 1.1. |
 | **LTD-11** | No `synchronized` blocks — use `ReentrantLock`. The write path uses a single ReentrantLock for serialization (§3.5). |
 | **LTD-15** | SLF4J structured logging. Resolved secret values must be redacted in log output (fields annotated `x-sensitive: true` in the schema). |
 | **INV-CE-01** | The configuration file is the sole source of truth. ConfigModel is always derived from the YAML file on disk. No runtime state modifies configuration outside the write path. |

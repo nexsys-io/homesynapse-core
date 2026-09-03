@@ -1,5 +1,5 @@
 {
-  "$comment": "Integration config schema for the integrations.zigbee section (Doc 08 §9). Shipped at M9.3; the SchemaRegistry.registerIntegrationSchema call site lands with the adapter factory at M9.4 (W10 boundary). All options default sensibly: the adapter runs correctly with zero configuration (INV-CE-02).",
+  "$comment": "Integration config schema for the integrations.zigbee section (Doc 08 §9). Shipped at M9.3; since PKG-SEC-2 the composition root supplies it to HomeSynapseCore.registerIntegrationSchema BEFORE start(), so it composes into the root schema ahead of Phase-1 validation — every `default` declared here is OPERATIVE (Doc 06 §3.1 stage 4 merges it into the model on every boot), so a key whose ABSENCE carries meaning (permit_join_duration: absent ⇒ no join window, M9.4-PJ) declares none. All options default sensibly: the adapter runs correctly with zero configuration (INV-CE-02).",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -27,8 +27,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 254,
-      "default": 120,
-      "description": "Permit join default duration in seconds (Zigbee spec maximum 254)."
+      "description": "Permit-join window duration in seconds, opened once at adapter start while this key is SET (Zigbee spec maximum 254; 120 suits most pairing workflows). Absent: no window ever opens — the conservative default (M9.4-PJ); set the key to admit devices, remove it to stop the window re-opening on boot. Deliberately NO schema default: since PKG-SEC-2 this fragment composes before Phase-1 validation, so a declared default would merge into every unconfigured boot and open the network for joins."
     },
     "adopt_devices": {
       "type": "array",

@@ -96,6 +96,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -129,7 +130,10 @@ import org.slf4j.LoggerFactory;
  *
  * <ol start="0">
  *   <li><b>BOOTSTRAP</b> — platform dirs, {@link HealthReporter} selection.</li>
- *   <li><b>FOUNDATION</b> — {@link ConfigurationService#load()} (first init step).</li>
+ *   <li><b>FOUNDATION</b> — the core schemas and every integration schema
+ *       fragment supplied before {@code start()} compose into the root schema,
+ *       then {@link ConfigurationService#load()} validates against it (the
+ *       first init step; PKG-SEC-2 — see {@link #registerIntegrationSchema}).</li>
  *   <li><b>DATA_INFRASTRUCTURE</b> — persistence, event bus, publisher.</li>
  *   <li><b>CORE_DOMAIN</b> — device registries, state projection (REPLAY→LIVE),
  *       then the {@code automation_engine} subscriber <em>after</em> the
@@ -249,7 +253,23 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     private HealthReporter healthReporter;
     private DeferredEventPublisher deferredConfigPublisher;
     private ConfigurationService configurationService;
+    /** Published under {@link #schemaLock} in Phase 1; {@code null} before that. */
     private SchemaRegistry schemaRegistry;
+    /**
+     * Integration schema fragments supplied before Phase 1 assembled the
+     * registry (PKG-SEC-2), keyed by integration type in registration order —
+     * drained into {@link #schemaRegistry} by {@link #installSchemaRegistry}
+     * before {@code load()}, then empty for the rest of the process. Guarded by
+     * {@link #schemaLock}.
+     */
+    private final Map<String, String> pendingIntegrationSchemas = new LinkedHashMap<>();
+    /**
+     * Orders {@link #registerIntegrationSchema} against the Phase-1 publication
+     * of {@link #schemaRegistry} (LTD-11): a fragment either lands in the queue
+     * and is drained, or registers directly on the visible registry — never
+     * lost. Never held across I/O (fragment registration is an in-memory parse).
+     */
+    private final ReentrantLock schemaLock = new ReentrantLock();
     private SystemId systemId;
     private PersistenceFactory persistenceFactory;
     private InProcessEventBus eventBus;
@@ -455,14 +475,22 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         ConfigurationServiceFactory.Assembly cfg = ConfigurationServiceFactory.create(
                 configDir, clock, systemId, deferredConfigPublisher);
         this.configurationService = cfg.service();
-        this.schemaRegistry = cfg.schemaRegistry();
-        // Doc 12 Phase 1 is "core-only schema composition": the automation schema
-        // is a CORE schema, so it must be registered BEFORE config.load() so the
-        // config's `automation:` section validates against it (only INTEGRATION
-        // schemas are deferred, to after Phase 6). The schema text is the
-        // config-free constant the automation module owns (FIX-07).
-        schemaRegistry.registerCoreSchema(
+        // Doc 06 §3.2 composition, in order, BEFORE config.load(): the CORE schemas
+        // first — the automation schema is a core schema, so the config's
+        // `automation:` section validates against it (the schema text is the
+        // config-free constant the automation module owns, FIX-07) — then every
+        // INTEGRATION fragment supplied before start() (PKG-SEC-2, R-4 C-1). The
+        // fragments are static JSON text, so the composition root supplies them at
+        // construction and the drain composes them into the root schema here: the
+        // integrations.{type} sections validate against the real fragments at
+        // Phase-1 validation (a malformed block is caught at boot; a well-formed
+        // one boots with zero configuration issues). The former W10 "integration
+        // schemas register after Phase 6" deferral is RETIRED — nothing re-validates
+        // after Phase 1, so a fragment registered later only ever composed for the
+        // next reload while the boot ran on an "unknown property" WARNING.
+        cfg.schemaRegistry().registerCoreSchema(
                 AutomationSchema.SCHEMA_SECTION, AutomationSchema.SCHEMA_JSON);
+        installSchemaRegistry(cfg.schemaRegistry());
         // FATAL on failure — Configuration is a FATAL subsystem (Doc 12 §4).
         this.configurationService.load();
         recordSubsystem("configuration", LifecyclePhase.FOUNDATION, configStart);
@@ -1249,6 +1277,37 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     }
 
     /**
+     * Publishes the Phase-1 schema registry and drains every integration schema
+     * fragment queued before it existed (PKG-SEC-2), under {@link #schemaLock}:
+     * a {@link #registerIntegrationSchema} call racing this drain either lands in
+     * the queue (and is drained here) or registers directly on the now-visible
+     * registry — never lost. Runs BEFORE {@code load()}, so the drained fragments
+     * are part of the composed root schema Phase-1 validation reads. A fragment
+     * the registry rejects (not a JSON object) propagates and fails the boot with
+     * the registry unpublished — the loud build-defect path. One INFO per drained
+     * fragment (LTD-15) — the operator's boot evidence that the section validated
+     * against the real schema.
+     */
+    private void installSchemaRegistry(SchemaRegistry registry) {
+        List<String> drained;
+        schemaLock.lock();
+        try {
+            for (Map.Entry<String, String> fragment : pendingIntegrationSchemas.entrySet()) {
+                registry.registerIntegrationSchema(fragment.getKey(), fragment.getValue());
+            }
+            drained = List.copyOf(pendingIntegrationSchemas.keySet());
+            pendingIntegrationSchemas.clear();
+            this.schemaRegistry = registry;
+        } finally {
+            schemaLock.unlock();
+        }
+        for (String integrationType : drained) {
+            LOG.info("lifecycle.integration_schema_registered: type={} stage=pre-load",
+                    integrationType);
+        }
+    }
+
+    /**
      * Blocks until the state projection subscriber reaches {@code LIVE} (the
      * bus drives COLD → REPLAY → TRANSITION → LIVE on its own VT). On a fresh or
      * small log this completes in milliseconds. The poll uses real-time sleeps
@@ -1374,27 +1433,71 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     //    so config/device/automation stay non-transitive requires) ─────────────
 
     /**
-     * Registers an integration adapter's config-schema fragment (W10). Doc 12
-     * defers INTEGRATION schemas past core composition (only CORE schemas register
-     * before {@code config.load()}), so the composition-root host calls this after
-     * {@code start()} returns. The signature is {@code java.base}-only by design —
-     * the M3.6e.1 gateway pattern keeps {@code com.homesynapse.config} off this
-     * module's exported API (its {@code requires} stays non-transitive).
+     * Registers an integration adapter's config-schema fragment for the
+     * {@code integrations.{type}} section (W10, re-timed by PKG-SEC-2).
+     *
+     * <p><strong>Before {@code start()}</strong> — the production path — the
+     * fragment is QUEUED and drained into the schema registry in Phase 1,
+     * immediately after the core schemas register and BEFORE
+     * {@code ConfigurationService.load()}: the section validates against the real
+     * fragment at Phase-1 validation (Doc 06 §3.2 — composition after integration
+     * registration and before validation; C7 — the composed schema written at
+     * startup carries every registered fragment). Integration fragments are static
+     * JSON text (no adapter instance is involved), so the composition-root host
+     * supplies them at construction — the Row 13 (a′) ruling. A malformed
+     * {@code integrations.{type}} block is therefore CAUGHT at boot (the §3.6
+     * ERROR/WARNING tiers apply) and a well-formed one boots with zero
+     * configuration issues. Queueing the same type twice keeps the last fragment
+     * (the registry's own put semantics).</p>
+     *
+     * <p><strong>After Phase 1 published the registry</strong> (later in
+     * {@code start()}, or after it returns) the call registers directly and the
+     * registry recomposes in memory on its next {@code getComposedSchema()}. The
+     * on-disk {@code schemas/config.schema.json} cache is rewritten by the
+     * configuration service at its next {@code load()}/{@code reload()}/
+     * {@code write()} pass, not by this call, and nothing re-validates the active
+     * model — the Phase-1 pass is the only startup validation (the C7 cache
+     * behavior read from {@code StandardSchemaRegistry}, preserved).</p>
+     *
+     * <p>Never throws for ordering reasons. The fragment's JSON is parsed by the
+     * registry at registration — for a pre-start fragment that is the Phase-1
+     * drain, so a malformed bundled fragment fails the boot in Phase 1 (the
+     * registry's {@code IllegalArgumentException} propagates through
+     * {@code start()}): a build defect surfaces loudly, never as a silent drop.
+     * The signature is {@code java.base}-only by design — the M3.6e.1 gateway
+     * pattern keeps {@code com.homesynapse.config} off this module's exported API
+     * (its {@code requires} stays non-transitive).</p>
      *
      * @param integrationType the integration type key (e.g. {@code "zigbee"}),
-     *        never {@code null}
+     *        never {@code null} or blank
      * @param schemaJson the schema fragment as JSON text, never {@code null}
-     * @throws IllegalStateException if called before {@code start()} assembled the
-     *         configuration subsystem
+     * @throws NullPointerException     if either argument is {@code null}
+     * @throws IllegalArgumentException if {@code integrationType} is blank, or —
+     *         on the direct path — if the fragment is not a JSON object
      */
     public void registerIntegrationSchema(String integrationType, String schemaJson) {
-        SchemaRegistry registry = this.schemaRegistry;
-        if (registry == null) {
-            throw new IllegalStateException(
-                    "Integration schemas register after start(); the configuration "
-                            + "subsystem is not assembled yet");
+        Objects.requireNonNull(integrationType, "integrationType");
+        Objects.requireNonNull(schemaJson, "schemaJson");
+        if (integrationType.isBlank()) {
+            throw new IllegalArgumentException("integrationType must not be blank");
         }
-        registry.registerIntegrationSchema(integrationType, schemaJson);
+        boolean queued;
+        schemaLock.lock();
+        try {
+            SchemaRegistry registry = this.schemaRegistry;
+            queued = registry == null;
+            if (queued) {
+                pendingIntegrationSchemas.put(integrationType, schemaJson);
+            } else {
+                registry.registerIntegrationSchema(integrationType, schemaJson);
+            }
+        } finally {
+            schemaLock.unlock();
+        }
+        if (!queued) {
+            LOG.info("lifecycle.integration_schema_registered: type={} stage=direct",
+                    integrationType);
+        }
     }
 
     /**
@@ -1412,7 +1515,10 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         return registryProjection;
     }
 
-    /** @return the schema registry (or {@code null} before start). */
+    /**
+     * @return the schema registry (or {@code null} before Phase 1 published it —
+     *         a pre-start fragment waits in the queue until then)
+     */
     SchemaRegistry schemaRegistry() {
         return schemaRegistry;
     }

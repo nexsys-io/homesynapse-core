@@ -21,7 +21,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 
 /**
@@ -43,6 +46,13 @@ import java.util.concurrent.CountDownLatch;
  * constructor, so {@code SqlitePersistenceLifecycle} enables at-rest encryption
  * for {@code [identity, presence_personal]} (encrypt-from-genesis — the
  * immutable log is encrypted from the first sensitive write).</p>
+ *
+ * <p><strong>PKG-SEC-2 boundary.</strong> Every hosted integration's config-schema
+ * fragment ({@link #integrationSchemaFragments()}) is handed to
+ * {@link HomeSynapseCore#registerIntegrationSchema(String, String)} BEFORE
+ * {@code start()}, so Phase-1 validation composes the real
+ * {@code integrations.{type}} schemas (R-4 C-1: the boot no longer runs on an
+ * "unknown property" WARNING; a malformed block is caught at boot).</p>
  */
 public final class Main {
 
@@ -119,16 +129,24 @@ public final class Main {
             }
         }, "hs-shutdown"));
 
+        // PKG-SEC-2 (R-4 C-1): the integration config-schema fragments are static
+        // resource text — no adapter instance is needed — so they are supplied
+        // BEFORE start(). The core drains them into the schema registry in Phase 1,
+        // after the core schemas and before ConfigurationService.load(), so the
+        // integrations.zigbee section validates against the REAL fragment at
+        // Phase-1 validation (Doc 06 §3.2; C7): a malformed block is caught at boot
+        // and a well-formed one boots with zero configuration issues. The former
+        // post-start W10 registration is REMOVED rather than kept as a no-op: the
+        // pre-start fragment is already composed, and a second registration would
+        // only invalidate the composition cache for no observable gain. The
+        // adapter's config subtree is still served by the per-type
+        // ConfigurationAccess scoping inside the supervisor assembly.
+        integrationSchemaFragments().forEach(core::registerIntegrationSchema);
+
         // Synchronous, blocks until the engine reaches RUNNING; AB-1 opens the
         // HTTP surface behind auth (loopback-bound) during start() Phase 5.
         manager.start();
 
-        // W10: the integrations.zigbee schema fragment registers AFTER Phase 6
-        // (Doc 12 — only CORE schemas compose before config.load()); the adapter's
-        // config subtree is served by the existing per-type ConfigurationAccess
-        // scoping inside the supervisor assembly.
-        core.registerIntegrationSchema(ZigbeeIntegrationFactory.INTEGRATION_TYPE,
-                ZigbeeIntegrationFactory.configSchemaJson());
         System.out.println("HomeSynapse Core is RUNNING (phase=" + manager.currentPhase()
                 + "); HTTP surface exposed behind bearer-token auth, loopback-bound (AB-1)."
                 + " Send SIGTERM to stop.");
@@ -141,6 +159,26 @@ public final class Main {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    /**
+     * The integration config-schema fragments the composition root supplies to
+     * {@link HomeSynapseCore#registerIntegrationSchema(String, String)} BEFORE
+     * {@code start()} (PKG-SEC-2) — one entry per hosted integration type, keyed
+     * by its {@code integrations.{type}} section key, in registration order (the
+     * registry composes in registration order, so the on-disk composed schema is
+     * byte-stable across boots). Static resource text — the zigbee fragment is a
+     * classpath read — so no adapter instance is involved. Package-private so the
+     * app test pins the supply.
+     *
+     * @return the fragments keyed by integration type; unmodifiable, never
+     *         {@code null}
+     */
+    static Map<String, String> integrationSchemaFragments() {
+        Map<String, String> fragments = new LinkedHashMap<>();
+        fragments.put(ZigbeeIntegrationFactory.INTEGRATION_TYPE,
+                ZigbeeIntegrationFactory.configSchemaJson());
+        return Collections.unmodifiableMap(fragments);
     }
 
     /**
