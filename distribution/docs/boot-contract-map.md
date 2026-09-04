@@ -100,18 +100,37 @@ defence in depth.)
 ## Exit codes → restart policy
 
 `ExitCode.java`: `10` CONFIGURATION_FAILURE · `11` PERSISTENCE_FAILURE · `12` EVENT_BUS_FAILURE
-· `13` SUBSYSTEM_INIT_TIMEOUT · `99` UNEXPECTED_ERROR. Its Javadoc: *"The systemd unit file
-can use these codes to distinguish between restartable and non-restartable failures."*
+· `13` SUBSYSTEM_INIT_TIMEOUT (reserved — no producer) · `99` UNEXPECTED_ERROR. **WIRED as of
+FAILCHAN (2026-09-04; R-10 EXITCODE (a)) — the contract is true, not documented-only:** a fatal
+startup failure leaves a `StartupFailureReport` (phase · subsystem · recommendation) on
+`SystemLifecycleManager.lastStartupFailure()`, emits the C12-04 line
+`lifecycle.startup_failed: phase= subsystem= recommendation="…"` with the stack trace, tears down
+and re-throws; `Main` maps the report through `ExitCodes.forStartupFailure` and `System.exit`s
+with the code — in `main`, after `start()` threw, never from the shutdown hook (`Runtime.exit`
+during a running shutdown never returns). Mapping: `configuration` → 10 · `persistence` → 11 ·
+`event-bus` → 12 · every other fatal-set subsystem or no report → 99. Before FAILCHAN the JVM
+exited 1 and `RestartPreventExitStatus=10` could never match — a bad config restart-looped five
+times in 300 s and then died looking like a crash.
 
-⇒ Unit: `Restart=on-failure`, `RestartSec=10` (Doc 12 §6.4 / LTD-13), with
-`RestartPreventExitStatus=10` — a configuration failure is deterministic and must be surfaced,
-not crash-looped. `StartLimitBurst=5/300s` bounds any loop; `MemoryMax=2G` per Doc 12 §6.6.
+⇒ Unit (the three lines): `Restart=always` · `RestartSec=10` · `RestartPreventExitStatus=10`.
+A clean stop is exit 143 (`SuccessExitStatus=143`, §Shutdown) and systemd never restarts a unit it
+stopped itself; every other exit — a crash, SIGKILL/OOM (137), a stray external SIGTERM —
+relaunches after 10 s, EXCEPT `10`: a configuration failure is deterministic and is surfaced, not
+looped. `StartLimitBurst=5/300s` bounds any loop; `MemoryMax=2G` per Doc 12 §6.6. The lint
+`smoke/unit-directives-test.sh` (Static lint step) pins these directives present exactly once.
 
 ## Shutdown
 
 `Main` installs a SIGTERM shutdown hook → `SystemLifecycleManager.shutdown("SIGTERM")`; Doc 12
-§7 bounds the grace period at 30s (internal), within systemd's `TimeoutStopSec=90`. Unit uses
-the default `KillSignal=SIGTERM`.
+§7 bounds the grace period at 30s (internal), within systemd's `TimeoutStopSec=90`. The unit sets
+`KillSignal=SIGTERM` explicitly. **The JVM exits 143 after a caught SIGTERM (the hooks run first) —
+a clean stop by contract, declared to systemd as `SuccessExitStatus=143` (FAILCHAN, R-10 Row 6 (a)),
+so `systemctl stop` ends `ActiveState=inactive` / `Result=success`** (it graded `failed` /
+`exit-code` / `ExecMainStatus=143` before — measured R-3a §6-B and O-2 on `hs-fresh`;
+`run-smoke.sh` check 8 now asserts the clean grade). The hook never exits the process:
+`System.exit` from a shutdown hook deadlocks (`Runtime.exit` blocks on the running hook
+sequence), so the only `System.exit` on the fatal path lives in `main`, and on a SIGTERM that
+arrives mid-bootstrap (Doc 12 §6.5) `main` returns and the JVM's 143 is the exit.
 
 ## Update safety (no destructive migration)
 

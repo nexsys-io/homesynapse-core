@@ -100,6 +100,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -248,6 +249,17 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     private volatile boolean started = false;
     private volatile boolean abandoned = false;
     private volatile boolean shutdownComplete = false;
+    /**
+     * FAILCHAN (C12-04): the fatal-set subsystem whose initialization is being
+     * ATTEMPTED — set immediately BEFORE each init inside {@link #bootstrap()}, in
+     * the {@code recordSubsystem} vocabulary ({@code recordSubsystem}, written after
+     * success, is the other bookend). Read by the {@link #start()} catch to name the
+     * failed subsystem; {@code "unknown"} until Phase 1 begins. Phase 2 records
+     * persistence and event-bus together, so this marker is what tells 11 from 12.
+     */
+    private volatile String initializing = "unknown";
+    /** The C12-04 report of the most recent {@link #start()} failure; empty otherwise. */
+    private volatile Optional<StartupFailureReport> lastStartupFailure = Optional.empty();
 
     // ── Subsystems (constructed during start()) ─────────────────────────────
     private HealthReporter healthReporter;
@@ -424,7 +436,10 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     /**
      * Executes the full startup sequence (Phases 0–6) synchronously, blocking
      * until the engine reaches {@link LifecyclePhase#RUNNING}. On a fatal
-     * failure, tears down any already-initialized subsystems and rethrows.
+     * failure, records the C12-04 {@link StartupFailureReport} (readable through
+     * {@link #lastStartupFailure()}), emits the {@code lifecycle.startup_failed}
+     * line, tears down any already-initialized subsystems and rethrows — the
+     * thrown type is never wrapped.
      *
      * <p>MUST be called from a platform thread (LTD-19).</p>
      *
@@ -433,13 +448,25 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
      */
     @Override
     public void start() throws Exception {
+        lastStartupFailure = Optional.empty();
         if (started) {
             throw new IllegalStateException("HomeSynapseCore already started");
         }
         try {
             bootstrap();
         } catch (Exception fatal) {
-            LOG.error("Fatal error during startup; tearing down initialized subsystems", fatal);
+            // C12-04 (FAILCHAN): the report is built BEFORE the teardown — which moves
+            // the phase to SHUTTING_DOWN/STOPPED — so it names the phase the failure
+            // occurred in; `initializing` names the fatal-set subsystem being attempted.
+            // The fatal is NEVER wrapped: the throw type is a pin the schema-admission
+            // tests hold, and the report rides beside it for the composition root.
+            String subsystem = initializing;
+            String recommendation = recommendationFor(subsystem);
+            lastStartupFailure = Optional.of(
+                    new StartupFailureReport(phase, subsystem, recommendation));
+            LOG.error("lifecycle.startup_failed: phase={} subsystem={} recommendation=\"{}\" "
+                            + "— tearing down initialized subsystems",
+                    phase, subsystem, recommendation, fatal);
             try {
                 shutdown("startup failure: " + fatal.getMessage());
             } catch (RuntimeException teardownFailure) {
@@ -462,6 +489,12 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
 
         // ── Phase 1 FOUNDATION — config.load() is the FIRST subsystem init step ──
         setPhase(LifecyclePhase.FOUNDATION);
+        // C12-04 marker (FAILCHAN): the whole Phase-1 block — service assembly, the
+        // schema composition, load() — is the configuration subsystem's init (the
+        // configStart bookend below spans it); a failure anywhere in it (a malformed
+        // document OR a malformed bundled fragment) is deterministic and exits 10,
+        // which the unit never loops on.
+        initializing = "configuration";
         Instant configStart = clock.instant();
         this.systemId = SystemId.of(homeId.value());
         // Config (Phase 1) needs an EventPublisher, but the bus (Phase 2) is not
@@ -507,9 +540,13 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 .toList();
         // AB-3: payloadCipher is null (inert) — the factory then runs
         // plaintext-for-all (the cipher activation is AB-4).
+        // C12-04 markers: persistence and event-bus are RECORDED together below, so
+        // the marker set before each build is what tells exit 11 from exit 12.
+        initializing = "persistence";
         this.persistenceFactory = PersistenceFactory.start(
                 dbPath, config.persistence(), clock, homeId, eventClasses, payloadCipher);
 
+        initializing = "event-bus";
         BusMetrics jfrMetrics = BusMetrics.jfr();
         this.eventBus = new InProcessEventBus(
                 persistenceFactory.eventStore(),
@@ -538,6 +575,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         // root passes the SAME instance to registry-consuming integration
         // factories, so dispatch resolution and adapter adoption index one truth.
         Instant deviceStart = clock.instant();
+        initializing = "device-model";
         this.entityRegistry = new InMemoryEntityRegistry();
         this.deviceRegistry = providedDeviceRegistry;
         this.areaRegistry = new InMemoryAreaRegistry();
@@ -561,6 +599,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
 
         // Step 3.2 — state store + projection (REPLAY → LIVE) + query service.
         Instant stateStart = clock.instant();
+        initializing = "state-store";
         DerivedPublishGate publishGate = rateLimit::acquire;
         AttributeValueComparator comparator = AttributeValueComparator.structural();
         ComparisonPolicy comparisonPolicy = ComparisonPolicy.FP_NOISE_DEFAULT;
@@ -623,6 +662,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         // Phase 1 (core-only schema composition) so the `automation:` section
         // validated during config.load().
         Instant automationStart = clock.instant();
+        initializing = "automation";
         InMemoryAutomationIdentityStore identityStore =
                 new InMemoryAutomationIdentityStore(clock);
         AutomationDefinitionLoader loader = new AutomationDefinitionLoader(
@@ -738,6 +778,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         // No HealthContributor/HealthAggregator production impls exist yet; AB-3
         // reports aggregated HEALTHY and the loop pets the watchdog (structural).
         setPhase(LifecyclePhase.OBSERVABILITY);
+        initializing = "observability";
         recordSubsystem("observability", LifecyclePhase.OBSERVABILITY, clock.instant());
 
         // ── Phase 5 EXTERNAL_INTERFACES — open HTTP behind auth (AB-1) ───────
@@ -751,6 +792,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         // (idempotent). The cipher stays inert (AB-4); WS auth is HELD (the WS
         // runtime is unbuilt — see the AB-1 handoff).
         setPhase(LifecyclePhase.EXTERNAL_INTERFACES);
+        initializing = "rest-api";
         bringUpHttpSurface();
 
         // ── Phase 6 INTEGRATIONS — the integration spine (M9.1) ─────────────
@@ -760,6 +802,9 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         // AB-3/AB-4 held-not-consumed precedent). Main injects nothing yet.
         if (!integrationFactories.isEmpty()) {
             Instant integrationStart = clock.instant();
+            // C12-04 marker: only the assembly/subscribe outside the bounded try below
+            // can escape (INV-RF-01 keeps the supervisor start itself non-fatal).
+            initializing = "integration";
             // DP-3: integration-runtime carries no JSON library — the
             // command-parameter decoder rides the persistence ObjectMapper (the
             // M7.4b commandParameterSerializer in the opposite direction), so an
@@ -842,6 +887,11 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     @Override
     public LifecyclePhase currentPhase() {
         return phase;
+    }
+
+    @Override
+    public Optional<StartupFailureReport> lastStartupFailure() {
+        return lastStartupFailure;
     }
 
     @Override
@@ -1559,6 +1609,23 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
      */
     IntegrationSupervisor integrationSupervisor() {
         return integrationSupervisor;
+    }
+
+    /**
+     * The C12-04 operator recommendation for a failed fatal-set subsystem (the
+     * report's third field, Register C): what to check, and whether a restart helps.
+     */
+    private static String recommendationFor(String subsystem) {
+        return switch (subsystem) {
+            case "configuration" -> "check the configuration file (homesynapse.yaml + integrations/)"
+                    + " — a schema or syntax error is deterministic; the unit does not restart on it";
+            case "persistence" -> "verify the event store file and disk; run the integrity check;"
+                    + " restore from the pre-upgrade snapshot if corrupt";
+            case "event-bus" -> "report: the in-process bus failed to initialize — a defect, not an"
+                    + " operator condition";
+            default -> "inspect the log and the JFR recording; report with the phase and subsystem"
+                    + " named";
+        };
     }
 
     private void recordSubsystem(String name, LifecyclePhase subsystemPhase, Instant startInstant) {

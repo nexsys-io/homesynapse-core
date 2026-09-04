@@ -187,6 +187,19 @@ if [ "${MODE}" = "systemd" ]; then
     systemctl stop "${HS_UNIT}" && ok "service stopped" || bad "service stop"
     sleep 2
     systemctl is-active --quiet "${HS_UNIT}" && bad "still active after stop" || ok "service inactive after stop"
+    # FAILCHAN §6-B (R-10 Row 6 (a)): a clean stop must GRADE clean. The JVM exits 143 after
+    # its SIGTERM hook; without SuccessExitStatus=143 systemd graded every clean stop
+    # Result=exit-code / ActiveState=failed (measured twice: R-3a §6-B; O-2 on hs-fresh,
+    # 2026-09-03). The O-2 measurement inverted into a gate — the mechanical confirmation on
+    # this runner and, on the card, R-4b's first `systemctl stop`.
+    RES="$(systemctl show -p Result --value "${HS_UNIT}" 2>/dev/null || true)"
+    ST="$(systemctl show -p ActiveState --value "${HS_UNIT}" 2>/dev/null || true)"
+    EX="$(systemctl show -p ExecMainStatus --value "${HS_UNIT}" 2>/dev/null || true)"
+    if [ "${RES}" = "success" ] && [ "${ST}" = "inactive" ]; then
+        ok "clean stop grades success (Result=${RES} ExecMainStatus=${EX})"
+    else
+        bad "clean stop graded ${RES}/${ST} (ExecMainStatus=${EX}) — the §6-B lie"; dump_logs
+    fi
 else
     pkill -TERM -u "${HS_USER}" -f "${HS_LAUNCHER}" 2>/dev/null; sleep 3
     pgrep -u "${HS_USER}" -f "${HS_LAUNCHER}" >/dev/null && bad "process survived SIGTERM" || ok "process exited on SIGTERM"

@@ -11,6 +11,7 @@
 # and proves readiness with the UNauthenticated loopback /health probe in
 # ExecStartPost (E3 closed at R-9). The Type=notify + WatchdogSec block at the
 # bottom is NOT a staged flip — read its DANGER note before touching it.
+# EXIT CONTRACT (FAILCHAN, 2026-09-04): exit 143 = a clean stop; Restart=always except ExitCode 10 (the restart block).
 Description=HomeSynapse Core — local-first smart-home engine
 Documentation=file:/opt/homesynapse/VERSION
 After=network-online.target
@@ -55,13 +56,18 @@ ExecStartPost=/opt/homesynapse/libexec/health-probe.sh --wait --timeout 90 --hea
 # Graceful stop: Main installs a SIGTERM shutdown hook (Doc 12 §7, 30s internal
 # grace). Give systemd's stop timeout the Doc-12 budget.
 KillSignal=SIGTERM
+# The JVM exits 143 after a caught SIGTERM (hooks run first) — a clean stop, by contract; SIGKILL (137) still grades as failure.
+SuccessExitStatus=143
 TimeoutStartSec=120
 TimeoutStopSec=90
 
-# Restart policy keyed to the ExitCode contract. CONFIGURATION_FAILURE (10) is
-# deterministic — a bad config will fail identically on every restart, so do NOT
-# loop on it; surface it instead. All other non-zero exits are restart-worthy.
-Restart=on-failure
+# Restart policy keyed to the ExitCode contract (FAILCHAN, 2026-09-04; wired in Main):
+# a clean stop is exit 143 (SuccessExitStatus above) and is never restarted because
+# systemd never restarts a unit it stopped itself; every other exit relaunches
+# (Restart=always — a stray SIGTERM or a crash must not leave the house dark) EXCEPT
+# CONFIGURATION_FAILURE (10), which is deterministic — a bad config fails identically on
+# every restart, so it is surfaced, not looped. StartLimitBurst bounds the rest.
+Restart=always
 RestartSec=10
 RestartPreventExitStatus=10
 

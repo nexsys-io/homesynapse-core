@@ -797,8 +797,15 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
      * LTD-01, no sleep), run one §G pass, keepalive-tick, and feed transport
      * failures to the watchdog; while unhealthy, tick the reopen backoff and park
      * on the stop latch (responsive to {@code close()}).
+     *
+     * <p>FAILCHAN §10-O: a transport failure or command timeout that surfaces AFTER
+     * {@link #close()} counted the stop latch down is the orderly consequence of the
+     * close racing the read-as-park — classified at the catch as
+     * {@code zigbee.transport_closed_orderly} (INFO) and the loop exits; the watchdog
+     * is never fed. Package-private: the §10-O scenario test drives the loop directly
+     * over the scripted transport after the §5.1 ladder (the drive-seam pattern).</p>
      */
-    private void productionLoop() throws InterruptedException {
+    void productionLoop() throws InterruptedException {
         while (stopSignal.getCount() > 0) {
             if (watchdog.isHealthy()) {
                 try {
@@ -812,10 +819,25 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
                         watchdog.onAshLivenessLost();
                     }
                 } catch (TransportFailureException failure) {
+                    if (closeRequested()) {
+                        // FAILCHAN §10-O: close() counted the latch down and closed the
+                        // transport while this loop was parked in the read — the read
+                        // failing is the ORDERLY consequence, not a port death. Never
+                        // fed to the watchdog (a reopen would race the stop); the loop
+                        // ends here instead of at the next latch check.
+                        log.info("zigbee.transport_closed_orderly: {}", failure.getMessage());
+                        break;
+                    }
                     log.warn("zigbee.transport_failed: {} — the watchdog owns "
                             + "recovery", failure.getMessage());
                     watchdog.onReadError();
                 } catch (EzspCommandTimeoutException timeout) {
+                    if (closeRequested()) {
+                        // The same guard: a command timing out against a transport a
+                        // concurrent close() just took down is orderly too.
+                        log.info("zigbee.transport_closed_orderly: {}", timeout.getMessage());
+                        break;
+                    }
                     log.warn("zigbee.cycle_command_timeout: {}", timeout.getMessage());
                     watchdog.onAshLivenessLost();
                 }
@@ -825,6 +847,15 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
                         java.util.concurrent.TimeUnit.MILLISECONDS);
             }
         }
+    }
+
+    /**
+     * True once {@link #close()} has counted the stop latch down — the §10-O
+     * classifier: a transport failure observed after this point is the close, not
+     * a port death.
+     */
+    private boolean closeRequested() {
+        return stopSignal.getCount() == 0;
     }
 
     /**

@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.UnaryOperator;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -417,6 +418,59 @@ class ZigbeeProductionTransportTest {
                         + " vendorId=10c4 productId=ea60 pinnedOnly=false");
     }
 
+    // ── FAILCHAN §10-O: an orderly close() racing the pump is NOT a transport failure ─
+
+    @Test
+    @DisplayName("FAILCHAN §10-O (T8): close() landing inside the production pump's serial "
+            + "read is reported as zigbee.transport_closed_orderly (INFO) — never "
+            + "zigbee.transport_failed, never a watchdog signal — and the loop exits")
+    void orderlyCloseDoesNotReportTransportFailure() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> formationHandler(ncp, command));
+        CloseInsideReadChannel channel = new CloseInsideReadChannel(channelOver(ncp));
+        ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(context(null),
+                new InMemoryDeviceRegistry(),
+                new RegistryProjection(new InMemoryDeviceRegistry(),
+                        new InMemoryEntityRegistry()),
+                tempDir, clock, null,
+                () -> List.of(coordinatorCandidate()),
+                candidate -> channel);
+        adapter.initialize();
+        adapter.bindTransport(adapter.resolvePort());
+        adapter.coordinatorProtocol().startSession();
+        adapter.resumeOrForm();
+        adapter.coordinatorProtocol().awaitNetworkUp();
+        ListAppender<ILoggingEvent> watchdogLog = new ListAppender<>();
+        watchdogLog.start();
+        Logger watchdogLogger = (Logger) LoggerFactory.getLogger(PortWatchdog.class);
+        watchdogLogger.addAppender(watchdogLog);
+        try {
+            // The race, made deterministic on one thread: the supervisor's close() lands
+            // while the production loop is parked inside the bounded serial read (the
+            // M9.4b §5.1 read-as-park), and the read then fails exactly the way a closed
+            // port fails (-1 → AshSession's "serial read error: port dead or closed"
+            // TransportFailureException — the line the bench logged at every SIGTERM stop).
+            channel.closeInsideNextRead(adapter::close);
+
+            adapter.productionLoop();   // returns: the loop exits on the orderly close
+
+            assertThat(adapterMessages(Level.INFO, "zigbee.transport_closed_orderly"))
+                    .singleElement().asString()
+                    .contains("serial read error: port dead or closed");
+            assertThat(adapterMessages(Level.WARN, "zigbee.transport_failed"))
+                    .as("an orderly close is never a transport failure")
+                    .isEmpty();
+            assertThat(watchdogLog.list.stream().map(ILoggingEvent::getFormattedMessage))
+                    .as("the watchdog is never fed on an orderly close: no port_unhealthy, "
+                            + "no reopen scheduling")
+                    .noneMatch(message -> message.startsWith("zigbee.port_"));
+            assertThat(channel.closedInsideRead()).isTrue();
+        } finally {
+            watchdogLogger.detachAppender(watchdogLog);
+            watchdogLog.stop();
+        }
+    }
+
     // ── scripted NCP handlers (v13 dialect) ─────────────────────────────────
 
     /** Formation-capable handler: scan + form + the NETWORK_UP callback. */
@@ -544,6 +598,65 @@ class ZigbeeProductionTransportTest {
 
     private static Logger adapterLogger() {
         return (Logger) LoggerFactory.getLogger(ZigbeeIntegrationAdapter.class);
+    }
+
+    // ── the FAILCHAN §10-O race rig: a channel whose next read runs close() first ─
+
+    /**
+     * A {@link SerialByteChannel} delegating to the scripted fake whose NEXT read, once
+     * armed, runs the injected hook (the adapter's {@code close()} — the supervisor's stop
+     * landing while the production loop is parked in the read) and then fails the read the
+     * way a closed port fails ({@code -1}). One thread, deterministic: the cross-thread
+     * race the bench logged at every SIGTERM stop, reproduced in order.
+     */
+    private static final class CloseInsideReadChannel implements SerialByteChannel {
+
+        private final FakeSerialByteChannel delegate;
+        private final AtomicReference<Runnable> armed = new AtomicReference<>();
+        private boolean closedInsideRead;
+
+        private CloseInsideReadChannel(FakeSerialByteChannel delegate) {
+            this.delegate = delegate;
+        }
+
+        void closeInsideNextRead(Runnable close) {
+            armed.set(close);
+        }
+
+        boolean closedInsideRead() {
+            return closedInsideRead;
+        }
+
+        @Override
+        public int read(byte[] buffer, long maxWaitMillis) {
+            Runnable close = armed.getAndSet(null);
+            if (close != null) {
+                close.run();
+                closedInsideRead = true;
+                return -1;   // what a closed or yanked port returns
+            }
+            return delegate.read(buffer, maxWaitMillis);
+        }
+
+        @Override
+        public void write(byte[] data) {
+            delegate.write(data);
+        }
+
+        @Override
+        public void flushInput() {
+            delegate.flushInput();
+        }
+
+        @Override
+        public boolean isOpen() {
+            return delegate.isOpen();
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
+        }
     }
 
     // ── inert context stubs (the adapter never touches these paths here) ────

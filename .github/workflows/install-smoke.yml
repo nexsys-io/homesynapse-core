@@ -82,6 +82,11 @@ jobs:
             echo "::error::the unit carries a directive systemd does not know (see 'Unknown key name' above)"
             exit 1
           fi
+          # FAILCHAN (R-10 Row 6 (a)): parse-clean is not contract-true — the seven load-bearing
+          # directives (Type=exec · KillSignal=SIGTERM · SuccessExitStatus=143 · Restart=always ·
+          # RestartPreventExitStatus=10 · StartLimitBurst=5 · the /health ExecStartPost) must each
+          # be present exactly once as ACTIVE lines; the lint lists the misses and fails the step.
+          bash distribution/smoke/unit-directives-test.sh
           echo "unit directives verified"
 
       - name: Build runtime image (Gradle installDist → jlink)

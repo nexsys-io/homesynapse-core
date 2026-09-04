@@ -10,6 +10,7 @@ import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.integration.zigbee.ZigbeeIntegrationFactory;
 import com.homesynapse.lifecycle.HomeSynapseConfig;
 import com.homesynapse.lifecycle.HomeSynapseCore;
+import com.homesynapse.lifecycle.StartupFailureReport;
 import com.homesynapse.lifecycle.SystemLifecycleManager;
 import com.homesynapse.persistence.EncryptedPayload;
 import com.homesynapse.persistence.PayloadCipher;
@@ -26,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Application entry point for HomeSynapse Core (AB-3).
@@ -53,6 +55,13 @@ import java.util.concurrent.CountDownLatch;
  * {@code start()}, so Phase-1 validation composes the real
  * {@code integrations.{type}} schemas (R-4 C-1: the boot no longer runs on an
  * "unknown property" WARNING; a malformed block is caught at boot).</p>
+ *
+ * <p><strong>FAILCHAN boundary (EXITCODE (a)).</strong> {@code main()} wraps ONLY
+ * {@code start()}: a fatal startup failure maps the lifecycle's
+ * {@code lastStartupFailure()} through {@link ExitCodes} and exits with the
+ * {@link ExitCode} (C12-04) — in {@code main}, after the lifecycle tore itself
+ * down inside {@code start()}, never from the shutdown hook; a SIGTERM that lands
+ * mid-bootstrap makes {@code main} return and the JVM's 143 is the clean exit.</p>
  */
 public final class Main {
 
@@ -119,8 +128,15 @@ public final class Main {
         SystemLifecycleManager manager = core;
 
         CountDownLatch shutdownLatch = new CountDownLatch(1);
+        // FAILCHAN (Doc 12 §6.5): the hook records that SIGTERM arrived, so a start()
+        // that throws BECAUSE the hook tore the boot down is not mistaken for a fatal
+        // startup failure below — the hook owns that exit (143, clean by the unit's
+        // SuccessExitStatus). The hook itself NEVER calls System.exit: Runtime.exit
+        // during a running shutdown sequence blocks forever.
+        AtomicBoolean sigtermReceived = new AtomicBoolean();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
+                sigtermReceived.set(true);
                 manager.shutdown("SIGTERM");
             } catch (Exception e) {
                 System.err.println("HomeSynapse Core shutdown failed: " + e.getMessage());
@@ -145,7 +161,30 @@ public final class Main {
 
         // Synchronous, blocks until the engine reaches RUNNING; AB-1 opens the
         // HTTP surface behind auth (loopback-bound) during start() Phase 5.
-        manager.start();
+        // FAILCHAN (EXITCODE (a), C12-04): a fatal startup failure exits with the
+        // ExitCode the unit keys its restart policy on — 10 for a deterministic
+        // configuration failure (RestartPreventExitStatus=10: surfaced, never looped),
+        // 11/12 for persistence/event-bus, 99 otherwise — mapped from the lifecycle's
+        // report by ExitCodes (unit-tested). The System.exit is this ONE call, in
+        // main, AFTER start() threw and the lifecycle ran its own teardown inside
+        // start() — nothing else to tear down. The pre-start paths above (directory
+        // creation, resolveHomeId) still exit 1 through `throws Exception` (out of
+        // scope here; noted).
+        try {
+            manager.start();
+        } catch (Exception fatal) {
+            if (sigtermReceived.get()) {
+                // Doc 12 §6.5: SIGTERM arrived mid-bootstrap; the hook owns the exit (143 — clean
+                // by the unit's SuccessExitStatus). A System.exit here would block forever:
+                // Runtime.exit during a running shutdown sequence never returns.
+                return;
+            }
+            ExitCode code = ExitCodes.forStartupFailure(manager.lastStartupFailure());
+            System.err.println("HomeSynapse Core exiting: code=" + code.code() + " (" + code
+                    + ") — " + manager.lastStartupFailure().map(StartupFailureReport::recommendation)
+                    .orElse("see the log"));
+            System.exit(code.code());
+        }
 
         System.out.println("HomeSynapse Core is RUNNING (phase=" + manager.currentPhase()
                 + "); HTTP surface exposed behind bearer-token auth, loopback-bound (AB-1)."

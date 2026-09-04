@@ -5,6 +5,7 @@
 package com.homesynapse.lifecycle;
 
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Top-level orchestrator for the HomeSynapse process lifecycle.
@@ -93,4 +94,28 @@ public interface SystemLifecycleManager {
      *         never {@code null}
      */
     Map<String, SubsystemState> subsystemStates();
+
+    /**
+     * Returns the C12-04 report of the most recent {@link #start()} failure
+     * (FAILCHAN, 2026-09-04).
+     *
+     * <p>Present iff the most recent {@code start()} threw from inside its
+     * bootstrap sequence — the phase the failure occurred in, the fatal-set
+     * subsystem being initialized, and the operator recommendation, built BEFORE
+     * the teardown that follows. Empty before {@code start()}, after a successful
+     * {@code start()}, and for the pre-bootstrap {@code IllegalStateException}
+     * ("already started"), which is a caller error rather than a startup failure.
+     * The composition root ({@code Main}) maps the report to the process exit
+     * code after {@code start()} threw; the unit keys its restart policy on it.</p>
+     *
+     * <p>A {@code default} so existing implementations and test doubles need no
+     * edit (interface evolution, java-patterns §12); the production implementation
+     * ({@code HomeSynapseCore}) overrides it.</p>
+     *
+     * @return the report of the most recent startup failure, or empty; never
+     *         {@code null}
+     */
+    default Optional<StartupFailureReport> lastStartupFailure() {
+        return Optional.empty();
+    }
 }

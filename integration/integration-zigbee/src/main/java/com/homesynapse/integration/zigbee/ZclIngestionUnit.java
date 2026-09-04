@@ -416,6 +416,19 @@ final class ZclIngestionUnit {
                     key.partner(), key.statusName());
             return;
         }
+        // FAILCHAN §10-M — KEEP-WITH-REASON (ruling row (ii), 2026-09-04): the measured
+        // `device=0xFFFFFFFFFFFFFFFF status=TC_REQUESTER_VERIFY_KEY_TIMEOUT` (R-3a
+        // rehearsal record §8, 2026-08-30 14:11:26, ~2 min after the join window
+        // closed; the M9.4 acceptance record, 2026-07-06 07:39:03) is a faithful relay
+        // of the NCP status: the all-ones partner is the EmberZNet null EUI64 ("no
+        // specific partner") and 0x32 is the TC timing out on a Verify-Key it never
+        // received. The CAUSE stays OPEN — R-3a §8 reads it as "(probably) a transient
+        // key self-expiring as designed", and no UG100/EZSP text read at source
+        // confirms that the sentinel partner + this status IS the designed expiry — so
+        // the line stays a WARN and is NOT reclassified. Never guess the cause: a
+        // reclassification needs the spec cite first, then the INFO token
+        // `zigbee.transient_key_cleared: status=… partner=none` for the sentinel
+        // partner only (the WARN stays for every real partner).
         log.warn("zigbee.key_establishment_failed: device={} status={}",
                 key.partner(), key.statusName());
     }
