@@ -48,6 +48,30 @@ dependencies {
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     jvmArgs("-XX:+EnableDynamicAgentLoading")
+
+    // FIX-1a (2026-09-05): every red run carries its own mechanism. One XML
+    // block per test case — so a method's stdout (the structured log tokens) is
+    // attributable to the method that produced it — and the FULL assertion
+    // message + stack on the console, where today only "AssertionError at
+    // X.java:NNN" reaches the CI log.
+    reports.junitXml.isOutputPerTestCase = true
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showStandardStreams = false
+    }
+
+    // Desk-only knob — CI never sets it. `-PvtParallelism=N` shapes the test
+    // JVM's virtual-thread scheduler like a small runner (the GitHub runner has
+    // 2 vCPUs = 2 carriers, and SQLite's native reads pin a carrier for their
+    // duration), so a delivery stall that needs carrier starvation can be
+    // reproduced on a 24-core desk. Absent property = JVM defaults, unchanged.
+    project.findProperty("vtParallelism")?.toString()?.toIntOrNull()?.let { n ->
+        jvmArgs(
+            "-Djdk.virtualThreadScheduler.parallelism=$n",
+            "-Djdk.virtualThreadScheduler.maxPoolSize=$n"
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------

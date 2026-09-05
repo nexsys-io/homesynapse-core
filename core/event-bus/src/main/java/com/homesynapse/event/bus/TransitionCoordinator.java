@@ -11,6 +11,7 @@ import com.homesynapse.event.EventStore;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * Drains the {@link ReplayWindowQueue} and atomically promotes a subscriber
@@ -55,21 +56,29 @@ final class TransitionCoordinator {
     private final SubscriberRuntime runtime;
     private final EventStore eventStore;
     private final Clock clock;
+    private final Consumer<DeliveryAnomaly> anomalyEmitter;
 
     /**
      * Creates a new coordinator bound to the given subscriber runtime.
      *
-     * @param runtime    the subscriber's runtime bundle
-     * @param eventStore the event store used to load envelopes for queue entries
-     * @param clock      the injected clock for DLQ timestamps (NO_DIRECT_TIME_ACCESS)
+     * @param runtime        the subscriber's runtime bundle
+     * @param eventStore     the event store used to load envelopes for queue entries
+     * @param clock          the injected clock for DLQ and anomaly timestamps
+     *                       (NO_DIRECT_TIME_ACCESS)
+     * @param anomalyEmitter the bus's delivery-anomaly emitter (FIX-1a) — a
+     *                       queued position whose read returns an empty page is
+     *                       reported through it before it is skipped; never
+     *                       {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     TransitionCoordinator(SubscriberRuntime runtime,
                           EventStore eventStore,
-                          Clock clock) {
+                          Clock clock,
+                          Consumer<DeliveryAnomaly> anomalyEmitter) {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.eventStore = Objects.requireNonNull(eventStore, "eventStore");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.anomalyEmitter = Objects.requireNonNull(anomalyEmitter, "anomalyEmitter");
     }
 
     /**
@@ -98,6 +107,10 @@ final class TransitionCoordinator {
                     EventPage page = runtime.readExecutor().executeRead(
                             () -> eventStore.readFrom(pos - 1, 1));
                     if (page.events().isEmpty()) {
+                        // FIX-1a: a queued position the store cannot show is the
+                        // fourth silent drop point (the grounding audit S4) —
+                        // emit before skipping it; the skip is FIX-1a-unchanged.
+                        emitAnomaly(pos, "drainAndPromote: no envelope at position");
                         continue;
                     }
                     envelope = page.events().get(0);
@@ -169,5 +182,24 @@ final class TransitionCoordinator {
         }
 
         return true;
+    }
+
+    /**
+     * Emits a {@link DeliveryAnomaly.Kind#TRANSITION_READ_EMPTY} anomaly for
+     * this subscriber (FIX-1a). Never throws — a {@link RuntimeException} from
+     * the emitter is swallowed; an instrument must never become a failure
+     * channel.
+     *
+     * @param globalPosition the queued position the store could not show
+     * @param detail         one line of mechanism
+     */
+    private void emitAnomaly(long globalPosition, String detail) {
+        try {
+            anomalyEmitter.accept(new DeliveryAnomaly(
+                    runtime.info().subscriberId(), globalPosition,
+                    DeliveryAnomaly.Kind.TRANSITION_READ_EMPTY, detail, clock.instant()));
+        } catch (RuntimeException swallowed) {
+            // The emitter is an instrument; its failure is not the coordinator's.
+        }
     }
 }

@@ -210,7 +210,8 @@ class ReplayTransitionIT {
             Thread.sleep(50L);
         }
         throw new AssertionError("Checkpoint for '" + subscriberId
-                + "' did not reach " + target + " within " + maxWaitMillis + " ms");
+                + "' did not reach " + target + " within " + maxWaitMillis + " ms"
+                + " (resting checkpoint " + store.readCheckpoint(subscriberId) + ")");
     }
 
     /**

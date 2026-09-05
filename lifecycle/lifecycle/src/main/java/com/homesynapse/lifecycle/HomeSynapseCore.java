@@ -53,6 +53,7 @@ import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.bus.BusMetrics;
+import com.homesynapse.event.bus.DeliveryAnomaly;
 import com.homesynapse.event.bus.DerivedWriteRateLimit;
 import com.homesynapse.event.bus.EventBus;
 import com.homesynapse.event.bus.HealthSignal;
@@ -548,6 +549,15 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
 
         initializing = "event-bus";
         BusMetrics jfrMetrics = BusMetrics.jfr();
+        // FIX-1a (2026-09-05): every silent delivery drop on the bus's LIVE /
+        // TRANSITION paths reaches the operator as ONE structured WARN line. The
+        // bus is SLF4J-free by its own design note, so the composition root
+        // owns the transport — the same route shape as healthSignalHandler
+        // (Phase 3) owns QueueSaturationHealthCheck's signals.
+        Consumer<DeliveryAnomaly> anomalyHandler = anomaly -> LOG.warn(
+                "bus.delivery_anomaly: kind={} subscriber={} position={} detail={} at={}",
+                anomaly.kind(), anomaly.subscriberId(), anomaly.globalPosition(),
+                anomaly.detail(), anomaly.timestamp());
         this.eventBus = new InProcessEventBus(
                 persistenceFactory.eventStore(),
                 persistenceFactory.checkpointStore(),
@@ -555,7 +565,8 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 persistenceFactory.subscriberReadConnectionFactory(),
                 jfrMetrics,
                 persistenceFactory.writeQueueDepthSupplier(),
-                config.eventBus());
+                config.eventBus(),
+                anomalyHandler);
 
         this.rateLimit = new DerivedWriteRateLimit(clock, jfrMetrics, PROJECTION_SUBSCRIBER_ID);
         this.projectionAdvancer = ProjectionAdvancer.dispatching(persistenceFactory.eventStore());

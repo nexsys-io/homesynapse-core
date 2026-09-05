@@ -5,6 +5,10 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
+  # FIX-1a (2026-09-05): veto-only samples of a LANDED sha (FAILCHAN-FIX-1 §B.4).
+  # A dispatched run can re-open the gate on a red; it never clears it — only
+  # the push run of a commit is the gate of record.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,12 +33,20 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
 
       - name: Run check
-        run: ./gradlew check --no-daemon
+        # --continue (FIX-1a): a red run still FAILS, but the log now names
+        # every failing task instead of stopping at the first red module
+        # (dc3328b's run never reached :lifecycle:lifecycle:test).
+        run: ./gradlew check --no-daemon --continue
 
       - name: Upload test reports
-        if: failure()
+        # always() (FIX-1a): the per-test-case XML (test-results/) rides beside
+        # the HTML, on green runs too — a red run's neighbours are its
+        # comparison corpus, and the assertion MESSAGE lives in the XML.
+        if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: test-reports
-          path: '**/build/reports/tests/'
-          retention-days: 7
+          name: test-reports-${{ github.run_number }}
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          retention-days: 14

@@ -36,6 +36,17 @@ import java.util.function.IntSupplier;
  * {@link ReplayWindowQueue} with gap detection, and the LIVE pull loop
  * processes notifications dispatched by {@link #notifyEvent(long)}.</p>
  *
+ * <p><strong>Delivery drops are never silent (FAILCHAN-FIX-1a).</strong> The
+ * LIVE loop and the TRANSITION drain process only OFFERED positions and never
+ * page forward from the checkpoint, so a single-position read that returns an
+ * empty page or throws loses that position to the subscriber. Each such point
+ * — and {@code notifyEvent}'s own unfilterable empty page — emits one
+ * {@link DeliveryAnomaly} through the constructor-injected
+ * {@code Consumer<DeliveryAnomaly>} BEFORE the path returns or continues; the
+ * composition root routes it to the log as {@code bus.delivery_anomaly}. The
+ * bus module itself stays SLF4J-free and adds no eighth metric (AMD-43
+ * §3.6.2).</p>
+ *
  * <p><strong>Thread safety:</strong> The subscriber registry is guarded by a
  * {@link ReentrantReadWriteLock} per LTD-11 (no {@code synchronized}).
  * Notification fan-out acquires the read lock; registry mutations acquire the
@@ -51,6 +62,13 @@ import java.util.function.IntSupplier;
  */
 public final class InProcessEventBus implements EventBus {
 
+    /**
+     * The {@link DeliveryAnomaly#subscriberId()} of a drop observed before
+     * fan-out ({@link DeliveryAnomaly.Kind#NOTIFY_NOT_VISIBLE}) — no subscriber
+     * has been resolved yet, so the anomaly belongs to all of them.
+     */
+    static final String ANOMALY_ALL_SUBSCRIBERS = "*";
+
     private final EventStore eventStore;
     private final CheckpointStore checkpointStore;
     private final Clock clock;
@@ -59,6 +77,7 @@ public final class InProcessEventBus implements EventBus {
     private final IntSupplier queueDepthSupplier;
     private final EventBusConfig config;
     private final int publisherBlockedDepthThreshold;
+    private final Consumer<DeliveryAnomaly> anomalyEmitter;
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
     private volatile boolean abandoned = false;
 
@@ -117,12 +136,13 @@ public final class InProcessEventBus implements EventBus {
 
     /**
      * Creates a new in-process event bus with a caller-supplied
-     * {@link EventBusConfig} (M3.6b, audit findings D1-07 and D4-09).
+     * {@link EventBusConfig} (M3.6b, audit findings D1-07 and D4-09) and NO
+     * delivery-anomaly emitter — every drop signal is discarded.
      *
-     * <p>This is the canonical production constructor — the composition root
-     * (M3.6d) calls it directly. The 4-arg and 6-arg convenience constructors
-     * delegate here with {@link EventBusConfig#HOME_DEFAULT}, so callers that
-     * have not yet opted in to per-tier tuning observe no behavioural change.</p>
+     * <p>Retained for callers that predate FIX-1a (the test factory and the
+     * bus's own convenience constructors delegate here). The composition root
+     * calls the emitter-carrying constructor below so that every silent drop
+     * reaches the log.</p>
      *
      * @param eventStore                 the event store for loading event metadata
      * @param checkpointStore            the checkpoint store for position tracking
@@ -145,6 +165,50 @@ public final class InProcessEventBus implements EventBus {
                              BusMetrics metrics,
                              IntSupplier writerQueueDepthSupplier,
                              EventBusConfig config) {
+        this(eventStore, checkpointStore, clock, readConnectionFactory,
+                metrics, writerQueueDepthSupplier, config, anomaly -> { });
+    }
+
+    /**
+     * Creates a new in-process event bus with a caller-supplied
+     * {@link EventBusConfig} and a delivery-anomaly emitter (FAILCHAN-FIX-1a).
+     *
+     * <p>This is the canonical production constructor — the composition root
+     * calls it directly. Every point on the LIVE and TRANSITION delivery paths
+     * where a position would otherwise be dropped silently — a single-position
+     * read that returns an empty page or throws, a notification whose envelope
+     * the store cannot see — emits one {@link DeliveryAnomaly} through
+     * {@code anomalyEmitter} BEFORE the path returns or continues. The emitter
+     * is invoked on the observing thread (the publisher's for
+     * {@link DeliveryAnomaly.Kind#NOTIFY_NOT_VISIBLE}, the subscriber's virtual
+     * thread otherwise) and any {@link RuntimeException} it throws is
+     * swallowed — an instrument must never become a failure channel.</p>
+     *
+     * @param eventStore                 the event store for loading event metadata
+     * @param checkpointStore            the checkpoint store for position tracking
+     * @param clock                      the clock for supervisor timing and
+     *                                   anomaly timestamps (never {@code null})
+     * @param readConnectionFactory      factory for per-subscriber read executors
+     * @param metrics                    the bus metrics emitter (AMD-43 §3.6.2)
+     * @param writerQueueDepthSupplier   supplier of the writer queue depth
+     *                                   (DEC-M3-14 — the bus holds no reference
+     *                                   to persistence types)
+     * @param config                     bus configuration — replay-queue
+     *                                   capacity and publisher-blocked depth
+     *                                   threshold (M3.6b)
+     * @param anomalyEmitter             receives one {@link DeliveryAnomaly} per
+     *                                   delivery drop; never {@code null}; must
+     *                                   be safe to call from any thread
+     * @throws NullPointerException if any parameter is {@code null}
+     */
+    public InProcessEventBus(EventStore eventStore,
+                             CheckpointStore checkpointStore,
+                             Clock clock,
+                             SubscriberReadConnectionFactory readConnectionFactory,
+                             BusMetrics metrics,
+                             IntSupplier writerQueueDepthSupplier,
+                             EventBusConfig config,
+                             Consumer<DeliveryAnomaly> anomalyEmitter) {
         this.eventStore = Objects.requireNonNull(eventStore, "eventStore must not be null");
         this.checkpointStore = Objects.requireNonNull(checkpointStore,
                 "checkpointStore must not be null");
@@ -156,6 +220,8 @@ public final class InProcessEventBus implements EventBus {
                 "writerQueueDepthSupplier must not be null");
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.publisherBlockedDepthThreshold = config.publisherBlockedDepthThreshold();
+        this.anomalyEmitter = Objects.requireNonNull(anomalyEmitter,
+                "anomalyEmitter must not be null");
     }
 
     // ── Existing Phase 2 contract (passive registration) ─────────────
@@ -248,6 +314,12 @@ public final class InProcessEventBus implements EventBus {
             // Load the event at globalPosition from the store for filter evaluation.
             EventPage page = eventStore.readFrom(globalPosition - 1, 1);
             if (page.events().isEmpty()) {
+                // FIX-1a: without its envelope the notification cannot be
+                // filtered and is offered to NO subscriber — the first of the
+                // four silent drop points (the grounding audit S4). Say so
+                // before returning; behaviour otherwise unchanged in FIX-1a.
+                emitAnomaly(DeliveryAnomaly.Kind.NOTIFY_NOT_VISIBLE, ANOMALY_ALL_SUBSCRIBERS,
+                        globalPosition, "notifyEvent: no envelope at position");
                 return;
             }
             EventEnvelope envelope = page.events().get(0);
@@ -439,7 +511,7 @@ public final class InProcessEventBus implements EventBus {
         }
 
         TransitionCoordinator coordinator = new TransitionCoordinator(
-                runtime, eventStore, clock);
+                runtime, eventStore, clock, anomalyEmitter);
         if (!coordinator.drainAndPromote()) {
             return;
         }
@@ -478,6 +550,13 @@ public final class InProcessEventBus implements EventBus {
                 EventPage page = runtime.readExecutor().executeRead(
                         () -> eventStore.readFrom(pos - 1, 1));
                 if (page.events().isEmpty()) {
+                    // FIX-1a: the loop never pages forward from the checkpoint,
+                    // so an offered position the store cannot show is lost to
+                    // this subscriber — the next delivery checkpoints past it.
+                    // Emit before skipping; the skip itself is FIX-1a-unchanged
+                    // (FIX-1b turns it into a bounded retry, then SUSPEND).
+                    emitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_EMPTY, subscriberId, pos,
+                            "liveLoop: no envelope at position");
                     continue;
                 }
                 envelope = page.events().get(0);
@@ -486,6 +565,9 @@ public final class InProcessEventBus implements EventBus {
                 return;
             } catch (Exception e) {
                 // Transient read failure — skip this position; retain mode.
+                // FIX-1a: emit the mechanism before skipping.
+                emitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_FAILED, subscriberId, position,
+                        e.getClass().getSimpleName() + ": " + e.getMessage());
                 continue;
             }
 
@@ -520,6 +602,28 @@ public final class InProcessEventBus implements EventBus {
                 }
                 metrics.recordSubscriberLag(subscriberId, lagEvents, lagMillis);
             }
+        }
+    }
+
+    /**
+     * Emits one {@link DeliveryAnomaly} through the injected emitter, stamped
+     * from the bus's injected clock (FIX-1a). Never throws: a
+     * {@link RuntimeException} from the emitter is swallowed, because an
+     * instrument must never become a failure channel of its own.
+     *
+     * @param kind           the drop point
+     * @param subscriberId   the subscriber whose delivery dropped, or
+     *                       {@link #ANOMALY_ALL_SUBSCRIBERS} before fan-out
+     * @param globalPosition the undelivered position
+     * @param detail         one line of mechanism
+     */
+    private void emitAnomaly(DeliveryAnomaly.Kind kind, String subscriberId,
+                             long globalPosition, String detail) {
+        try {
+            anomalyEmitter.accept(new DeliveryAnomaly(
+                    subscriberId, globalPosition, kind, detail, clock.instant()));
+        } catch (RuntimeException swallowed) {
+            // The emitter is an instrument; its failure is not the bus's.
         }
     }
 
