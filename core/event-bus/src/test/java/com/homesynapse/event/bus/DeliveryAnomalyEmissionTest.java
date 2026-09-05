@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.stream.LongStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -212,7 +213,149 @@ final class DeliveryAnomalyEmissionTest {
         }
     }
 
+    // ── FIX-1b — DP-2: a drop is retried, then an honest SUSPEND ────────────
+
+    @Test
+    @DisplayName("T5 — a LIVE read that is empty twice and real on the third attempt delivers P exactly once "
+            + "and checkpoints it; no LIVE_READ_EXHAUSTED; the subscriber stays LIVE")
+    void liveReadRetried_thenDelivered() throws Exception {
+        subscribeAndAwaitLive(bus);
+        long p1 = publishAndNotify(bus);
+        awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p1,
+                "the baseline delivery checkpointing " + p1);
+
+        long p = p1 + 1;
+        scriptedStore.emptyTimes(p, 2);
+        assertThat(publishAndNotify(bus)).isEqualTo(p);
+
+        awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p,
+                "the retried read delivering and checkpointing " + p);
+        assertThat(delivered.stream().filter(pos -> pos == p).count())
+                .as("delivered exactly once").isEqualTo(1L);
+        assertThat(countAnomalies(DeliveryAnomaly.Kind.LIVE_READ_EMPTY, p))
+                .as("one anomaly per empty attempt").isEqualTo(2L);
+        assertThat(anomalies).extracting(DeliveryAnomaly::kind)
+                .doesNotContain(DeliveryAnomaly.Kind.LIVE_READ_EXHAUSTED);
+        assertThat(bus.subscriberInfo(SUBSCRIBER_ID).mode()).isEqualTo(SubscriberMode.LIVE);
+    }
+
+    @Test
+    @DisplayName("T6 — five empty LIVE reads exhaust the retry: LIVE_READ_EXHAUSTED, mode SUSPENDED, "
+            + "the checkpoint never past P, P never delivered")
+    void liveReadExhausted_suspendsHonestly() throws Exception {
+        subscribeAndAwaitLive(bus);
+        long p1 = publishAndNotify(bus);
+        awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p1,
+                "the baseline delivery checkpointing " + p1);
+
+        long p = p1 + 1;
+        scriptedStore.emptyForever(p);
+        assertThat(publishAndNotify(bus)).isEqualTo(p);
+
+        DeliveryAnomaly exhausted = awaitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_EXHAUSTED, p);
+        assertThat(exhausted.subscriberId()).isEqualTo(SUBSCRIBER_ID);
+        awaitTrue(() -> bus.subscriberInfo(SUBSCRIBER_ID).mode() == SubscriberMode.SUSPENDED,
+                "the honest SUSPEND");
+        assertThat(countAnomalies(DeliveryAnomaly.Kind.LIVE_READ_EMPTY, p))
+                .as("exactly the bounded attempt count (5)").isEqualTo(5L);
+        assertThat(checkpointStore.readCheckpoint(SUBSCRIBER_ID)).isEqualTo(p1);
+        assertThat(delivered).doesNotContain(p);
+    }
+
+    @Test
+    @DisplayName("T7 — notifyEvent(P) on a page the publisher cannot see still offers P to the LIVE "
+            + "subscriber; when the store shows P it is delivered and checkpointed")
+    void notifyNotVisible_stillOffersToLive() throws Exception {
+        subscribeAndAwaitLive(bus);
+        long p1 = publishAndNotify(bus);
+        awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p1,
+                "the baseline delivery checkpointing " + p1);
+
+        long p = p1 + 1;
+        scriptedStore.emptyOnceForPublisher(p);   // notifyEvent's own read misses …
+        scriptedStore.emptyOnce(p);               // … and so does the LIVE loop's first read
+        assertThat(publishAndNotify(bus)).isEqualTo(p);
+
+        DeliveryAnomaly notVisible = findAnomaly(DeliveryAnomaly.Kind.NOTIFY_NOT_VISIBLE, p)
+                .orElseThrow(() -> new AssertionError("NOTIFY_NOT_VISIBLE not emitted for " + p));
+        assertThat(notVisible.subscriberId()).isEqualTo("*");
+        awaitTrue(() -> delivered.contains(p), "P delivered through the unfiltered offer");
+        awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p, "the checkpoint reaching " + p);
+    }
+
+    // ── FIX-1b — the ReplayTransitionIT mechanism: TRANSITION deliveries checkpoint ──
+
+    @Test
+    @DisplayName("T-R1 — positions delivered by the TRANSITION drain advance the checkpoint (the "
+            + "ReplayTransitionIT phase-1 stall: a burst that ends inside TRANSITION left the checkpoint "
+            + "at the REPLAY tail while every event had been delivered)")
+    void transitionDeliveries_advanceCheckpoint() throws Exception {
+        long first = realStore.publishRoot(TestEventFactory.draft()).globalPosition();
+        int burst = 40;
+        // The REPLAY driver's tail read (afterPosition == first) runs the publisher's whole
+        // burst and then reports the tail as it stood when the read began: every burst
+        // position is notified while the subscriber is in REPLAY and lands in the replay
+        // window queue, to be delivered by the TRANSITION drain — one thread, real order.
+        scriptedStore.onPageReadRunThenEmpty(first, () -> {
+            for (int i = 0; i < burst; i++) {
+                try {
+                    publishAndNotify(bus);
+                } catch (SequenceConflictException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        });
+        subscribeAndAwaitLive(bus);
+
+        long last = first + burst;
+        awaitTrue(() -> delivered.size() == burst + 1,
+                "every position delivered (REPLAY " + first + ", TRANSITION " + (first + 1) + ".." + last + ")");
+        assertThat(delivered).containsExactlyElementsOf(
+                LongStream.rangeClosed(first, last).boxed().toList());
+        awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == last,
+                "the checkpoint reaching the last TRANSITION-delivered position " + last);
+        assertThat(anomalies).isEmpty();
+    }
+
+    @Test
+    @DisplayName("T-R2 — a queued position the TRANSITION drain cannot read is retried, then the subscriber "
+            + "SUSPENDs honestly with TRANSITION_READ_EXHAUSTED; the checkpoint stays at the last delivery")
+    void transitionReadExhausted_suspendsHonestly() throws Exception {
+        long first = realStore.publishRoot(TestEventFactory.draft()).globalPosition();
+        scriptedStore.onPageReadRunThenEmpty(first, () -> {
+            try {
+                publishAndNotify(bus);
+                publishAndNotify(bus);
+            } catch (SequenceConflictException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        long readable = first + 1;
+        long unreadable = first + 2;
+        scriptedStore.emptyForever(unreadable);
+
+        bus.subscribeRuntime(
+                new SubscriberInfo(SUBSCRIBER_ID, SubscriptionFilter.all(), false),
+                event -> delivered.add(event.globalPosition()));
+
+        awaitAnomaly(DeliveryAnomaly.Kind.TRANSITION_READ_EXHAUSTED, unreadable);
+        awaitTrue(() -> bus.subscriberInfo(SUBSCRIBER_ID).mode() == SubscriberMode.SUSPENDED,
+                "the honest SUSPEND out of TRANSITION");
+        assertThat(delivered).containsExactly(first, readable);
+        assertThat(checkpointStore.readCheckpoint(SUBSCRIBER_ID))
+                .as("the TRANSITION delivery of " + readable + " was checkpointed; the unreadable one never")
+                .isEqualTo(readable);
+        assertThat(countAnomalies(DeliveryAnomaly.Kind.TRANSITION_READ_EMPTY, unreadable))
+                .as("exactly the bounded attempt count (5)").isEqualTo(5L);
+    }
+
     // ── Harness ─────────────────────────────────────────────────────────────
+
+    private long countAnomalies(DeliveryAnomaly.Kind kind, long position) {
+        return anomalies.stream()
+                .filter(anomaly -> anomaly.kind() == kind && anomaly.globalPosition() == position)
+                .count();
+    }
 
     private InProcessEventBus newBus(Consumer<DeliveryAnomaly> emitter) {
         return new InProcessEventBus(scriptedStore, checkpointStore, CLOCK,
@@ -282,8 +425,10 @@ final class DeliveryAnomalyEmissionTest {
         private final EventStore delegate;
         private final ReentrantLock lock = new ReentrantLock();
         private final Map<Long, Deque<Response>> queued = new HashMap<>();
+        private final Map<Long, Deque<Response>> publisherQueued = new HashMap<>();
         private final Map<Long, Response> steady = new HashMap<>();
         private final Map<Long, String> throwMessages = new HashMap<>();
+        private final Map<Long, Runnable> pageHooks = new HashMap<>();
 
         ScriptedReadStore(EventStore delegate) {
             this.delegate = Objects.requireNonNull(delegate, "delegate");
@@ -320,11 +465,58 @@ final class DeliveryAnomalyEmissionTest {
             }
         }
 
+        /** The first {@code n} subscriber-thread reads of {@code position} are empty; later reads are real. */
+        void emptyTimes(long position, int n) {
+            lock.lock();
+            try {
+                Deque<Response> script = queued.computeIfAbsent(position, ignored -> new ArrayDeque<>());
+                for (int i = 0; i < n; i++) {
+                    script.add(Response.EMPTY);
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        /**
+         * The FIRST PUBLISHER-thread single-position read of {@code position} is empty
+         * — {@code notifyEvent}'s own read misses while the store already holds the
+         * envelope (the LIVE loop's read is scripted separately).
+         */
+        void emptyOnceForPublisher(long position) {
+            lock.lock();
+            try {
+                publisherQueued.computeIfAbsent(position, ignored -> new ArrayDeque<>())
+                        .add(Response.EMPTY);
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        /**
+         * The next subscriber-thread PAGE read (the REPLAY driver's
+         * {@code readFrom(afterPosition, 500)}) runs {@code hook} and then
+         * returns an EMPTY page — the tail as it stood when the read began. The
+         * hook is the concurrent publisher, executed inside the read on the one
+         * thread, so the interleaving is real and deterministic (the FAILCHAN
+         * §10-O pattern).
+         */
+        void onPageReadRunThenEmpty(long afterPosition, Runnable hook) {
+            lock.lock();
+            try {
+                pageHooks.put(afterPosition, hook);
+            } finally {
+                lock.unlock();
+            }
+        }
+
         @Override
         public EventPage readFrom(long afterPosition, int maxCount) {
-            if (maxCount == 1 && Thread.currentThread().isVirtual()) {
+            boolean virtual = Thread.currentThread().isVirtual();
+            if (maxCount == 1) {
                 long position = afterPosition + 1;
-                Response response = nextResponse(position);
+                Response response = virtual
+                        ? nextResponse(position) : nextPublisherResponse(position);
                 switch (response) {
                     case EMPTY -> {
                         return new EventPage(List.of(), afterPosition, false);
@@ -333,6 +525,12 @@ final class DeliveryAnomalyEmissionTest {
                     case REAL -> {
                         // fall through to the delegate
                     }
+                }
+            } else if (virtual) {
+                Runnable hook = takePageHook(afterPosition);
+                if (hook != null) {
+                    hook.run();
+                    return new EventPage(List.of(), afterPosition, false);
                 }
             }
             return delegate.readFrom(afterPosition, maxCount);
@@ -346,6 +544,28 @@ final class DeliveryAnomalyEmissionTest {
                     return script.poll();
                 }
                 return steady.getOrDefault(position, Response.REAL);
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private Response nextPublisherResponse(long position) {
+            lock.lock();
+            try {
+                Deque<Response> script = publisherQueued.get(position);
+                if (script != null && !script.isEmpty()) {
+                    return script.poll();
+                }
+                return Response.REAL;
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private Runnable takePageHook(long afterPosition) {
+            lock.lock();
+            try {
+                return pageHooks.remove(afterPosition);
             } finally {
                 lock.unlock();
             }

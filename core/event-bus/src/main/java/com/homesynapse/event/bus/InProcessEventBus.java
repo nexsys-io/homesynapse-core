@@ -45,7 +45,10 @@ import java.util.function.IntSupplier;
  * {@code Consumer<DeliveryAnomaly>} BEFORE the path returns or continues; the
  * composition root routes it to the log as {@code bus.delivery_anomaly}. The
  * bus module itself stays SLF4J-free and adds no eighth metric (AMD-43
- * §3.6.2).</p>
+ * §3.6.2). <strong>FIX-1b (DP-2):</strong> a drop is never a skip — a read
+ * that misses is retried with a bounded backoff ({@link #LIVE_READ_ATTEMPTS}),
+ * an invisible notification is still offered unfiltered, and exhaustion ends
+ * in an honest SUSPEND, never a checkpoint past an undelivered position.</p>
  *
  * <p><strong>Thread safety:</strong> The subscriber registry is guarded by a
  * {@link ReentrantReadWriteLock} per LTD-11 (no {@code synchronized}).
@@ -68,6 +71,18 @@ public final class InProcessEventBus implements EventBus {
      * has been resolved yet, so the anomaly belongs to all of them.
      */
     static final String ANOMALY_ALL_SUBSCRIBERS = "*";
+
+    /**
+     * DP-2 (FIX-1b): single-position read attempts on one offered position
+     * before the subscriber SUSPENDs honestly. Attempts are separated by a
+     * doubling {@code LockSupport.parkNanos} backoff starting at
+     * {@link #LIVE_READ_BACKOFF_FIRST_NANOS} (1 → 2 → 4 → 8 ms); a park is
+     * not a clock read (LTD-09 holds).
+     */
+    static final int LIVE_READ_ATTEMPTS = 5;
+
+    /** DP-2 (FIX-1b): the first inter-attempt park; doubled after every failed attempt. */
+    static final long LIVE_READ_BACKOFF_FIRST_NANOS = 1_000_000L;
 
     private final EventStore eventStore;
     private final CheckpointStore checkpointStore;
@@ -315,11 +330,14 @@ public final class InProcessEventBus implements EventBus {
             EventPage page = eventStore.readFrom(globalPosition - 1, 1);
             if (page.events().isEmpty()) {
                 // FIX-1a: without its envelope the notification cannot be
-                // filtered and is offered to NO subscriber — the first of the
-                // four silent drop points (the grounding audit S4). Say so
-                // before returning; behaviour otherwise unchanged in FIX-1a.
+                // filtered — the first of the four silent drop points (the
+                // grounding audit S4); say so. FIX-1b (DP-2): then offer the
+                // position UNFILTERED to every active subscriber — the LIVE loop
+                // and the TRANSITION drain filter after their own read — so a
+                // publisher-side visibility miss is never a lost delivery.
                 emitAnomaly(DeliveryAnomaly.Kind.NOTIFY_NOT_VISIBLE, ANOMALY_ALL_SUBSCRIBERS,
                         globalPosition, "notifyEvent: no envelope at position");
+                offerUnfiltered(globalPosition);
                 return;
             }
             EventEnvelope envelope = page.events().get(0);
@@ -353,32 +371,7 @@ public final class InProcessEventBus implements EventBus {
                 if (checkpoint >= globalPosition) {
                     continue;
                 }
-
-                ReplayWindowQueue queue = runtime.replayWindowQueue();
-                queue.lock();
-                try {
-                    SubscriberMode mode = runtime.mode();
-                    if (mode == SubscriberMode.COLD
-                            || mode == SubscriberMode.SUSPENDED) {
-                        continue;
-                    }
-                    if (mode == SubscriberMode.REPLAY
-                            || mode == SubscriberMode.TRANSITION) {
-                        // Buffer until coordinator drains. Overflow is recoverable —
-                        // ReplayDriver observes the latched flag and restarts REPLAY
-                        // from the persisted checkpoint.
-                        queue.enqueue(globalPosition);
-                    } else {
-                        // LIVE — standard pull path.
-                        runtime.pendingPositions().offer(globalPosition);
-                        Thread vt = runtime.virtualThread();
-                        if (vt != null) {
-                            LockSupport.unpark(vt);
-                        }
-                    }
-                } finally {
-                    queue.unlock();
-                }
+                routeByMode(runtime, globalPosition);
             }
             } finally {
                 rwLock.readLock().unlock();
@@ -511,7 +504,7 @@ public final class InProcessEventBus implements EventBus {
         }
 
         TransitionCoordinator coordinator = new TransitionCoordinator(
-                runtime, eventStore, clock, anomalyEmitter);
+                runtime, eventStore, checkpointStore, clock, anomalyEmitter);
         if (!coordinator.drainAndPromote()) {
             return;
         }
@@ -544,31 +537,14 @@ public final class InProcessEventBus implements EventBus {
                 continue;
             }
 
-            EventEnvelope envelope;
-            try {
-                final long pos = position;
-                EventPage page = runtime.readExecutor().executeRead(
-                        () -> eventStore.readFrom(pos - 1, 1));
-                if (page.events().isEmpty()) {
-                    // FIX-1a: the loop never pages forward from the checkpoint,
-                    // so an offered position the store cannot show is lost to
-                    // this subscriber — the next delivery checkpoints past it.
-                    // Emit before skipping; the skip itself is FIX-1a-unchanged
-                    // (FIX-1b turns it into a bounded retry, then SUSPEND).
-                    emitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_EMPTY, subscriberId, pos,
-                            "liveLoop: no envelope at position");
-                    continue;
-                }
-                envelope = page.events().get(0);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return;
-            } catch (Exception e) {
-                // Transient read failure — skip this position; retain mode.
-                // FIX-1a: emit the mechanism before skipping.
-                emitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_FAILED, subscriberId, position,
-                        e.getClass().getSimpleName() + ": " + e.getMessage());
-                continue;
+            // FIX-1b (DP-2): a drop is never a skip. The loop never pages forward
+            // from the checkpoint, so an offered position the store cannot show
+            // would be lost to this subscriber; the read is therefore retried with
+            // a bounded backoff and, on exhaustion, the subscriber SUSPENDs
+            // honestly — never a silent continue past an undelivered position.
+            EventEnvelope envelope = readLivePosition(runtime, subscriberId, position);
+            if (envelope == null) {
+                return; // SUSPENDED after exhaustion, or interrupted — both set by readLivePosition
             }
 
             if (!filter.matches(envelope)) {
@@ -603,6 +579,123 @@ public final class InProcessEventBus implements EventBus {
                 metrics.recordSubscriberLag(subscriberId, lagEvents, lagMillis);
             }
         }
+    }
+
+    /**
+     * Routes one position to an active subscriber by its current mode, with
+     * the queue's lock held across the mode read and the routing decision so
+     * the TRANSITION → LIVE CAS in {@link TransitionCoordinator} cannot
+     * interleave between the observation and the enqueue/offer.
+     *
+     * @param runtime        the subscriber's runtime bundle
+     * @param globalPosition the position to route
+     */
+    private void routeByMode(SubscriberRuntime runtime, long globalPosition) {
+        ReplayWindowQueue queue = runtime.replayWindowQueue();
+        queue.lock();
+        try {
+            SubscriberMode mode = runtime.mode();
+            if (mode == SubscriberMode.COLD || mode == SubscriberMode.SUSPENDED) {
+                return;
+            }
+            if (mode == SubscriberMode.REPLAY || mode == SubscriberMode.TRANSITION) {
+                // Buffer until coordinator drains. Overflow is recoverable —
+                // ReplayDriver observes the latched flag and restarts REPLAY
+                // from the persisted checkpoint.
+                queue.enqueue(globalPosition);
+            } else {
+                // LIVE — standard pull path.
+                runtime.pendingPositions().offer(globalPosition);
+                Thread vt = runtime.virtualThread();
+                if (vt != null) {
+                    LockSupport.unpark(vt);
+                }
+            }
+        } finally {
+            queue.unlock();
+        }
+    }
+
+    /**
+     * DP-2 (FIX-1b): offers a position whose envelope the publisher's read could
+     * not see to every ACTIVE subscriber without filtering — the LIVE loop and
+     * the TRANSITION drain filter after their own read, so a matching event is
+     * delivered once the store shows it and a non-matching one costs one read.
+     * The checkpoint guard is kept (a position at or below the subscriber's
+     * checkpoint is not offered). Passive registrations cannot be filtered
+     * without the envelope and are NOT offered; each gets its own
+     * {@code NOTIFY_NOT_VISIBLE} anomaly instead — the documented limitation.
+     *
+     * @param globalPosition the position the publisher's read could not see
+     */
+    private void offerUnfiltered(long globalPosition) {
+        rwLock.readLock().lock();
+        try {
+            for (PassiveRegistration reg : passiveRegistry.values()) {
+                if (checkpointStore.readCheckpoint(reg.info().subscriberId()) < globalPosition) {
+                    emitAnomaly(DeliveryAnomaly.Kind.NOTIFY_NOT_VISIBLE, reg.info().subscriberId(),
+                            globalPosition, "notifyEvent: passive subscriber not offered — no envelope to filter");
+                }
+            }
+            for (SubscriberRuntime runtime : activeRegistry.values()) {
+                long checkpoint = checkpointStore.readCheckpoint(runtime.info().subscriberId());
+                if (checkpoint >= globalPosition) {
+                    continue;
+                }
+                routeByMode(runtime, globalPosition);
+            }
+        } finally {
+            rwLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * DP-2 (FIX-1b): reads one offered position through the subscriber's
+     * dedicated read executor with a bounded retry. Each empty page emits
+     * {@code LIVE_READ_EMPTY}, each read exception {@code LIVE_READ_FAILED};
+     * attempts are separated by a doubling park (1 → 2 → 4 → 8 ms). On
+     * exhaustion the loop emits {@code LIVE_READ_EXHAUSTED} and SUSPENDs the
+     * subscriber — the {@code drainAndPromote} precedent: honest failure beats
+     * silent loss. The checkpoint is never written for a position that was not
+     * delivered (AMD-45 §2.2 untouched — no write happens here at all).
+     *
+     * @param runtime      the subscriber's runtime bundle
+     * @param subscriberId the subscriber's id (for the anomaly)
+     * @param pos          the offered position
+     * @return the envelope, or {@code null} when the LIVE loop must exit
+     *         (SUSPENDED after exhaustion, or interrupted — the flag re-asserted)
+     */
+    private EventEnvelope readLivePosition(SubscriberRuntime runtime, String subscriberId,
+                                           long pos) {
+        long backoff = LIVE_READ_BACKOFF_FIRST_NANOS;
+        for (int attempt = 1; attempt <= LIVE_READ_ATTEMPTS; attempt++) {
+            try {
+                EventPage page = runtime.readExecutor().executeRead(
+                        () -> eventStore.readFrom(pos - 1, 1));
+                if (!page.events().isEmpty()) {
+                    return page.events().get(0);
+                }
+                emitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_EMPTY, subscriberId, pos,
+                        "liveLoop: no envelope at position");
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return null;
+            } catch (Exception e) {
+                emitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_FAILED, subscriberId, pos,
+                        e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+            if (attempt < LIVE_READ_ATTEMPTS) {
+                LockSupport.parkNanos(backoff);
+                backoff <<= 1;
+            }
+        }
+        emitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_EXHAUSTED, subscriberId, pos,
+                "liveLoop: position unreadable after " + LIVE_READ_ATTEMPTS
+                        + " attempts; subscriber SUSPENDED");
+        runtime.transitionTo(SubscriberMode.SUSPENDED);
+        // M3.7 fix round 4: inform the subscriber of its new mode.
+        runtime.subscriber().setMode(SubscriberMode.SUSPENDED);
+        return null;
     }
 
     /**

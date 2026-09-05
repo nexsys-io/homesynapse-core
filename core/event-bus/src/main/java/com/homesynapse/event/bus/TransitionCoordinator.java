@@ -11,6 +11,7 @@ import com.homesynapse.event.EventStore;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 
 /**
@@ -53,30 +54,46 @@ final class TransitionCoordinator {
     /** Synthetic event-position marker for onCaughtUp DLQ entries (AMD-42 §3.4.3). */
     static final long CAUGHT_UP_TRANSITION_MARKER = -1L;
 
+    /**
+     * DP-2 (FIX-1b): single-position read attempts on one queued position
+     * before the subscriber SUSPENDs honestly; the same shape as the LIVE
+     * loop's {@code InProcessEventBus.LIVE_READ_ATTEMPTS}.
+     */
+    static final int DRAIN_READ_ATTEMPTS = 5;
+
+    /** DP-2 (FIX-1b): the first inter-attempt park (1 → 2 → 4 → 8 ms); a park is not a clock read. */
+    static final long DRAIN_READ_BACKOFF_FIRST_NANOS = 1_000_000L;
+
     private final SubscriberRuntime runtime;
     private final EventStore eventStore;
+    private final CheckpointStore checkpointStore;
     private final Clock clock;
     private final Consumer<DeliveryAnomaly> anomalyEmitter;
 
     /**
      * Creates a new coordinator bound to the given subscriber runtime.
      *
-     * @param runtime        the subscriber's runtime bundle
-     * @param eventStore     the event store used to load envelopes for queue entries
-     * @param clock          the injected clock for DLQ and anomaly timestamps
-     *                       (NO_DIRECT_TIME_ACCESS)
-     * @param anomalyEmitter the bus's delivery-anomaly emitter (FIX-1a) — a
-     *                       queued position whose read returns an empty page is
-     *                       reported through it before it is skipped; never
-     *                       {@code null}
+     * @param runtime         the subscriber's runtime bundle
+     * @param eventStore      the event store used to load envelopes for queue entries
+     * @param checkpointStore the durable checkpoint store (FIX-1b) — every
+     *                        successful TRANSITION delivery of a non-atomic
+     *                        subscriber is checkpointed exactly like a LIVE one
+     * @param clock           the injected clock for DLQ and anomaly timestamps
+     *                        (NO_DIRECT_TIME_ACCESS)
+     * @param anomalyEmitter  the bus's delivery-anomaly emitter (FIX-1a) — a
+     *                        queued position whose read returns an empty page is
+     *                        reported through it, retried, and on exhaustion
+     *                        ends in an honest SUSPEND (FIX-1b); never {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     TransitionCoordinator(SubscriberRuntime runtime,
                           EventStore eventStore,
+                          CheckpointStore checkpointStore,
                           Clock clock,
                           Consumer<DeliveryAnomaly> anomalyEmitter) {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.eventStore = Objects.requireNonNull(eventStore, "eventStore");
+        this.checkpointStore = Objects.requireNonNull(checkpointStore, "checkpointStore");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.anomalyEmitter = Objects.requireNonNull(anomalyEmitter, "anomalyEmitter");
     }
@@ -101,27 +118,11 @@ final class TransitionCoordinator {
                     continue; // gap detection — already delivered during REPLAY
                 }
 
-                EventEnvelope envelope;
-                try {
-                    final long pos = position;
-                    EventPage page = runtime.readExecutor().executeRead(
-                            () -> eventStore.readFrom(pos - 1, 1));
-                    if (page.events().isEmpty()) {
-                        // FIX-1a: a queued position the store cannot show is the
-                        // fourth silent drop point (the grounding audit S4) —
-                        // emit before skipping it; the skip is FIX-1a-unchanged.
-                        emitAnomaly(pos, "drainAndPromote: no envelope at position");
-                        continue;
-                    }
-                    envelope = page.events().get(0);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return false;
-                } catch (Exception e) {
-                    runtime.transitionTo(SubscriberMode.SUSPENDED);
-                    // M3.7 fix round 4: inform the subscriber of its new mode.
-                    runtime.subscriber().setMode(SubscriberMode.SUSPENDED);
-                    return false;
+                // FIX-1b (DP-2): a queued position the store cannot show is
+                // retried, then an honest SUSPEND — never a silent skip.
+                EventEnvelope envelope = readQueuedPosition(position);
+                if (envelope == null) {
+                    return false; // SUSPENDED (exhausted, or the read threw) or interrupted
                 }
 
                 if (!filter.matches(envelope)) {
@@ -137,6 +138,16 @@ final class TransitionCoordinator {
                     return false;
                 }
                 runtime.setLastReplayedPosition(envelope.globalPosition());
+                if (result == SubscriberSupervisor.DeliveryResult.SUCCESS
+                        && !runtime.info().atomicCheckpoint()) {
+                    // FIX-1b: a TRANSITION delivery checkpoints exactly like a LIVE
+                    // one (the AMD-45 §2.2 gate kept). Before this write, a publish
+                    // burst that ended inside TRANSITION was fully delivered yet left
+                    // the persisted checkpoint at the REPLAY tail — the
+                    // ReplayTransitionIT phase-1 stall (measured 2026-09-05).
+                    checkpointStore.writeCheckpoint(
+                            runtime.info().subscriberId(), envelope.globalPosition());
+                }
             }
 
             // Fuse "queue empty?" with the TRANSITION→LIVE CAS under the queue's
@@ -185,19 +196,64 @@ final class TransitionCoordinator {
     }
 
     /**
-     * Emits a {@link DeliveryAnomaly.Kind#TRANSITION_READ_EMPTY} anomaly for
-     * this subscriber (FIX-1a). Never throws — a {@link RuntimeException} from
-     * the emitter is swallowed; an instrument must never become a failure
-     * channel.
+     * DP-2 (FIX-1b): reads one queued position through the subscriber's
+     * dedicated read executor with a bounded retry. An empty page emits
+     * {@code TRANSITION_READ_EMPTY} and is retried after a doubling park; on
+     * exhaustion the coordinator emits {@code TRANSITION_READ_EXHAUSTED} and
+     * SUSPENDs the subscriber. A read exception SUSPENDs immediately (the
+     * pre-FIX-1b honest arm, unchanged); an interrupt re-asserts the flag.
      *
+     * @param pos the queued position
+     * @return the envelope, or {@code null} when {@code drainAndPromote} must
+     *         return {@code false}
+     */
+    private EventEnvelope readQueuedPosition(long pos) {
+        long backoff = DRAIN_READ_BACKOFF_FIRST_NANOS;
+        for (int attempt = 1; attempt <= DRAIN_READ_ATTEMPTS; attempt++) {
+            try {
+                EventPage page = runtime.readExecutor().executeRead(
+                        () -> eventStore.readFrom(pos - 1, 1));
+                if (!page.events().isEmpty()) {
+                    return page.events().get(0);
+                }
+                emitAnomaly(DeliveryAnomaly.Kind.TRANSITION_READ_EMPTY, pos,
+                        "drainAndPromote: no envelope at position");
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return null;
+            } catch (Exception e) {
+                runtime.transitionTo(SubscriberMode.SUSPENDED);
+                // M3.7 fix round 4: inform the subscriber of its new mode.
+                runtime.subscriber().setMode(SubscriberMode.SUSPENDED);
+                return null;
+            }
+            if (attempt < DRAIN_READ_ATTEMPTS) {
+                LockSupport.parkNanos(backoff);
+                backoff <<= 1;
+            }
+        }
+        emitAnomaly(DeliveryAnomaly.Kind.TRANSITION_READ_EXHAUSTED, pos,
+                "drainAndPromote: position unreadable after " + DRAIN_READ_ATTEMPTS
+                        + " attempts; subscriber SUSPENDED");
+        runtime.transitionTo(SubscriberMode.SUSPENDED);
+        // M3.7 fix round 4: inform the subscriber of its new mode.
+        runtime.subscriber().setMode(SubscriberMode.SUSPENDED);
+        return null;
+    }
+
+    /**
+     * Emits a {@link DeliveryAnomaly} of the given kind for this subscriber
+     * (FIX-1a/1b). Never throws — a {@link RuntimeException} from the emitter
+     * is swallowed; an instrument must never become a failure channel.
+     *
+     * @param kind           the drop point
      * @param globalPosition the queued position the store could not show
      * @param detail         one line of mechanism
      */
-    private void emitAnomaly(long globalPosition, String detail) {
+    private void emitAnomaly(DeliveryAnomaly.Kind kind, long globalPosition, String detail) {
         try {
             anomalyEmitter.accept(new DeliveryAnomaly(
-                    runtime.info().subscriberId(), globalPosition,
-                    DeliveryAnomaly.Kind.TRANSITION_READ_EMPTY, detail, clock.instant()));
+                    runtime.info().subscriberId(), globalPosition, kind, detail, clock.instant()));
         } catch (RuntimeException swallowed) {
             // The emitter is an instrument; its failure is not the coordinator's.
         }

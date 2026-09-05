@@ -88,10 +88,17 @@ public record DeliveryAnomaly(
         TRANSITION_READ_EMPTY,
 
         /**
-         * Reserved for FIX-1b (DP-2): the LIVE loop exhausted its bounded
-         * retries on one position and suspended the subscriber honestly.
-         * NOT emitted by FIX-1a — no code path produces it yet.
+         * FIX-1b (DP-2): the LIVE loop exhausted its bounded read attempts on
+         * one offered position and suspended the subscriber honestly — the
+         * position was never delivered and the checkpoint never passed it.
          */
-        LIVE_READ_EXHAUSTED
+        LIVE_READ_EXHAUSTED,
+
+        /**
+         * FIX-1b (DP-2): the TRANSITION drain exhausted its bounded read
+         * attempts on one queued position and suspended the subscriber
+         * honestly ({@code drainAndPromote} returns {@code false}).
+         */
+        TRANSITION_READ_EXHAUSTED
     }
 }
