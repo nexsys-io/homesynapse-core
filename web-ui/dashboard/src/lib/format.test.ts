@@ -14,6 +14,7 @@ import {
   labelFor,
   lastReportedCell,
   LIST_FRESHNESS_NO_CLAIM_TITLE,
+  LIST_FRESHNESS_NULL_TITLE,
   NULL_NAME_NOTE,
   outcomeMeta,
   originMeta,
@@ -217,5 +218,22 @@ describe('store-truth Last-reported (§10-G) and the no-claim list (§10-I)', ()
 
   it('the list makes no freshness claim it cannot evidence', () => {
     expect(LIST_FRESHNESS_NO_CLAIM_TITLE).toContain('open the device');
+  });
+
+  /* FE-113 (v1.1.3): the list row now CAN carry `lastReported`. Two facts, two
+   * sentences (FE-HONEST-1 §10-H/I): the key ABSENT = a hub that does not serve
+   * a report time on the list (pre-v1.1.3) — the no-claim title; the key PRESENT
+   * BUT NULL = this v1.1.3 hub has nothing on record — a different sentence. */
+  it('a present-but-null report time has its OWN sentence — never the pre-v1.1.3 no-claim title', () => {
+    expect(LIST_FRESHNESS_NULL_TITLE).toBe('This hub has no report time on record for this entity.');
+    expect(LIST_FRESHNESS_NULL_TITLE).not.toBe(LIST_FRESHNESS_NO_CLAIM_TITLE);
+    expect(LIST_FRESHNESS_NULL_TITLE).not.toContain('open the device'); // absence ≠ null: no redirect for a fact that IS on the wire
+  });
+
+  it('lastReportedCell reads the v1.1.3 wire form (Instant.toString(), nanos) — never an em-dash, never 1970', () => {
+    const cell = lastReportedCell('2026-09-06T02:45:29.123456Z');
+    expect(cell).not.toBe('—');
+    expect(cell).not.toContain('1970');
+    expect(cell).not.toBe('On record — unreadable by this dashboard');
   });
 });

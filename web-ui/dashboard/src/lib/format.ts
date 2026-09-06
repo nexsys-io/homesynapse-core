@@ -160,11 +160,16 @@ export function lastReportedCell(lastReported: string | null | undefined): strin
   return clockTimeWithDate(lastReported);
 }
 
-/** The device LIST carries no report time (frozen A1), so it makes NO freshness
- *  claim (§10-I: "Current" with no evidence was a lie by omission). This title
- *  explains the em-dash — test-locked. */
-export const LIST_FRESHNESS_NO_CLAIM_TITLE =
-  'Whether this reading is current is not shown in this list — open the device to see when it last reported.';
+/** The device LIST on a hub that does not serve `lastReported` on the list
+ *  (pre-v1.1.3 — the key ABSENT from the A1 row) makes NO freshness claim
+ *  (§10-I: "Current" with no evidence was a lie by omission). This title explains
+ *  that em-dash — test-locked; i18n-keyed (FE-113). */
+export const LIST_FRESHNESS_NO_CLAIM_TITLE = t('devices.freshness.noClaimTitle');
+
+/** The OTHER fact (FE-113, v1.1.3): the key is PRESENT BUT NULL — this hub serves
+ *  report times on the list and has none on record for this entity. Two facts,
+ *  two sentences: absence ≠ null (FE-HONEST-1 §10-H/I). Test-locked. */
+export const LIST_FRESHNESS_NULL_TITLE = t('devices.freshness.nullTitle');
 
 /* ---- Command outcome (the trust win) ---- */
 export function outcomeMeta(o: ActionOutcome | string | null | undefined): { label: string; tone: Tone; help: string } {

@@ -31,7 +31,8 @@ const REQUESTS: Record<EndpointId, string> = {
 
 describe('frozen read-API contract', () => {
   it('pins the contract version', () => {
-    expect(CONTRACT_VERSION).toBe('v1.1.2-2026-07-26');
+    // v1.1.3 (CG-123, landed core-side 2026-09-06 at f25291b): the four additive keys.
+    expect(CONTRACT_VERSION).toBe('v1.1.3-2026-09-06');
   });
 
   it('has a validator for every canonical endpoint', () => {

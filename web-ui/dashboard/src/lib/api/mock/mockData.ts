@@ -31,14 +31,21 @@ const nextVp = () => ++vp;
 
 export const meta = (): ResponseMeta => ({ viewPosition: nextVp(), timestamp: new Date().toISOString() });
 
-/* ---- Entities (A1/A2/A3) ---- */
+/* ---- Entities (A1/A2/A3) ----
+ * v1.1.3 (FE-113 / CG-2, CG-3): every row carries BOTH additive keys, as a v1.1.3 hub
+ * serves them — PRESENT, JSON null when unknown, never absent. And NOT always
+ * populated (the H8 false-type law): the front-door contact has no device on
+ * record (`deviceId: null` — the LIVE registry holds none for it), the bedroom
+ * motion has never reported (`lastReported: null`). `lastReported` here mirrors
+ * the same entity's A3 state below (one home, one clock); the device ids are
+ * ULID strings (LTD-04) — the token that correlates a row with `device_adopted`. */
 export const entities: EntitySummary[] = [
-  { entityId: 'ent_hallway_motion', availability: 'AVAILABLE', stale: false },
-  { entityId: 'ent_hallway_light', availability: 'AVAILABLE', stale: false },
-  { entityId: 'ent_livingroom_lamp', availability: 'AVAILABLE', stale: false },
-  { entityId: 'ent_frontdoor_contact', availability: 'AVAILABLE', stale: false },
-  { entityId: 'ent_kitchen_light', availability: 'AVAILABLE', stale: true },
-  { entityId: 'ent_bedroom_motion', availability: 'UNAVAILABLE', stale: false },
+  { entityId: 'ent_hallway_motion', availability: 'AVAILABLE', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5D7', lastReported: iso(0.5) },
+  { entityId: 'ent_hallway_light', availability: 'AVAILABLE', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5D9', lastReported: iso(1) },
+  { entityId: 'ent_livingroom_lamp', availability: 'AVAILABLE', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5E1', lastReported: iso(120) },
+  { entityId: 'ent_frontdoor_contact', availability: 'AVAILABLE', stale: false, deviceId: null, lastReported: iso(240) },
+  { entityId: 'ent_kitchen_light', availability: 'AVAILABLE', stale: true, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5E3', lastReported: iso(190) },
+  { entityId: 'ent_bedroom_motion', availability: 'UNAVAILABLE', stale: false, deviceId: null, lastReported: null },
 ];
 
 const entityLabels: Record<string, string> = {
@@ -136,16 +143,23 @@ export const health: ConsolidatedHealth = {
   ],
 };
 
-/* ---- Automations (B3 supporting) ---- */
+/* ---- Automations (B3 supporting) ----
+ * v1.1.3 (FE-113 / CG-1): every component carries `ref` — `{type: "entity", id}` when
+ * it addresses exactly ONE entity by identity, JSON null otherwise (the sunset
+ * conditions name no entity). ONE dangling ref by law: the disabled night light's
+ * lamp is not in this registry (the R-4 §10-J class — a rule pointing at an entity
+ * this hub does not hold; the ULID is the field exhibit's target, verbatim) so the
+ * LOUD render is exercised on the default scenario, not only on `dangling-ref`. */
+export const DANGLING_LAMP_ULID = '01KX1PB9AAB4VB3E10BD477TVX';
 export const automations: AutomationSummary[] = [
   {
     automationId: 'auto_evening_hallway',
     name: 'Evening Hallway Light',
     enabled: true,
     components: [
-      { type: 'trigger', summary: 'When Hallway Motion detects motion' },
-      { type: 'condition', summary: 'Only after sunset' },
-      { type: 'action', summary: 'Turn on Hallway Light' },
+      { type: 'trigger', summary: 'When Hallway Motion detects motion', ref: { type: 'entity', id: 'ent_hallway_motion' } },
+      { type: 'condition', summary: 'Only after sunset', ref: null },
+      { type: 'action', summary: 'Turn on Hallway Light', ref: { type: 'entity', id: 'ent_hallway_light' } },
     ],
     lastRunId: 'run_eh_001',
   },
@@ -154,9 +168,9 @@ export const automations: AutomationSummary[] = [
     name: 'Front Door Welcome',
     enabled: true,
     components: [
-      { type: 'trigger', summary: 'When Front Door opens' },
-      { type: 'condition', summary: 'Only after sunset' },
-      { type: 'action', summary: 'Turn on Living Room Lamp' },
+      { type: 'trigger', summary: 'When Front Door opens', ref: { type: 'entity', id: 'ent_frontdoor_contact' } },
+      { type: 'condition', summary: 'Only after sunset', ref: null },
+      { type: 'action', summary: 'Turn on Living Room Lamp', ref: { type: 'entity', id: 'ent_livingroom_lamp' } },
     ],
     lastRunId: 'run_fd_001',
   },
@@ -165,8 +179,8 @@ export const automations: AutomationSummary[] = [
     name: 'Bedroom Night Light',
     enabled: false,
     components: [
-      { type: 'trigger', summary: 'When Bedroom Motion detects motion' },
-      { type: 'action', summary: 'Dim Bedroom Lamp to 10%' },
+      { type: 'trigger', summary: 'When Bedroom Motion detects motion', ref: { type: 'entity', id: 'ent_bedroom_motion' } },
+      { type: 'action', summary: 'Dim Bedroom Lamp to 10%', ref: { type: 'entity', id: DANGLING_LAMP_ULID } },
     ],
     lastRunId: null,
   },
@@ -362,7 +376,12 @@ export const causalChains: Record<string, CausalChain> = {
 /* ---- Non-firing explanations (B3 — the co-equal hero half) ----
  * [MOCK — pending the SKIP-VIS DEPLOY] `noCommandsIssued` is the ruled v1.1.2
  * additive marker (DP-2): null on every non-silent-skip construction (never
- * false — the additive-nullable idiom). */
+ * false — the additive-nullable idiom).
+ * v1.1.3 (FE-113 / CG-1): `triggerRef` is PRESENT on every entry, appended after
+ * noCommandsIssued — an object (`{type: "entity", id}`, lowercase, the causal
+ * chain's literal) on the CONDITION_NOT_MET and DISABLED entries, and JSON null on
+ * the NEVER_TRIGGERED one (mirroring the live shape's honesty: the mock never
+ * always-populates a nullable key — H8). */
 export const nonFiring: Record<string, NonFiringExplanation> = {
   auto_evening_hallway: {
     automationId: 'auto_evening_hallway',
@@ -377,6 +396,7 @@ export const nonFiring: Record<string, NonFiringExplanation> = {
     // real tri-state so a fixture-green build cannot hide the null again.
     lastEvaluation: null,
     noCommandsIssued: null,
+    triggerRef: null,
   },
   auto_frontdoor_welcome: {
     automationId: 'auto_frontdoor_welcome',
@@ -388,6 +408,7 @@ export const nonFiring: Record<string, NonFiringExplanation> = {
     triggerSummary: 'This runs when the Front Door opens, after sunset.',
     lastEvaluation: { at: iso(240), conditionsResult: 'after sunset = false' },
     noCommandsIssued: null,
+    triggerRef: { type: 'entity', id: 'ent_frontdoor_contact' },
   },
   auto_bedroom_nightlight: {
     automationId: 'auto_bedroom_nightlight',
@@ -399,6 +420,7 @@ export const nonFiring: Record<string, NonFiringExplanation> = {
     triggerSummary: 'This would run when Bedroom Motion detects motion.',
     lastEvaluation: { at: null, conditionsResult: null },
     noCommandsIssued: null,
+    triggerRef: { type: 'entity', id: 'ent_bedroom_motion' },
   },
 };
 

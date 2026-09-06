@@ -6,14 +6,43 @@
  * Pick-an-automation mode when no id is supplied.
  */
 import { api } from '../lib/api';
-import type { AutomationSummary, NonFiringExplanation } from '../lib/api/contract';
+import type { AutomationSummary, NonFiringExplanation, SubjectRef } from '../lib/api/contract';
 import { useApi } from '../lib/poll';
 import { href } from '../lib/router';
-import { verdictMeta, clockTimeWithDate } from '../lib/format';
+import {
+  verdictMeta,
+  clockTimeWithDate,
+  refLabel,
+  UNRESOLVED_REF_HELP,
+  UNRESOLVED_REF_PHRASE,
+  UNRESOLVED_REF_PILL,
+} from '../lib/format';
+import { useRefResolver, type RefResolver } from '../lib/registry';
 import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { StatusPill } from '../components/StatusPill';
 import styles from './WhyNotView.module.css';
+
+/** v1.1.3 (FE-113 / CG-1): the trigger's entity, rendered THROUGH the registry
+ *  census (FE-HONEST-1 §10-J). Resolved → the display name, linked to the device
+ *  list; dangling on a COMPLETE census → LOUD: the ULID verbatim, "not in this
+ *  hub's registry", the failing pill (exactly the causal chain's render); an
+ *  incomplete/unloaded census → the neutral label, no accusation. Callers pass
+ *  only a PRESENT-object ref — null and absent render the sentence alone. */
+function TriggerEntity({ subjectRef, resolveRef }: { subjectRef: SubjectRef; resolveRef: RefResolver }) {
+  const res = resolveRef(subjectRef.id);
+  if (res.kind === 'dangling') {
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--hs-space-2)', flexWrap: 'wrap' }}>
+        <span>
+          <span style={{ fontFamily: 'var(--hs-font-mono, monospace)' }}>entity {subjectRef.id}</span> — {UNRESOLVED_REF_PHRASE}
+        </span>
+        <StatusPill tone="error" label={UNRESOLVED_REF_PILL} title={UNRESOLVED_REF_HELP} size="sm" />
+      </span>
+    );
+  }
+  return <a href={href(`/devices/${encodeURIComponent(subjectRef.id)}`)}>{refLabel(subjectRef.id, res)}</a>;
+}
 
 export function WhyNotView({ automationId }: { automationId?: string }) {
   if (!automationId) return <WhyNotPicker />;
@@ -44,6 +73,9 @@ function WhyNotPicker() {
 
 function WhyNotDetail({ automationId }: { automationId: string }) {
   const state = useApi(() => api.getNonFiring(automationId));
+  // v1.1.3: the registry census for the trigger ref (the same one-poll-loop read the
+  // causal chain uses); 'unverified' until it is in — nothing is accused without it.
+  const resolveRef = useRefResolver();
   return (
     <Page title="Why this didn't happen" meta={state.meta}>
       <p style={{ marginTop: 'calc(-1 * var(--hs-space-2))' }}>
@@ -79,7 +111,20 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
                 <dl class="kv">
                   <div class="kvRow">
                     <dt>What would make it run</dt>
-                    <dd class={styles.left}>{nf.triggerSummary}</dd>
+                    <dd class={styles.left}>
+                      {nf.triggerSummary}
+                      {/* v1.1.3 (FE-113 / CG-1): the R-4 concealment closed on THIS surface —
+                          the wire can now name WHICH entity the trigger watches. Rendered
+                          only for a PRESENT-object `triggerRef`, through the registry census
+                          (resolved → name; dangling → LOUD). PRESENT-null ("names no single
+                          entity") and ABSENT (a pre-v1.1.3 hub) both render the sentence
+                          alone — two honest facts, neither claims a name. */}
+                      {nf.triggerRef ? (
+                        <span style={{ display: 'block', marginTop: 'var(--hs-space-1)', fontSize: 'var(--hs-text-sm)' }}>
+                          Watching: <TriggerEntity subjectRef={nf.triggerRef} resolveRef={resolveRef} />
+                        </span>
+                      ) : null}
+                    </dd>
                   </div>
                   {/* OBSERVED LIVE NULLABILITY (2026-08-16, §4.5): the wire serves
                       `lastEvaluation: null` — the null case renders ABSENCE (the

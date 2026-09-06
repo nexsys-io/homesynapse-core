@@ -7,10 +7,12 @@
 import { readFileSync } from 'node:fs';
 
 const SHAPES = 'src/lib/api/shapes.ts';
-// v1.1.2 (ratified 2026-07-22, Nick ruling 1; landed core-side 2026-07-26,
-// SKIP-VIS, DP-4 GO): three ADDITIVE keys (actions[].resultOutcome,
-// actions[].settled, nonFiring noCommandsIssued); the v1.1 base stays byte-stable.
-const EXPECTED_VERSION = 'v1.1.2-2026-07-26';
+// v1.1.3 (docket Row 14 RULED 2026-09-03; landed core-side 2026-09-06, CG-123 at
+// f25291b): four ADDITIVE keys (entities[].deviceId, entities[].lastReported,
+// nonFiring triggerRef, automations components[].ref); v1.1.2 = three ADDITIVE
+// keys (actions[].resultOutcome, actions[].settled, nonFiring noCommandsIssued);
+// the v1.1 base stays byte-stable. This pin and contract.test.ts:35 move together.
+const EXPECTED_VERSION = 'v1.1.3-2026-09-06';
 // v1.1.1: the ratified problem-type URI prefix (Doc 09 §3.8 / ProblemType.TYPE_URI_PREFIX).
 const EXPECTED_PROBLEM_PREFIX = 'https://homesynapse.local/problems/';
 const REQUIRED = [

@@ -11,7 +11,31 @@
  *   B-class = FROZEN-UNBUILT (mock to these shapes; Core implements TO them).
  */
 
-export const CONTRACT_VERSION = 'v1.1.2-2026-07-26' as const;
+export const CONTRACT_VERSION = 'v1.1.3-2026-09-06' as const;
+/* v1.1.3 (docket Row 14 RULED (a) 2026-09-03; landed core-side 2026-09-06, CG-123 at
+ * f25291b, the SKIP-VIS shape; the FE mirror is FE-113). The same four-constraint law.
+ * FOUR ADDITIVE keys across THREE reads, zero changes to any existing field/casing/
+ * nesting/order (existing keys first; the new keys APPENDED, in this order):
+ *   - A1 `entities[].deviceId: string | null` — the owning device's ULID, read from the
+ *     LIVE registry at request time (two instants: the row's other fields come from the
+ *     state snapshot at viewPosition; a null is honest, never a defect).
+ *   - A1 `entities[].lastReported: string | null` — `Instant.toString()`: ISO-8601 UTC
+ *     with nanos when present (e.g. "2026-09-06T02:45:29.123456Z"); NEVER epoch seconds.
+ *   - non-firing `data.triggerRef: SubjectRef | null` — the first trigger's single-entity
+ *     ref, `{type: "entity", id}` (the causal chain's own literal; lowercase), null when
+ *     the trigger names no single entity.
+ *   - automations `data[].components[].ref: SubjectRef | null` — per component, the same
+ *     literal; null when the component names no single entity (the hub's R1 rule: a ref
+ *     iff exactly ONE entity by identity).
+ * EVERY new key is PRESENT in every v1.1.3 payload — JSON null when unknown, never
+ * absent. A v1.1.2 hub omits them entirely (lawful): the mirror marks them OPTIONAL and
+ * the validators enforce the TRI-STATE — absent passes, null passes, a present key
+ * must be typed (a wrong type is contract drift, never "optional").
+ * THE HONESTY LAW (FE-HONEST-1): ABSENCE and NULL are two different facts and render
+ * as two different sentences; a dangling ref renders LOUD through the registry census.
+ * H8 WARNING (the false-type class): a mock that ALWAYS populates a nullable key
+ * manufactures a false type — the default mock carries ≥1 null per new key and one
+ * dangling ref by law (v113-additive.test.ts pins it). */
 /* v1.1.2 (ratified 2026-07-22, Nick ruling 1 — the four-constraint law: additive-only ·
  * per-endpoint camelCase · the emitter leads · version discipline; landed core-side
  * 2026-07-26, WU-SKIP-VIS, DP-4 GO). Three ADDITIVE keys, zero changes to any
@@ -137,7 +161,11 @@ export type IntegrationHealth = 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | 'UNKNOWN'
 export type ProjectionMode = 'REPLAY' | 'TRANSITION' | 'LIVE';
 
 export interface SubjectRef {
-  type: string; // e.g. ENTITY
+  /** The subject category, LOWERCASE on the wire: `"entity"` (RunExplanation.java:95,
+   *  served since M7.5a; re-pinned at the v1.1.3 bytes, CG-123 audit §0). The old
+   *  "e.g. ENTITY" note here was a stale FE comment, never a wire fact — and the mirror
+   *  never normalizes case: the literal is rendered/compared as served. */
+  type: string;
   id: string;
 }
 
@@ -160,6 +188,14 @@ export interface EntitySummary {
   name?: string;
   availability: Availability;
   stale: boolean;
+  /** v1.1.3 ADDITIVE (CG-2): the owning device's ULID string, or null when this hub's
+   *  LIVE registry holds no device for the entity. OPTIONAL = absent on a pre-v1.1.3
+   *  hub (render absence); present-null = "nothing on record" (render that fact). */
+  deviceId?: string | null;
+  /** v1.1.3 ADDITIVE (CG-3): the projection's last report instant as
+   *  `Instant.toString()` (ISO-8601 UTC, nanos when present), or null when no report
+   *  is on record. NEVER epoch seconds — parse only via format.parseInstant. */
+  lastReported?: string | null;
 }
 
 /** A2 — GET /api/v1/entities/{id} (hot-path detail). Optional `name` per C8. */
@@ -366,6 +402,24 @@ export interface NonFiringExplanation {
    *  false. Such runs report ACTED_BUT_UNCONFIRMED; the clean-success sentence is
    *  unreachable for them. OPTIONAL for pre-v1.1.2 payloads. */
   noCommandsIssued?: true | null;
+  /** v1.1.3 ADDITIVE (CG-1): the first trigger's single-entity reference —
+   *  `{type: "entity", id}`, the causal chain's own literal — or null when the
+   *  trigger names no single entity (a group selector, a calendar, a webhook…).
+   *  Appended after noCommandsIssued; always present on a v1.1.3 hub. OPTIONAL for
+   *  pre-v1.1.3 payloads (the two recorded fixtures carry no key — lawful). The
+   *  surface resolves it through the registry census: dangling renders LOUD. */
+  triggerRef?: SubjectRef | null;
+}
+
+/** B3 — one component of an automation (trigger · condition · action), as listed. */
+export interface ComponentSummary {
+  type: string;
+  summary: string;
+  /** v1.1.3 ADDITIVE (CG-1): the single entity this component addresses by identity
+   *  (`{type: "entity", id}`), or null when it names none or several (the hub's R1
+   *  rule). Appended after summary; always present on a v1.1.3 hub; OPTIONAL for
+   *  pre-v1.1.3 payloads. */
+  ref?: SubjectRef | null;
 }
 
 /** B3 — GET /api/v1/automations (supporting surface). */
@@ -373,6 +427,6 @@ export interface AutomationSummary {
   automationId: string;
   name: string;
   enabled: boolean;
-  components: { type: string; summary: string }[];
+  components: ComponentSummary[];
   lastRunId: string | null;
 }

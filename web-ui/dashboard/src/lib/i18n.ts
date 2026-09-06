@@ -33,6 +33,14 @@ const en = {
   // The M7.5c gap, rendered honestly (FE-1): the hub doesn't serve this read yet.
   'events.notServedYet.title': 'Your hub doesn’t share the activity feed yet.',
   'events.notServedYet.hint': `Everything else on this dashboard is live. The feed arrives with a ${BRAND.productName} update — nothing is wrong.`,
+  // FE-113 (v1.1.3): the device list's freshness cell — TWO facts, TWO sentences
+  // (FE-HONEST-1 §10-H/I). The key ABSENT = a hub that does not serve `lastReported`
+  // on the list (pre-v1.1.3); the key PRESENT-BUT-NULL = this hub has nothing on record.
+  'devices.freshness.noClaimTitle':
+    'Whether this reading is current is not shown in this list — open the device to see when it last reported.',
+  'devices.freshness.nullTitle': 'This hub has no report time on record for this entity.',
+  // The muted secondary line under an entity when the wire carried its device's id.
+  'devices.deviceIdLabel': 'Device',
 } as const;
 
 type Messages = typeof en;

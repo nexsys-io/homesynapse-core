@@ -70,6 +70,17 @@ function strOrNull(v: unknown, path: string): void {
     throw new ContractError(`${path}: expected string or null, got ${typeof v}`);
   }
 }
+/** Subject ref OR null — the v1.1.3 additive-nullable ref idiom (`triggerRef`,
+ *  `components[].ref`): null is a lawful value ("names no single entity"); an
+ *  object must carry string `type` + string `id` (a missing `id` is drift, not
+ *  "optional"); anything else (a bare string, a number) is a contract error.
+ *  The `type` literal is validated as a string and NEVER case-normalized — the
+ *  wire serves lowercase `entity` and the mirror renders/compares it as served. */
+function refOrNull(v: unknown, path: string): void {
+  if (v === null) return;
+  if (!isObj(v)) throw new ContractError(`${path}: expected {type, id} or null, got ${typeof v}`);
+  subjectRef(v, path);
+}
 /** Optional field: absent is fine (additive-tolerant, freeze §A C8); present must be a string. */
 function optStr(o: Record<string, unknown>, key: string, path: string): void {
   if (key in o && typeof o[key] !== 'string') {
@@ -109,6 +120,11 @@ export const validators: Record<EndpointId, Validator> = {
       optStr(e, 'name', p);
       oneOf(req(e, 'availability', p), AVAILABILITY, `${p}.availability`);
       isBool(req(e, 'stale', p), `${p}.stale`);
+      // v1.1.3 ADDITIVE (CG-2/CG-3): the tri-state — absent is lawful (a pre-v1.1.3
+      // hub); PRESENT must be string-or-null. `lastReported` is `Instant.toString()`
+      // (ISO-8601) — a number on the wire is the epoch-seconds misread class, FAIL it.
+      if ('deviceId' in e) strOrNull(e.deviceId, `${p}.deviceId`);
+      if ('lastReported' in e) strOrNull(e.lastReported, `${p}.lastReported`);
     });
     meta(req(b, 'meta', 'A1'), 'A1.meta');
   },
@@ -294,6 +310,10 @@ export const validators: Record<EndpointId, Validator> = {
         `B3nf.data.noCommandsIssued: expected true or null (never false), got ${String(d.noCommandsIssued)}`,
       );
     }
+    // v1.1.3 ADDITIVE (CG-1): triggerRef is {type, id} or JSON null, appended after
+    // noCommandsIssued. Absence is lawful (pre-v1.1.3 — the two recorded fixtures);
+    // a present key must be a typed ref or null.
+    if ('triggerRef' in d) refOrNull(d.triggerRef, 'B3nf.data.triggerRef');
     meta(req(b, 'meta', 'B3nf'), 'B3nf.meta');
   },
   'B3:automations': (b) => {
@@ -306,7 +326,15 @@ export const validators: Record<EndpointId, Validator> = {
       isStr(req(a, 'automationId', p), `${p}.automationId`);
       isStr(req(a, 'name', p), `${p}.name`);
       isBool(req(a, 'enabled', p), `${p}.enabled`);
-      if (!Array.isArray(req(a, 'components', p))) throw new ContractError(`${p}.components must be array`);
+      const components = req(a, 'components', p);
+      if (!Array.isArray(components)) throw new ContractError(`${p}.components must be array`);
+      // v1.1.3 ADDITIVE (CG-1): each component's `ref` is {type, id} or JSON null,
+      // appended after summary. Absence lawful (pre-v1.1.3); present must be typed.
+      // (The v1.1 base validator never typed the component's own fields; that
+      // tolerance is kept byte-identical — only the additive key is checked.)
+      components.forEach((c, j) => {
+        if (isObj(c) && 'ref' in c) refOrNull(c.ref, `${p}.components[${j}].ref`);
+      });
     });
     meta(req(b, 'meta', 'B3auto'), 'B3auto.meta');
   },

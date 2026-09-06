@@ -21,6 +21,8 @@ import { WIRE_20260816_NONFIRING_BENCH_HERO } from '../lib/api/fixtures/wire-202
 import { WIRE_20260820_NEVER_TRIGGERED_BENCH_HERO } from '../lib/api/fixtures/wire-2026-08-20-never-triggered';
 import { validateAgainstContract } from '../lib/api/shapes';
 import { RENDER_ERROR_TITLE } from '../components/ErrorBoundary';
+import { UNRESOLVED_REF_PHRASE, UNRESOLVED_REF_PILL } from '../lib/format';
+import type { EntitySummary } from '../lib/api/contract';
 
 afterEach(() => {
   cleanup();
@@ -132,5 +134,90 @@ describe('open-vocabulary hardening on the same surface (the closed-switch class
     const text = container.textContent ?? '';
     expect(text).toContain('Recorded as "SOMETHING_NEW"'); // honest-can't-know register
     expect(text).not.toContain(RENDER_ERROR_TITLE);
+  });
+});
+
+/* ---- FE-113 (v1.1.3): `triggerRef` — the non-firing read can now name WHICH entity ----
+ * The R-4 concealment (FE-HONEST-1 §10-J) on THIS surface: "it fires on state
+ * change" with no ref to check. With v1.1.3 the wire carries
+ * `triggerRef: {type: "entity", id} | null` beside `triggerSummary`. The law:
+ * PRESENT-object → the entity is rendered THROUGH the registry census
+ * (resolved → its display name, linked; dangling on a complete census → LOUD,
+ * exactly the FE-HONEST-1 pill + phrase); PRESENT-null and ABSENT → the sentence
+ * alone, no claim, no accusation. Red-first: resolved + dangling are RED at
+ * HEAD (HEAD renders no ref at all); null + absent are green-by-construction
+ * (the surface must not change for them — disclosed). */
+const GHOST = '01KX1PB9AAB4VB3E10BD477TV3'; // the R-4 §10-J exhibit ULID, verbatim
+const REGISTRY: EntitySummary[] = [
+  { entityId: 'ent_hallway_motion', name: 'Hallway Motion', availability: 'AVAILABLE', stale: false, deviceId: null, lastReported: null },
+  { entityId: 'ent_hallway_light', name: 'Hallway Light', availability: 'AVAILABLE', stale: false, deviceId: null, lastReported: null },
+];
+
+async function renderWithCensus(data: unknown, complete = true) {
+  vi.spyOn(api, 'listEntities').mockResolvedValue({
+    data: REGISTRY,
+    // hasMore:true with a cursor = an INCOMPLETE census: the walker stops at its page bound
+    // and the resolver must stay no-claim.
+    pagination: complete ? undefined : { nextCursor: 'opaque', hasMore: true, limit: 500 },
+    meta: FIX.meta,
+  } as never);
+  const utils = await renderDetail(data);
+  // The census walk is a second async chain (listEntities → the walker → the resolver memo);
+  // flush it fully before asserting so 'unverified' cannot masquerade as the final render.
+  await act(async () => {});
+  await act(async () => {});
+  return utils;
+}
+
+describe('triggerRef renders through the registry census (v1.1.3, the §10-J law on the non-firing surface)', () => {
+  it('PRESENT-object, resolved: the display name renders as a link beside the sentence — no accusation', async () => {
+    const data = { ...FIX.data, triggerRef: { type: 'entity', id: 'ent_hallway_motion' } };
+    const { container } = await renderWithCensus(data);
+    const text = container.textContent ?? '';
+    expect(text).toContain('state change'); // the sentence survives
+    expect(text).toContain('Hallway Motion'); // the registry name, not the id
+    const link = Array.from(container.querySelectorAll('a')).find((a) => a.textContent?.includes('Hallway Motion'));
+    expect(link).toBeTruthy();
+    expect(link?.getAttribute('href')).toContain('ent_hallway_motion');
+    expect(text).not.toContain(UNRESOLVED_REF_PHRASE);
+    expect(text).not.toContain(UNRESOLVED_REF_PILL);
+  });
+
+  it('PRESENT-object, dangling on a COMPLETE census: LOUD — the ULID verbatim, the registry phrase, the failing pill', async () => {
+    const data = { ...FIX.data, triggerRef: { type: 'entity', id: GHOST } };
+    const { container } = await renderWithCensus(data);
+    const text = container.textContent ?? '';
+    expect(text).toContain(GHOST); // named, never paraphrased away
+    expect(text).toContain(UNRESOLVED_REF_PHRASE); // "not in this hub's registry"
+    expect(text).toContain(UNRESOLVED_REF_PILL); // the visually-failing pill
+    expect(text).toContain('state change'); // and the sentence still renders
+    expect(text).not.toContain(RENDER_ERROR_TITLE);
+  });
+
+  it('PRESENT-object on an INCOMPLETE census: no accusation (unverified renders neutral)', async () => {
+    const data = { ...FIX.data, triggerRef: { type: 'entity', id: GHOST } };
+    const { container } = await renderWithCensus(data, false);
+    const text = container.textContent ?? '';
+    expect(text).not.toContain(UNRESOLVED_REF_PHRASE);
+    expect(text).not.toContain(UNRESOLVED_REF_PILL);
+  });
+
+  it('PRESENT-null: the sentence alone — no name, no accusation, no "null"', async () => {
+    const data = { ...FIX.data, triggerRef: null };
+    const { container } = await renderWithCensus(data);
+    const text = container.textContent ?? '';
+    expect(text).toContain('state change');
+    expect(text).not.toContain(UNRESOLVED_REF_PHRASE);
+    expect(text).not.toContain('null');
+    expect(container.querySelector('a[href*="/devices/"]')).toBeNull();
+  });
+
+  it('ABSENT (the REAL 2026-08-16 v1.1.2 body): the sentence alone — the surface is unchanged for a pre-v1.1.3 hub', async () => {
+    expect('triggerRef' in FIX.data).toBe(false);
+    const { container } = await renderWithCensus(FIX.data);
+    const text = container.textContent ?? '';
+    expect(text).toContain('state change');
+    expect(text).not.toContain(UNRESOLVED_REF_PHRASE);
+    expect(container.querySelector('a[href*="/devices/"]')).toBeNull();
   });
 });

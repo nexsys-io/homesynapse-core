@@ -17,6 +17,7 @@ import {
   labelFor,
   lastReportedCell,
   LIST_FRESHNESS_NO_CLAIM_TITLE,
+  LIST_FRESHNESS_NULL_TITLE,
   timeAgo,
 } from '../lib/format';
 import { t } from '../lib/i18n';
@@ -56,6 +57,18 @@ export function DevicesView() {
                       <div style={{ fontSize: 'var(--hs-text-xs)', color: 'var(--hs-text-muted)', fontFamily: 'var(--hs-font-mono, monospace)' }}>
                         {r.entityId}
                       </div>
+                      {/* v1.1.3 (FE-113 / CG-2): the owning device's id — the token that
+                          correlates this row with the `device_adopted` log line (§10-H).
+                          Rendered ONLY when the wire carried a string: null (this hub has
+                          no device on record) and absent (a pre-v1.1.3 hub) both render
+                          NOTHING — absence renders absence, never "null", never a
+                          placeholder. Same muted mono line as the entity id; no new
+                          column, no new landmark. */}
+                      {typeof r.deviceId === 'string' && r.deviceId !== '' ? (
+                        <div style={{ fontSize: 'var(--hs-text-xs)', color: 'var(--hs-text-muted)', fontFamily: 'var(--hs-font-mono, monospace)' }}>
+                          {t('devices.deviceIdLabel')} {r.deviceId}
+                        </div>
+                      ) : null}
                     </div>
                   ),
                 },
@@ -72,20 +85,36 @@ export function DevicesView() {
                 {
                   key: 'fresh',
                   header: 'Reading',
-                  render: (r) =>
-                    r.stale ? (
-                      <StatusPill tone="warn" label="Stale" title="This reading may be out of date." size="sm" />
-                    ) : (
-                      // §10-I (FE-HONEST-1): the frozen A1 row carries NO report
-                      // time, so this list has no evidence for a freshness claim.
-                      // "Current" here contradicted a detail that said the report
-                      // time was not recorded — a claim with no evidence. The
-                      // list now claims nothing; the device page carries the
-                      // evidence-with-age truth.
-                      <span style={{ color: 'var(--hs-text-muted)' }} title={LIST_FRESHNESS_NO_CLAIM_TITLE}>
-                        —
-                      </span>
-                    ),
+                  render: (r) => {
+                    if (r.stale) {
+                      return <StatusPill tone="warn" label="Stale" title="This reading may be out of date." size="sm" />;
+                    }
+                    // §10-I (FE-HONEST-1): a list row with NO report time makes no
+                    // freshness claim ("Current" with no evidence was a lie by
+                    // omission). v1.1.3 (FE-113 / CG-3) splits that into the TRI-STATE
+                    // the wire actually serves — three facts, three renders:
+                    //   key ABSENT  → a pre-v1.1.3 hub: em-dash + the no-claim title
+                    //                 (unchanged behaviour);
+                    //   PRESENT-null → this hub serves report times and has none on
+                    //                 record for this entity: em-dash + ITS OWN title;
+                    //   PRESENT-string → the date-qualified stamp (lastReportedCell —
+                    //                 the ONE lawful instant parse; never 1970).
+                    if (!('lastReported' in r)) {
+                      return (
+                        <span style={{ color: 'var(--hs-text-muted)' }} title={LIST_FRESHNESS_NO_CLAIM_TITLE}>
+                          —
+                        </span>
+                      );
+                    }
+                    if (r.lastReported == null || r.lastReported === '') {
+                      return (
+                        <span style={{ color: 'var(--hs-text-muted)' }} title={LIST_FRESHNESS_NULL_TITLE}>
+                          —
+                        </span>
+                      );
+                    }
+                    return <span>{lastReportedCell(r.lastReported)}</span>;
+                  },
                 },
               ]}
             />
