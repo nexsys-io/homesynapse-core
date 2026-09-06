@@ -177,4 +177,69 @@ class ZdoCodecTest {
                 .isEqualTo(0x00124B0012345678L);
         assertThat(announce.get().macCapabilityFlags()).isEqualTo(0x80);
     }
+
+    /**
+     * F-R4-1b — the IEEE_addr_req / IEEE_addr_rsp pair (ZDP 0x0001 / 0x8001),
+     * the second over-the-air identity surface for interview-on-rejoin. The
+     * vectors are the R-4b miss arm's device: the SNZB-02P
+     * {@code 0xF044D3FFFED2A201} at {@code nwk=0x15ac}.
+     */
+    @Nested
+    @DisplayName("IEEE_addr_req / IEEE_addr_rsp (F-R4-1b)")
+    class IeeeAddressExchange {
+
+        @Test
+        @DisplayName("C1: IEEE_addr_req is [tsn][nwk LE][RequestType 0x00 Single][StartIndex 0x00]")
+        void encodeIeeeAddressRequest_isTsnNwkLeSingleZeroIndex() {
+            assertThat(ZdoCodec.encodeIeeeAddressRequest(0x2A, 0x15AC))
+                    .containsExactly(0x2A, 0xAC, 0x15, 0x00, 0x00);
+        }
+
+        @Test
+        @DisplayName("C2: a SUCCESS IEEE_addr_rsp carries the IEEE (LE) and the response's "
+                + "nwk; an Extended trailing list is ignored")
+        void parseIeeeAddressResponse_successCarriesIeeeAndNwk() {
+            byte[] message = {
+                    0x2A, 0x00,
+                    0x01, (byte) 0xA2, (byte) 0xD2, (byte) 0xFE,
+                    (byte) 0xFF, (byte) 0xD3, 0x44, (byte) 0xF0,
+                    (byte) 0xAC, 0x15,
+                    0x01, 0x00, 0x34, 0x12                  // NumAssocDev, StartIndex, one nwk
+            };
+
+            Optional<ZdoCodec.IeeeAddressResponse> response =
+                    ZdoCodec.parseIeeeAddressResponse(message);
+
+            assertThat(response).isPresent();
+            assertThat(response.get().status()).isZero();
+            assertThat(response.get().ieeeAddress())
+                    .isEqualTo(new IEEEAddress(0xF044D3FFFED2A201L));
+            assertThat(response.get().networkAddress()).isEqualTo(0x15AC);
+        }
+
+        @Test
+        @DisplayName("C3: an 11-byte body is empty (truncated); a 12-byte body with status "
+                + "0x81 is PRESENT with its status — the codec never decides, the caller does")
+        void parseIeeeAddressResponse_truncatedIsEmpty_statusIsCarried() {
+            byte[] truncated = {
+                    0x2A, 0x00,
+                    0x01, (byte) 0xA2, (byte) 0xD2, (byte) 0xFE,
+                    (byte) 0xFF, (byte) 0xD3, 0x44, (byte) 0xF0,
+                    (byte) 0xAC
+            };
+            byte[] notFound = {
+                    0x2A, (byte) 0x81,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    (byte) 0xAC, 0x15
+            };
+
+            assertThat(ZdoCodec.parseIeeeAddressResponse(truncated)).isEmpty();
+            Optional<ZdoCodec.IeeeAddressResponse> failed =
+                    ZdoCodec.parseIeeeAddressResponse(notFound);
+            assertThat(failed).isPresent();
+            assertThat(failed.get().status()).isEqualTo(0x81);
+            assertThat(failed.get().ieeeAddress()).isEqualTo(new IEEEAddress(0L));
+            assertThat(failed.get().networkAddress()).isEqualTo(0x15AC);
+        }
+    }
 }

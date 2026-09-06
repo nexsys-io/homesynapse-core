@@ -1662,6 +1662,83 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
     }
 
     /**
+     * F-R4-1b — the SECOND over-the-air identity surface of the interview-on-
+     * rejoin arm: asks the DEVICE itself with a ZDP {@code IEEE_addr_req}
+     * ({@link ZdoCodec#CLUSTER_IEEE_ADDR_REQ}) unicast to {@code networkAddress}
+     * and awaits the tsn-matched {@code IEEE_addr_rsp} over
+     * {@link #zdoUnicastExchange} (the interview's Node_Desc/Active_EP idiom;
+     * the pipeline lock is taken there). The adapter calls it ONLY after a
+     * clean {@link #lookupIeee} MISS — 0x0061 reads the coordinator's OWN
+     * table, which a router-parented sleepy device never enters (R-4b:
+     * {@code lookup_eui64_failed nwk=0x15ac status=0x1}) — and bounds it to
+     * once per nwk per window epoch.
+     *
+     * <p>Outcomes (the R-4c glance grammar): INFO {@code zigbee.ieee_addr_req}
+     * on the attempt; a SUCCESS status ⇒ INFO {@code zigbee.ieee_addr_rsp} + the
+     * response (the RESPONSE's nwk rides beside the IEEE — it renders as
+     * {@code response_nwk=} only when it differs from the request's, the
+     * tsn-only matcher's guard); a non-success status ⇒ WARN
+     * {@code zigbee.ieee_addr_rsp_failed} naming the status byte (the
+     * {@code lookup_eui64_failed} mirror) + empty; an NCP rejection or silence
+     * past the deadline ⇒ WARN {@code zigbee.ieee_addr_req_unanswered} + empty
+     * (the seam returns empty for both — ONE token covers them); a body shorter
+     * than the 12-byte fixed shape ⇒ {@link EzspFormatException} (a malformed
+     * answer is a dialect defect, not a miss — the {@link #lookupNetworkAddress}
+     * precedent). An unanswering NCP surfaces as the command timeout, which the
+     * adapter's production loop routes to the watchdog (coordinator trouble is
+     * never device evidence). BENCH-VERIFY: the frame shape is pinned on the
+     * desk against the R-4b miss arm; the wire at R-4c decides.</p>
+     *
+     * @param networkAddress the sender's 16-bit network address
+     * @param timeoutMillis the exchange deadline (the adapter passes the
+     *        interview's own step bound)
+     * @return the response (IEEE + the response's nwk) on SUCCESS, else empty
+     * @throws IllegalArgumentException outside 0x0000–0xFFFF
+     * @throws EzspFormatException on a body shorter than 12 bytes
+     * @throws EzspCommandTimeoutException when the {@code sendUnicast} command
+     *         itself goes unanswered
+     */
+    Optional<ZdoCodec.IeeeAddressResponse> requestIeeeAddress(int networkAddress,
+            long timeoutMillis) {
+        if (networkAddress < 0 || networkAddress > 0xFFFF) {
+            throw new IllegalArgumentException(
+                    "networkAddress must be 0x0000-0xFFFF, got " + networkAddress);
+        }
+        log.info("zigbee.ieee_addr_req: nwk=0x{}", Integer.toHexString(networkAddress));
+        Optional<byte[]> reply = zdoUnicastExchange(networkAddress,
+                ZdoCodec.CLUSTER_IEEE_ADDR_REQ, ZdoCodec.CLUSTER_IEEE_ADDR_RSP,
+                tsn -> ZdoCodec.encodeIeeeAddressRequest(tsn, networkAddress),
+                timeoutMillis);
+        if (reply.isEmpty()) {
+            log.warn("zigbee.ieee_addr_req_unanswered: nwk=0x{} timeout_ms={}",
+                    Integer.toHexString(networkAddress), timeoutMillis);
+            return Optional.empty();
+        }
+        Optional<ZdoCodec.IeeeAddressResponse> parsed =
+                ZdoCodec.parseIeeeAddressResponse(reply.get());
+        if (parsed.isEmpty()) {
+            throw new EzspFormatException("IEEE_addr_rsp response too short: "
+                    + reply.get().length + " bytes, expected 12");
+        }
+        ZdoCodec.IeeeAddressResponse response = parsed.get();
+        if (response.status() != 0) {
+            log.warn("zigbee.ieee_addr_rsp_failed: nwk=0x{} status=0x{}",
+                    Integer.toHexString(networkAddress),
+                    Integer.toHexString(response.status()));
+            return Optional.empty();
+        }
+        if (response.networkAddress() != networkAddress) {
+            log.info("zigbee.ieee_addr_rsp: nwk=0x{} device={} response_nwk=0x{}",
+                    Integer.toHexString(networkAddress), response.ieeeAddress(),
+                    Integer.toHexString(response.networkAddress()));
+        } else {
+            log.info("zigbee.ieee_addr_rsp: nwk=0x{} device={}",
+                    Integer.toHexString(networkAddress), response.ieeeAddress());
+        }
+        return Optional.of(response);
+    }
+
+    /**
      * Sends one APS unicast under the pipeline lock.
      *
      * @return {@code true} if the NCP accepted the frame for transmission

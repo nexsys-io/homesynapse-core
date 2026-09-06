@@ -85,6 +85,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * interview walk, so the rejoin-admitted interview runs through proposal and
  * — with the device on the {@code adopt_devices} list — through the REAL
  * {@code device_adopted} path.
+ *
+ * <p><strong>F-R4-1b (the T3 family):</strong> R-4b measured 0x0061 HITTING the
+ * mains router and MISSING the router-parented sleepy SNZB-02P
+ * ({@code lookup_eui64_failed nwk=0x15ac status=0x1} — the coordinator's own
+ * table never holds a grandchild). The third resolver asks the DEVICE itself
+ * with a ZDP {@code IEEE_addr_req} (0x0001) over the locked ZDO exchange after
+ * a clean table miss, once per nwk per window epoch on the SAME set, and admits
+ * on the response through the SAME announce path. The scripted air answers via
+ * {@link #zdoReply}: a scriptable status, a scriptable response nwk, or silence
+ * (a {@code null} reply — the fake channel advances the clock, so the 10 s bound
+ * elapses deterministically). Sleepy-device physics is not modelled here: the
+ * synchronous reply pins the FRAME SHAPE; the wire at R-4c decides the timing.
  */
 @DisplayName("ZigbeeIntegrationAdapter — interview-on-rejoin (F-R4-1, R-10 Row 10 (a))")
 class ZigbeeInterviewOnRejoinTest {
@@ -134,6 +146,14 @@ class ZigbeeInterviewOnRejoinTest {
     private final List<Integer> lookupRequests = new ArrayList<>();
     /** When non-zero, every 0x0061 answers this EmberStatus (the miss script). */
     private int lookupStatus;
+    /** Every ZDO unicast REQUEST body, captured per request cluster in send order (F-R4-1b). */
+    private final Map<Integer, List<byte[]>> zdoRequests = new HashMap<>();
+    /** When non-zero, the scripted IEEE_addr_rsp carries this ZDP status (the air-miss script). */
+    private int ieeeAddrStatus;
+    /** When set, the air NEVER answers IEEE_addr_req — silence; the fake channel advances the clock. */
+    private boolean ieeeAddrSilent;
+    /** When non-null, the scripted IEEE_addr_rsp carries this nwk instead of echoing the request's. */
+    private Integer ieeeAddrResponseNwk;
     private int reportTsn = 0x40;
 
     @BeforeEach
@@ -293,36 +313,188 @@ class ZigbeeInterviewOnRejoinTest {
         assertThat(publisher.published()).isEmpty();
     }
 
-    // ── T3: window OPEN, lookup MISS ⇒ no schedule; one WARN per nwk ────────
+    // ── T3: window OPEN, table MISS ⇒ the air (F-R4-1b); both miss ⇒ one WARN ─
 
     @Test
-    @DisplayName("T3: inside an open window a lookup MISS (status ≠ 0) schedules "
-            + "nothing, WARNs zigbee.rejoin_candidate_unresolved ONCE per nwk, and the "
-            + "coordinator is asked only once per nwk per invocation")
-    void unknownSenderInsideWindow_lookupMiss_warnsOnceAndSchedulesNothing()
+    @DisplayName("T3: inside an open window a table MISS (0x0061 status ≠ 0) asks the "
+            + "DEVICE itself with ONE ZDP IEEE_addr_req; an air MISS (status 0x81) schedules "
+            + "nothing, WARNs zigbee.rejoin_candidate_unresolved reason=zdo_miss ONCE per nwk, "
+            + "and a second frame asks NEITHER surface again")
+    void unknownSenderInsideWindow_tableAndAirMiss_warnsOnceAndSchedulesNothing()
             throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
         ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
         adapter.openPermitJoinWindow();
-        lookupStatus = 0x01;   // EMBER_ERR_FATAL: not in the address table
+        lookupStatus = 0x01;     // EMBER_ERR_FATAL: not in the address table
+        ieeeAddrStatus = 0x81;   // ZDP DEVICE_NOT_FOUND from the air
 
         riders.add(occupancyReport(UNKNOWN_NWK));
         riders.add(occupancyReport(UNKNOWN_NWK));
         deliverAndCycle(adapter);
 
         assertThat(lookupRequests).as("asked ONCE per nwk").containsExactly(UNKNOWN_NWK);
+        assertThat(zdoRequests.get(ZdoCodec.CLUSTER_IEEE_ADDR_REQ))
+                .as("exactly ONE IEEE_addr_req, [tsn][nwk LE][Single 0x00][StartIndex 0x00]")
+                .singleElement()
+                .satisfies(body -> {
+                    assertThat(body).hasSize(5);
+                    assertThat(body[1]).isEqualTo((byte) 0x99);
+                    assertThat(body[2]).isEqualTo((byte) 0x99);
+                    assertThat(body[3]).isEqualTo((byte) 0x00);
+                    assertThat(body[4]).isEqualTo((byte) 0x00);
+                });
         assertThat(adapterMessages(Level.WARN, "zigbee.rejoin_candidate_unresolved"))
                 .containsExactly("zigbee.rejoin_candidate_unresolved: nwk=0x9999 "
-                        + "cluster=0x406 reason=lookup_miss");
+                        + "cluster=0x406 reason=zdo_miss");
         assertThat(protocolMessages(Level.WARN, "zigbee.lookup_eui64_failed"))
                 .as("the protocol names the status byte — the R-4b criterion-0 instrument")
                 .containsExactly("zigbee.lookup_eui64_failed: nwk=0x9999 status=0x1");
+        assertThat(protocolMessages(Level.WARN, "zigbee.ieee_addr_rsp_failed"))
+                .as("the air's status byte — the R-4c instrument, the lookup mirror")
+                .containsExactly("zigbee.ieee_addr_rsp_failed: nwk=0x9999 status=0x81");
         assertThat(adapterMessages(Level.INFO, "zigbee.rejoin_candidate:")).isEmpty();
         assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
                 .isZero();
         assertThat(adapter.allDevices()).isEmpty();
         assertThat(publisher.published()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("T3b: a table MISS then an air HIT (IEEE_addr_rsp status 0x00) admits "
+            + "through the SAME announce path — rejoin_candidate source=unknown_sender, the "
+            + "interview runs, device_proposed source=rejoin, and — listed — the device "
+            + "adopts; exactly ONE 0x0061 and ONE 0x0001 request")
+    void unknownSenderInsideWindow_tableMiss_airHit_adoptsThroughTheAnnouncePath()
+            throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::rejoinHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS,
+                List.of(SNZB_ACCEPT_ENTRY));
+        adapter.openPermitJoinWindow();
+        lookupStatus = 0x01;     // the coordinator's own table misses (the SNZB-02P shape)
+
+        riders.add(occupancyReport(UNKNOWN_NWK));
+        deliverAndCycle(adapter);
+
+        assertThat(lookupRequests).containsExactly(UNKNOWN_NWK);
+        assertThat(zdoRequests.get(ZdoCodec.CLUSTER_IEEE_ADDR_REQ))
+                .as("exactly ONE IEEE_addr_req").hasSize(1);
+        assertThat(protocolMessages(Level.INFO, "zigbee.ieee_addr_req:"))
+                .containsExactly("zigbee.ieee_addr_req: nwk=0x9999");
+        assertThat(protocolMessages(Level.INFO, "zigbee.ieee_addr_rsp:"))
+                .containsExactly("zigbee.ieee_addr_rsp: nwk=0x9999 "
+                        + "device=0x00124B0012345678");
+        assertThat(adapterMessages(Level.INFO, "zigbee.rejoin_candidate:"))
+                .as("the T1 line, byte-identical in shape — the surface reads from the "
+                        + "two protocol lines that precede it")
+                .containsExactly("zigbee.rejoin_candidate: device=0x00124B0012345678 "
+                        + "nwk=0x9999 source=unknown_sender");
+        assertThat(adapterMessages(Level.WARN, "zigbee.rejoin_candidate_unresolved"))
+                .isEmpty();
+        assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
+                .as("exactly ONE interview walk started — the announce path, reused")
+                .isEqualTo(1);
+        assertThat(sliceMessages(Level.INFO, "zigbee.device_proposed"))
+                .containsExactly("zigbee.device_proposed: device=0x00124B0012345678 "
+                        + "manufacturer=eWeLink model=SNZB-03P profile="
+                        + MeasuredCorpusValues.SNZB_PROFILE_ID
+                        + " status=COMPLETE source=rejoin");
+        assertThat(publisher.ofType(EventTypes.DEVICE_DISCOVERED).count()).isEqualTo(1);
+        assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).count())
+                .as("adopted by the SAME path — device_proposed → device_adopted")
+                .isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("T3c: a table MISS then a SILENT air times the IEEE_addr_req out ONCE "
+            + "at the interview's own 10 s step bound (the clock advances — no real wait), "
+            + "WARNs zigbee.ieee_addr_req_unanswered, resolves nothing, and a second frame "
+            + "asks nothing")
+    void unknownSenderInsideWindow_tableMiss_airSilent_timesOutOnceAndSchedulesNothing()
+            throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::rejoinHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
+        adapter.openPermitJoinWindow();
+        lookupStatus = 0x01;
+        ieeeAddrSilent = true;
+        Instant before = clock.instant();
+
+        riders.add(occupancyReport(UNKNOWN_NWK));
+        riders.add(occupancyReport(UNKNOWN_NWK));
+        deliverAndCycle(adapter);
+
+        assertThat(Duration.between(before, clock.instant()).toMillis())
+                .as("the exchange ran to its deadline — the fake channel advanced the clock")
+                .isGreaterThanOrEqualTo(InterviewStateMachine.STEP_TIMEOUT_MILLIS);
+        assertThat(lookupRequests).containsExactly(UNKNOWN_NWK);
+        assertThat(zdoRequests.get(ZdoCodec.CLUSTER_IEEE_ADDR_REQ))
+                .as("the air is asked ONCE per nwk per epoch").hasSize(1);
+        assertThat(protocolMessages(Level.WARN, "zigbee.ieee_addr_req_unanswered"))
+                .containsExactly("zigbee.ieee_addr_req_unanswered: nwk=0x9999 timeout_ms="
+                        + InterviewStateMachine.STEP_TIMEOUT_MILLIS);
+        assertThat(adapterMessages(Level.WARN, "zigbee.rejoin_candidate_unresolved"))
+                .containsExactly("zigbee.rejoin_candidate_unresolved: nwk=0x9999 "
+                        + "cluster=0x406 reason=zdo_miss");
+        assertThat(adapterMessages(Level.INFO, "zigbee.rejoin_candidate:")).isEmpty();
+        assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
+                .isZero();
+        assertThat(adapter.allDevices()).isEmpty();
+        assertThat(publisher.published()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("T3d: when the coordinator's table HITS, the air is never asked — ZERO "
+            + "IEEE_addr_req unicasts (the resolution ORDER; green-by-construction at HEAD, "
+            + "disclosed)")
+    void unknownSenderInsideWindow_tableHit_neverAsksTheAir() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::rejoinHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
+        adapter.openPermitJoinWindow();
+
+        riders.add(occupancyReport(SNZB_NWK));
+        deliverAndCycle(adapter);
+
+        assertThat(lookupRequests).containsExactly(SNZB_NWK);
+        assertThat(adapterMessages(Level.INFO, "zigbee.rejoin_candidate:"))
+                .containsExactly("zigbee.rejoin_candidate: device=0x00124B0012345678 "
+                        + "nwk=0x6b9a source=unknown_sender");
+        assertThat(zdoRequests.getOrDefault(ZdoCodec.CLUSTER_IEEE_ADDR_REQ, List.of()))
+                .as("the table answered — the air is never asked").isEmpty();
+        assertThat(protocolMessages(Level.INFO, "zigbee.ieee_addr_req:")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("T3e: an IEEE_addr_rsp whose nwk differs from the request's (a re-addressed "
+            + "device still answers) admits on the RESPONSE's pair and renders both nwk "
+            + "values on the ieee_addr_rsp line — the tsn-only matcher's guard")
+    void unknownSenderInsideWindow_airAnswersWithAnotherNwk_admitsOnTheResponsePair()
+            throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::rejoinHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
+        adapter.openPermitJoinWindow();
+        lookupStatus = 0x01;
+        ieeeAddrResponseNwk = SNZB_NWK;   // the device answers from its live address
+
+        riders.add(occupancyReport(UNKNOWN_NWK));
+        deliverAndCycle(adapter);
+
+        assertThat(zdoRequests.get(ZdoCodec.CLUSTER_IEEE_ADDR_REQ)).hasSize(1);
+        assertThat(protocolMessages(Level.INFO, "zigbee.ieee_addr_rsp:"))
+                .containsExactly("zigbee.ieee_addr_rsp: nwk=0x9999 "
+                        + "device=0x00124B0012345678 response_nwk=0x6b9a");
+        assertThat(adapterMessages(Level.INFO, "zigbee.rejoin_candidate:"))
+                .as("admitted on the RESPONSE's pair (DP-6): recordAnnounce takes the response nwk")
+                .containsExactly("zigbee.rejoin_candidate: device=0x00124B0012345678 "
+                        + "nwk=0x6b9a source=unknown_sender");
+        assertThat(adapter.device(SNZB))
+                .hasValueSatisfying(record ->
+                        assertThat(record.networkAddress()).isEqualTo(SNZB_NWK));
+        assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
+                .as("exactly ONE interview walk started").isEqualTo(1);
     }
 
     // ── T4: H-i, accepted rejoin for an UNKNOWN device, window OPEN ─────────
@@ -529,7 +701,8 @@ class ZigbeeInterviewOnRejoinTest {
     @Test
     @DisplayName("T7: the once-per-(invocation, nwk) sets — the window-closed note AND "
             + "the lookup-attempted set — clear on openPermitJoinWindow(): after a reopen "
-            + "a previously-noted nwk logs the closed INFO again and is looked up again")
+            + "a previously-noted nwk logs the closed INFO again and is looked up again; "
+            + "F-R4-1b: the ONE set bounds the PAIR, so the air is re-asked with it")
     void windowReopen_clearsTheOncePerInvocationSets() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
@@ -548,13 +721,18 @@ class ZigbeeInterviewOnRejoinTest {
                         "zigbee.rejoin_ignored_window_closed: nwk=0x8888 cluster=0x406");
 
         // Reopen (the operator's restart semantic) with a coordinator that
-        // holds no entry: the lookup runs ONCE, WARNs once, then stays quiet.
+        // holds no entry AND — F-R4-1b — an air that misses too (T7 pins the
+        // SETS, not the surfaces): the lookup runs ONCE, the air is asked
+        // ONCE, ONE WARN, then quiet.
         adapter.openPermitJoinWindow();
         lookupStatus = 0x01;
+        ieeeAddrStatus = 0x81;
         riders.add(occupancyReport(UNKNOWN_NWK));
         riders.add(occupancyReport(UNKNOWN_NWK));
         deliverAndCycle(adapter);
         assertThat(lookupRequests).containsExactly(UNKNOWN_NWK);
+        assertThat(zdoRequests.get(ZdoCodec.CLUSTER_IEEE_ADDR_REQ))
+                .as("the air is asked once per nwk per epoch").hasSize(1);
         assertThat(adapterMessages(Level.WARN, "zigbee.rejoin_candidate_unresolved"))
                 .hasSize(1);
 
@@ -570,11 +748,15 @@ class ZigbeeInterviewOnRejoinTest {
                         "zigbee.rejoin_ignored_window_closed: nwk=0x8888 cluster=0x406",
                         "zigbee.rejoin_ignored_window_closed: nwk=0x9999 cluster=0x406");
 
-        // A second reopen clears the attempted-set: the nwk is looked up again.
+        // A second reopen clears the attempted-set: the nwk is looked up again
+        // — and the air asked again (the ONE set bounds the pair, DP-3).
         adapter.openPermitJoinWindow();
         riders.add(occupancyReport(UNKNOWN_NWK));
         deliverAndCycle(adapter);
         assertThat(lookupRequests).containsExactly(UNKNOWN_NWK, UNKNOWN_NWK);
+        assertThat(zdoRequests.get(ZdoCodec.CLUSTER_IEEE_ADDR_REQ))
+                .as("the ONE set bounds the pair and clears with it (F-R4-1b DP-3)")
+                .hasSize(2);
         assertThat(adapterMessages(Level.WARN, "zigbee.rejoin_candidate_unresolved"))
                 .hasSize(2);
         assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
@@ -758,7 +940,8 @@ class ZigbeeInterviewOnRejoinTest {
 
         if (profile == EzspCoordinatorProtocol.ZDO_PROFILE_ID) {
             int tsn = message[0] & 0xFF;
-            byte[] reply = zdoReply(cluster, tsn);
+            zdoRequests.computeIfAbsent(cluster, key -> new ArrayList<>()).add(message);
+            byte[] reply = zdoReply(cluster, tsn, message);
             if (reply != null) {
                 frames.add(incomingMessage(EzspCoordinatorProtocol.ZDO_PROFILE_ID,
                         cluster | 0x8000, 0, SNZB_NWK, reply));
@@ -773,7 +956,15 @@ class ZigbeeInterviewOnRejoinTest {
         return frames;
     }
 
-    private static byte[] zdoReply(int cluster, int tsn) {
+    /**
+     * The scripted ZDO replies. A {@code null} = silence (the fake channel
+     * advances the clock to the exchange's deadline). The F-R4-1b
+     * {@code IEEE_addr_req} case answers for the SNZB with a scriptable status
+     * ({@link #ieeeAddrStatus}), a scriptable response nwk
+     * ({@link #ieeeAddrResponseNwk}; default: the REQUEST's nwk echoed), or
+     * silence ({@link #ieeeAddrSilent}).
+     */
+    private byte[] zdoReply(int cluster, int tsn, byte[] request) {
         int nwkLo = SNZB_NWK & 0xFF;
         int nwkHi = (SNZB_NWK >> 8) & 0xFF;
         return switch (cluster) {
@@ -786,8 +977,33 @@ class ZigbeeInterviewOnRejoinTest {
                     (byte) tsn, 0x00, (byte) nwkLo, (byte) nwkHi, 0x01,
                     (byte) SNZB_ENDPOINT};
             case ZdoCodec.CLUSTER_SIMPLE_DESC_REQ -> simpleDescriptor(tsn);
+            case ZdoCodec.CLUSTER_IEEE_ADDR_REQ -> ieeeAddressResponse(tsn, request);
             default -> null;
         };
+    }
+
+    /**
+     * The scripted IEEE_addr_rsp: {@code [tsn][status][ieee LE 8][nwk LE 2]}
+     * (ZDP §2.4.4.1.2, the Single Device Response shape); a non-success status
+     * carries a zeroed EUI64 (the {@link #lookupEui64Response} idiom).
+     */
+    private byte[] ieeeAddressResponse(int tsn, byte[] request) {
+        if (ieeeAddrSilent) {
+            return null;
+        }
+        int requestNwk = (request[1] & 0xFF) | ((request[2] & 0xFF) << 8);
+        int nwk = ieeeAddrResponseNwk != null ? ieeeAddrResponseNwk : requestNwk;
+        byte[] reply = new byte[12];
+        reply[0] = (byte) tsn;
+        reply[1] = (byte) ieeeAddrStatus;
+        if (ieeeAddrStatus == 0) {
+            for (int i = 0; i < 8; i++) {
+                reply[2 + i] = (byte) (SNZB_IEEE >> (8 * i));
+            }
+        }
+        reply[10] = (byte) (nwk & 0xFF);
+        reply[11] = (byte) ((nwk >> 8) & 0xFF);
+        return reply;
     }
 
     private static byte[] simpleDescriptor(int tsn) {

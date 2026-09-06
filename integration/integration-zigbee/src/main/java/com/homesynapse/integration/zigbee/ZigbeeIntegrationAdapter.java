@@ -101,6 +101,22 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     static final int PERMIT_JOIN_MAX_SECONDS = 254;
 
     /**
+     * F-R4-1b DP-4 — the bound on the ZDO {@code IEEE_addr_req} exchange the
+     * interview-on-rejoin arm sends after a clean coordinator-table miss: the
+     * interview's own per-step budget
+     * ({@link InterviewStateMachine#STEP_TIMEOUT_MILLIS}, 10 s — Doc 08 §3.4).
+     * The interview steps that follow an admission run under the same bound,
+     * so a device that cannot answer inside it could not be interviewed
+     * anyway; a router parent buffers for its own indirect timeout (the
+     * coordinator's is 7680 ms,
+     * {@link EzspCoordinatorProtocol#INDIRECT_TRANSMISSION_TIMEOUT_VALUE}) and
+     * a sleepy end device that has just transmitted polls its parent. Not
+     * re-tuned on the desk — the wire at R-4c decides.
+     */
+    static final long IEEE_ADDR_REQ_TIMEOUT_MILLIS =
+            InterviewStateMachine.STEP_TIMEOUT_MILLIS;
+
+    /**
      * The {@code integrations.zigbee} config key pinning the RF channel for FIRST
      * formation (M9.4-TCJ §B; schema'd 11–26). Read only on the form path: a
      * present, in-range value forms directly on that channel (the energy scan never
@@ -1197,9 +1213,10 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
 
         /**
          * F-R4-1 hook H-ii (the evidenced case): the window is the FIRST
-         * gate, the once-per-nwk set the second, the coordinator lookup LAST
-         * and at most once per nwk per window epoch (the branch is hot —
-         * every frame from every unknown device lands here).
+         * gate, the once-per-nwk set the second, the coordinator lookup next
+         * and — F-R4-1b — the air LAST, after a clean table miss only; the
+         * ONE set bounds the pair at most once per nwk per window epoch (the
+         * branch is hot — every frame from every unknown device lands here).
          */
         @Override
         public void onRejoinCandidate(int networkAddress, int clusterId) {
@@ -1212,14 +1229,23 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
                 }
                 return;
             }
-            // Resolution order (F-R4-1 §3): (1) the cache's NWK→IEEE view — a
-            // structural miss on this arm, re-checked so the method stands on
-            // its own; (2) the coordinator's address table, once per nwk per
-            // epoch, hit or miss; (3) a miss is an unresolved candidate —
-            // never a synthesized identity, never a ZDO IEEE_addr_req (a
-            // second over-the-air surface is a second WU).
+            // Resolution order (F-R4-1 §3; F-R4-1b DP-2): (1) the cache's
+            // NWK→IEEE view — a structural miss on this arm, re-checked so the
+            // method stands on its own; (2) the coordinator's address table,
+            // once per nwk per epoch, hit or miss; (3) the AIR — a ZDP
+            // IEEE_addr_req to the device itself, ONLY after a clean (2) miss:
+            // 0x0061 reads the coordinator's OWN table, which a router-parented
+            // sleepy device never enters (R-4b's measured miss,
+            // lookup_eui64_failed nwk=0x15ac status=0x1). The ONE set bounds
+            // the pair — the coordinator is asked at most once and the air at
+            // most once per nwk per epoch. A miss on both is an unresolved
+            // candidate — never a synthesized identity. (3) blocks this run
+            // thread for up to IEEE_ADDR_REQ_TIMEOUT_MILLIS, inside an open
+            // window only — the interview that follows an admission already
+            // does the same under the same bound.
             Optional<IEEEAddress> resolved =
                     cache.deviceForNetworkAddress(networkAddress);
+            int admittedAddress = networkAddress;
             if (resolved.isEmpty()) {
                 if (!rejoinLookupAttempted.add(networkAddress)) {
                     return;   // already asked this epoch: nothing new to say
@@ -1229,8 +1255,10 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
                 } catch (EzspCommandException | EzspFormatException
                         | IllegalStateException failure) {
                     // A rejected or malformed exchange is an unresolved
-                    // candidate. An unanswering NCP (the command timeout) and
-                    // a dead transport propagate to the production loop's
+                    // candidate and does NOT fall through to the air (DP-2: a
+                    // rejected coordinator exchange is no evidence the air
+                    // will answer). An unanswering NCP (the command timeout)
+                    // and a dead transport propagate to the production loop's
                     // watchdog arms — coordinator trouble is never device
                     // evidence.
                     log.warn("zigbee.rejoin_candidate_unresolved: nwk=0x{} "
@@ -1240,14 +1268,36 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
                     return;
                 }
                 if (resolved.isEmpty()) {
-                    log.warn("zigbee.rejoin_candidate_unresolved: nwk=0x{} "
-                                    + "cluster=0x{} reason=lookup_miss",
-                            Integer.toHexString(networkAddress),
-                            Integer.toHexString(clusterId));
-                    return;
+                    Optional<ZdoCodec.IeeeAddressResponse> answer;
+                    try {
+                        answer = protocol.requestIeeeAddress(networkAddress,
+                                IEEE_ADDR_REQ_TIMEOUT_MILLIS);
+                    } catch (EzspCommandException | EzspFormatException
+                            | IllegalStateException failure) {
+                        log.warn("zigbee.rejoin_candidate_unresolved: nwk=0x{} "
+                                        + "cluster=0x{} reason={}",
+                                Integer.toHexString(networkAddress),
+                                Integer.toHexString(clusterId),
+                                failure.getMessage());
+                        return;
+                    }
+                    if (answer.isEmpty()) {
+                        // A non-success status, an NCP rejection, or silence
+                        // past the deadline — the protocol's line says which.
+                        log.warn("zigbee.rejoin_candidate_unresolved: nwk=0x{} "
+                                        + "cluster=0x{} reason=zdo_miss",
+                                Integer.toHexString(networkAddress),
+                                Integer.toHexString(clusterId));
+                        return;
+                    }
+                    // DP-6/DP-8: the RESPONSE's pair is the admitted identity
+                    // — a device answering after a re-address is still an
+                    // answer; recordAnnounce takes the response's nwk.
+                    resolved = Optional.of(answer.get().ieeeAddress());
+                    admittedAddress = answer.get().networkAddress();
                 }
             }
-            admitRejoinCandidate(resolved.get(), networkAddress, "unknown_sender");
+            admitRejoinCandidate(resolved.get(), admittedAddress, "unknown_sender");
         }
 
         /** F-R4-1 hook H-i: the callback carried the EUI64 — window gate, then admit. */
