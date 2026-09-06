@@ -4,6 +4,9 @@
  */
 package com.homesynapse.api.rest;
 
+import com.homesynapse.device.Entity;
+import com.homesynapse.device.EntityRegistry;
+import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.state.EntityState;
 import com.homesynapse.state.StateQueryService;
 import com.homesynapse.state.StateSnapshot;
@@ -37,12 +40,33 @@ import java.util.function.LongSupplier;
  * <h2>Response (200)</h2>
  * <pre>{@code
  * {
- *   "data": [ { "entityId": "...", "availability": "...", "stale": false } ],
+ *   "data": [ { "entityId": "...", "availability": "...", "stale": false,
+ *               "deviceId": "<ulid|null>", "lastReported": "<ISO-8601|null>" } ],
  *   "meta": { "viewPosition": 12345, "timestamp": "2026-05-22T..." }
  * }
  * }</pre>
  *
  * <p>Header: {@code X-HomeSynapse-View-Position: {viewPosition}}.</p>
+ *
+ * <h2>v1.1.3 additive keys (docket Row 14 / CG-2, CG-3 — 2026-09-05)</h2>
+ *
+ * <p>Two keys are APPENDED to every row (the v1.1 base renders byte-unchanged; the
+ * {@link LinkedHashMap} order is the wire order):</p>
+ * <ul>
+ *   <li>{@code deviceId} — the owning device's ULID string (LTD-04) from the LIVE
+ *       {@link EntityRegistry} ({@code findEntity}), so a row can be correlated to the
+ *       {@code device_adopted} line that created it; JSON {@code null} when the entity is
+ *       absent from the registry or is a helper entity that owns no device. A registry
+ *       exception is deliberately NOT swallowed — it would be a projection defect and
+ *       surfaces as today's 500 path.</li>
+ *   <li>{@code lastReported} — the projection's {@link EntityState#lastReported()} as
+ *       {@code Instant.toString()} (ISO-8601 UTC, the same rendering as
+ *       {@code meta.timestamp}); JSON {@code null} when the projection holds none, so the
+ *       list never claims a freshness it cannot show. The record-direct A2/A3 reads render
+ *       the same field in the F-S8 epoch-seconds dialect until docket Row 8 lands — this
+ *       list row is the contract's rendering.</li>
+ * </ul>
+ * <p>The C8 optional {@code name} is NOT populated here (Core does not populate it today).</p>
  *
  * <h2>Behavioural contract</h2>
  *
@@ -73,7 +97,7 @@ import java.util.function.LongSupplier;
  * (single-{@code long} read). Safe to call from any number of Jetty
  * worker threads concurrently.</p>
  *
- * @see RestFilters#installEntityQueryEndpoints(Object, StateQueryService, LongSupplier, java.time.Clock)
+ * @see RestFilters#installEntityQueryEndpoints(Object, StateQueryService, EntityRegistry, LongSupplier, java.time.Clock)
  * @see EndpointContext
  */
 final class ListEntitiesEndpoint implements Handler {
@@ -88,6 +112,7 @@ final class ListEntitiesEndpoint implements Handler {
     static final String VIEW_POSITION_HEADER = "X-HomeSynapse-View-Position";
 
     private final StateQueryService queryService;
+    private final EntityRegistry entityRegistry;
     private final LongSupplier viewPositionSupplier;
     private final Clock clock;
 
@@ -96,6 +121,11 @@ final class ListEntitiesEndpoint implements Handler {
      *
      * @param queryService         the materialized state query service;
      *                             never {@code null}
+     * @param entityRegistry       the LIVE entity registry (the same instance
+     *                             the registry projection writes) the v1.1.3
+     *                             {@code deviceId} correlation reads from —
+     *                             read-only here ({@code findEntity});
+     *                             never {@code null}
      * @param viewPositionSupplier supplier for the projection's current
      *                             cursor position; never {@code null}
      * @param clock                injected clock for response timestamps
@@ -103,9 +133,11 @@ final class ListEntitiesEndpoint implements Handler {
      *                             never {@code null}
      */
     ListEntitiesEndpoint(StateQueryService queryService,
+                         EntityRegistry entityRegistry,
                          LongSupplier viewPositionSupplier,
                          Clock clock) {
         this.queryService = Objects.requireNonNull(queryService, "queryService");
+        this.entityRegistry = Objects.requireNonNull(entityRegistry, "entityRegistry");
         this.viewPositionSupplier =
                 Objects.requireNonNull(viewPositionSupplier, "viewPositionSupplier");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -154,11 +186,22 @@ final class ListEntitiesEndpoint implements Handler {
         ctx.json(body);
     }
 
-    private static Map<String, Object> summarise(EntityState state) {
-        Map<String, Object> summary = new LinkedHashMap<>(3);
+    private Map<String, Object> summarise(EntityState state) {
+        Map<String, Object> summary = new LinkedHashMap<>(5);
         summary.put("entityId", state.entityId().toString());
         summary.put("availability", state.availability().name());
         summary.put("stale", state.stale());
+        // v1.1.3 (CG-2): the owning device from the LIVE registry — a ULID string (LTD-04) or
+        // JSON null (absent from the registry, or a helper entity with no device). A registry
+        // exception is NOT caught here: it would be a projection defect (today's 500 path).
+        summary.put("deviceId", entityRegistry.findEntity(state.entityId())
+                .map(Entity::deviceId)
+                .map(DeviceId::toString)
+                .orElse(null));
+        // v1.1.3 (CG-3): the projection's last state_reported instant, ISO-8601 UTC (the same
+        // rendering as meta.timestamp), or JSON null when the projection holds none.
+        summary.put("lastReported",
+                state.lastReported() == null ? null : state.lastReported().toString());
         return summary;
     }
 

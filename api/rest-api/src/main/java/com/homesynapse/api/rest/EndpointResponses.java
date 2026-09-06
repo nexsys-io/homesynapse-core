@@ -4,6 +4,8 @@
  */
 package com.homesynapse.api.rest;
 
+import com.homesynapse.automation.RunExplanation;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -16,6 +18,10 @@ import java.util.Map;
  * stable field order ({@code type}, {@code status}, {@code title},
  * {@code detail}) via {@link LinkedHashMap} so log scans across endpoints
  * see consistent layout.</p>
+ *
+ * <p>Since v1.1.3 (CG-1) it also carries the ONE shared rendering of a subject
+ * reference ({@link #subjectRefMap}) so the causal chain, the non-firing read and
+ * the automation list cannot drift apart on the {@code {type, id}} shape.</p>
  *
  * <p>Package-private utility class — not part of the rest-api module's
  * exported API.</p>
@@ -73,5 +79,26 @@ final class EndpointResponses {
         body.put("title", type.title());
         body.put("detail", detail);
         return body;
+    }
+
+    /**
+     * The frozen {@code {type, id}} wire map of a {@link RunExplanation.SubjectRefView} — ONE
+     * rendering shared by every read that serves a subject reference: the causal chain's
+     * {@code trigger.subjectRef} / {@code actions[].targetRef} (M7.5a) and, since v1.1.3
+     * (CG-1), {@code nonFiring.triggerRef} and {@code automations[].components[].ref}. Hoisted
+     * verbatim from {@code GetRunCausalChainEndpoint} so the three reads cannot drift.
+     *
+     * @param ref the view, or {@code null}
+     * @return the ordered {@code {type, id}} map, or {@code null} when {@code ref} is
+     *         {@code null} (JSON null on the wire — the key stays present)
+     */
+    static Map<String, Object> subjectRefMap(RunExplanation.SubjectRefView ref) {
+        if (ref == null) {
+            return null;
+        }
+        Map<String, Object> map = new LinkedHashMap<>(2);
+        map.put("type", ref.type());
+        map.put("id", ref.id());
+        return map;
     }
 }

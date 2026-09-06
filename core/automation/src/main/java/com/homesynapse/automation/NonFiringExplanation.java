@@ -30,7 +30,8 @@ import com.homesynapse.platform.identity.AutomationId;
  * <p>The rest-api layer renders {@link #verdict} to its wire string via {@code name()} and maps
  * the (nullable) {@link #lastEvaluation} / {@link #lastRelevantRunId} to the frozen JSON; the
  * internal types never appear on the wire as objects (LTD-04: ULIDs are Crockford Base32 strings
- * at the boundary).</p>
+ * at the boundary). Since v1.1.3 it also renders {@link #triggerRef} as the same
+ * {@code {type, id}} map the causal chain serves for {@code trigger.subjectRef}.</p>
  *
  * @param automationId      the diagnosed automation; never {@code null}
  * @param automationName    the display name from the definition; never {@code null}
@@ -48,6 +49,16 @@ import com.homesynapse.platform.identity.AutomationId;
  *                          §3.9, or none defined); {@code null} in every other construction
  *                          (never {@code false} — absent means "not the skip case", the
  *                          additive-nullable idiom)
+ * @param triggerRef        the v1.1.3 first-trigger entity reference (CG-1, DP-2): the
+ *                          {@code {type:"entity", id}} view of the ONE entity the definition's
+ *                          FIRST trigger (definition order) addresses by identity — a
+ *                          {@code DirectRefSelector}, or a {@code CalendarTrigger}'s calendar
+ *                          entity — or {@code null} when the automation has no trigger or its
+ *                          first trigger names a set (a group selector), a device
+ *                          ({@code ReachabilityTrigger}), or no subject at all; never a
+ *                          fabricated id (D5). Multi-trigger automations expose each trigger's
+ *                          ref in {@code AutomationSummary.components[].ref}. Nullable by
+ *                          contract (the additive-nullable idiom); NOT null-checked
  */
 public record NonFiringExplanation(
         AutomationId automationId,
@@ -58,12 +69,14 @@ public record NonFiringExplanation(
         String explanation,
         String triggerSummary,
         LastEvaluationView lastEvaluation,
-        Boolean noCommandsIssued) {
+        Boolean noCommandsIssued,
+        RunExplanation.SubjectRefView triggerRef) {
 
     /**
      * Validates the non-nullable components. {@code lastRelevantRunId} and {@code lastEvaluation}
-     * are intentionally nullable (the "never triggered, no run" case); {@code noCommandsIssued} is
-     * nullable by contract (absent means "not the skip case") and is NOT null-checked.
+     * are intentionally nullable (the "never triggered, no run" case); {@code noCommandsIssued}
+     * and {@code triggerRef} are nullable by contract (absent means "not the skip case" / "no
+     * single-entity ref") and are NOT null-checked.
      *
      * @throws NullPointerException if any non-nullable component is {@code null}
      */
@@ -76,16 +89,30 @@ public record NonFiringExplanation(
     }
 
     /**
-     * Convenience constructor for the non-skip constructions: delegates to the canonical
-     * constructor with {@code noCommandsIssued = null} (validation lives ONLY in the canonical
-     * constructor). Pre-v1.1.2 call sites compile unchanged through this overload.
+     * Convenience constructor for the pre-v1.1.3 nine-component form (test-convenience;
+     * production constructs the canonical form): delegates to the canonical constructor with
+     * {@code triggerRef = null} (validation lives ONLY in the canonical constructor).
+     */
+    public NonFiringExplanation(AutomationId automationId, String automationName, boolean enabled,
+                                NonFiringVerdict verdict, RunId lastRelevantRunId,
+                                String explanation, String triggerSummary,
+                                LastEvaluationView lastEvaluation, Boolean noCommandsIssued) {
+        this(automationId, automationName, enabled, verdict, lastRelevantRunId, explanation,
+                triggerSummary, lastEvaluation, noCommandsIssued, null);
+    }
+
+    /**
+     * Convenience constructor for the pre-v1.1.2 eight-component form (test-convenience;
+     * production constructs the canonical form): delegates to the canonical constructor with
+     * {@code noCommandsIssued = null} and {@code triggerRef = null} (validation lives ONLY in the
+     * canonical constructor). Pre-v1.1.2 call sites compile unchanged through this overload.
      */
     public NonFiringExplanation(AutomationId automationId, String automationName, boolean enabled,
                                 NonFiringVerdict verdict, RunId lastRelevantRunId,
                                 String explanation, String triggerSummary,
                                 LastEvaluationView lastEvaluation) {
         this(automationId, automationName, enabled, verdict, lastRelevantRunId, explanation,
-                triggerSummary, lastEvaluation, null);
+                triggerSummary, lastEvaluation, null, null);
     }
 
     /**

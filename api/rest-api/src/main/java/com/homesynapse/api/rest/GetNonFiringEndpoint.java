@@ -40,6 +40,12 @@ import java.util.function.LongSupplier;
  * carries {@code noCommandsIssued} — the CORE-P2 silent-skip marker ({@code true} exactly for a
  * COMPLETED run that issued zero device commands while defining actions; JSON null otherwise,
  * never {@code false}).</p>
+ *
+ * <p>v1.1.3 amendment (additive-only, docket Row 14 / CG-1): the {@code data} object additionally
+ * carries {@code triggerRef} — the first trigger's single-entity reference as the same
+ * {@code {type:"entity", id}} map the causal chain serves ({@link EndpointResponses#subjectRefMap}),
+ * or JSON null when the first trigger names no single entity (a group selector, a device, or no
+ * subject); appended after {@code noCommandsIssued}, always present.</p>
  */
 final class GetNonFiringEndpoint implements Handler {
 
@@ -108,7 +114,7 @@ final class GetNonFiringEndpoint implements Handler {
     }
 
     private static Map<String, Object> toWire(NonFiringExplanation e) {
-        Map<String, Object> data = new LinkedHashMap<>(9);
+        Map<String, Object> data = new LinkedHashMap<>(10);
         data.put("automationId", e.automationId().toString());
         data.put("automationName", e.automationName());
         data.put("enabled", e.enabled());
@@ -119,6 +125,8 @@ final class GetNonFiringEndpoint implements Handler {
         data.put("triggerSummary", e.triggerSummary());
         data.put("lastEvaluation", lastEvaluationMap(e.lastEvaluation()));
         data.put("noCommandsIssued", e.noCommandsIssued());
+        // v1.1.3 (CG-1): appended LAST — the LinkedHashMap order is the wire order.
+        data.put("triggerRef", EndpointResponses.subjectRefMap(e.triggerRef()));
         return data;
     }
 

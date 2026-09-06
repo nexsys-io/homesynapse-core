@@ -45,6 +45,7 @@ final class AutomationEndpointsTest {
 
     private static final String RUN_ULID = "01H8000000000000000000000A";
     private static final String AUTO_ULID = "01H8000000000000000000000B";
+    private static final String ENTITY_ULID = "01H8000000000000000000000C";
 
     AutomationEndpointsTest() {
     }
@@ -78,7 +79,13 @@ final class AutomationEndpointsTest {
         Map<String, Object> data = asMap(body.get("data"));
         assertThat(data).containsOnlyKeys("automationId", "automationName", "enabled", "verdict",
                 "lastRelevantRunId", "explanation", "triggerSummary", "lastEvaluation",
-                "noCommandsIssued");
+                "noCommandsIssued", "triggerRef");
+        // The LinkedHashMap order IS the wire order: v1.1.3 appends triggerRef at the END.
+        assertThat(data.keySet()).containsExactly("automationId", "automationName", "enabled",
+                "verdict", "lastRelevantRunId", "explanation", "triggerSummary", "lastEvaluation",
+                "noCommandsIssued", "triggerRef");
+        // The 8-arg fixture carries no ref → the key is PRESENT with JSON null (never absent).
+        assertThat(data).containsEntry("triggerRef", null);
         assertThat(data).containsEntry("automationId", AUTO_ULID);
         assertThat(data).containsEntry("automationName", "My Automation");
         assertThat(data).containsEntry("enabled", true);
@@ -148,6 +155,29 @@ final class AutomationEndpointsTest {
         RecordingEndpointContext ctx2 = new RecordingEndpointContext().withPathParam("id", AUTO_ULID);
         absent.apply(ctx2);
         assertThat(asMap(asMap(ctx2.body).get("data"))).containsEntry("noCommandsIssued", null);
+    }
+
+    @Test
+    @DisplayName("GET /automations/{id}/non-firing carries the v1.1.3 triggerRef as {type, id}")
+    void nonFiring_triggerRefOnWire() {
+        NonFiringExplanation explanation = new NonFiringExplanation(
+                AutomationId.parse(AUTO_ULID), "My Automation", true,
+                NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, null,
+                "Automation 'My Automation' has not been triggered; it fires on state change.",
+                "state change", null, null,
+                new RunExplanation.SubjectRefView("entity", ENTITY_ULID));
+        GetNonFiringEndpoint endpoint =
+                new GetNonFiringEndpoint(fake().withNonFiring(explanation), VIEW_POSITION, FIXED_CLOCK);
+        RecordingEndpointContext ctx = new RecordingEndpointContext().withPathParam("id", AUTO_ULID);
+
+        endpoint.apply(ctx);
+
+        Map<String, Object> data = asMap(asMap(ctx.body).get("data"));
+        Map<String, Object> triggerRef = asMap(data.get("triggerRef"));
+        // The SAME {type, id} map the causal chain serves for subjectRef/targetRef — keys in order.
+        assertThat(triggerRef.keySet()).containsExactly("type", "id");
+        assertThat(triggerRef).containsEntry("type", "entity");
+        assertThat(triggerRef).containsEntry("id", ENTITY_ULID);
     }
 
     @Test
@@ -230,9 +260,13 @@ final class AutomationEndpointsTest {
         assertThat(automation).containsEntry("lastRunId", RUN_ULID);
 
         Map<String, Object> component = asMap(((List<?>) automation.get("components")).get(0));
-        assertThat(component).containsOnlyKeys("type", "summary");
+        assertThat(component).containsOnlyKeys("type", "summary", "ref");
+        // v1.1.3 appends ref at the END of each component map (the LinkedHashMap order is the wire).
+        assertThat(component.keySet()).containsExactly("type", "summary", "ref");
         assertThat(component).containsEntry("type", "StateChangeTrigger");
         assertThat(component).containsEntry("summary", "state change trigger");
+        // The 2-arg fixture carries no ref → the key is PRESENT with JSON null (never absent).
+        assertThat(component).containsEntry("ref", null);
 
         Map<String, Object> pagination = asMap(body.get("pagination"));
         assertThat(pagination).containsOnlyKeys("nextCursor", "hasMore", "limit");
@@ -261,6 +295,28 @@ final class AutomationEndpointsTest {
         Map<String, Object> automation = asMap(((List<?>) asMap(ctx.body).get("data")).get(0));
         assertThat(automation).containsEntry("lastRunId", null);
         assertThat(automation).containsEntry("enabled", false);
+    }
+
+    @Test
+    @DisplayName("GET /automations carries the v1.1.3 components[].ref as {type, id}")
+    void automations_componentRefOnWire() {
+        AutomationSummary summary = new AutomationSummary(
+                AutomationId.parse(AUTO_ULID), "My Automation", true,
+                List.of(new AutomationSummary.ComponentView("CommandAction", "command action",
+                        new RunExplanation.SubjectRefView("entity", ENTITY_ULID))),
+                null);
+        ListAutomationsEndpoint endpoint = new ListAutomationsEndpoint(
+                fake().withAutomations(List.of(summary)), VIEW_POSITION, FIXED_CLOCK);
+        RecordingEndpointContext ctx = new RecordingEndpointContext();
+
+        endpoint.apply(ctx);
+
+        Map<String, Object> automation = asMap(((List<?>) asMap(ctx.body).get("data")).get(0));
+        Map<String, Object> component = asMap(((List<?>) automation.get("components")).get(0));
+        Map<String, Object> ref = asMap(component.get("ref"));
+        assertThat(ref.keySet()).containsExactly("type", "id");
+        assertThat(ref).containsEntry("type", "entity");
+        assertThat(ref).containsEntry("id", ENTITY_ULID);
     }
 
     @Test

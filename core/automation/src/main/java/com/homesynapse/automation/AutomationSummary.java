@@ -56,8 +56,16 @@ public record AutomationSummary(
      * @param type    a stable kind label — the concrete definition record's simple name
      *                (e.g. {@code "StateChangeTrigger"}); never {@code null}
      * @param summary a short human rendering of that kind (e.g. {@code "state change trigger"}); never {@code null}
+     * @param ref     the v1.1.3 entity reference (CG-1, DP-2): the {@code {type:"entity", id}}
+     *                view of the ONE entity this component addresses by identity — a
+     *                {@code DirectRefSelector} on a trigger, condition, or command action, or a
+     *                {@code CalendarTrigger}'s calendar entity — or {@code null} for a group
+     *                selector (the automation names a SET), a device-addressed trigger, a
+     *                compound condition / branch (never descended), and every component with no
+     *                selector at all; never a fabricated id (D5). Nullable by contract; NOT
+     *                null-checked
      */
-    public record ComponentView(String type, String summary) {
+    public record ComponentView(String type, String summary, RunExplanation.SubjectRefView ref) {
 
         /**
          * @throws NullPointerException if {@code type} or {@code summary} is {@code null}
@@ -65,6 +73,14 @@ public record AutomationSummary(
         public ComponentView {
             Objects.requireNonNull(type, "type must not be null");
             Objects.requireNonNull(summary, "summary must not be null");
+        }
+
+        /**
+         * Convenience constructor for the pre-v1.1.3 two-component form (test-convenience;
+         * production constructs the canonical form): delegates with {@code ref = null}.
+         */
+        public ComponentView(String type, String summary) {
+            this(type, summary, null);
         }
     }
 }

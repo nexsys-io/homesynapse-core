@@ -60,7 +60,7 @@ import java.util.function.LongSupplier;
  *
  * <p>Stateless — same threading discipline as {@link ListEntitiesEndpoint}.</p>
  *
- * @see RestFilters#installEntityQueryEndpoints(Object, StateQueryService, LongSupplier, java.time.Clock)
+ * @see RestFilters#installEntityQueryEndpoints(Object, StateQueryService, com.homesynapse.device.EntityRegistry, LongSupplier, java.time.Clock)
  * @see EndpointContext
  */
 final class GetEntityEndpoint implements Handler {

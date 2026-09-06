@@ -119,19 +119,11 @@ final class GetRunCausalChainEndpoint implements Handler {
     private static Map<String, Object> triggerMap(RunExplanation.TriggerView t) {
         Map<String, Object> map = new LinkedHashMap<>(4);
         map.put("type", t.type());
-        map.put("subjectRef", subjectRefMap(t.subjectRef()));
+        // The {type, id} rendering is shared with the v1.1.3 non-firing/list reads (CG-1);
+        // hoisted to EndpointResponses.subjectRefMap, wire byte-identical.
+        map.put("subjectRef", EndpointResponses.subjectRefMap(t.subjectRef()));
         map.put("matchedAt", t.matchedAt() == null ? null : t.matchedAt().toString());
         map.put("firingValue", t.firingValue());
-        return map;
-    }
-
-    private static Map<String, Object> subjectRefMap(RunExplanation.SubjectRefView ref) {
-        if (ref == null) {
-            return null;
-        }
-        Map<String, Object> map = new LinkedHashMap<>(2);
-        map.put("type", ref.type());
-        map.put("id", ref.id());
         return map;
     }
 
@@ -162,7 +154,7 @@ final class GetRunCausalChainEndpoint implements Handler {
         for (RunExplanation.ActionView a : actions) {
             Map<String, Object> map = new LinkedHashMap<>(8);
             map.put("type", a.type());
-            map.put("targetRef", subjectRefMap(a.targetRef()));
+            map.put("targetRef", EndpointResponses.subjectRefMap(a.targetRef()));
             map.put("command", a.command());
             map.put("params", parseParams(a.paramsJson()));
             map.put("outcome", a.outcome().name());

@@ -7,12 +7,14 @@ package com.homesynapse.automation;
 import static com.homesynapse.automation.AutomationTestSupport.FIXED_CLOCK;
 import static com.homesynapse.automation.AutomationTestSupport.FIXED_INSTANT;
 import static com.homesynapse.automation.AutomationTestSupport.automationId;
+import static com.homesynapse.automation.AutomationTestSupport.deviceId;
 import static com.homesynapse.automation.AutomationTestSupport.entityId;
 import static com.homesynapse.automation.AutomationTestSupport.eventId;
 import static com.homesynapse.automation.AutomationTestSupport.str;
 import static com.homesynapse.automation.AutomationTestSupport.ulid;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.homesynapse.device.EntityRole;
 import com.homesynapse.event.AutomationActionCompletedEvent;
 import com.homesynapse.event.AutomationActionStartedEvent;
 import com.homesynapse.event.AutomationCompletedEvent;
@@ -38,7 +40,9 @@ import com.homesynapse.event.test.InMemoryEventStore;
 import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
+import com.homesynapse.state.Availability;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -312,6 +316,123 @@ final class NonFiringExplanationServiceTest {
         assertThat(service.listAutomations()).isEmpty();
     }
 
+    // ---- v1.1.3 (CG-1): triggerRef + components[].ref — the DP-2 ref rule ---
+
+    @Test
+    @DisplayName("triggerRef is the first trigger's DirectRefSelector entity on every verdict path")
+    void explainNonFiring_triggerRef_directRefSelector() {
+        EntityId entity = entityId();
+        RunExplanation.SubjectRefView expected = ref(entity);
+
+        // NEVER_TRIGGERED with no run — the explainNonFiring site.
+        AutomationId never = automationId();
+        registry.add(withTriggers(never, "Never", true, stateChange(new DirectRefSelector(entity))));
+        assertThat(service.explainNonFiring(never, 0).orElseThrow().triggerRef()).isEqualTo(expected);
+
+        // DISABLED — the short-circuit site.
+        AutomationId off = automationId();
+        registry.add(withTriggers(off, "Off", false, stateChange(new DirectRefSelector(entity))));
+        assertThat(service.explainNonFiring(off, 0).orElseThrow().triggerRef()).isEqualTo(expected);
+
+        // CONDITION_NOT_MET — threaded through deriveNonFiring.
+        AutomationId notMet = automationId();
+        registry.add(withTriggers(notMet, "NotMet", true, stateChange(new DirectRefSelector(entity))));
+        seedCompleted(notMet, "CONDITION_NOT_MET", null);
+        assertThat(service.explainNonFiring(notMet, 0).orElseThrow().triggerRef()).isEqualTo(expected);
+
+        // COMPLETED with zero commands — threaded through completedVerdict (the marker path).
+        AutomationId skipped = automationId();
+        registry.add(withTriggers(skipped, "Skipped", true, stateChange(new DirectRefSelector(entity))));
+        seedCompleted(skipped, "COMPLETED", null, 1234L, 3, 0);
+        assertThat(service.explainNonFiring(skipped, 0).orElseThrow().triggerRef()).isEqualTo(expected);
+
+        // COMPLETED and confirmed — the DP-B2 clean path in completedVerdict.
+        AutomationId clean = automationId();
+        registry.add(withTriggers(clean, "Clean", true, stateChange(new DirectRefSelector(entity))));
+        seedRun(clean, entity, "COMPLETED", null, ConfirmKind.CONFIRMED);
+        assertThat(service.explainNonFiring(clean, 0).orElseThrow().triggerRef()).isEqualTo(expected);
+    }
+
+    @Test
+    @DisplayName("a group-resolving first trigger yields a null triggerRef — never a fabricated id (D5)")
+    void explainNonFiring_triggerRef_nullForGroupSelector() {
+        List<Selector> groupSelectors = List.of(
+                new LabelSelector("porch", Set.of(EntityRole.PRIMARY)),
+                new AreaSelector("hall", Set.of(EntityRole.PRIMARY)),
+                new TypeSelector("LIGHT", Set.of(EntityRole.PRIMARY)),
+                new SemanticTagSelector("room", "porch", MatchMode.EXACT, Set.of(EntityRole.PRIMARY)),
+                new SlugSelector("porch-light"),
+                // A compound of ONE direct ref still names a set, not an entity — the rule as written.
+                new CompoundSelector(List.of(new DirectRefSelector(entityId()))));
+        for (Selector selector : groupSelectors) {
+            AutomationId autoId = automationId();
+            registry.add(withTriggers(autoId, "Group", true, stateChange(selector)));
+            seedCompleted(autoId, "CONDITION_NOT_MET", null);
+
+            NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+            assertThat(result.triggerRef()).as(selector.getClass().getSimpleName()).isNull();
+            assertThat(result.verdict())
+                    .isEqualTo(NonFiringExplanation.NonFiringVerdict.CONDITION_NOT_MET);
+        }
+    }
+
+    @Test
+    @DisplayName("a subject-less first trigger yields null; a CalendarTrigger yields its calendar entity")
+    void explainNonFiring_triggerRef_nullForSubjectlessTrigger() {
+        AutomationId time = automationId();
+        registry.add(withTriggers(time, "Time", true, new TimeTrigger()));
+        assertThat(service.explainNonFiring(time, 0).orElseThrow().triggerRef()).isNull();
+
+        AutomationId event = automationId();
+        registry.add(withTriggers(event, "Event", true,
+                new EventTrigger("custom.ping", Map.of(), "t1")));
+        assertThat(service.explainNonFiring(event, 0).orElseThrow().triggerRef()).isNull();
+
+        EntityId calendar = entityId();
+        AutomationId cal = automationId();
+        registry.add(withTriggers(cal, "Calendar", true,
+                new CalendarTrigger(calendar, CalendarEventTransition.EVENT_START, null, "t1")));
+        assertThat(service.explainNonFiring(cal, 0).orElseThrow().triggerRef())
+                .isEqualTo(ref(calendar));
+    }
+
+    @Test
+    @DisplayName("components[].ref follows each component's own selector, in componentsOf order")
+    void listAutomations_componentRef_perComponent() {
+        EntityId e1 = entityId();
+        EntityId e2 = entityId();
+        EntityId e3 = entityId();
+        AutomationId mixed = automationId();
+        registry.add(withComponents(mixed, "Mixed", true,
+                List.of(stateChange(new DirectRefSelector(e1))),
+                List.of(new StateCondition(new DirectRefSelector(e2), "motion", "active")),
+                List.of(new CommandAction(new DirectRefSelector(e3), "turn_on", Map.of(),
+                                UnavailablePolicy.SKIP),
+                        new DelayAction(Duration.ofSeconds(1)))));
+
+        AutomationSummary summary = byId(service.listAutomations(), mixed);
+
+        assertThat(summary.components()).extracting(AutomationSummary.ComponentView::type)
+                .containsExactly("StateChangeTrigger", "StateCondition", "CommandAction",
+                        "DelayAction");
+        assertThat(summary.components()).extracting(AutomationSummary.ComponentView::ref)
+                .containsExactly(ref(e1), ref(e2), ref(e3), null);
+
+        // A device-addressed trigger yields null (the frozen API has no device read to census
+        // against); a NumericCondition on a DirectRefSelector takes the selector rule.
+        EntityId e4 = entityId();
+        AutomationId device = automationId();
+        registry.add(withComponents(device, "Device", true,
+                List.of(new ReachabilityTrigger(deviceId(), Availability.UNAVAILABLE, null, "t1")),
+                List.of(new NumericCondition(new DirectRefSelector(e4), "temperature", 20.0, null)),
+                List.of()));
+
+        assertThat(byId(service.listAutomations(), device).components())
+                .extracting(AutomationSummary.ComponentView::ref)
+                .containsExactly(null, ref(e4));
+    }
+
     // ---- INV-SA-03: pure projection -----------------------------------------
 
     @Test
@@ -355,6 +476,32 @@ final class NonFiringExplanationServiceTest {
                 List.of(new StateCondition(new DirectRefSelector(entity), "motion", "active")),
                 List.of(new CommandAction(new DirectRefSelector(entity), "turn_on", Map.of(),
                         UnavailablePolicy.SKIP)));
+    }
+
+    /** An automation with the given triggers and no conditions/actions (the CG-1 fixtures). */
+    private static AutomationDefinition withTriggers(AutomationId autoId, String name,
+                                                     boolean enabled,
+                                                     TriggerDefinition... triggers) {
+        return withComponents(autoId, name, enabled, List.of(triggers), List.of(), List.of());
+    }
+
+    private static AutomationDefinition withComponents(AutomationId autoId, String name,
+                                                       boolean enabled,
+                                                       List<TriggerDefinition> triggers,
+                                                       List<ConditionDefinition> conditions,
+                                                       List<ActionDefinition> actions) {
+        return new AutomationDefinition(autoId, "slug-" + name, name, null, enabled,
+                ConcurrencyMode.SINGLE, 1, MaxExceededSeverity.INFO, 0, triggers, conditions,
+                actions);
+    }
+
+    private static TriggerDefinition stateChange(Selector selector) {
+        return new StateChangeTrigger(selector, "motion", null, "active", null, "t1");
+    }
+
+    /** The DP-2 wire view of one entity: the same {@code {type, id}} the causal chain serves. */
+    private static RunExplanation.SubjectRefView ref(EntityId entity) {
+        return new RunExplanation.SubjectRefView("entity", entity.toString());
     }
 
     /** Seeds only a terminal {@code automation_completed} marker. */

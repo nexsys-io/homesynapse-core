@@ -153,11 +153,26 @@ public final class RestFilters {
      * return {@code 503} until the State Projection reaches
      * {@code SubscriberMode.LIVE}.</p>
      *
+     * <p>v1.1.3 (CG-2/CG-3, 2026-09-05): the list rows additionally carry
+     * {@code deviceId} and {@code lastReported}. The {@code entityRegistry}
+     * parameter feeds {@code deviceId} and MUST be the SAME instance the
+     * registry projection writes (the composition root guarantees it — never
+     * a fresh registry); it is read-only here ({@code findEntity}) and is
+     * handed to the list endpoint only. {@link EntityRegistry} appears directly
+     * on this exported signature (unlike the {@code Object}-erased registry of
+     * {@link #installCommandEndpoints}) because {@code com.homesynapse.device}
+     * reaches this module's consumers through {@code requires transitive
+     * com.homesynapse.state} → {@code requires transitive com.homesynapse.device}
+     * — no module-info change.</p>
+     *
      * @param javalinApp           the Javalin application instance (must be
      *                             a {@link io.javalin.Javalin}); never
      *                             {@code null}
      * @param queryService         the materialized state query service;
      *                             never {@code null}
+     * @param entityRegistry       the LIVE entity registry the list rows'
+     *                             {@code deviceId} is read from; never
+     *                             {@code null}
      * @param viewPositionSupplier supplier for the projection's current
      *                             cursor position (typically
      *                             {@code stateProjection::cursorPosition});
@@ -169,15 +184,18 @@ public final class RestFilters {
      */
     public static void installEntityQueryEndpoints(Object javalinApp,
                                                    StateQueryService queryService,
+                                                   EntityRegistry entityRegistry,
                                                    LongSupplier viewPositionSupplier,
                                                    Clock clock) {
         Objects.requireNonNull(javalinApp, "javalinApp");
         Objects.requireNonNull(queryService, "queryService");
+        Objects.requireNonNull(entityRegistry, "entityRegistry");
         Objects.requireNonNull(viewPositionSupplier, "viewPositionSupplier");
         Objects.requireNonNull(clock, "clock");
         Javalin app = (Javalin) javalinApp;
         app.get("/api/v1/entities",
-                new ListEntitiesEndpoint(queryService, viewPositionSupplier, clock));
+                new ListEntitiesEndpoint(queryService, entityRegistry, viewPositionSupplier,
+                        clock));
         app.get("/api/v1/entities/{entityId}",
                 new GetEntityEndpoint(queryService, viewPositionSupplier, clock));
         app.get("/api/v1/entities/{entityId}/state",

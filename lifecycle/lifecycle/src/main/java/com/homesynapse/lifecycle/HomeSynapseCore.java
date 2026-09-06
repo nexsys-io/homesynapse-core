@@ -1027,7 +1027,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             RestFilters.installHealthEndpoint(app, this);
             RestFilters.installReadinessGate(app, this);
             RestFilters.installEntityQueryEndpoints(
-                    app, stateQueryService, stateProjection::cursorPosition, clock);
+                    app, stateQueryService, entityRegistry, stateProjection::cursorPosition, clock);
             // M7.5c-a: the /internal/* reads carry the frozen {data, meta} envelope
             // (v1.1.1 §A4/§A5, DRIFT-1). The log head (eventStore::latestPosition)
             // feeds the frozen A4 lagEvents; PROJECTION_VERSION is the same constant

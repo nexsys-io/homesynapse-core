@@ -32,6 +32,12 @@ import java.util.function.LongSupplier;
  * (the {@code o:<offset>} cursor here, distinct from the run endpoints' {@code p:<position>}
  * cursor). The dataset is small (a home has tens of automations). Empty {@code data} (not 404) when
  * none are loaded.</p>
+ *
+ * <p>v1.1.3 amendment (additive-only, docket Row 14 / CG-1): each {@code components[]} map
+ * additionally carries {@code ref} — the component's single-entity reference as the same
+ * {@code {type:"entity", id}} map the causal chain serves ({@link EndpointResponses#subjectRefMap}),
+ * or JSON null when the component names no single entity; appended after {@code summary},
+ * always present.</p>
  */
 final class ListAutomationsEndpoint implements Handler {
 
@@ -108,9 +114,11 @@ final class ListAutomationsEndpoint implements Handler {
         map.put("enabled", summary.enabled());
         List<Map<String, Object>> components = new ArrayList<>(summary.components().size());
         for (AutomationSummary.ComponentView component : summary.components()) {
-            Map<String, Object> comp = new LinkedHashMap<>(2);
+            Map<String, Object> comp = new LinkedHashMap<>(3);
             comp.put("type", component.type());
             comp.put("summary", component.summary());
+            // v1.1.3 (CG-1): appended LAST — the LinkedHashMap order is the wire order.
+            comp.put("ref", EndpointResponses.subjectRefMap(component.ref()));
             components.add(comp);
         }
         map.put("components", components);

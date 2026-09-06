@@ -221,6 +221,11 @@ final class StandardExplanationService implements ExplanationService {
         AutomationDefinition definition = maybe.get();
         String automationName = definition.name();
         String triggerSummary = triggerSummary(definition.triggers());
+        // v1.1.3 (CG-1): the FIRST trigger's single-entity ref (DP-2), derived ONCE beside the
+        // summary and threaded into every construction below; null when the definition has no
+        // trigger or its first trigger names no single entity (never a fabricated id).
+        RunExplanation.SubjectRefView triggerRef =
+                definition.triggers().isEmpty() ? null : refOf(definition.triggers().get(0));
 
         // DISABLED short-circuits: a disabled automation's non-firing reason is that it is off,
         // regardless of any run history (DP-B2 step 3).
@@ -228,7 +233,7 @@ final class StandardExplanationService implements ExplanationService {
             return Optional.of(new NonFiringExplanation(automationId, automationName, false,
                     NonFiringExplanation.NonFiringVerdict.DISABLED, null,
                     "Automation '" + automationName + "' is currently disabled.",
-                    triggerSummary, null));
+                    triggerSummary, null, null, triggerRef));
         }
 
         long sinceInclusive = Math.max(0L, expectedSincePosition);
@@ -239,7 +244,7 @@ final class StandardExplanationService implements ExplanationService {
                     NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, null,
                     "Automation '" + automationName + "' has not been triggered" + windowNote
                             + "; it fires on " + triggerSummary + ".",
-                    triggerSummary, null));
+                    triggerSummary, null, null, triggerRef));
         }
 
         AutomationCompletedEvent payload = (AutomationCompletedEvent) latest.payload();
@@ -249,25 +254,30 @@ final class StandardExplanationService implements ExplanationService {
         Instant evaluatedAt = derivedTriggerInstant(latest, payload.durationMs());
 
         return Optional.of(deriveNonFiring(automationId, automationName, triggerSummary,
-                latest, status, runId, evaluatedAt));
+                triggerRef, latest, status, runId, evaluatedAt));
     }
 
     /**
      * Maps the most-recent in-window terminal run to a verdict. Exhaustive over {@link RunStatus}
      * with no {@code default}, so a future status is a compile error here, not a silent miswire.
+     * Every construction is the canonical ten-component form carrying the derived
+     * {@code triggerRef} (v1.1.3).
      */
     private NonFiringExplanation deriveNonFiring(AutomationId automationId, String automationName,
-                                                 String triggerSummary, EventEnvelope completed,
-                                                 RunStatus status, RunId runId, Instant evaluatedAt) {
+                                                 String triggerSummary,
+                                                 RunExplanation.SubjectRefView triggerRef,
+                                                 EventEnvelope completed, RunStatus status,
+                                                 RunId runId, Instant evaluatedAt) {
         return switch (status) {
             case CONDITION_NOT_MET -> new NonFiringExplanation(automationId, automationName, true,
                     NonFiringExplanation.NonFiringVerdict.CONDITION_NOT_MET, runId,
                     "Automation '" + automationName
                             + "' was triggered, but its conditions were not met, so no actions ran.",
                     triggerSummary,
-                    new NonFiringExplanation.LastEvaluationView(evaluatedAt, "false"));
+                    new NonFiringExplanation.LastEvaluationView(evaluatedAt, "false"),
+                    null, triggerRef);
             case COMPLETED -> completedVerdict(automationId, automationName, triggerSummary,
-                    completed, runId, evaluatedAt);
+                    triggerRef, completed, runId, evaluatedAt);
             case FAILED, ABORTED, INTERRUPTED -> new NonFiringExplanation(automationId,
                     automationName, true,
                     NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED, runId,
@@ -275,7 +285,8 @@ final class StandardExplanationService implements ExplanationService {
                             + status.name().toLowerCase(Locale.ROOT)
                             + " without a confirmed result.",
                     triggerSummary,
-                    new NonFiringExplanation.LastEvaluationView(evaluatedAt, null));
+                    new NonFiringExplanation.LastEvaluationView(evaluatedAt, null),
+                    null, triggerRef);
             case EVALUATING, RUNNING -> {
                 // A non-terminal status on a terminal marker is a producer anomaly. Report it
                 // honestly as "ran, outcome not confirmed" rather than fabricate a clean success.
@@ -286,7 +297,8 @@ final class StandardExplanationService implements ExplanationService {
                         "Automation '" + automationName
                                 + "' fired recently; its outcome is not yet confirmed.",
                         triggerSummary,
-                        new NonFiringExplanation.LastEvaluationView(evaluatedAt, null));
+                        new NonFiringExplanation.LastEvaluationView(evaluatedAt, null),
+                        null, triggerRef);
             }
         };
     }
@@ -308,8 +320,10 @@ final class StandardExplanationService implements ExplanationService {
      * reuses {@link #buildActions} (the M7.5a honest-confirmation derivation) — no duplication.
      */
     private NonFiringExplanation completedVerdict(AutomationId automationId, String automationName,
-                                                  String triggerSummary, EventEnvelope completed,
-                                                  RunId runId, Instant evaluatedAt) {
+                                                  String triggerSummary,
+                                                  RunExplanation.SubjectRefView triggerRef,
+                                                  EventEnvelope completed, RunId runId,
+                                                  Instant evaluatedAt) {
         AutomationCompletedEvent payload = (AutomationCompletedEvent) completed.payload();
         if (payload.commandCount() == 0 && payload.actionCount() > 0) {
             return new NonFiringExplanation(automationId, automationName, true,
@@ -319,7 +333,7 @@ final class StandardExplanationService implements ExplanationService {
                             + "unavailable or no device actions defined).",
                     triggerSummary,
                     new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"),
-                    Boolean.TRUE);
+                    Boolean.TRUE, triggerRef);
         }
         List<EventEnvelope> chain =
                 eventStore.readByCorrelation(completed.causalContext().correlationId());
@@ -333,14 +347,16 @@ final class StandardExplanationService implements ExplanationService {
                     "Automation '" + automationName
                             + "' fired, but a device did not confirm the requested change.",
                     triggerSummary,
-                    new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"));
+                    new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"),
+                    null, triggerRef);
         }
         return new NonFiringExplanation(automationId, automationName, true,
                 NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, runId,
                 "Automation '" + automationName + "' last fired and confirmed at "
                         + evaluatedAt + "; no non-firing was detected in the requested window.",
                 triggerSummary,
-                new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"));
+                new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"),
+                null, triggerRef);
     }
 
     @Override
@@ -441,19 +457,120 @@ final class StandardExplanationService implements ExplanationService {
         List<AutomationSummary.ComponentView> components = new ArrayList<>(
                 def.triggers().size() + def.conditions().size() + def.actions().size());
         for (TriggerDefinition t : def.triggers()) {
-            components.add(componentView(t.getClass().getSimpleName()));
+            components.add(componentView(t.getClass().getSimpleName(), refOf(t)));
         }
         for (ConditionDefinition c : def.conditions()) {
-            components.add(componentView(c.getClass().getSimpleName()));
+            components.add(componentView(c.getClass().getSimpleName(), refOf(c)));
         }
         for (ActionDefinition a : def.actions()) {
-            components.add(componentView(a.getClass().getSimpleName()));
+            components.add(componentView(a.getClass().getSimpleName(), refOf(a)));
         }
         return components;
     }
 
-    private static AutomationSummary.ComponentView componentView(String simpleName) {
-        return new AutomationSummary.ComponentView(simpleName, humanize(simpleName));
+    private static AutomationSummary.ComponentView componentView(String simpleName,
+                                                                 RunExplanation.SubjectRefView ref) {
+        return new AutomationSummary.ComponentView(simpleName, humanize(simpleName), ref);
+    }
+
+    // ---- the v1.1.3 ref rule (CG-1, DP-2) -----------------------------------
+
+    /**
+     * The single-entity reference of one trigger (v1.1.3, DP-2): the {@code {type:"entity", id}}
+     * view of the ONE entity the trigger addresses by identity, or {@code null}. A trigger
+     * contributes a ref <em>iff</em> it addresses exactly one entity by identity — a
+     * {@link Selector} that is a {@link DirectRefSelector} (the {@link #selectorRef} rule), or a
+     * {@link CalendarTrigger}'s {@code calendarEntityId}. Every other permit yields {@code null}:
+     * the subject-less triggers ({@link EventTrigger}, {@link ManualTrigger},
+     * {@link WebhookTrigger}; the Tier-2 reserved {@link TimeTrigger}, {@link SunTrigger},
+     * {@link PresenceTrigger}) name no entity, and a {@link ReachabilityTrigger} addresses a
+     * DEVICE — the frozen read API has no device read for a consumer to census a
+     * {@code {type:"device"}} ref against, so it is {@code null} here (a stated limitation; a
+     * device-typed ref is a candidate for a later additive bump, not this one). Exhaustive over
+     * the sealed hierarchy with no {@code default}, so a new permit is a compile error here, not a
+     * silent {@code null}.
+     */
+    private static RunExplanation.SubjectRefView refOf(TriggerDefinition trigger) {
+        return switch (trigger) {
+            case StateChangeTrigger t -> selectorRef(t.selector());
+            case StateTrigger t -> selectorRef(t.selector());
+            case NumericThresholdTrigger t -> selectorRef(t.selector());
+            case AvailabilityTrigger t -> selectorRef(t.selector());
+            case CalendarTrigger t -> entityRef(t.calendarEntityId());
+            case ReachabilityTrigger t -> null; // a DEVICE subject: no entity census target
+            case EventTrigger t -> null;
+            case ManualTrigger t -> null;
+            case WebhookTrigger t -> null;
+            case TimeTrigger t -> null;
+            case SunTrigger t -> null;
+            case PresenceTrigger t -> null;
+        };
+    }
+
+    /**
+     * The single-entity reference of one condition (v1.1.3, DP-2): the {@link #selectorRef} rule
+     * for the selector-bearing permits ({@link StateCondition}, {@link NumericCondition});
+     * {@code null} for {@link TimeCondition} and the Tier-2 {@link ZoneCondition} (no selector),
+     * and for the compound {@link AndCondition}/{@link OrCondition}/{@link NotCondition}, which
+     * are never descended — a compound names a combination, not an entity. Exhaustive, no
+     * {@code default}.
+     */
+    private static RunExplanation.SubjectRefView refOf(ConditionDefinition condition) {
+        return switch (condition) {
+            case StateCondition c -> selectorRef(c.selector());
+            case NumericCondition c -> selectorRef(c.selector());
+            case TimeCondition c -> null;
+            case AndCondition c -> null; // compound: never descended
+            case OrCondition c -> null;
+            case NotCondition c -> null;
+            case ZoneCondition c -> null;
+        };
+    }
+
+    /**
+     * The single-entity reference of one action (v1.1.3, DP-2): the {@link #selectorRef} rule for
+     * a {@link CommandAction}'s {@code target}; {@code null} for every other permit —
+     * {@link DelayAction}, {@link EmitEventAction} and the Tier-2 reserved actions carry no
+     * selector, and {@link WaitForAction}/{@link ConditionBranchAction} carry a condition that is
+     * never descended. Exhaustive, no {@code default}.
+     */
+    private static RunExplanation.SubjectRefView refOf(ActionDefinition action) {
+        return switch (action) {
+            case CommandAction a -> selectorRef(a.target());
+            case DelayAction a -> null;
+            case WaitForAction a -> null; // carries a condition, not a selector: never descended
+            case ConditionBranchAction a -> null;
+            case EmitEventAction a -> null;
+            case ActivateSceneAction a -> null;
+            case InvokeIntegrationAction a -> null;
+            case ParallelAction a -> null;
+        };
+    }
+
+    /**
+     * The selector rule (DP-2 / D5): only a {@link DirectRefSelector} addresses exactly one entity
+     * by identity, so only it yields a ref. Every group-resolving permit ({@link SlugSelector},
+     * {@link AreaSelector}, {@link LabelSelector}, {@link TypeSelector},
+     * {@link SemanticTagSelector}, {@link CompoundSelector}) names a SET resolved at trigger time
+     * — a ref would be a fabrication — and yields {@code null}; a {@code CompoundSelector} is not
+     * descended even when it wraps a single {@code DirectRefSelector} (the rule as written).
+     * Exhaustive, no {@code default}.
+     */
+    private static RunExplanation.SubjectRefView selectorRef(Selector selector) {
+        return switch (selector) {
+            case DirectRefSelector s -> entityRef(s.entityId());
+            case SlugSelector s -> null;
+            case AreaSelector s -> null;
+            case LabelSelector s -> null;
+            case TypeSelector s -> null;
+            case SemanticTagSelector s -> null;
+            case CompoundSelector s -> null; // a set, never descended (see the javadoc)
+        };
+    }
+
+    /** The {@code {type:"entity", id}} view of one entity — the causal chain's own rendering. */
+    private static RunExplanation.SubjectRefView entityRef(EntityId entityId) {
+        return subjectRefView("entity", entityId.toString());
     }
 
     /**
