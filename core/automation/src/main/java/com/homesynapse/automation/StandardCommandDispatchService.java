@@ -31,6 +31,7 @@ import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.IntegrationId;
+import com.homesynapse.platform.identity.Ulid;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -69,6 +70,15 @@ import org.slf4j.LoggerFactory;
  * causation = the {@code command_issued} event id. The in-process {@link #dispatch} primitive,
  * which knows only the originating command event id, retains the thin-router causality
  * ({@code chain(commandEventId, commandEventId)}).</p>
+ *
+ * <p><strong>Provenance (HONESTY-1 ORIGIN-1; Doc 01 §3.9).</strong> {@code origin} is
+ * evidence-based and the system never guesses it. On the bus path the {@code command_issued}
+ * envelope is the evidence, so {@code command_dispatched} and the router's own
+ * {@code command_result} INHERIT its {@code origin} and {@code actorRef} (a REST-issued command
+ * dispatches as {@code USER_COMMAND} with its actor; an automation's as {@code AUTOMATION}). The
+ * in-process {@link #dispatch} primitive holds no envelope, so it stamps
+ * {@link EventOrigin#UNKNOWN} with no actor — the enum's honest default, not a guessed
+ * {@code AUTOMATION}.</p>
  *
  * <p><strong>Validation scope.</strong> The Tier-1 dispatch validation is command/capability
  * existence + feature gating only (deep parameter-schema validation is out of scope —
@@ -131,6 +141,13 @@ public final class StandardCommandDispatchService implements CommandDispatchServ
 
     // ── CommandDispatchService (in-process primitive) ───────────────────────
 
+    /**
+     * The in-process primitive. Provenance: no issuing envelope is in hand — only the
+     * originating command event id — so the command events it publishes carry
+     * {@link EventOrigin#UNKNOWN} and no {@code actorRef} (Doc 01 §3.9: origin is never
+     * guessed; a store read to recover the issuer's origin is out of scope). The bus path
+     * ({@link #onEvent}) inherits the real provenance.
+     */
     @Override
     public void dispatch(EventId commandEventId, EntityId targetRef, String commandName,
                          Map<String, Object> parameters) {
@@ -142,7 +159,8 @@ public final class StandardCommandDispatchService implements CommandDispatchServ
         // command events publish on chain(commandEventId, commandEventId). The bus path
         // (onEvent) threads the full Run correlation per Doc 07 §3.11.2.
         route(targetRef, commandName, parameters,
-                CausalContext.chain(commandEventId.value(), commandEventId.value()));
+                CausalContext.chain(commandEventId.value(), commandEventId.value()),
+                EventOrigin.UNKNOWN, null);
     }
 
     @Override
@@ -161,6 +179,11 @@ public final class StandardCommandDispatchService implements CommandDispatchServ
         this.replayMode = mode != SubscriberMode.LIVE;
     }
 
+    /**
+     * The bus path: consumes {@code command_issued} in {@code LIVE} only. The issued envelope is
+     * the evidence for provenance (Doc 01 §3.9), so its {@code origin} and {@code actorRef} are
+     * inherited by the {@code command_dispatched} / {@code command_result} this call publishes.
+     */
     @Override
     public void onEvent(EventEnvelope event) {
         if (replayMode) {
@@ -173,8 +196,10 @@ public final class StandardCommandDispatchService implements CommandDispatchServ
         // Tier-1 validation is command/capability existence only; the serialized parameters stay
         // on the durable command_issued for the adapter (M9), so an empty map suffices here.
         // Causality (Doc 07 §3.11.2): correlation = the Run's, causation = the command_issued id.
+        // Provenance (Doc 01 §3.9): the issued envelope's origin + actorRef, inherited as-is.
         route(target, issued.commandType(), Map.of(),
-                CausalContext.chain(event.causalContext().correlationId(), event.eventId().value()));
+                CausalContext.chain(event.causalContext().correlationId(), event.eventId().value()),
+                event.origin(), event.actorRef());
     }
 
     // ── Shared resolve → validate → emit ─────────────────────────────────────
@@ -182,23 +207,26 @@ public final class StandardCommandDispatchService implements CommandDispatchServ
     /**
      * The dispatch core shared by the in-process primitive and the bus path. Resolves the target
      * to an integration, validates the command, and publishes {@code command_dispatched} on
-     * success or {@code command_result} on failure — all threaded on {@code cause}.
+     * success or {@code command_result} on failure — all threaded on {@code cause} and stamped
+     * with the caller's provenance pair ({@code origin}, {@code actorRef}; the actor nullable).
      */
     private void route(EntityId targetRef, String commandName, Map<String, Object> parameters,
-                       CausalContext cause) {
+                       CausalContext cause, EventOrigin origin, Ulid actorRef) {
         Optional<IntegrationId> integration = resolveIntegration(targetRef);
         if (integration.isEmpty()) {
             publishResult(targetRef, commandName, "unroutable",
-                    "Entity '" + targetRef + "' is not routable to an integration", cause);
+                    "Entity '" + targetRef + "' is not routable to an integration",
+                    cause, origin, actorRef);
             return;
         }
         CommandValidator.ValidationResult validation =
                 commandValidator.validate(targetRef, commandName, parameters);
         if (!validation.valid()) {
-            publishResult(targetRef, commandName, OUTCOME_INVALID, validation.reason(), cause);
+            publishResult(targetRef, commandName, OUTCOME_INVALID, validation.reason(),
+                    cause, origin, actorRef);
             return;
         }
-        publishDispatched(targetRef, integration.get(), cause);
+        publishDispatched(targetRef, integration.get(), cause, origin, actorRef);
     }
 
     /** Two-hop entity &rarr; device &rarr; integration resolution; empty when unroutable. */
@@ -215,24 +243,34 @@ public final class StandardCommandDispatchService implements CommandDispatchServ
     }
 
     private void publishDispatched(EntityId targetRef, IntegrationId integrationId,
-                                   CausalContext cause) {
+                                   CausalContext cause, EventOrigin origin, Ulid actorRef) {
         CommandDispatchedEvent payload = new CommandDispatchedEvent(
                 targetRef.value(), integrationId.value(), NO_PROTOCOL_METADATA);
-        publish(EventTypes.COMMAND_DISPATCHED, payload, targetRef, EventPriority.DIAGNOSTIC, cause);
+        publish(EventTypes.COMMAND_DISPATCHED, payload, targetRef, EventPriority.DIAGNOSTIC,
+                cause, origin, actorRef);
     }
 
     private void publishResult(EntityId targetRef, String commandName, String outcome,
-                               String failureReason, CausalContext cause) {
+                               String failureReason, CausalContext cause,
+                               EventOrigin origin, Ulid actorRef) {
         CommandResultEvent payload = new CommandResultEvent(
                 targetRef.value(), commandName, outcome, failureReason);
-        publish(EventTypes.COMMAND_RESULT, payload, targetRef, EventPriority.NORMAL, cause);
+        publish(EventTypes.COMMAND_RESULT, payload, targetRef, EventPriority.NORMAL,
+                cause, origin, actorRef);
     }
 
+    /**
+     * Publishes one command event on {@code cause}, stamped with the provenance pair the caller
+     * established: the issued envelope's {@code origin}/{@code actorRef} on the bus path,
+     * {@link EventOrigin#UNKNOWN}/{@code null} from the primitive. The draft's
+     * {@code idempotencyKey} stays {@code null} (unchanged).
+     */
     private void publish(String eventType, DomainEvent payload, EntityId targetRef,
-                         EventPriority priority, CausalContext cause) {
+                         EventPriority priority, CausalContext cause,
+                         EventOrigin origin, Ulid actorRef) {
         EventDraft draft = new EventDraft(eventType, SCHEMA_VERSION, null,
-                SubjectRef.entity(targetRef), priority, EventOrigin.AUTOMATION, payload,
-                null, null);
+                SubjectRef.entity(targetRef), priority, origin, payload,
+                actorRef, null);
         try {
             publisher.publish(draft, cause);
         } catch (SequenceConflictException ex) {

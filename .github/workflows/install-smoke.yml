@@ -19,7 +19,6 @@ name: install-smoke
 on:
   push:
     branches: [ main, develop ]
-    paths: [ 'distribution/**', 'app/**', 'lifecycle/**', 'api/**', 'gradle/**', 'build-logic/**', '.github/workflows/install-smoke.yml' ]
   pull_request:
     branches: [ main ]
     paths: [ 'distribution/**', 'app/**', 'lifecycle/**', 'api/**' ]

@@ -125,6 +125,30 @@ final class CheckpointSerializerTest {
     }
 
     @Test
+    @DisplayName("HONESTY-1 (AMD-53 §1.5 as corrected): null lastReported is preserved across the round trip; a non-null one round-trips to itself")
+    void nullLastReportedPreserved() {
+        // The projection seeds lastReported null until the first state_reported (LASTREPORTED-1);
+        // the checkpoint must carry that null exactly as it carries a null staleAfter (ALWAYS
+        // inclusion), never a fabricated instant.
+        Map<EntityId, EntityState> input = new LinkedHashMap<>();
+        input.put(ENT_A, entityWithAttrs(ENT_A, Map.of("on", new StringValue("true")),
+                Availability.AVAILABLE, 1L, T0, T0, null, null, false));   // adopted, never reported
+        input.put(ENT_B, entityWithAttrs(ENT_B, Map.of(), Availability.UNKNOWN,
+                2L, T0, T1, T2, null, false));                              // reported at T2
+
+        byte[] bytes = serializer.serialize(input, 1, null, null, null);
+        CheckpointData parsed = serializer.deserialize(bytes);
+
+        assertThat(parsed.stateMap().get(ENT_A).lastReported())
+                .as("null lastReported preserved across the round trip")
+                .isNull();
+        assertThat(parsed.stateMap().get(ENT_A).lastChanged()).isEqualTo(T0);
+        assertThat(parsed.stateMap().get(ENT_B).lastReported())
+                .as("a non-null lastReported round-trips to itself")
+                .isEqualTo(T2);
+    }
+
+    @Test
     @DisplayName("AMD-52 §5#7: mixed typed variants + a null attribute value + null staleAfter round-trip equal")
     void typedEnvelopeMixedVariantsRoundTrip() {
         Map<String, AttributeValue> attrs = new HashMap<>();

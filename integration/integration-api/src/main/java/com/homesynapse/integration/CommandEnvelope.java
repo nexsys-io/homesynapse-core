@@ -43,10 +43,12 @@ import java.util.Objects;
  * @param parameters      command parameters as key-value pairs, defined by the
  *                        capability's command schema; never {@code null},
  *                        may be empty; returned as an unmodifiable map
- * @param commandEventId  the event ID of the originating
- *                        {@code command_dispatched} event, used as the
- *                        causation ID in the resulting {@code command_result}
- *                        event; never {@code null}
+ * @param commandEventId  the event ID of the originating {@code command_issued}
+ *                        event — the supervisor's {@code CommandRoutingSubscriber}
+ *                        passes the {@code command_dispatched} envelope's causation
+ *                        id, which is the {@code command_issued} id (Doc 07
+ *                        §3.11.2); used as the causation ID of the resulting
+ *                        {@code command_result} event; never {@code null}
  * @param correlationId   the correlation ID from the originating command's
  *                        causal context, propagated to the {@code command_result}
  *                        event; never {@code null}

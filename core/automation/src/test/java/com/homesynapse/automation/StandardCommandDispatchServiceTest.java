@@ -16,6 +16,7 @@ import com.homesynapse.event.CommandDispatchedEvent;
 import com.homesynapse.event.CommandResultEvent;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventId;
+import com.homesynapse.event.EventOrigin;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
@@ -93,5 +94,19 @@ class StandardCommandDispatchServiceTest {
         CommandResultEvent payload = (CommandResultEvent) results.get(0).payload();
         assertThat(payload.outcome()).isEqualTo("unroutable");
         assertThat(publisher.ofType(EventTypes.COMMAND_DISPATCHED)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("ORIGIN-1 T-B3: the in-process primitive has no envelope in hand — it stamps UNKNOWN with no actorRef (never a guessed AUTOMATION)")
+    void dispatch_primitive_stampsUnknownOriginAndNoActor() {
+        dispatch.dispatch(commandEventId, entityId, "turn_on", Map.of());
+
+        List<EventEnvelope> dispatched = publisher.ofType(EventTypes.COMMAND_DISPATCHED);
+        assertThat(dispatched).hasSize(1);
+        // EventOrigin's law (Doc 01 §3.9): the system never guesses origin. The primitive holds
+        // only the originating command event id — no issuing envelope — so UNKNOWN is the honest
+        // default; AUTOMATION here was a guess (TR-0 TR0-3).
+        assertThat(dispatched.get(0).origin()).isEqualTo(EventOrigin.UNKNOWN);
+        assertThat(dispatched.get(0).actorRef()).isNull();
     }
 }

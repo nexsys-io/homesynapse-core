@@ -763,6 +763,48 @@ class ReconciliationTest {
     }
 
     @Test
+    @DisplayName("AMD-53 §5 #4b (§1.5 as corrected 2026-09-07): adoption through a state_changed seeds lastReported NULL until the first state_reported")
+    void adoptionSeedsLastReportedNullUntilFirstStateReported() {
+        // HERO-0 F1 (Nick's word `F1: seed-null`; HONESTY-1 LASTREPORTED-1): lastReported means
+        // "the last report". An entity adopted through a LIVE logged state_changed has never
+        // reported, so its seed is null — never the adoption instant. lastChanged/lastUpdated
+        // still seed from the adopting event's event-time (AMD-53 §1.5, unchanged for those
+        // two); staleAfter/stale are untouched (AMD-53-INV-02).
+        SubjectRef subject = freshSubject();
+        EntityId entityId = new EntityId(subject.id());
+        InMemoryStateStore store = new InMemoryStateStore();
+        StateProjection p = projectionFor("amd53-seed-null", 1, 1, noopRule, store, 0L);
+        p.setMode(SubscriberMode.LIVE);
+
+        Instant t0 = EVENT_TIME;
+        Instant t1 = EVENT_TIME.plusSeconds(60);
+        p.onEvent(changedEnvelope(subject, 1L, "level", null, "7", t0, t0));
+
+        EntityState adopted = store.get(entityId).orElseThrow();
+        assertThat(adopted.lastReported())
+                .as("lastReported is the last REPORT — an entity that has never reported holds "
+                        + "null, never the adoption instant (F1: seed-null)")
+                .isNull();
+        assertThat(adopted.lastChanged()).isEqualTo(t0);
+        assertThat(adopted.lastUpdated()).isEqualTo(t0);
+        assertThat(adopted.staleAfter()).isNull();
+        assertThat(adopted.stale()).isFalse();
+        assertThat(adopted.stateVersion()).isEqualTo(1L);
+
+        p.onEvent(reportedEnvelope(subject, 2L, "level", "7", t1, t1));
+
+        EntityState reported = store.get(entityId).orElseThrow();
+        assertThat(reported.lastReported())
+                .as("the first state_reported owns lastReported")
+                .isEqualTo(t1);
+        assertThat(reported.lastChanged())
+                .as("a state_reported does not touch lastChanged")
+                .isEqualTo(t0);
+        assertThat(reported.lastUpdated()).isEqualTo(t1);
+        assertThat(reported.stateVersion()).isEqualTo(2L);
+    }
+
+    @Test
     @DisplayName("AMD-53 §5 #5 / §3.4: a 4->5 reconciliation heals legacy wall-clock activity timestamps to event-time")
     void reconciliation4to5HealsLegacyWallClockActivityTimestamps() {
         // Legacy regime: an entity materialized under a wall-clock-stamped checkpoint (all

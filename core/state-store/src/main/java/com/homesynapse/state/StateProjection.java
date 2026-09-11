@@ -795,10 +795,13 @@ public final class StateProjection implements Subscriber {
         // AMD-53 §2.1: the activity timestamps source from the causing envelope's
         // event-time (eventTime ?? ingestTime), computed once and reused for every
         // activity-timestamp write below — never the projection wall-clock
-        // (AMD-53-INV-01). The same stamp seeds a brand-new entity (§1.5), so a
-        // field a given event does not overwrite is still a pure function of the
-        // log. clock is retained for reconciledAt / checkpoint cadence / replay
-        // metric / staleness, but applyToState no longer reads it.
+        // (AMD-53-INV-01). The same stamp seeds a brand-new entity's lastChanged and
+        // lastUpdated (§1.5); lastReported seeds null until the first state_reported
+        // (§1.5 as corrected 2026-09-07 — a report the entity never sent is not
+        // fabricated from the adoption instant). A field a given event does not
+        // overwrite is thus still a pure function of the log. clock is retained for
+        // reconciledAt / checkpoint cadence / replay metric / staleness, but
+        // applyToState no longer reads it.
         Instant stamp = eventTimestamp(envelope);
         EntityState prior = stateStore.get(entityId)
                 .orElseGet(() -> initialEntityState(entityId, stamp));
@@ -907,7 +910,9 @@ public final class StateProjection implements Subscriber {
      * {@code lastUpdated}, {@code lastReported} — in both the LIVE
      * {@link #applyToState} path and the AMD-50 reconciliation backfill
      * ({@link #applyBackfillAttribute}), plus the entity-adoption seed
-     * ({@link #initialEntityState}). It is shared so LIVE and backfill agree by
+     * ({@link #initialEntityState} — {@code lastChanged} and {@code lastUpdated} only;
+     * {@code lastReported} seeds {@code null} until the first {@code state_reported},
+     * AMD-53 §1.5 as corrected 2026-09-07). It is shared so LIVE and backfill agree by
      * construction (AMD-53 §2.1, AMD-53-INV-01).
      *
      * <p>It is NEVER the projection wall-clock ({@code clock.instant()}):
@@ -976,14 +981,21 @@ public final class StateProjection implements Subscriber {
     }
 
     /**
-     * Seeds the initial {@link EntityState} for a brand-new entity. The three
-     * activity timestamps are seeded from {@code seed} — the triggering event's
-     * event-time stamp ({@link #eventTimestamp}), NOT the projection wall-clock
-     * (AMD-53 §1.5/§2.1, AMD-53-INV-01) — so a field that the entity's events never
-     * overwrite (e.g. {@code lastChanged} for an entity that only ever reports an
-     * unchanged value) is still a pure function of the log and is deterministic
-     * across rebuilds. {@code staleAfter} stays {@code null} and {@code stale} stays
-     * {@code false} (the real-time freshness carve-out, AMD-53-INV-02).
+     * Seeds the initial {@link EntityState} for a brand-new entity. Two of the three
+     * activity timestamps — {@code lastChanged} and {@code lastUpdated} — are seeded
+     * from {@code seed}, the triggering event's event-time stamp
+     * ({@link #eventTimestamp}), NOT the projection wall-clock (AMD-53 §1.5/§2.1,
+     * AMD-53-INV-01), so a field that the entity's events never overwrite (e.g.
+     * {@code lastChanged} for an entity that only ever reports an unchanged value) is
+     * still a pure function of the log and is deterministic across rebuilds.
+     *
+     * <p>{@code lastReported} seeds {@code null} (AMD-53 §1.5 as corrected 2026-09-07 —
+     * HERO-0 F1, {@code F1: seed-null}; HONESTY-1). It means "the last report", and an
+     * entity that has never sent a {@code state_reported} has none: the value is owned by
+     * the {@code state_reported} branch of {@link #applyToState} alone and is never the
+     * adoption instant. Determinism holds — {@code null} is a pure function of the log.
+     * {@code staleAfter} stays {@code null} and {@code stale} stays {@code false} (the
+     * real-time freshness carve-out, AMD-53-INV-02).</p>
      *
      * @param entityId the entity being adopted
      * @param seed     the triggering event's event-time stamp; never {@code null}
@@ -995,11 +1007,11 @@ public final class StateProjection implements Subscriber {
                 Map.of(),
                 Availability.UNKNOWN,
                 0L,
-                seed,
-                seed,
-                seed,
-                null,
-                false);
+                seed,       // lastChanged
+                seed,       // lastUpdated
+                null,       // lastReported — owned by state_reported alone (§1.5 as corrected)
+                null,       // staleAfter
+                false);     // stale
     }
 
     private static Availability parseAvailability(String value) {

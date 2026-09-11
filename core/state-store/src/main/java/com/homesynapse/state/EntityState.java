@@ -71,7 +71,8 @@ import java.util.Map;
  * @param lastUpdated when the projection last processed any event for this entity,
  *        never {@code null}
  * @param lastReported when the integration adapter last sent a {@code state_reported}
- *        event for this entity, never {@code null}
+ *        event for this entity, or {@code null} until the entity's first
+ *        {@code state_reported} (AMD-53 §1.5 as corrected 2026-09-07; HONESTY-1)
  * @param staleAfter the instant after which this entity is considered stale, or
  *        {@code null} if staleness detection is disabled for this entity
  * @param stale whether this entity is currently stale, derived from {@code staleAfter}

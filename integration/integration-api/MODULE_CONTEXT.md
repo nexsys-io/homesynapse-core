@@ -220,7 +220,7 @@ api(project(":config:configuration"))
 
 **GOTCHA: `IntegrationDescriptor.dependsOn()` uses `Set<String>` (integration type strings), not `Set<IntegrationId>`.** Dependencies are declared against software types ("zigbee"), not instance IDs (ULIDs). The supervisor resolves type→ID mapping at startup.
 
-**GOTCHA: `CommandEnvelope.commandEventId` and `correlationId` are `Ulid`, not `EventId`.** This is because the command envelope is constructed by the supervisor from an event envelope's fields, and the adapter doesn't need the typed EventId wrapper for causal context construction.
+**GOTCHA: `CommandEnvelope.commandEventId` and `correlationId` are `Ulid`, not `EventId`.** This is because the command envelope is constructed by the supervisor from an event envelope's fields, and the adapter doesn't need the typed EventId wrapper for causal context construction. **Its VALUE is the `command_issued` id, not the `command_dispatched` id** (HONESTY-1 TR0-1, 2026-09-10): `CommandRoutingSubscriber.routeDispatched` passes the `command_dispatched` envelope's *causation* id — the `command_issued` id (Doc 07 §3.11.2) — and the record javadoc now says so (it said `command_dispatched` until then); whether the router's own failure results should chain to that same id is TR0-2 (B-2), open.
 
 **GOTCHA: `ManagedHttpClient.send()` throws checked exceptions (IOException, InterruptedException).** These are standard java.net.http exceptions. The supervisor classifies IOException as TRANSIENT and InterruptedException as SHUTDOWN_SIGNAL per Doc 05 §3.7.
 

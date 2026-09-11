@@ -386,14 +386,30 @@ final class AutomationTestSupport {
      * A {@code command_issued} envelope on an entity subject with an explicit causal chain
      * (correlation = the Run's, causation = the triggering event — Doc 07 §3.11.2), so the
      * dispatch subscriber's threading can be asserted. Frozen 5-component payload, parameterless.
+     * Provenance defaults to {@code AUTOMATION} with no actor — delegates to the 6-arg overload,
+     * so every pre-HONESTY-1 caller keeps its fixture byte-for-byte.
      */
     static EventEnvelope commandIssued(EntityId target, String commandType,
                                        Ulid correlationId, Ulid causationId) {
+        return commandIssued(target, commandType, correlationId, causationId,
+                EventOrigin.AUTOMATION, null);
+    }
+
+    /**
+     * The {@link #commandIssued(EntityId, String, Ulid, Ulid)} envelope with an explicit
+     * provenance pair — the issuing envelope's {@code origin} and {@code actorRef} — so the
+     * dispatch subscriber's inheritance of both onto {@code command_dispatched} /
+     * {@code command_result} can be asserted (HONESTY-1 ORIGIN-1; Doc 01 §3.9: the
+     * {@code command_issued} envelope is the evidence).
+     */
+    static EventEnvelope commandIssued(EntityId target, String commandType,
+                                       Ulid correlationId, Ulid causationId,
+                                       EventOrigin origin, Ulid actorRef) {
         EventId id = eventId();
         return new EventEnvelope(id, EventTypes.COMMAND_ISSUED, 1, FIXED_INSTANT, null,
-                SubjectRef.entity(target), 1L, 0L, EventPriority.NORMAL, EventOrigin.AUTOMATION,
+                SubjectRef.entity(target), 1L, 0L, EventPriority.NORMAL, origin,
                 List.of(EventCategory.AUTOMATION),
-                CausalContext.chain(correlationId, causationId), null,
+                CausalContext.chain(correlationId, causationId), actorRef,
                 new CommandIssuedEvent(target.value(), commandType, "{}", 5000,
                         CommandIdempotency.IDEMPOTENT));
     }
