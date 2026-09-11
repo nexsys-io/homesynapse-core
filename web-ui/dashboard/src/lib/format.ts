@@ -27,6 +27,27 @@ export type Tone = 'ok' | 'warn' | 'error' | 'info' | 'unknown' | 'neutral';
  * be mistaken for data, never the string "null", never an invented value. */
 export const NOT_RECORDED = 'not recorded';
 
+/* ---- FE-NULL-1 (2026-09-10): the causal chain's REQUIRED-NULLABLE arms — the honest
+ * sentences HERO-0 wrote (context/research/2026-09-06_HERO-0_null-census_v1.1.3_return.md
+ * §1). Each is name-light and test-locked; a null renders as the sentence, never as a
+ * blank, never as "null", never as an invented name or verb, and a null ref accuses no
+ * registry (it is not a dangling id). */
+/** `trigger.subjectRef` null — the triggering event is outside the run's correlation. */
+export function unrecordedTriggerLine(when: string): string {
+  return `Something set it off at ${when} — what isn't recorded.`;
+}
+/** `observedState[].value` null — rendered as `${entity} ${attribute} ${NO_READING_YET}`. */
+export const NO_READING_YET = 'had no reading yet.';
+export function noReadingLine(entityLabel: string, attribute: string): string {
+  return `${entityLabel} ${attribute} ${NO_READING_YET}`;
+}
+/** `actions[].command` null — a SKIPPED/FAILED action that never issued a command. */
+export const SKIPPED_BEFORE_COMMAND = 'Skipped before any command was sent.';
+/** `actions[].targetRef` null — the action line ends with this; no target is named, none accused. */
+export const UNNAMED_TARGET = "a device the run didn't name";
+/** `cascade.depth > 0` with `parentRunId` null (always null in V1 — F4): started by a run the record cannot name. */
+export const CASCADE_PARENT_UNRECORDED = "Started by another run — which one isn't recorded.";
+
 /** The genuinely-empty chain (a real, successful response with nothing planned):
  *  an explicit, calm statement — nothing failed, and nothing is hidden. */
 export const EMPTY_CHAIN_NOTE =
@@ -466,23 +487,33 @@ export function causalSentence(
   // Date-qualified (NEW-6): a run can be days old; "at 9:40 AM" alone would
   // read as this morning. Same-day runs stay clock-only (the mom-test budget).
   const when = clockTimeWithDate(trigger?.matchedAt);
+  // FE-NULL-1: `trigger.subjectRef` null (the triggering event is outside the run's
+  // correlation) — the "because" clause is the HERO-0 sentence, not a label.
+  const because =
+    trigger?.subjectRef === null
+      ? `something set it off at ${when} — what isn't recorded`
+      : `${triggerSubject} ${triggerVerb} at ${when}`;
   const actions = chain.actions ?? [];
   const outcome = chain.outcome;
   // The silent-skip class: the run finished without doing anything visible —
   // say so up front, never a sentence that implies something happened.
   if (actions.length === 0 && (outcome?.actionCount ?? 0) > 0 && (outcome?.commandCount ?? 0) === 0) {
-    return `${runName(chain.automationName)} ran when ${triggerSubject} ${triggerVerb} at ${when}, but nothing was changed.`;
+    return `${runName(chain.automationName)} ran when ${because}, but nothing was changed.`;
   }
   const action = actions[0];
   const targetId = action?.targetRef?.id;
   const targetRes = resolve(targetId);
+  // FE-NULL-1: `targetRef` null (no target refs, :771) — the same HERO-0 fragment the
+  // action step ends with, sentence-initial; no registry is accused.
   const target = action
-    ? targetId && targetRes.kind === 'dangling'
-      ? `Entity ${targetId} (${UNRESOLVED_REF_PHRASE})`
-      : refLabel(targetId, targetRes)
+    ? action.targetRef === null
+      ? UNNAMED_TARGET.charAt(0).toUpperCase() + UNNAMED_TARGET.slice(1)
+      : targetId && targetRes.kind === 'dangling'
+        ? `Entity ${targetId} (${UNRESOLVED_REF_PHRASE})`
+        : refLabel(targetId, targetRes)
     : runName(chain.automationName);
   const verb = action ? commandVerb(action.command) : 'ran';
-  return `${target} ${verb} because ${triggerSubject} ${triggerVerb} at ${when}.`;
+  return `${target} ${verb} because ${because}.`;
 }
 
 function commandVerb(command: string | null | undefined): string {

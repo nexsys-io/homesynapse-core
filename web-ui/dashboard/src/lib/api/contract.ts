@@ -316,7 +316,10 @@ export interface RunSummary {
  *  invented value. Guarded only — no other action taken (the hub's ruling). */
 export interface CausalTrigger {
   type: string | null;
-  subjectRef: SubjectRef;
+  /** REQUIRED-NULLABLE (FE-NULL-1, HERO-0 F2 2026-09-06): null when the triggering event is
+   *  outside the run's correlation — StandardExplanationService.java:644–:649 (`.orElse(null)`).
+   *  The key is always PRESENT on the v1.1 wire; only its VALUE is nullable. */
+  subjectRef: SubjectRef | null;
   matchedAt: string;
   firingValue: string | null;
 }
@@ -325,13 +328,19 @@ export interface CausalCondition {
   expression: string;
   evaluated: boolean;
   result: boolean;
-  observedState: { entityId: string; attribute: string; value: string }[];
+  /** `value` REQUIRED-NULLABLE (FE-NULL-1, HERO-0 F2 2026-09-06): null when the entity had no
+   *  value for the attribute at evaluation — RunExplanation.java:137 ("or null if unreported"). */
+  observedState: { entityId: string; attribute: string; value: string | null }[];
 }
 
 export interface CausalAction {
   type: string;
-  targetRef: SubjectRef;
-  command: string;
+  /** REQUIRED-NULLABLE (FE-NULL-1, HERO-0 F2 2026-09-06): null for a non-dispatched action with
+   *  no target refs — StandardExplanationService.java:771 (`targetRefs().isEmpty() ? null : …`). */
+  targetRef: SubjectRef | null;
+  /** REQUIRED-NULLABLE (FE-NULL-1, HERO-0 F2 2026-09-06): null for a SKIPPED/FAILED action that
+   *  never issued a command — StandardExplanationService.java:776 (`new ActionView(…, targetRef, null, "{}", …)`). */
+  command: string | null;
   params: Record<string, unknown>;
   outcome: ActionOutcome;
   reason: string | null;
@@ -369,6 +378,9 @@ export interface CausalChain {
     actionCount: number;
     commandCount: number;
   };
+  /** `parentRunId` is ALWAYS null in V1 — RunExplanation.java:213–:219 (the events carry only
+   *  the flattened depth). A null is NOT "root": depth > 0 with a null parent renders the honest
+   *  "started by another run — which one isn't recorded" line (HERO-0 F4, FE-NULL-1). */
   cascade: { parentRunId: string | null; depth: number };
 }
 

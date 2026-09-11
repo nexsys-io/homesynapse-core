@@ -228,7 +228,18 @@ export const runs: RunSummary[] = [
  * LANDED on main 2026-07-26). They are mocked to the ruled shape per law (c)
  * (the emitter leads, the consumer follows) because the DEPLOYED read surface
  * predates the landing until the deploy evening completes — re-verify against
- * live payloads at the first post-deploy run. */
+ * live payloads at the first post-deploy run.
+ * FE-NULL-1 (2026-09-10, HERO-0 F2/F4): the v1.1 truth the mock had hidden (H8 — an
+ * always-populated mock manufactures a false type). The four REQUIRED-NULLABLE arms are
+ * carried here, each once, exactly as the emitter serves them at core 39c8dd3:
+ *   - run_eh_003 (SKIPPED, the OLDEST run): the action carries `command: null` and
+ *     `targetRef: null` (StandardExplanationService:771/:776 — no command was ever issued;
+ *     `resultOutcome: null`, `settled: true`), and `trigger.subjectRef: null` (:644–:649 —
+ *     its triggering event lies outside the run's correlation);
+ *   - run_fd_001: one observedState entry with `value: null` (RunExplanation:137 — the lamp
+ *     had no brightness reading at evaluation) and `cascade: { parentRunId: null, depth: 1 }`
+ *     (RunExplanation:213–:219 — V1 never carries a parent id; depth > 0 is NOT "root").
+ *   run_eh_001 / run_eh_002 are untouched (the happy path + the honest-unconfirmed path). */
 export const causalChains: Record<string, CausalChain> = {
   // The happy path: motion -> light, CONFIRMED.
   run_eh_001: {
@@ -304,14 +315,15 @@ export const causalChains: Record<string, CausalChain> = {
     },
     cascade: { parentRunId: null, depth: 0 },
   },
-  // Skipped: condition false (it was daytime).
+  // Skipped: condition false (it was daytime). FE-NULL-1: the triggering event is outside
+  // this run's correlation (subjectRef null) and the skipped action never issued a command.
   run_eh_003: {
     runId: 'run_eh_003',
     automationId: 'auto_evening_hallway',
     automationName: 'Evening Hallway Light',
     trigger: {
       type: 'state_changed',
-      subjectRef: { type: 'ENTITY', id: 'ent_hallway_motion' },
+      subjectRef: null,
       matchedAt: iso(610),
       firingValue: 'motion = detected',
     },
@@ -326,8 +338,8 @@ export const causalChains: Record<string, CausalChain> = {
     actions: [
       {
         type: 'device_command',
-        targetRef: { type: 'ENTITY', id: 'ent_hallway_light' },
-        command: 'turn_on',
+        targetRef: null,
+        command: null,
         params: {},
         outcome: 'SKIPPED',
         reason: 'Condition not met',
@@ -353,7 +365,10 @@ export const causalChains: Record<string, CausalChain> = {
         expression: 'time is after sunset',
         evaluated: true,
         result: true,
-        observedState: [{ entityId: 'sys_sun', attribute: 'elevation', value: '-12.0°' }],
+        observedState: [
+          { entityId: 'sys_sun', attribute: 'elevation', value: '-12.0°' },
+          { entityId: 'ent_livingroom_lamp', attribute: 'brightness', value: null },
+        ],
       },
     ],
     actions: [
@@ -369,7 +384,7 @@ export const causalChains: Record<string, CausalChain> = {
       },
     ],
     outcome: { status: 'COMPLETED', reason: null, durationMs: 389, actionCount: 1, commandCount: 1 },
-    cascade: { parentRunId: null, depth: 0 },
+    cascade: { parentRunId: null, depth: 1 },
   },
 };
 

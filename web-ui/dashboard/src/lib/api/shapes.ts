@@ -253,7 +253,10 @@ export const validators: Record<EndpointId, Validator> = {
     if (!isObj(trigger)) throw new ContractError('B3chain.trigger must be object');
     strOrNull(req(trigger, 'type', 'B3chain.trigger'), 'B3chain.trigger.type'); // observed live null
     strOrNull(req(trigger, 'firingValue', 'B3chain.trigger'), 'B3chain.trigger.firingValue'); // observed live null (all eras, 2026-07-27)
-    subjectRef(req(trigger, 'subjectRef', 'B3chain.trigger'), 'B3chain.trigger.subjectRef');
+    // FE-NULL-1 (HERO-0 F2): REQUIRED key, VALUE null-or-{type,id} — null when the triggering
+    // event is outside the run's correlation (StandardExplanationService:644–:649). This line
+    // previously REJECTED a lawful null (the manufactured-type class).
+    refOrNull(req(trigger, 'subjectRef', 'B3chain.trigger'), 'B3chain.trigger.subjectRef');
     const conditions = req(d, 'conditions', 'B3chain.data');
     if (!Array.isArray(conditions)) throw new ContractError('B3chain.conditions must be array');
     conditions.forEach((c, i) => {
@@ -262,14 +265,30 @@ export const validators: Record<EndpointId, Validator> = {
       isStr(req(c, 'expression', p), `${p}.expression`);
       isBool(req(c, 'evaluated', p), `${p}.evaluated`);
       isBool(req(c, 'result', p), `${p}.result`);
-      if (!Array.isArray(req(c, 'observedState', p))) throw new ContractError(`${p}.observedState must be array`);
+      const observed = req(c, 'observedState', p);
+      if (!Array.isArray(observed)) throw new ContractError(`${p}.observedState must be array`);
+      // FE-NULL-1 (HERO-0 F2): every entry validated — `entityId` string · `attribute` string ·
+      // `value` string-or-null (RunExplanation:137 "or null if unreported"); all three REQUIRED.
+      // Previously nothing inside the array was checked.
+      observed.forEach((o, j) => {
+        const q = `${p}.observedState[${j}]`;
+        if (!isObj(o)) throw new ContractError(`${q}: must be object`);
+        isStr(req(o, 'entityId', q), `${q}.entityId`);
+        isStr(req(o, 'attribute', q), `${q}.attribute`);
+        strOrNull(req(o, 'value', q), `${q}.value`);
+      });
     });
     const actions = req(d, 'actions', 'B3chain.data');
     if (!Array.isArray(actions)) throw new ContractError('B3chain.actions must be array');
     actions.forEach((a, i) => {
       const p = `B3chain.actions[${i}]`;
       if (!isObj(a)) throw new ContractError(`${p}: must be object`);
-      isStr(req(a, 'command', p), `${p}.command`);
+      // FE-NULL-1 (HERO-0 F2): REQUIRED keys, VALUES nullable — a SKIPPED/FAILED action that never
+      // issued a command carries `command: null` and, with no target refs, `targetRef: null`
+      // (StandardExplanationService:771/:776). `command` previously REJECTED the lawful null;
+      // `targetRef` was previously not validated at all.
+      strOrNull(req(a, 'command', p), `${p}.command`);
+      refOrNull(req(a, 'targetRef', p), `${p}.targetRef`);
       oneOf(req(a, 'outcome', p), ACTION_OUTCOME, `${p}.outcome`);
       // v1.1.2 ADDITIVE keys (SKIP-VIS DP-1/DP-4 GO). Absence is lawful (a
       // pre-v1.1.2 payload — the deployed surface may predate the landing);

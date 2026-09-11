@@ -25,9 +25,9 @@
  * validator that rejects a recorded measurement is wrong, not the fixture).
  */
 import { describe, it, expect } from 'vitest';
-import { validateAgainstContract, ContractError } from './shapes';
-import type { AutomationSummary, EntitySummary, NonFiringExplanation, SubjectRef } from './contract';
-import { entities, nonFiring, automations } from './mock/mockData';
+import { validateAgainstContract, ContractError, CONTRACT_VERSION } from './shapes';
+import type { AutomationSummary, CausalChain, EntitySummary, NonFiringExplanation, SubjectRef } from './contract';
+import { entities, nonFiring, automations, causalChains } from './mock/mockData';
 import { WIRE_20260816_NONFIRING_BENCH_HERO as AUG16 } from './fixtures/wire-2026-08-16-nonfiring';
 import { WIRE_20260820_NEVER_TRIGGERED_BENCH_HERO as AUG20 } from './fixtures/wire-2026-08-20-never-triggered';
 
@@ -219,5 +219,187 @@ describe('the TypeScript mirror declares the four keys optional-nullable (additi
       lastRunId: null,
     };
     expect([v113, v112, nulls, nfx, nfn, auto].length).toBe(6);
+  });
+});
+
+/* ---- FE-NULL-1 (2026-09-10): the causal chain's REQUIRED-NULLABLE arms — v1.1 base keys, NO bump ----
+ * Four B3 causal-chain keys the emitter serves as JSON null on the v1.1 wire that the
+ * mirror at d192d17 typed non-null (HERO-0 F2, 2026-09-06 — the F2/F4 rows):
+ *   trigger.subjectRef            StandardExplanationService:644–:649 — `.orElse(null)` when the
+ *                                 triggering event is outside the run's correlation
+ *   conditions[].observedState[].value   RunExplanation:137 — "or null if unreported"
+ *   actions[].command · actions[].targetRef   StandardExplanationService:771/:776 — a SKIPPED/FAILED
+ *                                 action that never issued a command (`new ActionView(type, targetRef|null, null, …)`)
+ *   cascade.parentRunId           RunExplanation:213–:219 — ALWAYS null in V1 (already `string|null`)
+ * These keys are REQUIRED on every v1.1 payload (the emitter always writes them): MISSING is a
+ * ContractError. The OPTIONAL `'key' in o` idiom of the v1.1.2/.3 additive keys above is
+ * deliberately NOT copied — two idioms, one table (MODULE_CONTEXT.md, the FE-NULL-1 beat).
+ *
+ * Red-first register, row by row, at HEAD 39c8dd3 (the hub re-reads these against HEAD — R2):
+ *   subjectRef  PRESENT-null: RED (shapes.ts:256 `subjectRef()` throws "must be object") AND the type
+ *               forbids the fixture. MISSING / wrong-type: GREEN-BY-CONSTRUCTION (req()/subjectRef()
+ *               already threw at HEAD) — disclosed; they are regression guards, not red rows.
+ *   command     PRESENT-null: RED (shapes.ts:272 `isStr` throws). MISSING / wrong-type: GREEN-BY-
+ *               CONSTRUCTION (req()/isStr already threw) — disclosed.
+ *   targetRef   NOT VALIDATED AT ALL at HEAD: PRESENT-null PASSES the validator but the TYPE forbids
+ *               the fixture (tsc RED); MISSING and wrong-shape are RED (nothing threw at HEAD).
+ *   value       nothing inside observedState[] was checked at HEAD (shapes.ts:265 array-only):
+ *               PRESENT-null passes the validator but the TYPE forbids it (tsc RED); MISSING and
+ *               wrong-type are RED (nothing threw at HEAD).
+ */
+/** A full, valid v1.1 chain body (the default mock's happy path, deep-cloned per test). */
+const chainBase = (): CausalChain => structuredClone(causalChains['run_eh_001']!);
+const chainBody = (d: CausalChain) => ({ data: d, meta: META });
+/** The wrong-type / missing-key fixtures are forbidden by the mirror's TYPES for good — the
+ *  cast lives ONLY here so a test can hand the validator what a drifted wire would carry. */
+const loosen = (d: CausalChain) => d as unknown as { trigger: Record<string, unknown>; conditions: Record<string, unknown>[]; actions: Record<string, unknown>[] };
+
+describe("FE-NULL-1 — the chain's null arms: trigger.subjectRef (REQUIRED, null-or-{type,id})", () => {
+  it('PRESENT-typed passes (the v1.1 shape as before)', () => {
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(chainBase()))).not.toThrow();
+  });
+  it('PRESENT-null passes — the triggering event is outside the run\'s correlation (:644–:649) [RED at HEAD: throws + type]', () => {
+    const c = chainBase();
+    c.trigger.subjectRef = null;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).not.toThrow();
+  });
+  it('MISSING throws — a REQUIRED v1.1 key, never "optional" [GREEN at HEAD by construction: req() threw]', () => {
+    const c = chainBase();
+    delete loosen(c).trigger.subjectRef;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).toThrow(ContractError);
+  });
+  it('PRESENT-wrong-type throws: subjectRef "ent_x" (a bare string is not a ref) [GREEN at HEAD by construction]', () => {
+    const c = chainBase();
+    loosen(c).trigger.subjectRef = 'ent_x';
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).toThrow(ContractError);
+  });
+});
+
+describe("FE-NULL-1 — the chain's null arms: conditions[].observedState[].value (REQUIRED, string-or-null)", () => {
+  it('PRESENT-typed passes, and every entry key is now checked (entityId · attribute · value)', () => {
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(chainBase()))).not.toThrow();
+  });
+  it('PRESENT-null passes — the entity had no value for the attribute at evaluation (RunExplanation:137) [RED at HEAD: type forbids]', () => {
+    const c = chainBase();
+    c.conditions[0]!.observedState[0]!.value = null;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).not.toThrow();
+  });
+  it('MISSING throws — `value` is a required entry key [RED at HEAD: nothing inside the array was checked]', () => {
+    const c = chainBase();
+    delete (loosen(c).conditions[0]!.observedState as Record<string, unknown>[])[0]!.value;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).toThrow(ContractError);
+  });
+  it('MISSING throws — `entityId` / `attribute` are required entry keys too [RED at HEAD]', () => {
+    const c = chainBase();
+    delete (loosen(c).conditions[0]!.observedState as Record<string, unknown>[])[0]!.entityId;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).toThrow(ContractError);
+    const d = chainBase();
+    delete (loosen(d).conditions[0]!.observedState as Record<string, unknown>[])[0]!.attribute;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(d))).toThrow(ContractError);
+  });
+  it('PRESENT-wrong-type throws: value 42 (the wire serves strings, never numbers) [RED at HEAD]', () => {
+    const c = chainBase();
+    (loosen(c).conditions[0]!.observedState as Record<string, unknown>[])[0]!.value = 42;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).toThrow(ContractError);
+  });
+  it('a non-object observedState entry throws [RED at HEAD]', () => {
+    const c = chainBase();
+    (loosen(c).conditions[0]!.observedState as unknown[])[0] = 'sys_sun';
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).toThrow(ContractError);
+  });
+});
+
+describe("FE-NULL-1 — the chain's null arms: actions[].command (REQUIRED, string-or-null)", () => {
+  it('PRESENT-typed passes', () => {
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(chainBase()))).not.toThrow();
+  });
+  it('PRESENT-null passes — a SKIPPED action that never issued a command (:776) [RED at HEAD: shapes.ts:272 isStr throws + type]', () => {
+    const c = chainBase();
+    c.actions[0]!.command = null;
+    c.actions[0]!.outcome = 'SKIPPED';
+    c.actions[0]!.resultOutcome = null;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).not.toThrow();
+  });
+  it('MISSING throws — a REQUIRED v1.1 key [GREEN at HEAD by construction: req() threw]', () => {
+    const c = chainBase();
+    delete loosen(c).actions[0]!.command;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).toThrow(ContractError);
+  });
+  it('PRESENT-wrong-type throws: command 7 [GREEN at HEAD by construction: isStr threw]', () => {
+    const c = chainBase();
+    loosen(c).actions[0]!.command = 7;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).toThrow(ContractError);
+  });
+});
+
+describe("FE-NULL-1 — the chain's null arms: actions[].targetRef (REQUIRED, null-or-{type,id}; never validated before)", () => {
+  it('PRESENT-typed passes', () => {
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(chainBase()))).not.toThrow();
+  });
+  it('PRESENT-null passes — a non-dispatched action with no target refs (:771) [RED at HEAD: type forbids; the validator never looked]', () => {
+    const c = chainBase();
+    c.actions[0]!.targetRef = null;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).not.toThrow();
+  });
+  it('MISSING throws — a REQUIRED v1.1 key [RED at HEAD: targetRef was not validated at all]', () => {
+    const c = chainBase();
+    delete loosen(c).actions[0]!.targetRef;
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).toThrow(ContractError);
+  });
+  it('PRESENT-wrong-shape throws: targetRef {type:"entity"} without id [RED at HEAD]', () => {
+    const c = chainBase();
+    loosen(c).actions[0]!.targetRef = { type: 'entity' };
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).toThrow(ContractError);
+  });
+  it('PRESENT-wrong-type throws: targetRef as a bare string [RED at HEAD]', () => {
+    const c = chainBase();
+    loosen(c).actions[0]!.targetRef = 'ent_hallway_light';
+    expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).toThrow(ContractError);
+  });
+});
+
+/* ---- R4: the default mock carries the four null arms + the depth-1 chain (the H8 class) ---- */
+describe('FE-NULL-1 — the default mock carries every null arm the v1.1 emitter serves (H8: an always-populated mock hides the null)', () => {
+  const chains = () => Object.values(causalChains);
+  it("the SKIPPED run's action carries command: null AND targetRef: null (the :776 shape), resultOutcome null, settled true", () => {
+    const skipped = chains().flatMap((c) => c.actions).filter((a) => a.outcome === 'SKIPPED');
+    expect(skipped.length).toBeGreaterThanOrEqual(1);
+    expect(skipped.some((a) => a.command === null && a.targetRef === null && a.resultOutcome === null && a.settled === true)).toBe(true);
+    // …and no SKIPPED action still carries the H8 false type (a command it never sent).
+    expect(skipped.every((a) => a.command === null)).toBe(true);
+  });
+  it('ONE condition carries an observedState entry with value: null', () => {
+    const entries = chains().flatMap((c) => c.conditions).flatMap((k) => k.observedState);
+    expect(entries.filter((e) => e.value === null).length).toBeGreaterThanOrEqual(1);
+    expect(entries.filter((e) => typeof e.value === 'string').length).toBeGreaterThanOrEqual(3);
+  });
+  it('ONE chain carries trigger.subjectRef: null (the oldest run — its triggering event outside its correlation)', () => {
+    const nulls = chains().filter((c) => c.trigger.subjectRef === null);
+    expect(nulls.length).toBe(1);
+    expect(nulls[0]!.runId).toBe('run_eh_003');
+    expect(chains().filter((c) => c.trigger.subjectRef !== null).length).toBeGreaterThanOrEqual(3);
+  });
+  it('ONE chain carries cascade { parentRunId: null, depth: 1 } (F4 — V1 never carries a parent id)', () => {
+    const deep = chains().filter((c) => c.cascade.depth > 0);
+    expect(deep.length).toBe(1);
+    expect(deep[0]!.cascade.parentRunId).toBeNull();
+    expect(chains().filter((c) => c.cascade.depth === 0).length).toBeGreaterThanOrEqual(3);
+  });
+  it('every default-mock chain validates under the FE-NULL-1 validators', () => {
+    for (const c of chains()) expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).not.toThrow();
+  });
+});
+
+/* ---- The typed mirror carries the four keys as REQUIRED-NULLABLE (compile-level; tsc runs in `verify`) ---- */
+describe('the TypeScript mirror declares the four chain keys required-nullable (no rename, no bump)', () => {
+  it('a present-null arm on each key is assignable; CONTRACT_VERSION is untouched', () => {
+    const c = chainBase();
+    c.trigger.subjectRef = null;
+    c.conditions[0]!.observedState[0]!.value = null;
+    c.actions[0]!.command = null;
+    c.actions[0]!.targetRef = null;
+    c.cascade = { parentRunId: null, depth: 1 };
+    expect(c.trigger.subjectRef).toBeNull();
+    expect(CONTRACT_VERSION).toBe('v1.1.3-2026-09-06');
   });
 });

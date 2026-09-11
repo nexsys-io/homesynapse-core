@@ -16,18 +16,23 @@ import { StatusPill } from './StatusPill';
 import { href } from '../lib/router';
 import {
   attrValueList,
+  CASCADE_PARENT_UNRECORDED,
   causalSentence,
   clockTimeWithDate,
   danglingTargetLine,
   danglingTriggerLine,
   EMPTY_CHAIN_NOTE,
+  noReadingLine,
   NOT_RECORDED,
   NULL_NAME_NOTE,
   pendingHint,
   refLabel,
   runStatusMeta,
+  SKIPPED_BEFORE_COMMAND,
   triggerVerbFromValue,
   unconfirmableHint,
+  UNNAMED_TARGET,
+  unrecordedTriggerLine,
   UNRESOLVED_REF_HELP,
   UNRESOLVED_REF_PHRASE,
   UNRESOLVED_REF_PILL,
@@ -78,10 +83,15 @@ export function CausalChain({
             "value not recorded" in words, never a blank and never "null". */}
         {/* NEW-6: matchedAt is date-qualified — a run can be days old, and a bare
             clock time on an old run reads as today. */}
+        {/* FE-NULL-1: `subjectRef` is REQUIRED-NULLABLE — null when the triggering event
+            is outside the run's correlation (StandardExplanationService:644–:649). The
+            line is then the HERO-0 sentence with the recorded time; no label, no
+            dangling pill — a null is not an unresolvable id and nothing is accused. */}
         {(() => {
           const trigId = trigger?.subjectRef?.id;
           const trigRes = resolveRef(trigId);
           const trigDangling = !!trigId && trigRes.kind === 'dangling';
+          const trigUnrecorded = trigger?.subjectRef === null;
           return (
             <Step
               kind="trigger"
@@ -90,7 +100,9 @@ export function CausalChain({
               line={
                 trigDangling
                   ? danglingTriggerLine(trigId, triggerVerbFromValue(trigger?.firingValue), clockTimeWithDate(trigger?.matchedAt))
-                  : `${refLabel(trigId, trigRes)} ${triggerVerbFromValue(trigger?.firingValue)} at ${clockTimeWithDate(trigger?.matchedAt)}.`
+                  : trigUnrecorded
+                    ? unrecordedTriggerLine(clockTimeWithDate(trigger?.matchedAt))
+                    : `${refLabel(trigId, trigRes)} ${triggerVerbFromValue(trigger?.firingValue)} at ${clockTimeWithDate(trigger?.matchedAt)}.`
               }
               pill={trigDangling ? <StatusPill tone="error" label={UNRESOLVED_REF_PILL} title={UNRESOLVED_REF_HELP} size="sm" /> : undefined}
             >
@@ -121,7 +133,11 @@ export function CausalChain({
                     .map((o) => {
                       const r = resolveRef(o.entityId);
                       const loud = r.kind === 'dangling' ? ` (${UNRESOLVED_REF_PHRASE})` : '';
-                      return `${refLabel(o.entityId, r)}${loud} ${o.attribute} = ${o.value}`;
+                      // FE-NULL-1: `value` null = the entity had no value for the attribute at
+                      // evaluation (RunExplanation:137) — said in words, never "= null".
+                      return o.value === null
+                        ? noReadingLine(`${refLabel(o.entityId, r)}${loud}`, o.attribute)
+                        : `${refLabel(o.entityId, r)}${loud} ${o.attribute} = ${o.value}`;
                     })
                     .join('; ')}
                 </Detail>
@@ -160,9 +176,17 @@ export function CausalChain({
               tone={targetDangling ? 'error' : v.tone}
               marker={targetDangling ? '!' : '→'}
               line={
-                targetDangling
-                  ? danglingTargetLine(actionPhrase(a.command), targetId)
-                  : `${actionPhrase(a.command)} ${refLabel(targetId, targetRes)}.`
+                /* FE-NULL-1: `command` null = a SKIPPED/FAILED action that never issued a
+                   command (:776) — the honest sentence, not actionPhrase(null)'s fallback
+                   (a dangling target keeps its pill + help below). `targetRef` null = no
+                   target refs (:771) — the phrase names no device and accuses no registry. */
+                a.command === null
+                  ? SKIPPED_BEFORE_COMMAND
+                  : targetDangling
+                    ? danglingTargetLine(actionPhrase(a.command), targetId)
+                    : a.targetRef === null
+                      ? `${actionPhrase(a.command)} ${UNNAMED_TARGET}.`
+                      : `${actionPhrase(a.command)} ${refLabel(targetId, targetRes)}.`
               }
               pill={
                 <>
@@ -230,10 +254,15 @@ export function CausalChain({
         />
       </ol>
 
+      {/* FE-NULL-1 / HERO-0 F4: `parentRunId` is ALWAYS null in V1 (RunExplanation:213–:219)
+          — a null is NOT "root". depth > 0 with no parent id says so honestly (no link);
+          depth 0 renders nothing, as before; a parent id (a later Core) keeps the link. */}
       {chain.cascade?.parentRunId ? (
         <p class={styles.cascade}>
           <a href={href(`/explain/run/${chain.cascade.parentRunId}`)}>← See what triggered this run</a>
         </p>
+      ) : (chain.cascade?.depth ?? 0) > 0 ? (
+        <p class={styles.cascade}>{CASCADE_PARENT_UNRECORDED}</p>
       ) : null}
 
       <p class={styles.permanence}>{t('hero.permanence')}</p>
