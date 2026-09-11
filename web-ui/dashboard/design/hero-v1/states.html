@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{NAME}} — explainability hero, design states v1 (static mockups)</title>
+<!--
+file: web-ui/dashboard/design/hero-v1/states.html
+purpose: Static mockups of the explainability hero in every L1 headline state (SPEC §3), every empty state (§4), the five confirmation modes (§5) and the why-not verdicts, each shown in dark and in light side by side. Self-contained: inline CSS, no scripts, no external resources. Nothing here is wired to the app; the product name appears only as the token {{NAME}}.
+status: v1 — 2026-09-11 (HERO-1 design lane). Colour values are the generated tokens.css values at core HEAD eabdbb1, named in the comment beside each value.
+-->
+<style>
+/* Token values copied by name from src/styles/tokens.css (generated from tokens.dtcg.json) at eabdbb1.
+   The app never uses literals; this file does only because it is a static mockup with no build. */
+.theme-dark {
+  --hs-bg: #0d1014;            /* --hs-bg = --hs-neutral-950 */
+  --hs-surface: #161a20;       /* --hs-surface = --hs-neutral-900 */
+  --hs-surface-sunk: #262c35;  /* --hs-surface-sunk = --hs-neutral-800 */
+  --hs-border: #262c35;        /* --hs-border = --hs-neutral-800 */
+  --hs-border-strong: #3b434f; /* --hs-border-strong = --hs-neutral-700 */
+  --hs-text: #eceff3;          /* --hs-text = --hs-neutral-100 */
+  --hs-text-secondary: #9aa5b2;/* --hs-text-secondary = --hs-neutral-400 */
+  --hs-text-muted: #7e8998;    /* --hs-text-muted (dark, AA-corrected FE-VERDICT-2) */
+  --hs-link: #6db8e8;          /* --hs-link = --hs-accent-300 */
+  --hs-focus-ring: #6db8e8;    /* --hs-focus-ring = --hs-accent-300 */
+  --hs-ok-500: #4ed28a;        /* --hs-ok-500 */
+  --hs-ok-bg: #16291f;         /* --hs-ok-bg */
+  --hs-warn-500: #e3b341;      /* --hs-warn-500 */
+  --hs-warn-bg: #2b2410;       /* --hs-warn-bg */
+  --hs-error-500: #f08a7e;     /* --hs-error-500 */
+  --hs-error-bg: #2c1714;      /* --hs-error-bg */
+  --hs-info-500: #6db8e8;      /* --hs-info-500 = --hs-accent-300 */
+  --hs-info-bg: #112230;       /* --hs-info-bg */
+  --hs-unknown-500: #b3a3d6;   /* --hs-unknown-500 */
+  --hs-unknown-bg: #211b2e;    /* --hs-unknown-bg */
+  --hs-shadow-sm: 0 1px 2px rgba(0,0,0,0.4); /* --hs-shadow-sm */
+}
+.theme-light {
+  --hs-bg: #f6f8fa;            /* --hs-bg = --hs-neutral-50 */
+  --hs-surface: #ffffff;       /* --hs-surface = --hs-neutral-0 */
+  --hs-surface-sunk: #eceff3;  /* --hs-surface-sunk = --hs-neutral-100 */
+  --hs-border: #dde2e9;        /* --hs-border = --hs-neutral-200 */
+  --hs-border-strong: #c4ccd6; /* --hs-border-strong = --hs-neutral-300 */
+  --hs-text: #161a20;          /* --hs-text = --hs-neutral-900 */
+  --hs-text-secondary: #515c6b;/* --hs-text-secondary = --hs-neutral-600 */
+  --hs-text-muted: #6b7787;    /* --hs-text-muted = --hs-neutral-500 (4.28 on --hs-bg — SPEC §9 T1) */
+  --hs-link: #1577be;          /* --hs-link = --hs-accent-500 */
+  --hs-focus-ring: #1577be;    /* --hs-focus-ring = --hs-accent-500 */
+  --hs-ok-500: #157a40;        /* --hs-ok-500 (light) */
+  --hs-ok-bg: #e6f4ec;         /* --hs-ok-bg (light) */
+  --hs-warn-500: #7f5500;      /* --hs-warn-500 (light) */
+  --hs-warn-bg: #fbf1d9;       /* --hs-warn-bg (light) */
+  --hs-error-500: #c1392b;     /* --hs-error-500 (light) */
+  --hs-error-bg: #fbeae8;      /* --hs-error-bg (light) */
+  --hs-info-500: #11608f;      /* --hs-info-500 = --hs-accent-600 (light) */
+  --hs-info-bg: #e9f3fb;       /* --hs-info-bg = --hs-accent-50 (light) */
+  --hs-unknown-500: #6a5b8a;   /* --hs-unknown-500 (light) */
+  --hs-unknown-bg: #efecf5;    /* --hs-unknown-bg (light) */
+  --hs-shadow-sm: 0 1px 2px rgba(13,16,20,0.06), 0 1px 1px rgba(13,16,20,0.04); /* --hs-shadow-sm (light) */
+}
+/* Theme-independent tokens (same names, same values in both themes) */
+:root {
+  --hs-font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; /* --hs-font-sans */
+  --hs-font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace; /* --hs-font-mono */
+  --hs-text-xs: 0.75rem; --hs-text-sm: 0.8125rem; --hs-text-base: 0.9375rem; --hs-text-md: 1.0625rem; --hs-text-lg: 1.375rem; /* type scale */
+  --hs-weight-medium: 500; --hs-weight-semibold: 600;
+  --hs-leading-normal: 1.5; --hs-leading-relaxed: 1.65;
+  --hs-space-1: 0.25rem; --hs-space-2: 0.5rem; --hs-space-3: 0.75rem; --hs-space-4: 1rem; --hs-space-5: 1.5rem; --hs-space-6: 2rem; /* space scale */
+  --hs-radius-sm: 4px; --hs-radius-md: 8px; --hs-radius-pill: 999px; /* radius */
+  --hs-border-width: 1px;
+}
+
+/* Page chrome (the mockup sheet itself, not the product) */
+html { background: #0d1014; color: #eceff3; }
+body { margin: 0; font-family: var(--hs-font-sans); font-size: var(--hs-text-base); line-height: var(--hs-leading-normal); padding: 0 16px 32px; }
+.top { max-width: 1180px; margin: 0 auto; padding: var(--hs-space-6) 0 var(--hs-space-4); }
+.top h1 { font-size: var(--hs-text-lg); font-weight: var(--hs-weight-semibold); margin: 0 0 var(--hs-space-2); }
+.top p { color: #9aa5b2; max-width: 80ch; margin: 0; }
+section { max-width: 1180px; margin: 0 auto var(--hs-space-6); }
+section h2 { font-size: var(--hs-text-md); font-weight: var(--hs-weight-medium); color: #c4ccd6; border-top: 1px solid #262c35; padding-top: var(--hs-space-4); margin: 0 0 var(--hs-space-3); }
+
+/* Each state twice: dark pane | light pane */
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+@media (max-width: 760px) { .pair { grid-template-columns: 1fr; } }
+.pane { background: var(--hs-bg); color: var(--hs-text); padding: var(--hs-space-4); border-radius: var(--hs-radius-md); }
+
+/* The product surfaces, token-only from here down */
+.card { background: var(--hs-surface); border: var(--hs-border-width) solid var(--hs-border); border-radius: var(--hs-radius-md); padding: var(--hs-space-4); box-shadow: var(--hs-shadow-sm); margin-bottom: var(--hs-space-3); }
+.card:last-child { margin-bottom: 0; }
+.cellno { font-size: var(--hs-text-xs); color: var(--hs-text-secondary); margin: 0 0 var(--hs-space-2); letter-spacing: 0.02em; }
+.headline { font-size: var(--hs-text-md); font-weight: var(--hs-weight-medium); line-height: var(--hs-leading-relaxed); color: var(--hs-text); max-width: 56ch; margin: 0 0 var(--hs-space-2); }
+.bodytext { margin: 0 0 var(--hs-space-2); color: var(--hs-text); max-width: 60ch; }
+.key { font-family: var(--hs-font-mono); font-size: var(--hs-text-xs); color: var(--hs-text-secondary); margin: var(--hs-space-2) 0 0; word-break: break-word; }
+.pills { display: flex; gap: var(--hs-space-2); align-items: center; flex-wrap: wrap; margin: 0; }
+.autoname { color: var(--hs-text-secondary); font-size: var(--hs-text-sm); }
+.link { margin: 0; font-size: var(--hs-text-sm); }
+a { color: var(--hs-link); }
+a:focus-visible, summary:focus-visible, .btn:focus-visible { outline: 2px solid var(--hs-focus-ring); outline-offset: 2px; }
+.btn { font: inherit; font-size: var(--hs-text-sm); color: var(--hs-text); background: var(--hs-surface-sunk); border: 1px solid var(--hs-border-strong); border-radius: var(--hs-radius-sm); padding: 4px 10px; }
+.small { font-size: var(--hs-text-sm); color: var(--hs-text-secondary); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: var(--hs-space-1) var(--hs-space-4); margin: var(--hs-space-2) 0 0; font-size: var(--hs-text-sm); }
+.kv dt { color: var(--hs-text-secondary); } .kv dd { margin: 0; }
+
+/* Status pill (StatusPill.module.css) — label + glyph carry the state; hue reinforces */
+.pill { display: inline-flex; align-items: center; gap: var(--hs-space-1); padding: 1px 6px; border-radius: var(--hs-radius-pill); font-size: 11px; font-weight: var(--hs-weight-medium); line-height: 1.4; white-space: nowrap; border: var(--hs-border-width) solid transparent; }
+.glyph { width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.provisional { border-style: dashed; border-color: currentColor; background: transparent !important; }
+.ok      { color: var(--hs-ok-500);      background: var(--hs-ok-bg); }
+.warn    { color: var(--hs-warn-500);    background: var(--hs-warn-bg); }
+.error   { color: var(--hs-error-500);   background: var(--hs-error-bg); }
+.info    { color: var(--hs-info-500);    background: var(--hs-info-bg); }
+.unknown { color: var(--hs-unknown-500); background: var(--hs-unknown-bg); }
+.neutral { color: var(--hs-text-secondary); background: var(--hs-surface-sunk); }
+
+/* The bounded, linear chain (CausalChain.module.css) */
+.chain { list-style: none; margin: var(--hs-space-2) 0 0; padding: 0; display: flex; flex-direction: column; }
+.step { position: relative; display: grid; grid-template-columns: 28px 1fr; gap: var(--hs-space-3); padding: 0 0 var(--hs-space-4); }
+.step:not(:last-child)::before { content: ''; position: absolute; left: 13px; top: 22px; bottom: 0; width: 2px; background: var(--hs-border); }
+.marker { width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: var(--hs-weight-semibold); background: var(--hs-surface-sunk); color: var(--hs-text-secondary); border: 1px solid var(--hs-border); z-index: 1; }
+.marker.ok, .marker.warn, .marker.error, .marker.info, .marker.unknown { border-color: transparent; }
+.body { padding-top: 3px; min-width: 0; }
+.line { display: flex; align-items: center; gap: var(--hs-space-2); flex-wrap: wrap; font-size: var(--hs-text-base); line-height: var(--hs-leading-normal); }
+.hint { margin: 2px 0 0; font-size: var(--hs-text-sm); color: var(--hs-text-secondary); line-height: var(--hs-leading-normal); max-width: 56ch; }
+.detail { font-size: var(--hs-text-sm); margin-top: 4px; }
+.detail summary { cursor: pointer; color: var(--hs-text-muted); font-size: var(--hs-text-xs); width: fit-content; list-style: none; }
+.detail summary::-webkit-details-marker { display: none; }
+.detail summary::before { content: '▸ '; } .detail[open] summary::before { content: '▾ '; }
+.dbody { margin-top: 4px; color: var(--hs-text-secondary); /* §8: secondary, not muted, on the sunk surface */ font-family: var(--hs-font-mono); font-size: var(--hs-text-xs); background: var(--hs-surface-sunk); padding: 6px 8px; border-radius: var(--hs-radius-sm); word-break: break-word; }
+.cascade { font-size: var(--hs-text-sm); margin: var(--hs-space-2) 0 0; }
+.asof { font-size: var(--hs-text-xs); color: var(--hs-text-secondary); margin: var(--hs-space-2) 0 0; }
+.permanence { font-size: var(--hs-text-sm); color: var(--hs-text-secondary); background: var(--hs-ok-bg); border-left: 3px solid var(--hs-ok-500); padding: var(--hs-space-2) var(--hs-space-3); border-radius: var(--hs-radius-sm); line-height: var(--hs-leading-normal); max-width: 60ch; margin: var(--hs-space-3) 0 0; }
+
+/* Screen-reader-only text (the label half for assistive tech) */
+.sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* No motion is used in this mockup; the build's settle transition is disabled here regardless */
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+</style>
+</head>
+<body>
+<header class="top"><h1>{{NAME}} · explainability hero — design states v1</h1><p>Each state twice: dark (the recorded default) on the left, light on the right. Labels and shapes carry every state; cover the colours and the states still read. Sample names and times are fixtures. Dashed pills are provisional. Keys under each card are the copy keys of SPEC §7.</p></header>
+<section><h2>A. The reference run card (L1 + the bounded chain + L2 one expand away)</h2>
+<div class="pair"><div class="theme-dark pane"><article class="card run">
+  <p class="headline">Hallway Light turned on because Hallway Motion detected motion at 9:42 pm.</p>
+  <ol class="chain" aria-label="Step-by-step explanation, from trigger to outcome">
+    <li class="step"><span class="marker info" aria-hidden="true">●</span><div class="body"><span class="sr">Step 1 of 4: trigger.</span><div class="line"><span>Hallway Motion set it off at 9:42 pm — the reading wasn&#x27;t recorded.</span></div>
+      <details class="detail"><summary>Trigger</summary><div class="dbody">state_changed · value not recorded</div></details></div></li>
+    <li class="step"><span class="marker ok" aria-hidden="true">✓</span><div class="body"><span class="sr">Step 2 of 4: condition — was true.</span><div class="line"><span>The rule "someone is home" was true.</span></div>
+      <details class="detail"><summary>At the time</summary><div class="dbody">Front Door presence = home; Hallway Lamp brightness had no reading yet.</div></details></div></li>
+    <li class="step"><span class="marker ok" aria-hidden="true">→</span><div class="body"><span class="sr">Step 3 of 4: action — Confirmed.</span><div class="line"><span>Hallway Light turned on.</span><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span></div>
+      <details class="detail"><summary>Command</summary><div class="dbody">turn_on (brightness 82)</div></details></div></li>
+    <li class="step"><span class="marker ok" aria-hidden="true">◆</span><div class="body"><span class="sr">Step 4 of 4: outcome — Done.</span><div class="line"><span>Done in 1.2s.</span><span class="pill ok">Done</span></div></div></li>
+  </ol>
+  <p class="cascade">Started by another run — which one isn&#x27;t recorded.</p>
+  <p class="asof">As of 9:42 pm · live</p>
+  <p class="permanence">Rebuilt from the permanent activity log. Nothing here is ever deleted, so this run is always here.</p>
+</article></div><div class="theme-light pane"><article class="card run">
+  <p class="headline">Hallway Light turned on because Hallway Motion detected motion at 9:42 pm.</p>
+  <ol class="chain" aria-label="Step-by-step explanation, from trigger to outcome">
+    <li class="step"><span class="marker info" aria-hidden="true">●</span><div class="body"><span class="sr">Step 1 of 4: trigger.</span><div class="line"><span>Hallway Motion set it off at 9:42 pm — the reading wasn&#x27;t recorded.</span></div>
+      <details class="detail"><summary>Trigger</summary><div class="dbody">state_changed · value not recorded</div></details></div></li>
+    <li class="step"><span class="marker ok" aria-hidden="true">✓</span><div class="body"><span class="sr">Step 2 of 4: condition — was true.</span><div class="line"><span>The rule "someone is home" was true.</span></div>
+      <details class="detail"><summary>At the time</summary><div class="dbody">Front Door presence = home; Hallway Lamp brightness had no reading yet.</div></details></div></li>
+    <li class="step"><span class="marker ok" aria-hidden="true">→</span><div class="body"><span class="sr">Step 3 of 4: action — Confirmed.</span><div class="line"><span>Hallway Light turned on.</span><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span></div>
+      <details class="detail"><summary>Command</summary><div class="dbody">turn_on (brightness 82)</div></details></div></li>
+    <li class="step"><span class="marker ok" aria-hidden="true">◆</span><div class="body"><span class="sr">Step 4 of 4: outcome — Done.</span><div class="line"><span>Done in 1.2s.</span><span class="pill ok">Done</span></div></div></li>
+  </ol>
+  <p class="cascade">Started by another run — which one isn&#x27;t recorded.</p>
+  <p class="asof">As of 9:42 pm · live</p>
+  <p class="permanence">Rebuilt from the permanent activity log. Nothing here is ever deleted, so this run is always here.</p>
+</article></div></div>
+</section>
+<section><h2>B. The L1 headline — every (RunStatus × leading ActionOutcome) cell, plus the silent skip and the two mode overrides</h2>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 1">
+  <p class="cellno">#1 · COMPLETED × CONFIRMED</p>
+  <p class="headline">Hallway Light turned on because Hallway Motion detected motion at 9:42 pm.</p>
+  <p class="pills"><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span><span class="pill ok">Done</span></p>
+  <p class="key">explain.headline.completed.confirmed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 1">
+  <p class="cellno">#1 · COMPLETED × CONFIRMED</p>
+  <p class="headline">Hallway Light turned on because Hallway Motion detected motion at 9:42 pm.</p>
+  <p class="pills"><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span><span class="pill ok">Done</span></p>
+  <p class="key">explain.headline.completed.confirmed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 2">
+  <p class="cellno">#2 · COMPLETED × DISPATCHED</p>
+  <p class="headline">Hallway Light was asked to turn on because Hallway Motion detected motion at 9:42 pm — no confirmation yet.</p>
+  <p class="pills"><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet</span><span class="pill ok">Done</span></p>
+  <p class="key">explain.headline.completed.dispatched</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 2">
+  <p class="cellno">#2 · COMPLETED × DISPATCHED</p>
+  <p class="headline">Hallway Light was asked to turn on because Hallway Motion detected motion at 9:42 pm — no confirmation yet.</p>
+  <p class="pills"><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet</span><span class="pill ok">Done</span></p>
+  <p class="key">explain.headline.completed.dispatched</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 3">
+  <p class="cellno">#3 · COMPLETED × UNCONFIRMED</p>
+  <p class="headline">Hallway Light was asked to turn on because Hallway Motion detected motion at 9:42 pm — it never confirmed.</p>
+  <p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span><span class="pill ok">Done</span></p>
+  <p class="key">explain.headline.completed.unconfirmed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 3">
+  <p class="cellno">#3 · COMPLETED × UNCONFIRMED</p>
+  <p class="headline">Hallway Light was asked to turn on because Hallway Motion detected motion at 9:42 pm — it never confirmed.</p>
+  <p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span><span class="pill ok">Done</span></p>
+  <p class="key">explain.headline.completed.unconfirmed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 4">
+  <p class="cellno">#4 · COMPLETED × FAILED</p>
+  <p class="headline">Hallway Light was asked to turn on because Hallway Motion detected motion at 9:42 pm, but the command failed.</p>
+  <p class="pills"><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span><span class="pill ok">Done</span></p>
+  <p class="key">explain.headline.completed.failed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 4">
+  <p class="cellno">#4 · COMPLETED × FAILED</p>
+  <p class="headline">Hallway Light was asked to turn on because Hallway Motion detected motion at 9:42 pm, but the command failed.</p>
+  <p class="pills"><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span><span class="pill ok">Done</span></p>
+  <p class="key">explain.headline.completed.failed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 5">
+  <p class="cellno">#5 · COMPLETED × SKIPPED</p>
+  <p class="headline">Nothing was sent to Hallway Light when Hallway Motion detected motion at 9:42 pm — that step was skipped.</p>
+  <p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span><span class="pill ok">Done</span></p>
+  <p class="key">explain.headline.completed.skipped</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 5">
+  <p class="cellno">#5 · COMPLETED × SKIPPED</p>
+  <p class="headline">Nothing was sent to Hallway Light when Hallway Motion detected motion at 9:42 pm — that step was skipped.</p>
+  <p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span><span class="pill ok">Done</span></p>
+  <p class="key">explain.headline.completed.skipped</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 6">
+  <p class="cellno">#6 · COMPLETED × —</p>
+  <p class="headline">Evening Lights ran when Hallway Motion detected motion at 9:42 pm and recorded no steps.</p>
+  <p class="pills"><span class="pill unknown">Done, recorded no steps</span></p>
+  <p class="key">explain.headline.completed.none</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 6">
+  <p class="cellno">#6 · COMPLETED × —</p>
+  <p class="headline">Evening Lights ran when Hallway Motion detected motion at 9:42 pm and recorded no steps.</p>
+  <p class="pills"><span class="pill unknown">Done, recorded no steps</span></p>
+  <p class="key">explain.headline.completed.none</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 7">
+  <p class="cellno">#7 · SKIPPED × CONFIRMED</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm. Hallway Light did turn on first, and confirmed it.</p>
+  <p class="pills"><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.confirmed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 7">
+  <p class="cellno">#7 · SKIPPED × CONFIRMED</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm. Hallway Light did turn on first, and confirmed it.</p>
+  <p class="pills"><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.confirmed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 8">
+  <p class="cellno">#8 · SKIPPED × DISPATCHED</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; no confirmation has come back.</p>
+  <p class="pills"><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet</span><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.dispatched</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 8">
+  <p class="cellno">#8 · SKIPPED × DISPATCHED</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; no confirmation has come back.</p>
+  <p class="pills"><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet</span><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.dispatched</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 9">
+  <p class="cellno">#9 · SKIPPED × UNCONFIRMED</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; it never confirmed.</p>
+  <p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.unconfirmed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 9">
+  <p class="cellno">#9 · SKIPPED × UNCONFIRMED</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; it never confirmed.</p>
+  <p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.unconfirmed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 10">
+  <p class="cellno">#10 · SKIPPED × FAILED</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm. The command to Hallway Light failed.</p>
+  <p class="pills"><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.failed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 10">
+  <p class="cellno">#10 · SKIPPED × FAILED</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm. The command to Hallway Light failed.</p>
+  <p class="pills"><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.failed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 11">
+  <p class="cellno">#11 · SKIPPED × SKIPPED</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm. Nothing was sent to Hallway Light.</p>
+  <p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.skipped</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 11">
+  <p class="cellno">#11 · SKIPPED × SKIPPED</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm. Nothing was sent to Hallway Light.</p>
+  <p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.skipped</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 12">
+  <p class="cellno">#12 · SKIPPED × —</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm.</p>
+  <p class="pills"><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.none</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 12">
+  <p class="cellno">#12 · SKIPPED × —</p>
+  <p class="headline">Evening Lights skipped this run when Hallway Motion detected motion at 9:42 pm.</p>
+  <p class="pills"><span class="pill unknown">Skipped</span></p>
+  <p class="key">explain.headline.skipped.frame + explain.headline.tail.none</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 13">
+  <p class="cellno">#13 · FAILED × CONFIRMED</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm. Hallway Light did turn on first, and confirmed it.</p>
+  <p class="pills"><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.confirmed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 13">
+  <p class="cellno">#13 · FAILED × CONFIRMED</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm. Hallway Light did turn on first, and confirmed it.</p>
+  <p class="pills"><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.confirmed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 14">
+  <p class="cellno">#14 · FAILED × DISPATCHED</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; no confirmation has come back.</p>
+  <p class="pills"><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet</span><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.dispatched</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 14">
+  <p class="cellno">#14 · FAILED × DISPATCHED</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; no confirmation has come back.</p>
+  <p class="pills"><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet</span><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.dispatched</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 15">
+  <p class="cellno">#15 · FAILED × UNCONFIRMED</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; it never confirmed.</p>
+  <p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.unconfirmed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 15">
+  <p class="cellno">#15 · FAILED × UNCONFIRMED</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; it never confirmed.</p>
+  <p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.unconfirmed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 16">
+  <p class="cellno">#16 · FAILED × FAILED</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm. The command to Hallway Light failed.</p>
+  <p class="pills"><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.failed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 16">
+  <p class="cellno">#16 · FAILED × FAILED</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm. The command to Hallway Light failed.</p>
+  <p class="pills"><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.failed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 17">
+  <p class="cellno">#17 · FAILED × SKIPPED</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm. Nothing was sent to Hallway Light.</p>
+  <p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.skipped</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 17">
+  <p class="cellno">#17 · FAILED × SKIPPED</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm. Nothing was sent to Hallway Light.</p>
+  <p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.skipped</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 18">
+  <p class="cellno">#18 · FAILED × —</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm.</p>
+  <p class="pills"><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.none</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 18">
+  <p class="cellno">#18 · FAILED × —</p>
+  <p class="headline">Evening Lights failed part-way when Hallway Motion detected motion at 9:42 pm.</p>
+  <p class="pills"><span class="pill error">Failed</span></p>
+  <p class="key">explain.headline.failed.frame + explain.headline.tail.none</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 19">
+  <p class="cellno">#19 · CANCELLED × CONFIRMED</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm. Hallway Light did turn on first, and confirmed it.</p>
+  <p class="pills"><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.confirmed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 19">
+  <p class="cellno">#19 · CANCELLED × CONFIRMED</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm. Hallway Light did turn on first, and confirmed it.</p>
+  <p class="pills"><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.confirmed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 20">
+  <p class="cellno">#20 · CANCELLED × DISPATCHED</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; no confirmation has come back.</p>
+  <p class="pills"><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet</span><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.dispatched</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 20">
+  <p class="cellno">#20 · CANCELLED × DISPATCHED</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; no confirmation has come back.</p>
+  <p class="pills"><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet</span><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.dispatched</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 21">
+  <p class="cellno">#21 · CANCELLED × UNCONFIRMED</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; it never confirmed.</p>
+  <p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.unconfirmed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 21">
+  <p class="cellno">#21 · CANCELLED × UNCONFIRMED</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; it never confirmed.</p>
+  <p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.unconfirmed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 22">
+  <p class="cellno">#22 · CANCELLED × FAILED</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm. The command to Hallway Light failed.</p>
+  <p class="pills"><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.failed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 22">
+  <p class="cellno">#22 · CANCELLED × FAILED</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm. The command to Hallway Light failed.</p>
+  <p class="pills"><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.failed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 23">
+  <p class="cellno">#23 · CANCELLED × SKIPPED</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm. Nothing was sent to Hallway Light.</p>
+  <p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.skipped</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 23">
+  <p class="cellno">#23 · CANCELLED × SKIPPED</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm. Nothing was sent to Hallway Light.</p>
+  <p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.skipped</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 24">
+  <p class="cellno">#24 · CANCELLED × —</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm.</p>
+  <p class="pills"><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.none</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 24">
+  <p class="cellno">#24 · CANCELLED × —</p>
+  <p class="headline">Evening Lights was cancelled after Hallway Motion detected motion at 9:42 pm.</p>
+  <p class="pills"><span class="pill neutral">Cancelled</span></p>
+  <p class="key">explain.headline.cancelled.frame + explain.headline.tail.none</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 25">
+  <p class="cellno">#25 · INTERRUPTED × CONFIRMED</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm. Hallway Light did turn on first, and confirmed it.</p>
+  <p class="pills"><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.confirmed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 25">
+  <p class="cellno">#25 · INTERRUPTED × CONFIRMED</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm. Hallway Light did turn on first, and confirmed it.</p>
+  <p class="pills"><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.confirmed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 26">
+  <p class="cellno">#26 · INTERRUPTED × DISPATCHED</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; no confirmation has come back.</p>
+  <p class="pills"><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet</span><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.dispatched</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 26">
+  <p class="cellno">#26 · INTERRUPTED × DISPATCHED</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; no confirmation has come back.</p>
+  <p class="pills"><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet</span><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.dispatched</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 27">
+  <p class="cellno">#27 · INTERRUPTED × UNCONFIRMED</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; it never confirmed.</p>
+  <p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.unconfirmed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 27">
+  <p class="cellno">#27 · INTERRUPTED × UNCONFIRMED</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm. Hallway Light was asked to turn on; it never confirmed.</p>
+  <p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.unconfirmed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 28">
+  <p class="cellno">#28 · INTERRUPTED × FAILED</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm. The command to Hallway Light failed.</p>
+  <p class="pills"><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.failed</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 28">
+  <p class="cellno">#28 · INTERRUPTED × FAILED</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm. The command to Hallway Light failed.</p>
+  <p class="pills"><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.failed</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 29">
+  <p class="cellno">#29 · INTERRUPTED × SKIPPED</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm. Nothing was sent to Hallway Light.</p>
+  <p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.skipped</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 29">
+  <p class="cellno">#29 · INTERRUPTED × SKIPPED</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm. Nothing was sent to Hallway Light.</p>
+  <p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.skipped</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card" aria-label="cell 30">
+  <p class="cellno">#30 · INTERRUPTED × —</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm.</p>
+  <p class="pills"><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.none</p>
+</article></div><div class="theme-light pane"><article class="card" aria-label="cell 30">
+  <p class="cellno">#30 · INTERRUPTED × —</p>
+  <p class="headline">Evening Lights was cut off before it finished, after Hallway Motion detected motion at 9:42 pm.</p>
+  <p class="pills"><span class="pill warn">Cut off</span></p>
+  <p class="key">explain.headline.interrupted.frame + explain.headline.tail.none</p>
+</article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card"><p class="cellno">COMPLETED × — (silent skip: actionCount&gt;0, commandCount 0)</p><p class="headline">Evening Lights ran when Hallway Motion detected motion at 9:42 pm, but nothing was changed.</p><p class="pills"><span class="pill warn">Completed, nothing changed</span></p><p class="key">explain.headline.completed.silentSkip</p></article></div><div class="theme-light pane"><article class="card"><p class="cellno">COMPLETED × — (silent skip: actionCount&gt;0, commandCount 0)</p><p class="headline">Evening Lights ran when Hallway Motion detected motion at 9:42 pm, but nothing was changed.</p><p class="pills"><span class="pill warn">Completed, nothing changed</span></p><p class="key">explain.headline.completed.silentSkip</p></article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card"><p class="cellno">COMPLETED × DISPATCHED|FAILED, mode = superseded (override)</p><p class="headline">Hallway Light was asked to turn on because Hallway Motion detected motion at 9:42 pm, then a newer command replaced it.</p><p class="pills"><span class="pill neutral"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 4.8h7L8.2 3M11 9.2H4l1.8 1.8"/></svg>Replaced</span></p><p class="key">explain.headline.completed.superseded</p></article></div><div class="theme-light pane"><article class="card"><p class="cellno">COMPLETED × DISPATCHED|FAILED, mode = superseded (override)</p><p class="headline">Hallway Light was asked to turn on because Hallway Motion detected motion at 9:42 pm, then a newer command replaced it.</p><p class="pills"><span class="pill neutral"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 4.8h7L8.2 3M11 9.2H4l1.8 1.8"/></svg>Replaced</span></p><p class="key">explain.headline.completed.superseded</p></article></div></div>
+<div class="pair"><div class="theme-dark pane"><article class="card"><p class="cellno">COMPLETED × FAILED, mode = expired-restart (override)</p><p class="headline">Hallway Light was asked to turn on because Hallway Motion detected motion at 9:42 pm; the hub restarted before it could confirm.</p><p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M11.5 7A4.5 4.5 0 113.9 3.8M11.5 2.5v2h-2"/></svg>Expired at restart</span></p><p class="key">explain.headline.completed.expiredRestart</p></article></div><div class="theme-light pane"><article class="card"><p class="cellno">COMPLETED × FAILED, mode = expired-restart (override)</p><p class="headline">Hallway Light was asked to turn on because Hallway Motion detected motion at 9:42 pm; the hub restarted before it could confirm.</p><p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M11.5 7A4.5 4.5 0 113.9 3.8M11.5 2.5v2h-2"/></svg>Expired at restart</span></p><p class="key">explain.headline.completed.expiredRestart</p></article></div></div>
+</section>
+<section><h2>C. The confirmation states — the five modes and their neighbours, distinct by label and shape (colour reinforces)</h2>
+<div class="pair"><div class="theme-dark pane"><article class="card run"><ol class="chain"><li class="step"><span class="marker ok" aria-hidden="true">→</span><div class="body"><span class="sr">Step 1 of 9: action — Confirmed.</span><p class="cellno">confirmed</p><div class="line"><span>Hallway Light turned on.</span><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span></div><p class="hint">The device&#x27;s own report confirms it.</p></div></li><li class="step"><span class="marker info" aria-hidden="true">→</span><div class="body"><span class="sr">Step 2 of 9: action — Sent — not settled yet. Provisional — may still change.</span><p class="cellno">4 · held-DISPATCHED (provisional)</p><div class="line"><span>Hallway Light was asked to turn on; waiting for it to confirm.</span><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet<span class="sr">Provisional — may still change</span></span></div><p class="hint">The outcome can still change when the device reports.</p></div></li><li class="step"><span class="marker warn" aria-hidden="true">→</span><div class="body"><span class="sr">Step 3 of 9: action — Sent — no reply.</span><p class="cellno">1 · dispatched-and-timed-out</p><div class="line"><span>Hallway Light was asked to turn on; no reply came within its window.</span><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span></div><p class="hint">The device did not report within the time allowed for this kind of command. It may still have acted.</p></div></li><li class="step"><span class="marker neutral" aria-hidden="true">→</span><div class="body"><span class="sr">Step 4 of 9: action — Replaced.</span><p class="cellno">2 · superseded-same-attribute</p><div class="line"><span>Hallway Light was asked to turn on, then a newer command replaced it.</span><span class="pill neutral"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 4.8h7L8.2 3M11 9.2H4l1.8 1.8"/></svg>Replaced</span></div><p class="hint">A later command changed the same setting, so this one stopped waiting. This is not a failure.</p></div></li><li class="step"><span class="marker warn" aria-hidden="true">→</span><div class="body"><span class="sr">Step 5 of 9: action — Accepted, never confirmed.</span><p class="cellno">3 · acked-then-silent-forever</p><div class="line"><span>Hallway Light accepted the command to turn on, but never reported acting.</span><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.8 5.6l1.8 1.8 3.4-3.4M9 10.4h.05M11 10.4h.05M12.9 10.4h.05"/></svg>Accepted, never confirmed</span></div><p class="hint">Accepting a command is not the same as doing it. No report followed.</p></div></li><li class="step"><span class="marker error" aria-hidden="true">!</span><div class="body"><span class="sr">Step 6 of 9: action — Failed.</span><p class="cellno">5 · settled-FAILED-on-window-close</p><div class="line"><span>The command to turn on Hallway Light failed — the bridge was offline.</span><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span></div><p class="hint">The recorded reason says why.</p></div></li><li class="step"><span class="marker unknown" aria-hidden="true">→</span><div class="body"><span class="sr">Step 7 of 9: action — Expired at restart.</span><p class="cellno">expired at restart</p><div class="line"><span>Hallway Light was asked to turn on; the hub restarted before it could confirm.</span><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M11.5 7A4.5 4.5 0 113.9 3.8M11.5 2.5v2h-2"/></svg>Expired at restart</span></div><p class="hint">Waiting does not survive a restart, so the outcome was closed unknown. This is bookkeeping, not a device fault.</p></div></li><li class="step"><span class="marker unknown" aria-hidden="true">→</span><div class="body"><span class="sr">Step 8 of 9: action — Skipped.</span><p class="cellno">skipped</p><div class="line"><span>Skipped before any command was sent.</span><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span></div></div></li><li class="step"><span class="marker unknown" aria-hidden="true">→</span><div class="body"><span class="sr">Step 9 of 9: action — Not recorded.</span><p class="cellno">not recorded</p><div class="line"><span>What happened to Hallway Light isn&#x27;t recorded.</span><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7h2M6.5 7h2M9.5 7h2"/></svg>Not recorded</span></div></div></li></ol></article></div><div class="theme-light pane"><article class="card run"><ol class="chain"><li class="step"><span class="marker ok" aria-hidden="true">→</span><div class="body"><span class="sr">Step 1 of 9: action — Confirmed.</span><p class="cellno">confirmed</p><div class="line"><span>Hallway Light turned on.</span><span class="pill ok"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7.2l2.2 2.3L10.5 4"/></svg>Confirmed</span></div><p class="hint">The device&#x27;s own report confirms it.</p></div></li><li class="step"><span class="marker info" aria-hidden="true">→</span><div class="body"><span class="sr">Step 2 of 9: action — Sent — not settled yet. Provisional — may still change.</span><p class="cellno">4 · held-DISPATCHED (provisional)</p><div class="line"><span>Hallway Light was asked to turn on; waiting for it to confirm.</span><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — not settled yet<span class="sr">Provisional — may still change</span></span></div><p class="hint">The outcome can still change when the device reports.</p></div></li><li class="step"><span class="marker warn" aria-hidden="true">→</span><div class="body"><span class="sr">Step 3 of 9: action — Sent — no reply.</span><p class="cellno">1 · dispatched-and-timed-out</p><div class="line"><span>Hallway Light was asked to turn on; no reply came within its window.</span><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — no reply</span></div><p class="hint">The device did not report within the time allowed for this kind of command. It may still have acted.</p></div></li><li class="step"><span class="marker neutral" aria-hidden="true">→</span><div class="body"><span class="sr">Step 4 of 9: action — Replaced.</span><p class="cellno">2 · superseded-same-attribute</p><div class="line"><span>Hallway Light was asked to turn on, then a newer command replaced it.</span><span class="pill neutral"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 4.8h7L8.2 3M11 9.2H4l1.8 1.8"/></svg>Replaced</span></div><p class="hint">A later command changed the same setting, so this one stopped waiting. This is not a failure.</p></div></li><li class="step"><span class="marker warn" aria-hidden="true">→</span><div class="body"><span class="sr">Step 5 of 9: action — Accepted, never confirmed.</span><p class="cellno">3 · acked-then-silent-forever</p><div class="line"><span>Hallway Light accepted the command to turn on, but never reported acting.</span><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.8 5.6l1.8 1.8 3.4-3.4M9 10.4h.05M11 10.4h.05M12.9 10.4h.05"/></svg>Accepted, never confirmed</span></div><p class="hint">Accepting a command is not the same as doing it. No report followed.</p></div></li><li class="step"><span class="marker error" aria-hidden="true">!</span><div class="body"><span class="sr">Step 6 of 9: action — Failed.</span><p class="cellno">5 · settled-FAILED-on-window-close</p><div class="line"><span>The command to turn on Hallway Light failed — the bridge was offline.</span><span class="pill error"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>Failed</span></div><p class="hint">The recorded reason says why.</p></div></li><li class="step"><span class="marker unknown" aria-hidden="true">→</span><div class="body"><span class="sr">Step 7 of 9: action — Expired at restart.</span><p class="cellno">expired at restart</p><div class="line"><span>Hallway Light was asked to turn on; the hub restarted before it could confirm.</span><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M11.5 7A4.5 4.5 0 113.9 3.8M11.5 2.5v2h-2"/></svg>Expired at restart</span></div><p class="hint">Waiting does not survive a restart, so the outcome was closed unknown. This is bookkeeping, not a device fault.</p></div></li><li class="step"><span class="marker unknown" aria-hidden="true">→</span><div class="body"><span class="sr">Step 8 of 9: action — Skipped.</span><p class="cellno">skipped</p><div class="line"><span>Skipped before any command was sent.</span><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Skipped</span></div></div></li><li class="step"><span class="marker unknown" aria-hidden="true">→</span><div class="body"><span class="sr">Step 9 of 9: action — Not recorded.</span><p class="cellno">not recorded</p><div class="line"><span>What happened to Hallway Light isn&#x27;t recorded.</span><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7h2M6.5 7h2M9.5 7h2"/></svg>Not recorded</span></div></div></li></ol></article></div></div>
+</section>
+<section><h2>D. The four empty states</h2>
+<div class="pair"><div class="theme-dark pane"><article class="card"><p class="cellno">1 · not fired (why-not, NEVER_TRIGGERED, no run)</p>
+  <p class="pills"><span class="pill neutral">Nothing set it off</span><span class="autoname">Evening Lights</span></p>
+  <p class="headline">It hasn&#x27;t run yet.</p><p class="bodytext">Nothing has set it off since this automation was loaded. It runs on motion in the hallway. Nothing is wrong — it&#x27;s waiting.</p>
+  <dl class="kv"><dt>What would make it run</dt><dd>motion in the hallway<br><span class="small">Watching: Hallway Motion</span></dd><dt>Last checked</dt><dd>Never checked yet.</dd></dl></article>
+<article class="card"><p class="cellno">2 · no detail recorded (run page, era-boundary skeleton chain)</p>
+  <p class="headline">This run is on record, but its steps aren&#x27;t.</p>
+  <p class="hint">This run happened under an earlier version of your automations, so its name is no longer on record. The run itself is preserved.</p>
+  <ol class="chain"><li class="step"><span class="marker info" aria-hidden="true">●</span><div class="body"><div class="line"><span>Something set it off at 3 Sep, 9:42 pm (what isn&#x27;t recorded).</span></div></div></li>
+  <li class="step"><span class="marker unknown" aria-hidden="true">○</span><div class="body"><div class="line"><span>It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed.</span></div></div></li>
+  <li class="step"><span class="marker unknown" aria-hidden="true">◆</span><div class="body"><div class="line"><span>Done.</span><span class="pill unknown">Done, recorded no steps</span></div></div></li></ol></article>
+<article class="card"><p class="cellno">3 · reading not recorded (trigger step, firingValue null — today: every run)</p>
+  <ol class="chain"><li class="step"><span class="marker info" aria-hidden="true">●</span><div class="body"><div class="line"><span>Hallway Motion set it off at 9:42 pm — the reading wasn&#x27;t recorded.</span></div><details class="detail" open><summary>Trigger</summary><div class="dbody">state_changed · value not recorded</div></details></div></li></ol></article>
+<article class="card"><p class="cellno">4a · confirmation unknown — settled UNCONFIRMED</p>
+  <ol class="chain"><li class="step"><span class="marker warn" aria-hidden="true">→</span><div class="body"><div class="line"><span>Hallway Light was asked to turn on; no reply came within its window.</span><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — the device never confirmed.</span></div><p class="hint">The command was sent; no confirmation came back — no reply within the window. It may have worked — the record can&#x27;t say.</p></div></li></ol></article>
+<article class="card"><p class="cellno">4b · confirmation unknown — unsettled DISPATCHED (no timer, no countdown)</p>
+  <ol class="chain"><li class="step"><span class="marker info" aria-hidden="true">→</span><div class="body"><div class="line"><span>Hallway Light was asked to set to warm white; waiting for it to confirm.</span><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — waiting for the device to confirm.<span class="sr">Provisional — may still change</span></span></div><p class="hint">Most devices confirm within a second or two. This updates when the device reports.</p><p class="hint">Colour changes confirm slowly on some bulbs — this can take several seconds.</p></div></li></ol></article></div><div class="theme-light pane"><article class="card"><p class="cellno">1 · not fired (why-not, NEVER_TRIGGERED, no run)</p>
+  <p class="pills"><span class="pill neutral">Nothing set it off</span><span class="autoname">Evening Lights</span></p>
+  <p class="headline">It hasn&#x27;t run yet.</p><p class="bodytext">Nothing has set it off since this automation was loaded. It runs on motion in the hallway. Nothing is wrong — it&#x27;s waiting.</p>
+  <dl class="kv"><dt>What would make it run</dt><dd>motion in the hallway<br><span class="small">Watching: Hallway Motion</span></dd><dt>Last checked</dt><dd>Never checked yet.</dd></dl></article>
+<article class="card"><p class="cellno">2 · no detail recorded (run page, era-boundary skeleton chain)</p>
+  <p class="headline">This run is on record, but its steps aren&#x27;t.</p>
+  <p class="hint">This run happened under an earlier version of your automations, so its name is no longer on record. The run itself is preserved.</p>
+  <ol class="chain"><li class="step"><span class="marker info" aria-hidden="true">●</span><div class="body"><div class="line"><span>Something set it off at 3 Sep, 9:42 pm (what isn&#x27;t recorded).</span></div></div></li>
+  <li class="step"><span class="marker unknown" aria-hidden="true">○</span><div class="body"><div class="line"><span>It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed.</span></div></div></li>
+  <li class="step"><span class="marker unknown" aria-hidden="true">◆</span><div class="body"><div class="line"><span>Done.</span><span class="pill unknown">Done, recorded no steps</span></div></div></li></ol></article>
+<article class="card"><p class="cellno">3 · reading not recorded (trigger step, firingValue null — today: every run)</p>
+  <ol class="chain"><li class="step"><span class="marker info" aria-hidden="true">●</span><div class="body"><div class="line"><span>Hallway Motion set it off at 9:42 pm — the reading wasn&#x27;t recorded.</span></div><details class="detail" open><summary>Trigger</summary><div class="dbody">state_changed · value not recorded</div></details></div></li></ol></article>
+<article class="card"><p class="cellno">4a · confirmation unknown — settled UNCONFIRMED</p>
+  <ol class="chain"><li class="step"><span class="marker warn" aria-hidden="true">→</span><div class="body"><div class="line"><span>Hallway Light was asked to turn on; no reply came within its window.</span><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>Sent — the device never confirmed.</span></div><p class="hint">The command was sent; no confirmation came back — no reply within the window. It may have worked — the record can&#x27;t say.</p></div></li></ol></article>
+<article class="card"><p class="cellno">4b · confirmation unknown — unsettled DISPATCHED (no timer, no countdown)</p>
+  <ol class="chain"><li class="step"><span class="marker info" aria-hidden="true">→</span><div class="body"><div class="line"><span>Hallway Light was asked to set to warm white; waiting for it to confirm.</span><span class="pill info provisional"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h7M7 4.5L9.5 7 7 9.5"/></svg>Sent — waiting for the device to confirm.<span class="sr">Provisional — may still change</span></span></div><p class="hint">Most devices confirm within a second or two. This updates when the device reports.</p><p class="hint">Colour changes confirm slowly on some bulbs — this can take several seconds.</p></div></li></ol></article></div></div>
+</section>
+<section><h2>E. &quot;Why didn’t it&quot; — the L1 sentence per NonFiringVerdict and derived state</h2>
+<div class="pair"><div class="theme-dark pane"><article class="card"><p class="cellno">N1 · CONDITION_NOT_MET</p><p class="pills"><span class="pill warn">A condition was not met</span><span class="autoname">Evening Lights</span></p><p class="headline">It was set off at 9:42 pm, but a condition was false, so it didn&#x27;t act.</p><p class="bodytext">It ran on motion in the hallway, checked its conditions, and one was false. The run shows which.</p><p class="link"><a href="#">See which condition blocked it →</a></p><p class="key">whyNot.headline.conditionNotMet</p></article>
+<article class="card"><p class="cellno">N2 · NEVER_TRIGGERED, no run</p><p class="pills"><span class="pill neutral">Nothing set it off</span><span class="autoname">Evening Lights</span></p><p class="headline">It hasn&#x27;t run yet.</p><p class="bodytext">Nothing has set it off since this automation was loaded. It runs on motion in the hallway. Nothing is wrong — it&#x27;s waiting.</p><p class="key">whyNot.headline.neverTriggered</p></article>
+<article class="card"><p class="cellno">N3 · NEVER_TRIGGERED with a run id (today’s inference)</p><p class="pills"><span class="pill info">It did run</span><span class="autoname">Evening Lights</span></p><p class="headline">It has run — most recently at 9:42 pm.</p><p class="bodytext">Whether anything changed is on the run&#x27;s own page.</p><p class="link"><a href="#">See that run — including whether anything changed →</a></p><p class="key">whyNot.headline.neverTriggered.ranFine</p></article>
+<article class="card"><p class="cellno">N4 · ACTED_BUT_UNCONFIRMED</p><p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>It ran, but the device never confirmed</span><span class="autoname">Evening Lights</span></p><p class="headline">It ran at 9:42 pm, but the device never confirmed it acted.</p><p class="bodytext">The command was sent. No confirmation came back, so whether it worked isn&#x27;t known.</p><p class="link"><a href="#">See the run where the device never confirmed →</a></p><p class="key">whyNot.headline.actedButUnconfirmed</p></article>
+<article class="card"><p class="cellno">N5 · DISABLED</p><p class="pills"><span class="pill unknown">It is turned off</span><span class="autoname">Evening Lights</span></p><p class="headline">It&#x27;s turned off, so it can&#x27;t run.</p><p class="bodytext">Turn it on in your automation settings to let it run. When it was turned off isn&#x27;t recorded.</p><p class="key">whyNot.headline.disabled</p></article>
+<article class="card"><p class="cellno">N6 · noCommandsIssued true</p><p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Ran, but sent nothing</span><span class="autoname">Evening Lights</span></p><p class="headline">It ran at 9:42 pm, but sent nothing — every step was skipped.</p><p class="bodytext">Every step ended without sending a command. Why each was skipped isn&#x27;t recorded yet.</p><p class="link"><a href="#">See the run that sent no commands →</a></p><p class="key">whyNot.headline.sentNothing</p></article>
+<article class="card"><p class="cellno">N7 · unknown verdict string</p><p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7h2M6.5 7h2M9.5 7h2"/></svg>Recorded as &quot;PAUSED&quot;</span><span class="autoname">Evening Lights</span></p><p class="headline">Recorded as &quot;PAUSED&quot; — a verdict this dashboard can&#x27;t explain yet.</p><p class="key">whyNot.headline.unknown</p></article></div><div class="theme-light pane"><article class="card"><p class="cellno">N1 · CONDITION_NOT_MET</p><p class="pills"><span class="pill warn">A condition was not met</span><span class="autoname">Evening Lights</span></p><p class="headline">It was set off at 9:42 pm, but a condition was false, so it didn&#x27;t act.</p><p class="bodytext">It ran on motion in the hallway, checked its conditions, and one was false. The run shows which.</p><p class="link"><a href="#">See which condition blocked it →</a></p><p class="key">whyNot.headline.conditionNotMet</p></article>
+<article class="card"><p class="cellno">N2 · NEVER_TRIGGERED, no run</p><p class="pills"><span class="pill neutral">Nothing set it off</span><span class="autoname">Evening Lights</span></p><p class="headline">It hasn&#x27;t run yet.</p><p class="bodytext">Nothing has set it off since this automation was loaded. It runs on motion in the hallway. Nothing is wrong — it&#x27;s waiting.</p><p class="key">whyNot.headline.neverTriggered</p></article>
+<article class="card"><p class="cellno">N3 · NEVER_TRIGGERED with a run id (today’s inference)</p><p class="pills"><span class="pill info">It did run</span><span class="autoname">Evening Lights</span></p><p class="headline">It has run — most recently at 9:42 pm.</p><p class="bodytext">Whether anything changed is on the run&#x27;s own page.</p><p class="link"><a href="#">See that run — including whether anything changed →</a></p><p class="key">whyNot.headline.neverTriggered.ranFine</p></article>
+<article class="card"><p class="cellno">N4 · ACTED_BUT_UNCONFIRMED</p><p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 7m-4.5 0a4.5 4.5 0 109 0a4.5 4.5 0 10-9 0M7 4.6V7l1.8 1.1"/></svg>It ran, but the device never confirmed</span><span class="autoname">Evening Lights</span></p><p class="headline">It ran at 9:42 pm, but the device never confirmed it acted.</p><p class="bodytext">The command was sent. No confirmation came back, so whether it worked isn&#x27;t known.</p><p class="link"><a href="#">See the run where the device never confirmed →</a></p><p class="key">whyNot.headline.actedButUnconfirmed</p></article>
+<article class="card"><p class="cellno">N5 · DISABLED</p><p class="pills"><span class="pill unknown">It is turned off</span><span class="autoname">Evening Lights</span></p><p class="headline">It&#x27;s turned off, so it can&#x27;t run.</p><p class="bodytext">Turn it on in your automation settings to let it run. When it was turned off isn&#x27;t recorded.</p><p class="key">whyNot.headline.disabled</p></article>
+<article class="card"><p class="cellno">N6 · noCommandsIssued true</p><p class="pills"><span class="pill warn"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M2.5 7h5.5M6 4.5L8.5 7 6 9.5M11 4.5v5"/></svg>Ran, but sent nothing</span><span class="autoname">Evening Lights</span></p><p class="headline">It ran at 9:42 pm, but sent nothing — every step was skipped.</p><p class="bodytext">Every step ended without sending a command. Why each was skipped isn&#x27;t recorded yet.</p><p class="link"><a href="#">See the run that sent no commands →</a></p><p class="key">whyNot.headline.sentNothing</p></article>
+<article class="card"><p class="cellno">N7 · unknown verdict string</p><p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7h2M6.5 7h2M9.5 7h2"/></svg>Recorded as &quot;PAUSED&quot;</span><span class="autoname">Evening Lights</span></p><p class="headline">Recorded as &quot;PAUSED&quot; — a verdict this dashboard can&#x27;t explain yet.</p><p class="key">whyNot.headline.unknown</p></article></div></div>
+</section>
+<section><h2>F. The error posture (never an eternal spinner, never a silent empty card)</h2>
+<div class="pair"><div class="theme-dark pane"><article class="card"><p class="cellno">error — one honest, named, retryable card</p><p class="headline">This explanation couldn&#x27;t be loaded.</p><p class="bodytext">The hub answered with an error. The record itself is safe — try again.</p><p><button class="btn" type="button">Try again</button></p></article>
+<article class="card"><p class="cellno">offline</p><p class="headline">The hub can&#x27;t be reached right now.</p><p class="bodytext">Nothing is lost. This page fills in when the connection returns.</p></article>
+<article class="card"><p class="cellno">replaying</p><p class="headline">The hub is catching up after a restart.</p><p class="bodytext">This takes a moment. Explanations appear as the log is replayed.</p></article></div><div class="theme-light pane"><article class="card"><p class="cellno">error — one honest, named, retryable card</p><p class="headline">This explanation couldn&#x27;t be loaded.</p><p class="bodytext">The hub answered with an error. The record itself is safe — try again.</p><p><button class="btn" type="button">Try again</button></p></article>
+<article class="card"><p class="cellno">offline</p><p class="headline">The hub can&#x27;t be reached right now.</p><p class="bodytext">Nothing is lost. This page fills in when the connection returns.</p></article>
+<article class="card"><p class="cellno">replaying</p><p class="headline">The hub is catching up after a restart.</p><p class="bodytext">This takes a moment. Explanations appear as the log is replayed.</p></article></div></div>
+</section>
+<footer class="top"><p>Design of record: SPEC.md in this folder. Not shipped, not bundled.</p></footer>
+</body>
+</html>
