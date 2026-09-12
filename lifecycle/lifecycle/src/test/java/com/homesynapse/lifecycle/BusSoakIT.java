@@ -111,6 +111,8 @@ final class BusSoakIT {
     private EntityId snzbEntity;
     private EntityId hueEntity;
     private ListAppender<ILoggingEvent> anomalyCapture;
+    /** FIX-2b-i: the test's temp dir, held so a timeout's thread dump has a home. */
+    private Path tempDir;
 
     /** Explicit no-arg constructor for {@code -Xlint:all -Werror} builds. */
     BusSoakIT() {
@@ -188,7 +190,7 @@ final class BusSoakIT {
         long anomalies = anomalyCount();
         printSummary(loops, ok, 0, latencyNanos, anomalies, settled.census());
         if (!settled.settled()) {
-            throw timeoutDiagnostic(core,
+            throw timeoutDiagnostic(core, tempDir,
                     "the position census settling to missed=0 for every scored subscriber",
                     settled.firstScoredMiss());
         }
@@ -275,7 +277,7 @@ final class BusSoakIT {
             sleepBriefly();
         }
         long position = awaitedPosition.getAsLong();
-        throw timeoutDiagnostic(core, what,
+        throw timeoutDiagnostic(core, tempDir, what,
                 position < 0 ? OptionalLong.empty() : OptionalLong.of(position));
     }
 
@@ -308,6 +310,7 @@ final class BusSoakIT {
     // ════════════════════════════════════════════════════════════════════════
 
     private void bootAndAdopt(Path tempDir) throws Exception {
+        this.tempDir = tempDir;
         clock = TestClock.createDefault();
         Path configDir = tempDir.resolve("config");
         Files.createDirectories(configDir);
@@ -413,7 +416,7 @@ final class BusSoakIT {
             sleepBriefly();
         }
         long position = awaitedPosition.getAsLong();
-        throw timeoutDiagnostic(core, what,
+        throw timeoutDiagnostic(core, tempDir, what,
                 position < 0 ? OptionalLong.empty() : OptionalLong.of(position));
     }
 }

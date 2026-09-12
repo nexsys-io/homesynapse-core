@@ -53,9 +53,9 @@ final class DlqStatusEndpointTest {
     void dlq_v111ShapeTest() {
         MinimalEventBusStub bus = new MinimalEventBusStub(List.of(
                 new SubscriberSnapshot(
-                        "state_projection", SubscriberMode.LIVE, 100L, 0, 0, null),
+                        "state_projection", SubscriberMode.LIVE, 100L, 0, 0, 0, null),
                 new SubscriberSnapshot(
-                        "automation", SubscriberMode.LIVE, 99L, 3, 1,
+                        "automation", SubscriberMode.LIVE, 99L, 3, 0, 1,
                         Instant.parse("2026-01-01T00:00:05Z"))));
         DlqStatusEndpoint endpoint = new DlqStatusEndpoint(bus, VIEW_POSITION, FIXED_CLOCK);
         RecordingEndpointContext ctx = new RecordingEndpointContext();
@@ -119,12 +119,12 @@ final class DlqStatusEndpointTest {
     void dlq_depthAndParkedDerivation() {
         MinimalEventBusStub bus = new MinimalEventBusStub(List.of(
                 new SubscriberSnapshot(
-                        "state_projection", SubscriberMode.LIVE, 100L, 2, 0,
+                        "state_projection", SubscriberMode.LIVE, 100L, 2, 0, 0,
                         Instant.parse("2026-01-01T00:00:01Z")),
                 new SubscriberSnapshot(
-                        "automation_engine", SubscriberMode.LIVE, 99L, 0, 0, null),
+                        "automation_engine", SubscriberMode.LIVE, 99L, 0, 0, 0, null),
                 new SubscriberSnapshot(
-                        "pending_command_ledger", SubscriberMode.SUSPENDED, 98L, 5, 2,
+                        "pending_command_ledger", SubscriberMode.SUSPENDED, 98L, 5, 0, 2,
                         Instant.parse("2026-01-01T00:00:02Z"))));
         DlqStatusEndpoint endpoint = new DlqStatusEndpoint(bus, VIEW_POSITION, FIXED_CLOCK);
         RecordingEndpointContext ctx = new RecordingEndpointContext();
@@ -143,7 +143,7 @@ final class DlqStatusEndpointTest {
     void respondsDuringReplay() {
         MinimalEventBusStub bus = new MinimalEventBusStub(List.of(
                 new SubscriberSnapshot(
-                        "state_projection", SubscriberMode.REPLAY, 50L, 0, 0, null)));
+                        "state_projection", SubscriberMode.REPLAY, 50L, 0, 0, 0, null)));
         DlqStatusEndpoint endpoint = new DlqStatusEndpoint(bus, VIEW_POSITION, FIXED_CLOCK);
         RecordingEndpointContext ctx = new RecordingEndpointContext();
 

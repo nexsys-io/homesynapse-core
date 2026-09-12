@@ -49,6 +49,21 @@ tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     jvmArgs("-XX:+EnableDynamicAgentLoading")
 
+    // FIX-2b-i (2026-09-11): the H1 witness. JDK 21 prints a line with the
+    // frames whenever a virtual thread blocks while pinned (a monitor or a
+    // native frame on its stack) — to the test JVM's stdout, so it lands in
+    // the XML <system-out> of the test that was running.
+    jvmArgs("-Djdk.tracePinnedThreads=short")
+
+    // FIX-2b-i (the FIX-2a R1 passthrough): a -D on the gradlew line sets a
+    // property on the Gradle JVM, never on the forked test worker. Forward the
+    // soak's K when it is given (`-Dhomesynapse.soak.loops=3` runs 3 loops);
+    // absent, nothing is forwarded and BusSoakIT falls back to the environment
+    // variable HOMESYNAPSE_SOAK_LOOPS, then to its default of 20.
+    providers.systemProperty("homesynapse.soak.loops").orNull?.let { loops ->
+        systemProperty("homesynapse.soak.loops", loops)
+    }
+
     // FIX-1a (2026-09-05): every red run carries its own mechanism. One XML
     // block per test case — so a method's stdout (the structured log tokens) is
     // attributable to the method that produced it — and the FULL assertion

@@ -732,6 +732,7 @@ public final class InProcessEventBus implements EventBus {
                 runtime.mode(),
                 checkpointStore.readCheckpoint(runtime.info().subscriberId()),
                 runtime.dlq().depth(),
+                runtime.pendingPositions().size(), // FIX-2b-i: offered to LIVE, not yet consumed
                 runtime.supervisor().crashCount(),
                 runtime.dlq().oldestParkedAt().orElse(null) // M3.7
         );

@@ -22,13 +22,18 @@ import java.util.OptionalLong;
  * lines; the first line is the JUnit XML {@code <failure message>}):</p>
  * <pre>
  * bus.await_timeout: what=&lt;what&gt; store_head=&lt;H&gt; awaited=&lt;P|none&gt;
- * bus.await_subscriber: subscriber=&lt;id&gt; mode=&lt;MODE&gt; checkpoint=&lt;C&gt; dlq=&lt;D&gt; behind=&lt;H-C&gt;
+ * bus.await_subscriber: subscriber=&lt;id&gt; mode=&lt;MODE&gt; checkpoint=&lt;C&gt; dlq=&lt;D&gt; pending=&lt;Q&gt; behind=&lt;H-C&gt;
  * </pre>
  * <p>One {@code bus.await_subscriber} line per snapshot, in the list's order;
  * lines are {@code \n}-joined with no trailing newline. {@code behind} is the
  * head minus the snapshot's checkpoint — for the atomic-checkpoint projection
  * ({@code state_projection}, AMD-45 §2.2) that number lags delivery by design
- * and is a reading, not a verdict.</p>
+ * and is a reading, not a verdict. {@code pending} (FIX-2b-i) is the snapshot's
+ * {@code pendingDepth} — positions offered to the LIVE queue and not yet
+ * consumed: {@code pending ≥ 1} with {@code checkpoint < awaited} reads
+ * "offered and not consumed" (the loop blocked or parked past its wake);
+ * {@code pending=0} with {@code checkpoint < awaited} on a matching subscriber
+ * reads "never offered".</p>
  */
 final class BusAwaitDiagnostic {
 
@@ -57,6 +62,7 @@ final class BusAwaitDiagnostic {
                     .append(" mode=").append(snapshot.mode())
                     .append(" checkpoint=").append(snapshot.checkpoint())
                     .append(" dlq=").append(snapshot.dlqDepth())
+                    .append(" pending=").append(snapshot.pendingDepth())
                     .append(" behind=").append(storeHead - snapshot.checkpoint());
         }
         return text.toString();

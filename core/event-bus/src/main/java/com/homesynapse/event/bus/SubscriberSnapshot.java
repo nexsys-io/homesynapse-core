@@ -22,10 +22,24 @@ import java.time.Instant;
  * {@link java.util.Optional Optional} handling can wrap with
  * {@code Optional.ofNullable(snapshot.oldestParkedAt())}).</p>
  *
+ * <p>FIX-2b-i (2026-09-11) extended the record from 6 to 7 fields by adding
+ * {@link #pendingDepth()} — the size of the subscriber's LIVE pending-position
+ * queue at the snapshot instant: positions {@code notifyEvent} offered and the
+ * subscriber's virtual thread has not yet consumed. A read-only observation
+ * (no behaviour of the bus changes); with it a stalled subscriber's snapshot
+ * reads either "offered and not consumed" ({@code pendingDepth ≥ 1} with the
+ * checkpoint below the head) or "never offered" ({@code pendingDepth = 0}).</p>
+ *
  * @param subscriberId    the subscriber's stable identifier
  * @param mode            the current lifecycle mode
  * @param checkpoint      the last delivered global position; 0 if never delivered
  * @param dlqDepth        current DLQ size (in-memory entries)
+ * @param pendingDepth    positions offered to this subscriber's LIVE queue and
+ *                        not yet consumed at the snapshot instant; 0 in
+ *                        REPLAY/TRANSITION (those modes queue elsewhere — the
+ *                        replay window, which this count does not include —
+ *                        unless a LIVE queue survived a SUSPENDED → {@code resume()},
+ *                        which clears the DLQ but not this queue) (FIX-2b-i)
  * @param crashCount      crashes within the current rolling 10-minute window
  * @param oldestParkedAt  the {@code parkedAt} timestamp of the oldest DLQ
  *                        entry, or {@code null} when the DLQ is empty (M3.7).
@@ -38,6 +52,7 @@ public record SubscriberSnapshot(
     SubscriberMode mode,
     long checkpoint,
     int dlqDepth,
+    int pendingDepth,
     int crashCount,
     Instant oldestParkedAt
 ) {

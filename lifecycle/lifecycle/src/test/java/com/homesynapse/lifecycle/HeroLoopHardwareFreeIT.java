@@ -69,6 +69,8 @@ final class HeroLoopHardwareFreeIT {
     private HomeSynapseCore core;
     private EntityId snzbEntity;
     private EntityId hueEntity;
+    /** FIX-2b-i: the test's temp dir, held so a timeout's thread dump has a home. */
+    private Path tempDir;
 
     /** Explicit no-arg constructor for {@code -Xlint:all -Werror} builds. */
     HeroLoopHardwareFreeIT() {
@@ -340,6 +342,7 @@ final class HeroLoopHardwareFreeIT {
     // ════════════════════════════════════════════════════════════════════════
 
     private void bootAndAdopt(Path tempDir) throws Exception {
+        this.tempDir = tempDir;
         clock = TestClock.createDefault();
         writeConfig(tempDir);
         rig = new ZigbeeHardwareFreeRig(clock, () -> core.deviceRegistry(),
@@ -643,20 +646,27 @@ final class HeroLoopHardwareFreeIT {
      * subscriber from {@code subscribers()} — prints it and returns the error to
      * throw. An instrument never becomes the failure channel: when the gathering
      * itself throws, the bare timeout message carries that cause instead.
+     *
+     * <p>FIX-2b-i (B): the thread dump ({@link BusThreadDump#capture}, virtual
+     * threads included when {@code jcmd} attaches) is appended after the
+     * subscriber lines in stdout — the XML {@code <system-out>} — while the
+     * thrown message stays the reading alone, so the XML
+     * {@code <failure message>} remains readable. The dump file lives under the
+     * test's temp dir; its path is on the {@code bus.thread_dump:} line.</p>
      */
     private AssertionError timeoutDiagnostic(String what, OptionalLong awaited) {
-        String text;
+        String reading;
         try {
             long storeHead = events().stream()
                     .mapToLong(EventEnvelope::globalPosition).max().orElse(0L);
-            text = BusAwaitDiagnostic.render(what, storeHead, awaited,
+            reading = BusAwaitDiagnostic.render(what, storeHead, awaited,
                     core.eventBus().subscribers());
         } catch (RuntimeException gatherFailure) {
-            text = "timed out awaiting " + what
+            reading = "timed out awaiting " + what
                     + " (bus.await_timeout unavailable: " + gatherFailure + ")";
         }
-        System.out.println(text);
-        return new AssertionError(text);
+        System.out.println(reading + "\n" + BusThreadDump.capture(tempDir));
+        return new AssertionError(reading);
     }
 
     /**

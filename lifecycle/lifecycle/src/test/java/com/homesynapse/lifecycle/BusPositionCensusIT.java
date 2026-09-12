@@ -89,6 +89,8 @@ final class BusPositionCensusIT {
     private HomeSynapseCore core;
     private EntityId snzbEntity;
     private EntityId hueEntity;
+    /** FIX-2b-i: the test's temp dir, held so a timeout's thread dump has a home. */
+    private Path tempDir;
 
     /** Explicit no-arg constructor for {@code -Xlint:all -Werror} builds. */
     BusPositionCensusIT() {
@@ -133,7 +135,7 @@ final class BusPositionCensusIT {
         SettledCensus settled = awaitSettledCensus(core);
         System.out.println(renderTokens(settled.census(), 1));
         if (!settled.settled()) {
-            throw timeoutDiagnostic(core,
+            throw timeoutDiagnostic(core, tempDir,
                     "the position census settling to missed=0 for every scored subscriber",
                     settled.firstScoredMiss());
         }
@@ -175,14 +177,17 @@ final class BusPositionCensusIT {
      * @param subscriberId the bus subscriber id
      * @param atomic       whether the subscriber's checkpoint is atomic (unscored)
      * @param dlqDepth     the snapshot's DLQ depth ({@code > 0} ⇒ unscored)
+     * @param pendingDepth the snapshot's pending-queue depth — offered to the LIVE
+     *                     queue, not yet consumed (FIX-2b-i; reported, never scored)
      * @param checkpoint   the persisted checkpoint the census was scored against
      * @param matched      positions the filter accepts
      * @param delivered    matched positions at or below the checkpoint
      * @param missed       {@code matched − delivered}
      * @param firstMissed  the lowest missed position, or empty
      */
-    record SubscriberCensus(String subscriberId, boolean atomic, int dlqDepth, long checkpoint,
-            long matched, long delivered, long missed, OptionalLong firstMissed) {
+    record SubscriberCensus(String subscriberId, boolean atomic, int dlqDepth, int pendingDepth,
+            long checkpoint, long matched, long delivered, long missed,
+            OptionalLong firstMissed) {
 
         /** True when {@code missed} is an assertion, not a reading. */
         boolean scored() {
@@ -268,7 +273,8 @@ final class BusPositionCensusIT {
             }
             long missed = matched - delivered;
             out.add(new SubscriberCensus(entry.subscriberId(), entry.atomic(),
-                    snapshot.dlqDepth(), snapshot.checkpoint(), matched, delivered, missed,
+                    snapshot.dlqDepth(), snapshot.pendingDepth(), snapshot.checkpoint(),
+                    matched, delivered, missed,
                     missed == 0 ? OptionalLong.empty() : OptionalLong.of(firstMissed)));
         }
         return List.copyOf(out);
@@ -297,7 +303,8 @@ final class BusPositionCensusIT {
 
     /**
      * The frozen TR-1 §3 grammar — the five frozen keys first, then the readings
-     * this instrument adds after them ({@code checkpoint}, {@code dlq}, the
+     * this instrument adds after them ({@code checkpoint}, {@code dlq},
+     * {@code pending} (FIX-2b-i — offered to LIVE, not yet consumed), the
      * {@code atomic=true} / {@code dlq_unscored=true} flags). The total's
      * {@code missed} counts SCORED subscribers only; {@code unscored_missed}
      * carries the rest so nothing is hidden.
@@ -318,7 +325,8 @@ final class BusPositionCensusIT {
                     .append(" first_missed=").append(subscriber.firstMissed().isPresent()
                             ? Long.toString(subscriber.firstMissed().getAsLong()) : "none")
                     .append(" checkpoint=").append(subscriber.checkpoint())
-                    .append(" dlq=").append(subscriber.dlqDepth());
+                    .append(" dlq=").append(subscriber.dlqDepth())
+                    .append(" pending=").append(subscriber.pendingDepth());
             if (subscriber.atomic()) {
                 out.append(" atomic=true");
             }
@@ -360,28 +368,33 @@ final class BusPositionCensusIT {
 
     /**
      * The (A) diagnostic for the two census/soak ITs: the store head, the awaited
-     * position, every subscriber's mode/checkpoint/dlq/behind — printed, and the
-     * error to throw. An instrument never becomes the failure channel.
+     * position, every subscriber's mode/checkpoint/dlq/pending/behind — printed,
+     * and the error to throw. An instrument never becomes the failure channel.
+     * FIX-2b-i (B): the thread dump ({@link BusThreadDump#capture}, virtual
+     * threads included when {@code jcmd} attaches) is appended after the
+     * subscriber lines in stdout (the XML {@code <system-out>}); the thrown
+     * message stays the reading alone (the XML {@code <failure message>}).
      *
      * @param core    the booted core
+     * @param dumpDir the directory for the dump file (the test's temp dir)
      * @param what    what was awaited
      * @param awaited the position the await was gated on, when known
      * @return the error to throw
      */
-    static AssertionError timeoutDiagnostic(HomeSynapseCore core, String what,
+    static AssertionError timeoutDiagnostic(HomeSynapseCore core, Path dumpDir, String what,
             OptionalLong awaited) {
-        String text;
+        String reading;
         try {
             long storeHead = allEvents(core.eventStore()).stream()
                     .mapToLong(EventEnvelope::globalPosition).max().orElse(0L);
-            text = BusAwaitDiagnostic.render(what, storeHead, awaited,
+            reading = BusAwaitDiagnostic.render(what, storeHead, awaited,
                     core.eventBus().subscribers());
         } catch (RuntimeException gatherFailure) {
-            text = "timed out awaiting " + what
+            reading = "timed out awaiting " + what
                     + " (bus.await_timeout unavailable: " + gatherFailure + ")";
         }
-        System.out.println(text);
-        return new AssertionError(text);
+        System.out.println(reading + "\n" + BusThreadDump.capture(dumpDir));
+        return new AssertionError(reading);
     }
 
     // ── store reads shared with BusSoakIT (pure functions over the log) ──────
@@ -475,6 +488,7 @@ final class BusPositionCensusIT {
     // ════════════════════════════════════════════════════════════════════════
 
     private void bootAndAdopt(Path tempDir) throws Exception {
+        this.tempDir = tempDir;
         clock = TestClock.createDefault();
         Path configDir = tempDir.resolve("config");
         Files.createDirectories(configDir);
@@ -587,7 +601,7 @@ final class BusPositionCensusIT {
             sleepBriefly();
         }
         long position = awaitedPosition.getAsLong();
-        throw timeoutDiagnostic(core, what,
+        throw timeoutDiagnostic(core, tempDir, what,
                 position < 0 ? OptionalLong.empty() : OptionalLong.of(position));
     }
 }
