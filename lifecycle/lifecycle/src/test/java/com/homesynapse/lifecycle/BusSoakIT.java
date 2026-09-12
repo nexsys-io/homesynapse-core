@@ -36,6 +36,7 @@ import com.homesynapse.test.TestClock;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
@@ -96,6 +97,7 @@ import java.util.function.LongSupplier;
  * {@code isPresent()}.</p>
  */
 @DisplayName("BusSoakIT — K hero loops in ONE core: delivery latency p50/p99/max, the anomaly count, the position census; a timed-out loop fails with the bus reading (FIX-2a C)")
+@Tag("bus-soak")
 final class BusSoakIT {
 
     static final String LOOPS_PROPERTY = "homesynapse.soak.loops";

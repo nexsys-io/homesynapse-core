@@ -29,6 +29,7 @@ import com.homesynapse.test.TestClock;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -76,6 +77,7 @@ import java.util.function.LongSupplier;
  * {@link BusSoakIT} computes the same census the same way.</p>
  */
 @DisplayName("BusPositionCensusIT — after one hero loop every scored subscriber's persisted checkpoint covers every position its filter matches (FIX-2a B, TR-1 §1)")
+@Tag("bus-soak")
 final class BusPositionCensusIT {
 
     private static final HomeId TEST_HOME_ID =

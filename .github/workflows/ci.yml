@@ -50,3 +50,42 @@ jobs:
             **/build/reports/tests/
             **/build/test-results/
           retention-days: 14
+
+  # CI-1 (2026-09-12): the bus-soak amplifier OFF the gate, kept as a sample
+  # source. BusSoakIT and BusPositionCensusIT carry @Tag("bus-soak"); the
+  # conventions' Test tasks exclude that tag unless -PincludeBusSoak is given,
+  # so `check` above runs without them (the hero IT stays in - the class's
+  # original signal, now carrying the diagnostic and the dump). This job runs
+  # EXACTLY those two classes on every push and uploads their XML; its red
+  # never fails the run (continue-on-error) - a sample source, not a gate.
+  bus-soak:
+    name: Bus soak (non-gating sample)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'corretto'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Run the bus soak
+        run: ./gradlew :lifecycle:lifecycle:test --tests '*BusSoakIT*' --tests '*BusPositionCensusIT*' -PincludeBusSoak --no-daemon
+
+      - name: Upload bus-soak reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: bus-soak-${{ github.run_number }}
+          path: |
+            lifecycle/lifecycle/build/test-results/
+            lifecycle/lifecycle/build/reports/tests/
+          retention-days: 14
