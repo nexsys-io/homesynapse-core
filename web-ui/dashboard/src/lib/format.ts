@@ -16,7 +16,8 @@ import type {
   RunStatus,
   TypedValue,
 } from './api/contract';
-import { t } from './i18n';
+import { t, type MessageKey } from './i18n';
+import { actionVerdict } from './verdicts';
 
 export type Tone = 'ok' | 'warn' | 'error' | 'info' | 'unknown' | 'neutral';
 
@@ -468,7 +469,165 @@ export function attrValueList(params: Record<string, unknown> | null | undefined
   return ' (' + entries.map(([k, v]) => `${k} ${String(v)}`).join(', ') + ')';
 }
 
-/* ---- The hero device-backward sentence (the mom test) ---- */
+/* ---- The hero L1 headline — the SPEC §3 grammar (HERO-1b B1, 2026-09-12) ----
+ * The headline follows the RUN'S STATUS and the LEADING ACTION'S OUTCOME, never
+ * the command's verb alone (the FE-NULL-1 O1 defect: `commandVerb` turned
+ * `turn_on` into "turned on" on a SKIPPED run). A COMPLETED run is device-led;
+ * a run that did not complete is automation-led — a frame sentence, then one
+ * tail sentence about the leading device — so a skipped or failed run never
+ * opens with a device acting. The mode override comes from `actionVerdict()`
+ * (never re-derived here): a superseded or expired-at-restart leading action
+ * replaces the cell's clause — a replaced command is an intent change, and the
+ * headline may not say "failed" for it. Every slot has a keyed null arm (§7
+ * `explain.slot.*`) so no cell is left to inference; a value the wire did not
+ * carry is never shown as if it had. Templates are keyed by their §7 key. */
+
+/** A §7 string by key (B2: the catalog in i18n.ts is the single source; an unknown key
+ *  is the empty string, never "undefined" on a surface). */
+function hs(key: string): string {
+  return t(key as MessageKey) ?? '';
+}
+
+/** Fill `{slot}` placeholders in a §7 string; a slot the template does not use is ignored. */
+export function fillSlots(template: string, slots: Record<string, string>): string {
+  return template.replace(/\{(\w+)\}/g, (m, k: string) => (k in slots ? slots[k]! : m));
+}
+const fill = fillSlots;
+
+/** A §7 string with its slots filled (the one call sites use). */
+export function heroCopy(key: MessageKey, slots: Record<string, string> = {}): string {
+  return fillSlots(t(key) ?? '', slots);
+}
+const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+
+/** The command's verbs: plain (turn on) and past (turned on); the §7 null arms. */
+export function commandVerbs(command: string | null | undefined): { verb: string; verbPast: string } {
+  switch (command) {
+    case 'turn_on':
+      return { verb: 'turn on', verbPast: 'turned on' };
+    case 'turn_off':
+      return { verb: 'turn off', verbPast: 'turned off' };
+    case 'dim':
+      return { verb: 'dim', verbPast: 'dimmed' };
+  }
+  if (command == null || command === '') return { verb: hs('explain.slot.verb.null'), verbPast: hs('explain.slot.verbPast.null') };
+  return { verb: fill(hs('explain.slot.verb.unknown'), { command }), verbPast: fill(hs('explain.slot.verbPast.unknown'), { command }) };
+}
+
+/** The `{time}` slot: date-qualified clock time, or the honest unparseable arm. */
+export function headlineTime(matchedAt: string | null | undefined): string {
+  return parseInstant(matchedAt) ? clockTimeWithDate(matchedAt) : hs('explain.slot.time.unparseable');
+}
+
+/** The `{because}` slot with its null arms: subjectRef null → the unrecorded arm;
+ *  a dangling ref on a complete census → the loud arm; firingValue null → "changed". */
+export function becauseClause(
+  trigger: CausalChain['trigger'] | null | undefined,
+  resolve: (id: string | null | undefined) => RefLook = () => ({ kind: 'unverified' }),
+): string {
+  const time = headlineTime(trigger?.matchedAt);
+  const id = trigger?.subjectRef?.id;
+  if (!id) return fill(hs('explain.slot.because.unrecorded'), { time });
+  const res = resolve(id);
+  if (res.kind === 'dangling') return fill(hs('explain.slot.because.dangling'), { id, time });
+  const triggerVerb = trigger?.firingValue == null || trigger.firingValue === '' ? hs('explain.slot.triggerVerb.null') : triggerVerbFromValue(trigger.firingValue);
+  return fill(hs('explain.slot.because'), { Trigger: refLabel(id, res), triggerVerb, time });
+}
+
+/** The `{target}` slot (lower-case form; callers capitalise for `{Target}`). */
+function targetSlot(action: CausalChain['actions'][number], resolve: (id: string | null | undefined) => RefLook): string {
+  const id = action.targetRef?.id;
+  if (!id) return hs('explain.slot.target.unnamed');
+  const res = resolve(id);
+  if (res.kind === 'dangling') return fill(hs('explain.slot.target.dangling'), { id });
+  return refLabel(id, res);
+}
+
+export interface CausalHeadline {
+  text: string;
+  /** The §7 key(s) the sentence was rendered from — one COMPLETED key, or frame + tail. */
+  keys: string[];
+}
+
+const FRAME_KEY: Record<string, string> = {
+  SKIPPED: 'explain.headline.skipped.frame',
+  FAILED: 'explain.headline.failed.frame',
+  CANCELLED: 'explain.headline.cancelled.frame',
+  INTERRUPTED: 'explain.headline.interrupted.frame',
+};
+const OUTCOME_SUFFIX: Record<string, string> = {
+  CONFIRMED: 'confirmed',
+  DISPATCHED: 'dispatched',
+  UNCONFIRMED: 'unconfirmed',
+  FAILED: 'failed',
+  SKIPPED: 'skipped',
+};
+
+/** The L1 headline with the keys it came from (SPEC §3). */
+export function causalHeadline(
+  chain: CausalChain,
+  resolve: (id: string | null | undefined) => RefLook = () => ({ kind: 'unverified' }),
+): CausalHeadline {
+  const because = becauseClause(chain.trigger, resolve);
+  const Automation = runName(chain.automationName);
+  const actions = chain.actions ?? [];
+  const outcome = chain.outcome;
+  const status = outcome?.status;
+  const action = actions[0];
+
+  // The leading action's clause suffix: the mode override first (never re-derived —
+  // actionVerdict() owns superseded / expired-restart), then the outcome cell.
+  let suffix: string | null = null;
+  let slots: Record<string, string> = { because, Automation };
+  if (action) {
+    const mode = actionVerdict(action).mode;
+    const target = targetSlot(action, resolve);
+    const { verb, verbPast } = commandVerbs(action.command);
+    slots = { ...slots, target, Target: cap(target), verb, verbPast };
+    suffix =
+      mode === 'superseded' ? 'superseded'
+      : mode === 'expired-restart' ? 'expiredRestart'
+      : (OUTCOME_SUFFIX[action.outcome as string] ?? null);
+    if (suffix === null) {
+      // Open-vocabulary hardening: an outcome this build does not know renders the
+      // honest not-recorded line — never success, never a crash (no §7 headline cell
+      // exists for it; filed with the hub).
+      const line = fill(hs('explain.mode.notRecorded.line'), slots);
+      const frameKey = FRAME_KEY[status as string];
+      return frameKey
+        ? { text: `${fill(hs(frameKey), slots)} ${line}`, keys: [frameKey, 'explain.mode.notRecorded.line'] }
+        : { text: cap(line), keys: ['explain.mode.notRecorded.line'] };
+    }
+  }
+
+  if (status === 'COMPLETED') {
+    if (!action) {
+      // "No action": recorded no steps (actionCount 0) vs the silent skip
+      // (actionCount > 0, commandCount 0 — planned steps, nothing sent).
+      const key =
+        (outcome?.actionCount ?? 0) > 0 && (outcome?.commandCount ?? 0) === 0
+          ? 'explain.headline.completed.silentSkip'
+          : 'explain.headline.completed.none';
+      return { text: fill(hs(key), slots), keys: [key] };
+    }
+    const key = `explain.headline.completed.${suffix}`;
+    return { text: fill(hs(key), slots), keys: [key] };
+  }
+
+  const frameKey = FRAME_KEY[status as string];
+  const tailKey = action ? `explain.headline.tail.${suffix}` : 'explain.headline.tail.none';
+  const tail = fill(hs(tailKey), slots);
+  if (!frameKey) {
+    // A status this build does not know (the closed-switch class): no frame is
+    // invented — the recorded status is shown as recorded, then the honest tail.
+    const shown = `${runStatusMeta(status).label}.`;
+    return { text: tail ? `${shown} ${tail}` : shown, keys: [tailKey] };
+  }
+  const frame = fill(hs(frameKey), slots);
+  return { text: tail ? `${frame} ${tail}` : frame, keys: [frameKey, tailKey] };
+}
+
+/* ---- The hero device-backward sentence (the mom test) — the L1 headline text. ---- */
 export function causalSentence(
   chain: CausalChain,
   // FE-HONEST-1 (§10-J): the headline must not paraphrase over a dangling ref.
@@ -476,59 +635,7 @@ export function causalSentence(
   // the registry fact; without one (the default), nothing is accused.
   resolve: (id: string | null | undefined) => RefLook = () => ({ kind: 'unverified' }),
 ): string {
-  // Live-wire hardening (FE-LIVE-V112 item 1): every field the wire has served
-  // null — or could omit — is guarded; the sentence stays honest, never invents.
-  const trigger = chain.trigger;
-  const trigId = trigger?.subjectRef?.id;
-  const trigRes = resolve(trigId);
-  const triggerSubject =
-    trigId && trigRes.kind === 'dangling' ? `entity ${trigId} (${UNRESOLVED_REF_PHRASE})` : refLabel(trigId, trigRes);
-  const triggerVerb = triggerVerbFromValue(trigger?.firingValue ?? null);
-  // Date-qualified (NEW-6): a run can be days old; "at 9:40 AM" alone would
-  // read as this morning. Same-day runs stay clock-only (the mom-test budget).
-  const when = clockTimeWithDate(trigger?.matchedAt);
-  // FE-NULL-1: `trigger.subjectRef` null (the triggering event is outside the run's
-  // correlation) — the "because" clause is the HERO-0 sentence, not a label.
-  const because =
-    trigger?.subjectRef === null
-      ? `something set it off at ${when} — what isn't recorded`
-      : `${triggerSubject} ${triggerVerb} at ${when}`;
-  const actions = chain.actions ?? [];
-  const outcome = chain.outcome;
-  // The silent-skip class: the run finished without doing anything visible —
-  // say so up front, never a sentence that implies something happened.
-  if (actions.length === 0 && (outcome?.actionCount ?? 0) > 0 && (outcome?.commandCount ?? 0) === 0) {
-    return `${runName(chain.automationName)} ran when ${because}, but nothing was changed.`;
-  }
-  const action = actions[0];
-  const targetId = action?.targetRef?.id;
-  const targetRes = resolve(targetId);
-  // FE-NULL-1: `targetRef` null (no target refs, :771) — the same HERO-0 fragment the
-  // action step ends with, sentence-initial; no registry is accused.
-  const target = action
-    ? action.targetRef === null
-      ? UNNAMED_TARGET.charAt(0).toUpperCase() + UNNAMED_TARGET.slice(1)
-      : targetId && targetRes.kind === 'dangling'
-        ? `Entity ${targetId} (${UNRESOLVED_REF_PHRASE})`
-        : refLabel(targetId, targetRes)
-    : runName(chain.automationName);
-  const verb = action ? commandVerb(action.command) : 'ran';
-  return `${target} ${verb} because ${because}.`;
-}
-
-function commandVerb(command: string | null | undefined): string {
-  switch (command) {
-    case 'turn_on':
-      return 'turned on';
-    case 'turn_off':
-      return 'turned off';
-    case 'dim':
-      return 'dimmed';
-    default:
-      // A null command is the present-but-null class: say it acted without
-      // naming a command it doesn't have — never render "null" as a verb.
-      return command ? `ran "${command}"` : 'acted';
-  }
+  return causalHeadline(chain, resolve).text;
 }
 
 /** The trigger verb from `firingValue` — OBSERVED NULL ON THE LIVE WIRE in all

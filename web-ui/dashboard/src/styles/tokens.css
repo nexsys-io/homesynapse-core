@@ -122,15 +122,15 @@
     --hs-border-strong: var(--hs-neutral-300);
     --hs-text: var(--hs-neutral-900);
     --hs-text-secondary: var(--hs-neutral-600);
-    --hs-text-muted: var(--hs-neutral-500);
+    --hs-text-muted: #5a6675;
     --hs-link: var(--hs-accent-500);
     --hs-focus-ring: var(--hs-accent-500);
     /* Status / health (color + SHAPE + LABEL — never color alone, WCAG 1.4.1) */
-    --hs-ok-500: #157a40;
+    --hs-ok-500: #13703b;
     --hs-ok-bg: #e6f4ec;
     --hs-warn-500: #7f5500;
     --hs-warn-bg: #fbf1d9;
-    --hs-error-500: #c1392b;
+    --hs-error-500: #b33326;
     --hs-error-bg: #fbeae8;
     --hs-info-500: var(--hs-accent-600);
     --hs-info-bg: var(--hs-accent-50);
@@ -154,15 +154,15 @@
   --hs-border-strong: var(--hs-neutral-300);
   --hs-text: var(--hs-neutral-900);
   --hs-text-secondary: var(--hs-neutral-600);
-  --hs-text-muted: var(--hs-neutral-500);
+  --hs-text-muted: #5a6675;
   --hs-link: var(--hs-accent-500);
   --hs-focus-ring: var(--hs-accent-500);
   /* Status / health (color + SHAPE + LABEL — never color alone, WCAG 1.4.1) */
-  --hs-ok-500: #157a40;
+  --hs-ok-500: #13703b;
   --hs-ok-bg: #e6f4ec;
   --hs-warn-500: #7f5500;
   --hs-warn-bg: #fbf1d9;
-  --hs-error-500: #c1392b;
+  --hs-error-500: #b33326;
   --hs-error-bg: #fbeae8;
   --hs-info-500: var(--hs-accent-600);
   --hs-info-bg: var(--hs-accent-50);

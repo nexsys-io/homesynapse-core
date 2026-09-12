@@ -12,12 +12,17 @@ import { href } from '../lib/router';
 import {
   verdictMeta,
   clockTimeWithDate,
+  heroCopy,
+  parseInstant,
   refLabel,
+  type Tone,
   UNRESOLVED_REF_HELP,
   UNRESOLVED_REF_PHRASE,
   UNRESOLVED_REF_PILL,
 } from '../lib/format';
 import { useRefResolver, type RefResolver } from '../lib/registry';
+import { MODE_GLYPHS } from '../lib/verdicts';
+import { t, type MessageKey } from '../lib/i18n';
 import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { StatusPill } from '../components/StatusPill';
@@ -71,6 +76,76 @@ function WhyNotPicker() {
   );
 }
 
+/* ---- HERO-1b B3 (2026-09-12): the why-not card's L1 sentence, body and link per verdict
+ * (SPEC §3 N1–N7; the copy is §7 `whyNot.*` behind t()). `{time}` is `lastEvaluation.at`
+ * (object-or-null on the observed wire — DX-16), so every row has a no-time arm: N1 and N3
+ * carry an explicit `.noTime` key; N4/N6 drop " at {time}" as the §7 slot note says. N3 is
+ * an INFERENCE from a non-null run id (a run that lawfully skipped every target also carries
+ * one), so it renders in the info register, never ok (Q1 ruled (a)) — until FIRED_CONFIRMED
+ * lands (EXPLAIN-6, gated). N6 (noCommandsIssued true) wins over any verdict. */
+interface WhyNotCard {
+  pill: { label: string; tone: Tone; glyph?: string };
+  headline: string;
+  body: string | null;
+  link: MessageKey | null;
+}
+
+function whyNotCard(nf: NonFiringExplanation): WhyNotCard {
+  const at = nf.lastEvaluation?.at ?? null;
+  const time = parseInstant(at) ? clockTimeWithDate(at) : null;
+  /** Drop the " at {time}" clause when the wire carries no time (§7: "null → drop 'at {time}'"). */
+  const timed = (key: MessageKey) => (time ? heroCopy(key, { time }) : heroCopy(key, {}).replace(' at {time}', ''));
+  const ranFine = nf.verdict === 'NEVER_TRIGGERED' && nf.lastRelevantRunId !== null;
+  if (nf.noCommandsIssued === true) {
+    return {
+      pill: { label: 'Ran, but sent nothing', tone: 'warn', glyph: MODE_GLYPHS.skipped },
+      headline: timed('whyNot.headline.sentNothing'),
+      body: heroCopy('whyNot.body.sentNothing'),
+      link: 'whyNot.link.sentNothing',
+    };
+  }
+  switch (nf.verdict) {
+    case 'CONDITION_NOT_MET':
+      return {
+        pill: verdictMeta(nf.verdict),
+        headline: time ? heroCopy('whyNot.headline.conditionNotMet', { time }) : heroCopy('whyNot.headline.conditionNotMet.noTime'),
+        body: heroCopy('whyNot.body.conditionNotMet', { triggerSummary: nf.triggerSummary }),
+        link: 'whyNot.link.conditionNotMet',
+      };
+    case 'NEVER_TRIGGERED':
+      return ranFine
+        ? {
+            pill: { label: 'It did run', tone: 'info' },
+            headline: time ? heroCopy('whyNot.headline.neverTriggered.ranFine', { time }) : heroCopy('whyNot.headline.neverTriggered.ranFine.noTime'),
+            body: heroCopy('whyNot.body.ranFine'),
+            link: 'whyNot.link.ranFine',
+          }
+        : {
+            pill: verdictMeta(nf.verdict),
+            headline: heroCopy('whyNot.headline.neverTriggered'),
+            body: heroCopy('whyNot.neverTriggered.body', { triggerSummary: nf.triggerSummary }),
+            link: null,
+          };
+    case 'ACTED_BUT_UNCONFIRMED':
+      return {
+        pill: { ...verdictMeta(nf.verdict), glyph: MODE_GLYPHS['timed-out'] },
+        headline: timed('whyNot.headline.actedButUnconfirmed'),
+        body: heroCopy('whyNot.body.actedButUnconfirmed'),
+        link: 'whyNot.link.actedButUnconfirmed',
+      };
+    case 'DISABLED':
+      return { pill: verdictMeta(nf.verdict), headline: heroCopy('whyNot.headline.disabled'), body: heroCopy('whyNot.body.disabled'), link: null };
+  }
+  // Open-vocabulary hardening (the closed-switch class): a verdict this build does not
+  // know is shown as recorded — never a crash, never invented meaning, never success.
+  return {
+    pill: { ...verdictMeta(nf.verdict), glyph: MODE_GLYPHS['not-recorded'] },
+    headline: heroCopy('whyNot.headline.unknown', { verdict: String(nf.verdict ?? '') }),
+    body: null,
+    link: null,
+  };
+}
+
 function WhyNotDetail({ automationId }: { automationId: string }) {
   const state = useApi(() => api.getNonFiring(automationId));
   // v1.1.3: the registry census for the trigger ref (the same one-poll-loop read the
@@ -83,34 +158,25 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
       </p>
       <Resource state={state}>
         {(nf: NonFiringExplanation) => {
-          // DP-B2 (core's ruled shape): the frozen 4-value verdict has no "fired
-          // fine" value, so a clean recent run arrives as NEVER_TRIGGERED with a
-          // NON-NULL lastRelevantRunId — the run id is how the wire says "it did
-          // run, and confirmed". Tell the two apart here (core's stated intent:
-          // "the UI tells them apart by the non-null run id").
-          const ranFine = nf.verdict === 'NEVER_TRIGGERED' && nf.lastRelevantRunId !== null;
-          // v1.1.2 (SKIP-VIS DP-2): the silent-skip marker. TRUE exactly when the
-          // governing COMPLETED run issued zero device commands — a do-nothing run
-          // is NEVER presented as clean success; it gets its own honest verdict pill.
-          const sentNothing = nf.noCommandsIssued === true;
-          const v = sentNothing
-            ? ({ label: 'Ran, but sent nothing', tone: 'warn' } as const)
-            : ranFine
-              ? ({ label: 'It did run', tone: 'ok' } as const)
-              : verdictMeta(nf.verdict);
+          const card = whyNotCard(nf);
           return (
             <Card>
               <div class={styles.detail}>
                 <div class={styles.verdictRow}>
-                  <StatusPill tone={v.tone} label={v.label} />
+                  <StatusPill tone={card.pill.tone} label={card.pill.label} glyph={card.pill.glyph} />
                   <span class={styles.autoName}>{nf.automationName}</span>
                 </div>
 
-                <p class={styles.explanation}>{nf.explanation}</p>
+                <p class={styles.explanation}>{card.headline}</p>
+                {card.body ? <p class={styles.body}>{card.body}</p> : null}
+                {/* The wire's own `explanation` string is NOT rendered (SPEC §2 gives it no
+                    slot): Core's DP-B2 sentence says "last fired and confirmed", a claim the
+                    Q1 ruling refuses to make from a run id alone — the keyed L1 + body carry
+                    every fact it does. Filed with the hub in the HERO-1b return. */}
 
                 <dl class="kv">
                   <div class="kvRow">
-                    <dt>What would make it run</dt>
+                    <dt>{t('whyNot.kv.trigger')}</dt>
                     <dd class={styles.left}>
                       {nf.triggerSummary}
                       {/* v1.1.3 (FE-113 / CG-1): the R-4 concealment closed on THIS surface —
@@ -121,7 +187,8 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
                           alone — two honest facts, neither claims a name. */}
                       {nf.triggerRef ? (
                         <span style={{ display: 'block', marginTop: 'var(--hs-space-1)', fontSize: 'var(--hs-text-sm)' }}>
-                          Watching: <TriggerEntity subjectRef={nf.triggerRef} resolveRef={resolveRef} />
+                          {t('whyNot.kv.watching').replace('{entity}', '')}
+                          <TriggerEntity subjectRef={nf.triggerRef} resolveRef={resolveRef} />
                         </span>
                       ) : null}
                     </dd>
@@ -131,48 +198,24 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
                       row simply doesn't render), never fabrication, never a
                       throw. This exact dereference, unguarded, was DX-16's crash
                       (`can't access property "at"`). Date-qualified stamp per
-                      NEW-6: an evaluation can be >24 h old. */}
+                      NEW-6: an evaluation can be >24 h old. A null conditionsResult
+                      beside a time is the FAILED/ABORTED/INTERRUPTED class
+                      (StandardExplanationService:281–:288) — said in words. */}
                   {nf.lastEvaluation?.at ? (
                     <div class="kvRow">
-                      <dt>Last checked</dt>
+                      <dt>{t('whyNot.kv.lastChecked')}</dt>
                       <dd>
                         {clockTimeWithDate(nf.lastEvaluation.at)}
-                        {nf.lastEvaluation.conditionsResult ? ` · ${nf.lastEvaluation.conditionsResult}` : ''}
+                        {' · '}
+                        {nf.lastEvaluation.conditionsResult ?? t('whyNot.kv.lastChecked.unclean')}
                       </dd>
                     </div>
                   ) : null}
                 </dl>
 
-                {ranFine && nf.lastRelevantRunId ? (
+                {card.link && nf.lastRelevantRunId ? (
                   <p class={styles.nextStep}>
-                    {/* Honest caveat: a run that lawfully skipped every unavailable
-                        target still reports "ran" here — the run's own page shows
-                        whether anything actually changed. */}
-                    <a href={href(`/explain/run/${nf.lastRelevantRunId}`)}>
-                      See that run — including whether anything actually changed →
-                    </a>
-                  </p>
-                ) : null}
-                {nf.verdict === 'DISABLED' ? (
-                  <p class={styles.nextStep}>To let it run, turn this automation on in your automation settings.</p>
-                ) : null}
-                {sentNothing && nf.lastRelevantRunId ? (
-                  <p class={styles.nextStep}>
-                    {/* The silent-skip truth, one click away — the run page shows the
-                        do-nothing record honestly (never a clean success tile). */}
-                    <a href={href(`/explain/run/${nf.lastRelevantRunId}`)}>
-                      See the run that sent no commands →
-                    </a>
-                  </p>
-                ) : null}
-                {!sentNothing && nf.verdict === 'ACTED_BUT_UNCONFIRMED' && nf.lastRelevantRunId ? (
-                  <p class={styles.nextStep}>
-                    <a href={href(`/explain/run/${nf.lastRelevantRunId}`)}>See the run where the device never confirmed →</a>
-                  </p>
-                ) : null}
-                {nf.verdict === 'CONDITION_NOT_MET' && nf.lastRelevantRunId ? (
-                  <p class={styles.nextStep}>
-                    <a href={href(`/explain/run/${nf.lastRelevantRunId}`)}>See exactly which condition blocked it →</a>
+                    <a href={href(`/explain/run/${nf.lastRelevantRunId}`)}>{t(card.link)}</a>
                   </p>
                 ) : null}
               </div>

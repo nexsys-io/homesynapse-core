@@ -44,7 +44,7 @@ describe('the REAL 2026-08-16 wire body (lastEvaluation: null) renders honestly'
     const { container } = await renderDetail(FIX.data);
     const text = container.textContent ?? '';
     expect(text).toContain('Nothing set it off'); // the honest NEVER_TRIGGERED verdict pill
-    expect(text).toContain("Automation 'bench-hero' has not been triggered");
+    expect(text).toContain("It hasn't run yet."); // HERO-1b B3: the keyed L1 (SPEC §3 N2) — the wire's own `explanation` string has no slot on the card
     expect(text).toContain('What would make it run'); // the surviving row still renders
     expect(text).not.toContain('Last checked'); // the null case: the row simply does not render
     expect(text).not.toContain(RENDER_ERROR_TITLE); // the VIEW is honest — not the boundary card
@@ -77,7 +77,7 @@ describe('the REAL 2026-08-20 wire body (second deployment, same null arm) rende
     const { container } = await renderDetail(FIX_0820.data, FIX_0820.meta);
     const text = container.textContent ?? '';
     expect(text).toContain('Nothing set it off');
-    expect(text).toContain("Automation 'bench-hero' has not been triggered");
+    expect(text).toContain("It hasn't run yet."); // HERO-1b B3: the keyed L1 (SPEC §3 N2) — the wire's own `explanation` string has no slot on the card
     expect(text).toContain('What would make it run');
     expect(text).toContain('state change');
     expect(text).not.toContain('Last checked');

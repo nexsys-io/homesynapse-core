@@ -72,7 +72,10 @@ const ACTION_REASON: Record<ActionOutcome, string | null> = {
  *   no settling record). Scenarios that reproduce the PRE-v1.1.2 deployed wire
  *   pass `resultOutcome: undefined, settled: undefined` to strip the keys. */
 const ACTION_RESULT_OUTCOME: Record<ActionOutcome, string | null> = {
-  CONFIRMED: 'acknowledged',
+  // HERO-1b B7: null, not 'acknowledged' — the zigbee handler publishes command_result only
+  // on failure, so a device-confirmed command lawfully carries NO verdict row (F-R4b-H); the
+  // always-populated value was the H8 false-VALUE class (contract-consumer.md §5).
+  CONFIRMED: null,
   DISPATCHED: null,
   UNCONFIRMED: null,
   FAILED: 'rejected',
@@ -900,6 +903,86 @@ function buildDanglingRef(): MockDataset {
   };
 }
 
+/* ---- HERO-1b B7 (2026-09-12): the hero-states scenario — SPEC §3 on today's wire ----
+ * One run per §3 row today's emitter can produce, each in ONE era (audit O1: the mock never
+ * shows a sentence the wire cannot back): COMPLETED × each outcome (rows 1–5), the silent
+ * skip and the era skeleton (row 6's two arms), one each of SKIPPED / FAILED / CANCELLED /
+ * INTERRUPTED (rows 11, 16, 19, 28-expired), and a replaced command (the mode override,
+ * §10 sentence 6). The wire's null arms as they are: `firingValue` null everywhere (all
+ * eras, 2026-07-27); `resultOutcome` null beside CONFIRMED (F-R4b-H — the zigbee handler
+ * publishes command_result only on failure); a SKIPPED action has `command: null` (:776)
+ * and keeps its planned target (:771 nulls it only when the plan names none). Anchored at
+ * the most recent 9:42 pm (the §7 sample slot) so the §10 script reads off the screen. */
+function buildHeroStates(): MockDataset {
+  const A = { automationId: 'auto_hero', automationName: 'Evening Lights' };
+  const light = { type: 'ENTITY', id: 'ent_hallway_light' };
+  const anchor = new Date(now);
+  anchor.setHours(21, 42, 0, 0);
+  if (anchor.getTime() > now) anchor.setDate(anchor.getDate() - 1);
+  const at = (minutesBefore: number) => new Date(anchor.getTime() - minutesBefore * 60_000).toISOString();
+  const chain = (runId: string, minutesBefore: number, o: Omit<ChainOpts, 'matchedAtIso' | 'automationId' | 'automationName'>): CausalChain => {
+    const c = makeChain(runId, { ...A, matchedAtIso: at(minutesBefore), ...o });
+    c.trigger.firingValue = null; // today's wire: never a reading (EXPLAIN-1 waits)
+    return c;
+  };
+  const confirmed = (over: Partial<CausalAction> = {}) => makeAction('CONFIRMED', { targetRef: light, resultOutcome: null, settled: true, ...over });
+  const skipped = (over: Partial<CausalAction> = {}) => makeAction('SKIPPED', { targetRef: light, command: null, params: {}, resultOutcome: null, settled: true, ...over });
+  const rows: [string, number, ChainOpts][] = [
+    ['run_hs_01_confirmed', 0, { actions: [confirmed()] }],
+    ['run_hs_02_dispatched', 5, { actions: [makeAction('DISPATCHED', { targetRef: light, resultOutcome: null, settled: false })], terminalReason: null }],
+    ['run_hs_03_unconfirmed', 10, { actions: [makeAction('UNCONFIRMED', { targetRef: light, resultOutcome: null, settled: true })], terminalReason: 'Action sent; device did not confirm within 5s', durationMs: 5021 }],
+    ['run_hs_04_failed', 15, { actions: [makeAction('FAILED', { targetRef: light, resultOutcome: 'rejected', reason: 'rejected' })] }],
+    ['run_hs_05_skipped_step', 20, { actions: [skipped({ reason: 'Target unavailable' })] }],
+    ['run_hs_06_replaced', 25, { actions: [makeAction('DISPATCHED', { targetRef: light, resultOutcome: 'superseded', settled: true })] }],
+    ['run_hs_11_skipped_run', 40, { status: 'SKIPPED', conditionResult: false, actions: [skipped({ reason: 'Condition not met' })], terminalReason: 'Condition not met: before sunset', durationMs: 38 }],
+    ['run_hs_16_failed_run', 55, { status: 'FAILED', actions: [makeAction('FAILED', { targetRef: light, resultOutcome: 'rejected', reason: 'rejected' })], terminalReason: 'Action failed: rejected', durationMs: 240 }],
+    ['run_hs_19_cancelled_run', 70, { status: 'CANCELLED', actions: [confirmed()], terminalReason: 'Superseded by a newer run', durationMs: 900 }],
+    ['run_hs_28_interrupted_run', 85, { status: 'INTERRUPTED', actions: [makeAction('FAILED', { targetRef: light, resultOutcome: 'expired_on_restart', reason: 'command was in-flight at restart and is not idempotent' })], terminalReason: 'System restarted mid-run', durationMs: 1200 }],
+  ];
+  const causalChains: Record<string, CausalChain> = {};
+  const runs: RunSummary[] = [];
+  for (const [id, min, o] of rows) {
+    const c = chain(id, min, o);
+    causalChains[id] = c;
+    runs.push(makeRun(id, { ...A, triggeredAt: c.trigger.matchedAt, status: c.outcome.status, terminalReason: c.outcome.reason }));
+  }
+  // Row 6a — the silent skip: planned steps, nothing sent, empty actions[] (§3.9 per-target skips).
+  const silent = chain('run_hs_06a_silent_skip', 30, { actions: [] });
+  silent.outcome = { status: 'COMPLETED', reason: null, durationMs: 41, actionCount: 2, commandCount: 0 };
+  causalChains[silent.runId] = silent;
+  runs.push(makeRun(silent.runId, { ...A, triggeredAt: silent.trigger.matchedAt }));
+  // Row 6b — the era skeleton: a run from before the current automations were loaded
+  // (the prior-instance class): name null, trigger type null, its triggering event
+  // outside the run's correlation, no steps on record. Permanent for this run.
+  const era = chain('run_hs_06b_era_skeleton', 35, { actions: [] });
+  era.automationName = null;
+  era.trigger.type = null;
+  era.trigger.subjectRef = null;
+  era.conditions = [];
+  era.outcome = { status: 'COMPLETED', reason: null, durationMs: 12, actionCount: 0, commandCount: 0 };
+  causalChains[era.runId] = era;
+  const eraRun = makeRun(era.runId, { ...A, triggeredAt: era.trigger.matchedAt });
+  eraRun.automationName = null;
+  runs.push(eraRun);
+  return {
+    ...defaultDataset,
+    automations: [
+      makeAutomation('auto_hero', 'Evening Lights', { lastRunId: 'run_hs_01_confirmed' }),
+      makeAutomation('auto_hero_porch', 'Porch Light', { lastRunId: null }),
+      makeAutomation('auto_hero_welcome', 'Front Door Welcome', { lastRunId: 'run_hs_11_skipped_run' }),
+    ],
+    runs,
+    causalChains,
+    nonFiring: {
+      // The why-not rows the §10 script reads: (3) never triggered, no run · (4) a condition was false.
+      // DP-B2 as Core writes it (StandardExplanationService:355–:358): NEVER_TRIGGERED with a run id.
+      auto_hero: makeNonFiring('auto_hero', 'NEVER_TRIGGERED', { automationName: 'Evening Lights', lastRelevantRunId: 'run_hs_01_confirmed', explanation: `Automation 'Evening Lights' last fired and confirmed at ${at(0)}; no non-firing was detected in the requested window.`, triggerSummary: 'motion in the hallway', lastEvaluation: { at: at(0), conditionsResult: 'true' } }),
+      auto_hero_porch: makeNonFiring('auto_hero_porch', 'NEVER_TRIGGERED', { automationName: 'Porch Light', triggerSummary: 'motion on the porch', triggerRef: null }),
+      auto_hero_welcome: makeNonFiring('auto_hero_welcome', 'CONDITION_NOT_MET', { automationName: 'Front Door Welcome', lastRelevantRunId: 'run_hs_11_skipped_run', triggerSummary: 'the front door opening', lastEvaluation: { at: at(40), conditionsResult: 'false' } }),
+    },
+  };
+}
+
 /* ---- The registry ---- */
 export interface Scenario {
   id: string;
@@ -919,6 +1002,7 @@ export const SCENARIOS: Scenario[] = [
   { id: 'verdict-vocabulary', label: 'The ten verdicts (pre-v1.1.2 wire)', group: 'Story', blurb: 'Every command_result outcome as the pre-SKIP-VIS deployed wire flattens it — the recorded-reason recovery path, kept for pre-v1.1.2 payloads until the deploy.', build: buildVerdictVocabulary },
   { id: 'field-evidence', label: 'Field evidence', group: 'Story', blurb: 'The silent-skip do-nothing run, the null-name prior-instance run, rehydrated “Available” with days-old evidence, and honest UNKNOWN since restart.', build: buildFieldEvidence },
   { id: 'live-nulls', label: 'Live wire: present-but-null', group: 'Story', blurb: 'The tri-state seam as the live wire serves it — every nullable key present-but-null, a genuinely empty chain, and a run whose chain read 404s.', build: buildLiveNulls },
+  { id: 'hero-states', label: 'The hero, every state', group: 'Story', blurb: 'SPEC §3 on today’s wire: one run per headline row the emitter can produce — each outcome, the silent skip, the era skeleton, a skipped / failed / cancelled / interrupted run, a replaced command — with the wire’s nulls as they are (no firing value; no verdict row beside Confirmed).', build: buildHeroStates },
   { id: 'dangling-ref', label: 'Dangling ref (loud)', group: 'Story', blurb: 'The R-4 custody-clone class: a run whose entity refs are not in this hub’s registry — rendered loud on the chain, never paraphrased away.', build: buildDanglingRef },
   { id: 'live-fleet', label: 'Live fleet mirror', group: 'Story', blurb: 'One entity per deployed device class with canonical attribute keys — including brightness level 0–254 plus the hub-derived percent.', build: buildLiveFleet },
   { id: 'all-origins', label: 'All event origins', group: 'Story', blurb: 'Automation, device, you, external, and the honest UNKNOWN.', build: buildAllOrigins },

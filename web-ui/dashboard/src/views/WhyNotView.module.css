@@ -22,3 +22,5 @@
 }
 .left { text-align: left !important; font-weight: var(--hs-weight-normal) !important; color: var(--hs-text-secondary) !important; }
 .nextStep { font-size: var(--hs-text-sm); color: var(--hs-text-secondary); }
+/* HERO-1b B3: the keyed body under the L1 sentence (SPEC §2 card order). */
+.body { font-size: var(--hs-text-base); line-height: var(--hs-leading-normal); color: var(--hs-text); max-width: 56ch; }

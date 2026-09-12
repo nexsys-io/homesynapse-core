@@ -11,6 +11,7 @@
  *  - Lead on "never evicted": the explanation is a projection of the permanent log.
  */
 import type { ComponentChildren } from 'preact';
+import { useLayoutEffect, useRef } from 'preact/hooks';
 import type { CausalChain as Chain } from '../lib/api/contract';
 import { StatusPill } from './StatusPill';
 import { href } from '../lib/router';
@@ -22,6 +23,7 @@ import {
   danglingTargetLine,
   danglingTriggerLine,
   EMPTY_CHAIN_NOTE,
+  heroCopy,
   noReadingLine,
   NOT_RECORDED,
   NULL_NAME_NOTE,
@@ -66,129 +68,157 @@ export function CausalChain({
   // A real, successful, genuinely empty chain: nothing planned, nothing run.
   const genuinelyEmpty =
     conditions.length === 0 && actions.length === 0 && (outcome?.actionCount ?? 0) === 0;
+  // HERO-1b B4 (SPEC §4): two empty facts, two sentences. The ERA BOUNDARY — a skeleton
+  // chain from before the current automations were loaded (`automationName` null or
+  // `trigger.type` null, HERO-0 §1's prior-instance class) — is permanent for these runs:
+  // its headline is the "no detail recorded" title and the body stands in for the steps
+  // (Q6 ruled (a): this tell now; a Core marker is a v1.1.5 ask). A CURRENT automation
+  // that planned nothing keeps the completed.none headline and the empty note.
+  const eraSkeleton = genuinelyEmpty && (chain.automationName === null || trigger?.type === null);
   const status = doNothing
     ? ({ label: 'Completed, nothing changed', tone: 'warn' } as const)
     : runStatusMeta(outcome?.status);
+  /* HERO-1b B5 (SPEC §5/§8): a held-DISPATCHED action that settles on a later poll is
+     announced ONCE through a polite role="status" region (`explain.a11y.live`) — the
+     region is always present (so assistive tech is subscribed) and silent otherwise.
+     The UI runs no timer: the transition is whatever the hub's next read carries. */
+  const verdicts = actions.map((a) => actionVerdict(a));
+  const prevProvisional = useRef<boolean[]>([]);
+  const settledNow = verdicts.filter((v, i) => prevProvisional.current[i] === true && !v.provisional).map((v) => v.label);
+  const liveAnnouncement = settledNow.length > 0 ? heroCopy('explain.a11y.live', { label: settledNow.join(', ') }) : '';
+  useLayoutEffect(() => {
+    prevProvisional.current = verdicts.map((v) => v.provisional);
+  });
   return (
     <div class={styles.wrap}>
-      <p class={styles.headline}>{causalSentence(chain, resolveRef)}</p>
+      <div role="status" aria-live="polite" class="sr-only">{liveAnnouncement}</div>
+      <p class={styles.headline}>{eraSkeleton ? t('explain.chain.noDetail.title') : causalSentence(chain, resolveRef)}</p>
 
       {/* The null-name class (prior-instance runs): say why calmly, never invent a name. */}
       {chain.automationName === null ? <p class={styles.hint}>{NULL_NAME_NOTE}</p> : null}
 
-      <ol class={styles.chain} aria-label="Step-by-step explanation, from trigger to outcome">
-        {/* Trigger. `type` is null for prior-instance runs — shown honestly as
-            "recorded before the current automations", never a blank. `firingValue`
-            is OBSERVED NULL on the live wire in all eras — the detail then says
-            "value not recorded" in words, never a blank and never "null". */}
-        {/* NEW-6: matchedAt is date-qualified — a run can be days old, and a bare
-            clock time on an old run reads as today. */}
-        {/* FE-NULL-1: `subjectRef` is REQUIRED-NULLABLE — null when the triggering event
-            is outside the run's correlation (StandardExplanationService:644–:649). The
-            line is then the HERO-0 sentence with the recorded time; no label, no
-            dangling pill — a null is not an unresolvable id and nothing is accused. */}
+      {/* HERO-1b B5 (SPEC §8): the chain is a semantic <ol>; each step carries
+          `explain.a11y.step` as visually-hidden text ("Step 2 of 4: action — Confirmed.")
+          so the marker's meaning never rides the shape alone; the marker itself is
+          aria-hidden. Steps are collected first so every one knows n of N. */}
+      <ol class={styles.chain} aria-label={t('explain.a11y.chain')}>
         {(() => {
-          const trigId = trigger?.subjectRef?.id;
-          const trigRes = resolveRef(trigId);
-          const trigDangling = !!trigId && trigRes.kind === 'dangling';
-          const trigUnrecorded = trigger?.subjectRef === null;
-          return (
-            <Step
-              kind="trigger"
-              tone={trigDangling ? 'error' : 'info'}
-              marker={trigDangling ? '!' : '●'}
-              line={
-                trigDangling
-                  ? danglingTriggerLine(trigId, triggerVerbFromValue(trigger?.firingValue), clockTimeWithDate(trigger?.matchedAt))
-                  : trigUnrecorded
-                    ? unrecordedTriggerLine(clockTimeWithDate(trigger?.matchedAt))
-                    : `${refLabel(trigId, trigRes)} ${triggerVerbFromValue(trigger?.firingValue)} at ${clockTimeWithDate(trigger?.matchedAt)}.`
-              }
-              pill={trigDangling ? <StatusPill tone="error" label={UNRESOLVED_REF_PILL} title={UNRESOLVED_REF_HELP} size="sm" /> : undefined}
-            >
-              {trigDangling ? <p class={styles.hint}>{UNRESOLVED_REF_HELP}</p> : null}
-              <Detail label="Trigger">
-                {trigger?.type ?? 'recorded before the current automations'} · {trigger?.firingValue ?? `value ${NOT_RECORDED}`}
-              </Detail>
-            </Step>
-          );
-        })()}
+          const steps: StepSpec[] = [];
 
-        {/* Conditions */}
-        {conditions.map((c, i) => {
-          const tone: Tone = !c.evaluated ? 'unknown' : c.result ? 'ok' : 'warn';
-          const verdict = !c.evaluated ? 'was not checked' : c.result ? 'was true' : 'was false';
-          const observed = c.observedState ?? [];
-          return (
-            <Step
-              key={i}
-              kind="condition"
-              tone={tone}
-              marker={c.result ? '✓' : c.evaluated ? '✕' : '?'}
-              line={`The rule "${c.expression ?? NOT_RECORDED}" ${verdict}.`}
-            >
-              {observed.length > 0 ? (
-                <Detail label="At the time">
-                  {observed
-                    .map((o) => {
-                      const r = resolveRef(o.entityId);
-                      const loud = r.kind === 'dangling' ? ` (${UNRESOLVED_REF_PHRASE})` : '';
-                      // FE-NULL-1: `value` null = the entity had no value for the attribute at
-                      // evaluation (RunExplanation:137) — said in words, never "= null".
-                      return o.value === null
-                        ? noReadingLine(`${refLabel(o.entityId, r)}${loud}`, o.attribute)
-                        : `${refLabel(o.entityId, r)}${loud} ${o.attribute} = ${o.value}`;
-                    })
-                    .join('; ')}
-                </Detail>
-              ) : null}
-            </Step>
-          );
-        })}
+          /* Trigger. `type` is null for prior-instance runs — shown honestly as
+             "recorded before the current automations", never a blank. `firingValue`
+             is OBSERVED NULL on the live wire in all eras — the detail then says
+             "value not recorded" in words, never a blank and never "null".
+             NEW-6: matchedAt is date-qualified — a run can be days old, and a bare
+             clock time on an old run reads as today.
+             FE-NULL-1: `subjectRef` is REQUIRED-NULLABLE — null when the triggering event
+             is outside the run's correlation (StandardExplanationService:644–:649). The
+             line is then the HERO-0 sentence with the recorded time; no label, no
+             dangling pill — a null is not an unresolvable id and nothing is accused. */
+          {
+            const trigId = trigger?.subjectRef?.id;
+            const trigRes = resolveRef(trigId);
+            const trigDangling = !!trigId && trigRes.kind === 'dangling';
+            const trigUnrecorded = trigger?.subjectRef === null;
+            // HERO-1b B4 (SPEC §4 "Reading not recorded"): `firingValue` null (today: every run)
+            // replaces the trigger LINE with the keyed arm — the L2 detail says "value not
+            // recorded" in words. A null subject drops the reading marker (one honest sentence).
+            const readingUnrecorded = !trigUnrecorded && !trigDangling && (trigger?.firingValue == null || trigger.firingValue === '');
+            steps.push({
+              kind: 'trigger',
+              tone: trigDangling ? 'error' : 'info',
+              marker: trigDangling ? '!' : '●',
+              label: trigDangling ? UNRESOLVED_REF_PILL : t('explain.trigger.detail'),
+              line: trigDangling
+                ? danglingTriggerLine(trigId, triggerVerbFromValue(trigger?.firingValue), clockTimeWithDate(trigger?.matchedAt))
+                : trigUnrecorded
+                  ? unrecordedTriggerLine(clockTimeWithDate(trigger?.matchedAt))
+                  : readingUnrecorded
+                    ? heroCopy('explain.trigger.readingNotRecorded', { Trigger: refLabel(trigId, trigRes), time: clockTimeWithDate(trigger?.matchedAt) })
+                    : `${refLabel(trigId, trigRes)} ${triggerVerbFromValue(trigger?.firingValue)} at ${clockTimeWithDate(trigger?.matchedAt)}.`,
+              pill: trigDangling ? <StatusPill tone="error" label={UNRESOLVED_REF_PILL} title={UNRESOLVED_REF_HELP} size="sm" /> : undefined,
+              children: (
+                <>
+                  {trigDangling ? <p class={styles.hint}>{UNRESOLVED_REF_HELP}</p> : null}
+                  <Detail label={t('explain.trigger.detail')}>
+                    {trigger?.type ?? t('explain.trigger.detail.noType')} · {trigger?.firingValue ?? t('explain.trigger.detail.noValue')}
+                  </Detail>
+                </>
+              ),
+            });
+          }
 
-        {/* Actions. Confirmation semantics are MEASURED + ratified (AMD-97): the backend
-            owns the per-capability confirm window; the UI renders each honest state as the
-            poll delivers it and NEVER runs its own timeout. The hints below are calm,
-            class-keyed plain language — no numbers, no timers, no failure-anxiety.
+          /* Conditions */
+          for (const c of conditions) {
+            const tone: Tone = !c.evaluated ? 'unknown' : c.result ? 'ok' : 'warn';
+            const verdict = !c.evaluated ? 'was not checked' : c.result ? 'was true' : 'was false';
+            const observed = c.observedState ?? [];
+            steps.push({
+              kind: 'condition',
+              tone,
+              marker: c.result ? '✓' : c.evaluated ? '✕' : '?',
+              label: verdict,
+              line: `The rule "${c.expression ?? NOT_RECORDED}" ${verdict}.`,
+              children:
+                observed.length > 0 ? (
+                  <Detail label={t('explain.condition.atTheTime')}>
+                    {observed
+                      .map((o) => {
+                        const r = resolveRef(o.entityId);
+                        const loud = r.kind === 'dangling' ? ` (${UNRESOLVED_REF_PHRASE})` : '';
+                        // FE-NULL-1: `value` null = the entity had no value for the attribute at
+                        // evaluation (RunExplanation:137) — said in words, never "= null".
+                        return o.value === null
+                          ? noReadingLine(`${refLabel(o.entityId, r)}${loud}`, o.attribute)
+                          : `${refLabel(o.entityId, r)}${loud} ${o.attribute} = ${o.value}`;
+                      })
+                      .join('; ')}
+                  </Detail>
+                ) : null,
+            });
+          }
 
-            THE FIVE HONEST FAILURE MODES RENDER DISTINCT (the 2026-07-25 law — the
-            distinction IS the product): actionVerdict() consumes the v1.1.2
-            `resultOutcome`/`settled` keys first-class where present (SKIP-VIS landed)
-            and falls back to recorded-reason recovery only on pre-v1.1.2 payloads.
-            Each mode carries its own label + glyph; color reinforces (never hue
-            alone). A not-yet-settled outcome renders visibly PROVISIONAL (§5.9) —
-            calm, never a settled pill. See lib/verdicts.ts. */}
-        {actions.map((a, i) => {
-          const v = actionVerdict(a);
-          const targetId = a.targetRef?.id;
-          const targetRes = resolveRef(targetId);
-          const targetDangling = !!targetId && targetRes.kind === 'dangling';
-          const hint =
-            v.mode === 'held-dispatched' ? pendingHint(a.command)
-            : v.mode === 'timed-out' || v.mode === 'acked-silent' ? unconfirmableHint(a.command)
-            : null;
-          const showHelp =
-            v.provisional || v.mode === 'superseded' || v.mode === 'acked-silent' || v.mode === 'expired-restart';
-          return (
-            <Step
-              key={i}
-              kind="action"
-              tone={targetDangling ? 'error' : v.tone}
-              marker={targetDangling ? '!' : '→'}
-              line={
-                /* FE-NULL-1: `command` null = a SKIPPED/FAILED action that never issued a
-                   command (:776) — the honest sentence, not actionPhrase(null)'s fallback
-                   (a dangling target keeps its pill + help below). `targetRef` null = no
-                   target refs (:771) — the phrase names no device and accuses no registry. */
+          /* Actions. Confirmation semantics are MEASURED + ratified (AMD-97): the backend
+             owns the per-capability confirm window; the UI renders each honest state as the
+             poll delivers it and NEVER runs its own timeout. The hints below are calm,
+             class-keyed plain language — no numbers, no timers, no failure-anxiety.
+
+             THE FIVE HONEST FAILURE MODES RENDER DISTINCT (the 2026-07-25 law — the
+             distinction IS the product): actionVerdict() consumes the v1.1.2
+             `resultOutcome`/`settled` keys first-class where present (SKIP-VIS landed)
+             and falls back to recorded-reason recovery only on pre-v1.1.2 payloads.
+             Each mode carries its own label + glyph; color reinforces (never hue
+             alone). A not-yet-settled outcome renders visibly PROVISIONAL (§5.9) —
+             calm, never a settled pill. See lib/verdicts.ts. */
+          actions.forEach((a) => {
+            const v = actionVerdict(a);
+            const targetId = a.targetRef?.id;
+            const targetRes = resolveRef(targetId);
+            const targetDangling = !!targetId && targetRes.kind === 'dangling';
+            const hint =
+              v.mode === 'held-dispatched' ? pendingHint(a.command)
+              : v.mode === 'timed-out' || v.mode === 'acked-silent' ? unconfirmableHint(a.command)
+              : null;
+            const showHelp =
+              v.provisional || v.mode === 'superseded' || v.mode === 'acked-silent' || v.mode === 'expired-restart';
+            steps.push({
+              kind: 'action',
+              tone: targetDangling ? 'error' : v.tone,
+              marker: targetDangling ? '!' : '→',
+              label: targetDangling ? `${UNRESOLVED_REF_PILL}, ${v.label}` : v.label,
+              /* FE-NULL-1: `command` null = a SKIPPED/FAILED action that never issued a
+                 command (:776) — the honest sentence, not actionPhrase(null)'s fallback
+                 (a dangling target keeps its pill + help below). `targetRef` null = no
+                 target refs (:771) — the phrase names no device and accuses no registry. */
+              line:
                 a.command === null
                   ? SKIPPED_BEFORE_COMMAND
                   : targetDangling
                     ? danglingTargetLine(actionPhrase(a.command), targetId)
                     : a.targetRef === null
                       ? `${actionPhrase(a.command)} ${UNNAMED_TARGET}.`
-                      : `${actionPhrase(a.command)} ${refLabel(targetId, targetRes)}.`
-              }
-              pill={
+                      : `${actionPhrase(a.command)} ${refLabel(targetId, targetRes)}.`,
+              pill: (
                 <>
                   {targetDangling ? (
                     <StatusPill tone="error" label={UNRESOLVED_REF_PILL} title={UNRESOLVED_REF_HELP} size="sm" />
@@ -202,58 +232,68 @@ export function CausalChain({
                     provisional={v.provisional}
                   />
                 </>
-              }
-            >
-              {targetDangling ? <p class={styles.hint}>{UNRESOLVED_REF_HELP}</p> : null}
-              {showHelp ? <p class={styles.hint}>{v.help}</p> : null}
-              {hint ? <p class={styles.hint}>{hint}</p> : null}
-              <Detail label="Command">{a.command ?? NOT_RECORDED}{attrValueList(a.params)}</Detail>
-              {a.reason ? <Detail label="Recorded reason">{a.reason}</Detail> : null}
-              {v.resultOutcome ? (
-                <Detail label="Recorded outcome">
-                  {v.resultOutcome}
-                  {v.recovered ? ' (recovered from the recorded reason — this record predates the current hub software)' : ''}
-                </Detail>
-              ) : null}
-            </Step>
-          );
-        })}
+              ),
+              children: (
+                <>
+                  {targetDangling ? <p class={styles.hint}>{UNRESOLVED_REF_HELP}</p> : null}
+                  {showHelp ? <p class={styles.hint}>{v.help}</p> : null}
+                  {hint ? <p class={styles.hint}>{hint}</p> : null}
+                  <Detail label={t('explain.action.detail.command')}>{a.command ?? NOT_RECORDED}{attrValueList(a.params)}</Detail>
+                  {a.reason ? <Detail label={t('explain.action.detail.reason')}>{a.reason}</Detail> : null}
+                  {v.resultOutcome ? (
+                    <Detail label={t('explain.action.detail.outcome')}>
+                      {v.resultOutcome}
+                      {v.recovered ? ' (recovered from the recorded reason — this record predates the current hub software)' : ''}
+                    </Detail>
+                  ) : null}
+                </>
+              ),
+            });
+          });
 
-        {/* The silent-skip run class (lawful Doc 07 §3.9 per-target skips): planned
-            actions, zero commands, empty actions[] — nothing visible happened and
-            today no marker event records why. Render it honestly, never as clean
-            success; the actionCount-vs-actions[] disagreement is the tell. */}
-        {doNothing && outcome ? (
-          <Step
-            kind="action"
-            tone="warn"
-            marker="→"
-            line={`Nothing was changed: ${outcome.actionCount === 1 ? 'the planned step' : `all ${outcome.actionCount} planned steps`} ended without sending a command.`}
-          >
-            <p class={styles.hint}>
-              This usually means the devices this automation targets were unavailable, so each was
-              skipped by design. The step-by-step record of these skips is not kept yet.
-            </p>
-          </Step>
-        ) : null}
+          /* The silent-skip run class (lawful Doc 07 §3.9 per-target skips): planned
+             actions, zero commands, empty actions[] — nothing visible happened and
+             today no marker event records why. Render it honestly, never as clean
+             success; the actionCount-vs-actions[] disagreement is the tell. */
+          if (doNothing && outcome) {
+            steps.push({
+              kind: 'action',
+              tone: 'warn',
+              marker: '→',
+              label: status.label,
+              line: `Nothing was changed: ${outcome.actionCount === 1 ? 'the planned step' : `all ${outcome.actionCount} planned steps`} ended without sending a command.`,
+              children: (
+                <p class={styles.hint}>
+                  This usually means the devices this automation targets were unavailable, so each was
+                  skipped by design. The step-by-step record of these skips is not kept yet.
+                </p>
+              ),
+            });
+          }
 
-        {/* The honest EMPTY state (a real, successful, genuinely empty chain):
-            an explicit statement — never a silent blank, never an error posture,
-            because nothing failed. */}
-        {genuinelyEmpty ? (
-          <Step kind="empty" tone="unknown" marker="○" line={EMPTY_CHAIN_NOTE} />
-        ) : null}
+          /* The honest EMPTY state — two facts, two sentences (HERO-1b B4, SPEC §4):
+             the era boundary renders the "no detail recorded" body in place of the
+             steps; a current automation that planned nothing renders the explicit
+             empty note. Never a silent blank, never an error posture — nothing failed. */
+          if (eraSkeleton) {
+            steps.push({ kind: 'empty', tone: 'unknown', marker: '○', label: status.label, line: t('explain.chain.noDetail.body') });
+          } else if (genuinelyEmpty) {
+            steps.push({ kind: 'empty', tone: 'unknown', marker: '○', label: status.label, line: EMPTY_CHAIN_NOTE });
+          }
 
-        {/* Terminal outcome */}
-        <Step
-          kind="outcome"
-          tone={status.tone}
-          marker="◆"
-          line={terminalLine(chain)}
-          pill={<StatusPill tone={status.tone} label={status.label} size="sm" />}
-        />
+          /* Terminal outcome */
+          steps.push({
+            kind: 'outcome',
+            tone: status.tone,
+            marker: '◆',
+            label: status.label,
+            line: terminalLine(chain),
+            pill: <StatusPill tone={status.tone} label={status.label} size="sm" />,
+          });
+
+          return steps.map((s, i) => <Step key={i} n={i + 1} N={steps.length} {...s} />);
+        })()}
       </ol>
-
       {/* FE-NULL-1 / HERO-0 F4: `parentRunId` is ALWAYS null in V1 (RunExplanation:213–:219)
           — a null is NOT "root". depth > 0 with no parent id says so honestly (no link);
           depth 0 renders nothing, as before; a parent id (a later Core) keeps the link. */}
@@ -265,28 +305,27 @@ export function CausalChain({
         <p class={styles.cascade}>{CASCADE_PARENT_UNRECORDED}</p>
       ) : null}
 
-      <p class={styles.permanence}>{t('hero.permanence')}</p>
+      <p class={styles.permanence}>{t('explain.permanence')}</p>
     </div>
   );
 }
 
-function Step({
-  tone,
-  marker,
-  line,
-  pill,
-  kind,
-  children,
-}: {
+interface StepSpec {
   tone: Tone;
   marker: string;
   line: string;
+  /** The state the marker carries, in words — read to screen readers as
+   *  "Step n of N: kind — label." (SPEC §8, `explain.a11y.step`). */
+  label: string;
   pill?: ComponentChildren;
   kind: string;
   children?: ComponentChildren;
-}) {
+}
+
+function Step({ tone, marker, line, label, pill, kind, children, n, N }: StepSpec & { n: number; N: number }) {
   return (
     <li class={styles.step} data-kind={kind}>
+      <span class="sr-only">{heroCopy('explain.a11y.step', { n: String(n), N: String(N), kind, label })}</span>
       <span class={`${styles.marker} ${styles[`tone_${tone}`]}`} aria-hidden="true">
         {marker}
       </span>

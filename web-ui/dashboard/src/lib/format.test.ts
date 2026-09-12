@@ -237,3 +237,209 @@ describe('store-truth Last-reported (§10-G) and the no-claim list (§10-I)', ()
     expect(cell).not.toBe('On record — unreadable by this dashboard');
   });
 });
+
+/* ---- HERO-1b B1 — the L1 headline grammar (SPEC §3, design/hero-v1/SPEC.md:25–:66).
+ * One assertion per cell of the 30-row table at the sample slots (Hallway Light ·
+ * Hallway Motion · Evening Lights · 9:42 pm), the mode overrides, and every slot
+ * null arm. RED at HEAD: HEAD's `causalSentence` writes "{Target} {verbPast}
+ * because {because}." for EVERY status and outcome (format.ts:472–:517), so a
+ * SKIPPED run read "Hallway Light turned on because…" — the FE-NULL-1 O1 defect.
+ * Disclosed GREEN-at-HEAD by construction: row 1 (the happy path), row 6's silent
+ * skip, and the targetRef-null CONFIRMED arm (HEAD already wrote those three). */
+import { causalHeadline } from './format';
+import type { CausalChain, RunStatus, ActionOutcome } from './api/contract';
+
+const AT = (() => {
+  const d = new Date();
+  d.setHours(21, 42, 0, 0); // the sample slot: 9:42 pm today (date-qualified by clockTimeWithDate)
+  return d.toISOString();
+})();
+const WHEN = (() => {
+  // the exact {time} slot as the formatter writes it (locale-cased "9:42 PM")
+  const d = new Date(AT);
+  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+})();
+const BECAUSE = `Hallway Motion detected motion at ${WHEN}`;
+
+type Over = Partial<{
+  command: string | null;
+  targetRef: CausalChain['actions'][number]['targetRef'];
+  resultOutcome: string | null;
+  settled: boolean;
+  automationName: string | null;
+  subjectRef: CausalChain['trigger']['subjectRef'];
+  firingValue: string | null;
+  matchedAt: string;
+  actionCount: number;
+  commandCount: number;
+}>;
+
+function mk(status: RunStatus, outcome: ActionOutcome | null, over: Over = {}): CausalChain {
+  const c = structuredClone(causalChains['run_eh_001']!);
+  c.automationName = over.automationName === undefined ? 'Evening Lights' : over.automationName;
+  c.trigger.matchedAt = over.matchedAt ?? AT;
+  c.trigger.firingValue = over.firingValue === undefined ? 'motion = detected' : over.firingValue;
+  if (over.subjectRef !== undefined) c.trigger.subjectRef = over.subjectRef;
+  c.outcome.status = status;
+  if (outcome === null) {
+    c.actions = [];
+    c.outcome.actionCount = over.actionCount ?? 0;
+    c.outcome.commandCount = over.commandCount ?? 0;
+  } else {
+    const a = c.actions[0]!;
+    a.outcome = outcome;
+    a.resultOutcome = over.resultOutcome === undefined ? null : over.resultOutcome;
+    a.settled = over.settled ?? outcome !== 'DISPATCHED';
+    if (over.command !== undefined) a.command = over.command;
+    if (over.targetRef !== undefined) a.targetRef = over.targetRef;
+  }
+  return c;
+}
+
+describe('HERO-1b B1 — the 30-cell headline table (SPEC §3)', () => {
+  const S = 'Evening Lights skipped this run when';
+  const F = 'Evening Lights failed part-way when';
+  const C = 'Evening Lights was cancelled after';
+  const I = 'Evening Lights was cut off before it finished, after';
+  const tails: [ActionOutcome | null, string][] = [
+    ['CONFIRMED', ' Hallway Light did turn on first, and confirmed it.'],
+    ['DISPATCHED', ' Hallway Light was asked to turn on; no confirmation has come back.'],
+    ['UNCONFIRMED', ' Hallway Light was asked to turn on; it never confirmed.'],
+    ['FAILED', ' The command to Hallway Light failed.'],
+    ['SKIPPED', ' Nothing was sent to Hallway Light.'],
+    [null, ''],
+  ];
+  const rows: [number, RunStatus, ActionOutcome | null, string][] = [
+    [1, 'COMPLETED', 'CONFIRMED', `Hallway Light turned on because ${BECAUSE}.`],
+    [2, 'COMPLETED', 'DISPATCHED', `Hallway Light was asked to turn on because ${BECAUSE} — no confirmation yet.`],
+    [3, 'COMPLETED', 'UNCONFIRMED', `Hallway Light was asked to turn on because ${BECAUSE} — it never confirmed.`],
+    [4, 'COMPLETED', 'FAILED', `Hallway Light was asked to turn on because ${BECAUSE}, but the command failed.`],
+    [5, 'COMPLETED', 'SKIPPED', `Nothing was sent to Hallway Light when ${BECAUSE} — that step was skipped.`],
+    [6, 'COMPLETED', null, `Evening Lights ran when ${BECAUSE} and recorded no steps.`],
+  ];
+  const frames: [number, RunStatus, string][] = [[7, 'SKIPPED', S], [13, 'FAILED', F], [19, 'CANCELLED', C], [25, 'INTERRUPTED', I]];
+  for (const [n, status, frame] of frames) {
+    tails.forEach(([outcome, tail], i) => rows.push([n + i, status, outcome, `${frame} ${BECAUSE}.${tail}`]));
+  }
+
+  it.each(rows)('row %i — %s × %s', (_n, status, outcome, expected) => {
+    expect(causalSentence(mk(status, outcome))).toBe(expected);
+  });
+
+  it('row 6, the silent skip (actionCount > 0, commandCount 0) [GREEN at HEAD — the FE-LIVE sentence, preserved]', () => {
+    expect(causalSentence(mk('COMPLETED', null, { actionCount: 2, commandCount: 0 }))).toBe(
+      `Evening Lights ran when ${BECAUSE}, but nothing was changed.`,
+    );
+  });
+
+  it('every headline sentence is ≤ 21 words at the sample slots (SPEC §3)', () => {
+    for (const [, status, outcome] of rows) {
+      for (const sentence of causalSentence(mk(status, outcome)).split(/(?<=\.)\s+/)) {
+        expect(sentence.split(/\s+/).length).toBeLessThanOrEqual(21);
+      }
+    }
+  });
+
+  it('reports the §7 keys it rendered from (frame + tail, or the one COMPLETED key)', () => {
+    expect(causalHeadline(mk('COMPLETED', 'CONFIRMED')).keys).toEqual(['explain.headline.completed.confirmed']);
+    expect(causalHeadline(mk('SKIPPED', 'SKIPPED')).keys).toEqual(['explain.headline.skipped.frame', 'explain.headline.tail.skipped']);
+    expect(causalHeadline(mk('FAILED', null)).keys).toEqual(['explain.headline.failed.frame', 'explain.headline.tail.none']);
+  });
+});
+
+describe('HERO-1b B1 — the mode override via actionVerdict() (superseded · expired-restart)', () => {
+  it('COMPLETED × DISPATCHED/superseded → the superseded clause, never "no confirmation yet"', () => {
+    const s = causalSentence(mk('COMPLETED', 'DISPATCHED', { resultOutcome: 'superseded', settled: true }));
+    expect(s).toBe(`Hallway Light was asked to turn on because ${BECAUSE}, then a newer command replaced it.`);
+  });
+  it('COMPLETED × FAILED/superseded → the superseded clause, never "the command failed"', () => {
+    const s = causalSentence(mk('COMPLETED', 'FAILED', { resultOutcome: 'superseded' }));
+    expect(s).toBe(`Hallway Light was asked to turn on because ${BECAUSE}, then a newer command replaced it.`);
+    expect(s).not.toMatch(/fail/i);
+  });
+  it('COMPLETED × FAILED/expired_on_restart → the expired-restart clause', () => {
+    const s = causalSentence(mk('COMPLETED', 'FAILED', { resultOutcome: 'expired_on_restart' }));
+    expect(s).toBe(`Hallway Light was asked to turn on because ${BECAUSE}; the hub restarted before it could confirm.`);
+  });
+  it('a non-completed frame keeps its frame and swaps the TAIL (SKIPPED × DISPATCHED/superseded — the §10 sentence 6)', () => {
+    const s = causalSentence(mk('SKIPPED', 'DISPATCHED', { resultOutcome: 'superseded', settled: true }));
+    expect(s).toBe(`Evening Lights skipped this run when ${BECAUSE}. Hallway Light was asked to turn on, then a newer command replaced it.`);
+  });
+  it('FAILED × FAILED/expired_on_restart → frame + the expired-restart tail', () => {
+    const s = causalSentence(mk('FAILED', 'FAILED', { resultOutcome: 'expired_on_restart' }));
+    expect(s).toBe(`Evening Lights failed part-way when ${BECAUSE}. Hallway Light was asked to turn on; the hub restarted before it could confirm.`);
+  });
+  it('UNCONFIRMED/unconfirmed (mode 3, acked-silent) keeps the unconfirmed clause — the pill carries the mode', () => {
+    expect(causalSentence(mk('COMPLETED', 'UNCONFIRMED', { resultOutcome: 'unconfirmed' }))).toBe(
+      `Hallway Light was asked to turn on because ${BECAUSE} — it never confirmed.`,
+    );
+  });
+});
+
+describe('HERO-1b B1 — every slot null arm (SPEC §3 / §7 explain.slot.*)', () => {
+  it('targetRef null, sentence-initial → "A device the run didn\'t name …" [GREEN at HEAD by construction]', () => {
+    expect(causalSentence(mk('COMPLETED', 'CONFIRMED', { targetRef: null }))).toBe(`A device the run didn't name turned on because ${BECAUSE}.`);
+  });
+  it('targetRef null mid-sentence → "…to a device the run didn\'t name"', () => {
+    expect(causalSentence(mk('SKIPPED', 'SKIPPED', { targetRef: null }))).toBe(`${'Evening Lights skipped this run when'} ${BECAUSE}. Nothing was sent to a device the run didn't name.`);
+  });
+  it('a dangling target on a complete census → "entity {id} (not in this hub’s registry)" — verbatim, never paraphrased', () => {
+    const c = mk('COMPLETED', 'CONFIRMED', { targetRef: { type: 'ENTITY', id: ULID } });
+    const s = causalSentence(c, (id) => (id === ULID ? { kind: 'dangling' } : { kind: 'unverified' }));
+    expect(s).toBe(`Entity ${ULID} (${UNRESOLVED_REF_PHRASE}) turned on because ${BECAUSE}.`);
+  });
+  it('subjectRef null → "…because something set it off at {time} (what isn\'t recorded)"', () => {
+    expect(causalSentence(mk('COMPLETED', 'CONFIRMED', { subjectRef: null }))).toBe(
+      `Hallway Light turned on because something set it off at ${WHEN} (what isn't recorded).`,
+    );
+  });
+  it('a dangling trigger on a complete census → "entity {id} (not in this hub’s registry) changed at {time}"', () => {
+    const c = mk('COMPLETED', 'CONFIRMED', { subjectRef: { type: 'ENTITY', id: ULID } });
+    const s = causalSentence(c, (id) => (id === ULID ? { kind: 'dangling' } : { kind: 'unverified' }));
+    expect(s).toBe(`Hallway Light turned on because entity ${ULID} (${UNRESOLVED_REF_PHRASE}) changed at ${WHEN}.`);
+  });
+  it('firingValue null (today: always) → the verb "changed", no invented reading', () => {
+    expect(causalSentence(mk('COMPLETED', 'CONFIRMED', { firingValue: null }))).toBe(`Hallway Light turned on because Hallway Motion changed at ${WHEN}.`);
+  });
+  it('automationName null → "An earlier automation" leads the frame', () => {
+    expect(causalSentence(mk('SKIPPED', null, { automationName: null }))).toBe(`An earlier automation skipped this run when ${BECAUSE}.`);
+    expect(causalSentence(mk('COMPLETED', null, { automationName: null }))).toBe(`An earlier automation ran when ${BECAUSE} and recorded no steps.`);
+  });
+  it('a command with no plain verb → run "{command}" / ran "{command}"', () => {
+    expect(causalSentence(mk('COMPLETED', 'CONFIRMED', { command: 'set_brightness' }))).toBe(`Hallway Light ran "set_brightness" because ${BECAUSE}.`);
+    expect(causalSentence(mk('COMPLETED', 'DISPATCHED', { command: 'set_brightness' }))).toBe(
+      `Hallway Light was asked to run "set_brightness" because ${BECAUSE} — no confirmation yet.`,
+    );
+  });
+  it('command null → act / acted (defined so no cell infers; unreachable on a dispatched cell)', () => {
+    expect(causalSentence(mk('COMPLETED', 'CONFIRMED', { command: null }))).toBe(`Hallway Light acted because ${BECAUSE}.`);
+    expect(causalSentence(mk('COMPLETED', 'UNCONFIRMED', { command: null }))).toBe(`Hallway Light was asked to act because ${BECAUSE} — it never confirmed.`);
+  });
+  it('an unparseable matchedAt → "at an unrecorded time" — never "—", never 1970', () => {
+    const s = causalSentence(mk('COMPLETED', 'CONFIRMED', { matchedAt: 1756500000.123 as unknown as string }));
+    expect(s).toBe('Hallway Light turned on because Hallway Motion detected motion at an unrecorded time.');
+  });
+  it('an outcome string this build does not know renders the honest not-recorded line — never success, never a crash', () => {
+    const c = mk('COMPLETED', 'CONFIRMED');
+    (c.actions[0] as { outcome: string }).outcome = 'SOMETHING_NEW';
+    const s = causalSentence(c);
+    expect(s).toBe("What happened to Hallway Light isn't recorded.");
+  });
+});
+
+describe('HERO-1b — the §10 acceptance sentences the headline layer owns (1 · 2 · 5 · 6), word for word at the sample slots', () => {
+  it('(1) why did it fire — the happy path', () => {
+    expect(causalSentence(mk('COMPLETED', 'CONFIRMED'))).toBe(`Hallway Light turned on because Hallway Motion detected motion at ${WHEN}.`);
+  });
+  it('(2) a skipped run never opens with a device acting', () => {
+    expect(causalSentence(mk('SKIPPED', 'SKIPPED'))).toBe(`Evening Lights skipped this run when Hallway Motion detected motion at ${WHEN}. Nothing was sent to Hallway Light.`);
+  });
+  it('(5) sent, never confirmed — calm, no delivery claim', () => {
+    expect(causalSentence(mk('COMPLETED', 'UNCONFIRMED'))).toBe(`Hallway Light was asked to turn on because Hallway Motion detected motion at ${WHEN} — it never confirmed.`);
+  });
+  it('(6) replaced, not failed', () => {
+    expect(causalSentence(mk('SKIPPED', 'DISPATCHED', { resultOutcome: 'superseded', settled: true }))).toContain(
+      'Hallway Light was asked to turn on, then a newer command replaced it.',
+    );
+  });
+});

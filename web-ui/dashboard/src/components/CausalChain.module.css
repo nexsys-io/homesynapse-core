@@ -86,6 +86,9 @@
 .summary::-webkit-details-marker { display: none; }
 .summary::before { content: '▸ '; }
 details[open] .summary::before { content: '▾ '; }
+/* HERO-1b B6 (SPEC §8/§9): the L2 body is SECONDARY text on the sunk surface (5.62 dark /
+   5.89 light) — muted text on the sunk surface falls under 4.5:1 in both themes (3.96 /
+   3.95) and is never used here; a link inside an L2 body uses body text with an underline. */
 .detailBody {
   margin-top: 4px;
   color: var(--hs-text-secondary);
@@ -95,6 +98,25 @@ details[open] .summary::before { content: '▾ '; }
   padding: 6px 8px;
   border-radius: var(--hs-radius-sm);
   word-break: break-word;
+}
+
+.detailBody a { color: var(--hs-text); text-decoration: underline; }
+
+/* HERO-1b B6 (SPEC §5/§8): the pill swap on a settle (a held-DISPATCHED action settling on
+   a later poll) eases tone; under prefers-reduced-motion the pill swaps state without a
+   fade and the connector rail does not draw. global.css also zeroes every transition
+   under reduced motion — this rule is the hero's own receipt of the law. */
+.stepLine > *,
+.marker {
+  transition: color var(--hs-dur) var(--hs-ease), background-color var(--hs-dur) var(--hs-ease), border-color var(--hs-dur) var(--hs-ease);
+}
+@media (prefers-reduced-motion: reduce) {
+  .stepLine > *,
+  .marker,
+  .step::before {
+    transition: none;
+    animation: none;
+  }
 }
 
 .cascade { font-size: var(--hs-text-sm); }

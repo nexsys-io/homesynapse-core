@@ -75,3 +75,55 @@ describe('accessibility — axe-core structural rules', () => {
     expect(await violations(container)).toEqual([]);
   });
 });
+
+/* ---- HERO-1b B5 (2026-09-12) — SPEC §8 (design/hero-v1/SPEC.md:281): shape and label on
+ * every state. Each marker is aria-hidden and the step carries `explain.a11y.step` as
+ * visually-hidden text; a provisional (dashed) pill appends `explain.a11y.provisional`; a
+ * held action that settles on a later poll is announced ONCE through a polite role="status"
+ * region (`explain.a11y.live`). RED at HEAD: no step carries hidden text (CausalChain.tsx
+ * :289–:301 renders marker + line only), StatusPill.tsx has no provisional suffix, and no
+ * role="status" exists in the hero. ---- */
+describe('HERO-1b B5 — the hero is legible without the marker shapes', () => {
+  const srText = (el: Element) => Array.from(el.querySelectorAll('.sr-only')).map((n) => n.textContent).join(' | ');
+
+  it('every step carries "Step {n} of {N}: {kind} — {label}." as visually-hidden text', () => {
+    const { container } = render(<CausalChain chain={causalChains['run_eh_001']!} />);
+    const steps = Array.from(container.querySelectorAll('ol > li'));
+    expect(steps.length).toBe(4); // trigger · condition · action · outcome
+    expect(srText(steps[0]!)).toContain('Step 1 of 4: trigger — Trigger.');
+    expect(srText(steps[1]!)).toContain('Step 2 of 4: condition — was true.');
+    expect(srText(steps[2]!)).toContain('Step 3 of 4: action — Confirmed.');
+    expect(srText(steps[3]!)).toContain('Step 4 of 4: outcome — Completed.');
+    for (const s of steps) expect(s.querySelector('[aria-hidden="true"]')).toBeTruthy(); // the marker stays hidden
+  });
+
+  it('a provisional pill appends "Provisional — may still change" for screen readers', () => {
+    const chain = SCENARIOS.find((s) => s.id === 'five-modes')!.build().causalChains['run_fm_all']!;
+    const { container } = render(<CausalChain chain={chain} />);
+    const held = Array.from(container.querySelectorAll('li[data-kind="action"]')).find((li) => li.textContent?.includes('Sent — not settled yet'))!;
+    expect(held).toBeTruthy();
+    expect(srText(held)).toContain('Provisional — may still change');
+    const settled = Array.from(container.querySelectorAll('li[data-kind="action"]')).find((li) => li.textContent?.includes('Confirmed'))!;
+    expect(srText(settled)).not.toContain('Provisional');
+  });
+
+  it('a held action that settles on a later read is announced once through role="status" (polite), and the region is present but silent before', () => {
+    const before = structuredClone(causalChains['run_eh_001']!);
+    before.actions[0]!.outcome = 'DISPATCHED';
+    before.actions[0]!.resultOutcome = null;
+    before.actions[0]!.settled = false;
+    const { container, rerender } = render(<CausalChain chain={before} />);
+    const region = container.querySelector('[role="status"]')!;
+    expect(region).toBeTruthy();
+    expect(region.getAttribute('aria-live')).toBe('polite');
+    expect(region.textContent).toBe('');
+    rerender(<CausalChain chain={causalChains['run_eh_001']!} />);
+    expect(container.querySelector('[role="status"]')!.textContent).toBe('Updated: Confirmed');
+  });
+
+  it('the chain is a labelled <ol>, and the hero with its hidden text still has no axe violations', async () => {
+    const { container } = render(<CausalChain chain={causalChains['run_eh_001']!} />);
+    expect(container.querySelector('ol')!.getAttribute('aria-label')).toBe('Step-by-step explanation, from trigger to outcome');
+    expect(await violations(container)).toEqual([]);
+  });
+});

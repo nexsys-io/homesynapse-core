@@ -239,7 +239,10 @@ export const runs: RunSummary[] = [
  *   - run_fd_001: one observedState entry with `value: null` (RunExplanation:137 — the lamp
  *     had no brightness reading at evaluation) and `cascade: { parentRunId: null, depth: 1 }`
  *     (RunExplanation:213–:219 — V1 never carries a parent id; depth > 0 is NOT "root").
- *   run_eh_001 / run_eh_002 are untouched (the happy path + the honest-unconfirmed path). */
+ *   run_eh_001 / run_eh_002 are untouched (the happy path + the honest-unconfirmed path).
+ * HERO-1b B7 (2026-09-12): the CONFIRMED actions carry `resultOutcome: null` — the live truth
+ * (F-R4b-H: command_result is published only on failure); 'acknowledged' beside CONFIRMED was
+ * the docketed H8 false value. The hero-states scenario lives in scenarios.ts. */
 export const causalChains: Record<string, CausalChain> = {
   // The happy path: motion -> light, CONFIRMED.
   run_eh_001: {
@@ -268,7 +271,7 @@ export const causalChains: Record<string, CausalChain> = {
         params: { brightness: 82 },
         outcome: 'CONFIRMED',
         reason: null,
-        resultOutcome: 'acknowledged',
+        resultOutcome: null, // HERO-1b B7: confirmed by the device's own report — no verdict row (F-R4b-H; the 'acknowledged' value was the H8 false value)
         settled: true,
       },
     ],
@@ -379,7 +382,7 @@ export const causalChains: Record<string, CausalChain> = {
         params: { brightness: 60 },
         outcome: 'CONFIRMED',
         reason: null,
-        resultOutcome: 'acknowledged',
+        resultOutcome: null, // HERO-1b B7: confirmed by the device's own report — no verdict row (F-R4b-H; the 'acknowledged' value was the H8 false value)
         settled: true,
       },
     ],

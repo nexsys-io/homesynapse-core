@@ -136,9 +136,15 @@ describe('the honest empty state — a real, successful, genuinely empty chain',
     });
 
   it('renders the explicit empty note — never a silent blank, never an error posture', () => {
+    // HERO-1b B4 (SPEC §4): this fixture carries `trigger.type: null` — the prior-instance
+    // class — so it is the ERA BOUNDARY and renders the "no detail recorded" body; the
+    // current-instance empty chain (type on record) keeps EMPTY_CHAIN_NOTE. Two facts.
     const { container } = render(<CausalChain chain={emptyChain()} />);
     const text = container.textContent ?? '';
-    expect(text).toContain(EMPTY_CHAIN_NOTE);
+    expect(text).toContain('It happened before the current automations were loaded, so the run was kept but not its steps.');
+    const current = emptyChain();
+    current.trigger = { ...current.trigger, type: 'state_changed' };
+    expect(render(<CausalChain chain={current} />).container.textContent).toContain(EMPTY_CHAIN_NOTE);
     // Nothing failed: the empty state must not borrow the error register.
     expect(text).not.toMatch(/went wrong|failed/i);
   });
@@ -322,5 +328,131 @@ describe("FE-NULL-1 — the chain's null arms render the honest sentence, never 
     expect(text).not.toMatch(/\bnull\b/);
     const res = await axe.run(container as HTMLElement, { rules: { 'color-contrast': { enabled: false }, region: { enabled: false } } });
     expect(res.violations.map((v) => `${v.id}: ${v.help}`)).toEqual([]);
+  });
+});
+
+/* ---- HERO-1b B4 (2026-09-12): the chain's empties split (SPEC §4, design/hero-v1/SPEC.md:88)
+ * and the trigger step's reading-not-recorded arm (SPEC.md:90). RED at HEAD: CausalChain.tsx
+ * :67–:68 has ONE `genuinelyEmpty` state (EMPTY_CHAIN_NOTE) for both facts, and :105 writes the
+ * trigger line as "{Trigger} changed at {time}." when firingValue is null. ---- */
+describe('HERO-1b B4 — two empty facts, two sentences (the era boundary vs a current automation that planned nothing)', () => {
+  const AT = '2026-07-27T23:47:00Z';
+  const skeleton = (over: Partial<Chain> = {}) =>
+    liveNullChain({
+      conditions: [],
+      actions: [],
+      outcome: { status: 'COMPLETED', reason: null, durationMs: 12, actionCount: 0, commandCount: 0 },
+      ...over,
+    });
+
+  it('the era skeleton (automationName null) renders the "no detail recorded" title as the headline and the body as one step — never "recorded no steps"', () => {
+    const { container } = render(<CausalChain chain={skeleton()} />);
+    const text = container.textContent ?? '';
+    expect(text).toContain("This run is on record, but its steps aren't.");
+    expect(text).toContain('It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed.');
+    expect(text).not.toContain(EMPTY_CHAIN_NOTE);
+    expect(text).not.toContain('recorded no steps');
+    expect(text).toContain(NULL_NAME_NOTE); // the name note still explains the null name
+    expect(container.querySelector('li[data-kind="outcome"]')).toBeTruthy(); // the terminal step stays
+  });
+
+  it('the era skeleton by trigger.type null alone (name on record) renders the same two sentences', () => {
+    const { container } = render(<CausalChain chain={skeleton({ automationName: 'Old hallway rule', trigger: { type: null, subjectRef: null, matchedAt: AT, firingValue: null } })} />);
+    const text = container.textContent ?? '';
+    expect(text).toContain("This run is on record, but its steps aren't.");
+    expect(text).not.toContain('Old hallway rule ran when');
+  });
+
+  it('a CURRENT automation that planned nothing renders the completed.none headline — not the era card', () => {
+    const chain = skeleton({ automationName: 'Quiet automation', trigger: { type: 'state_changed', subjectRef: { type: 'ENTITY', id: 'ent_hallway_motion' }, matchedAt: AT, firingValue: null } });
+    const { container } = render(<CausalChain chain={chain} />);
+    const text = container.textContent ?? '';
+    expect(text).toContain(`Quiet automation ran when Hallway Motion changed at ${clockTimeWithDate(AT)} and recorded no steps.`);
+    expect(text).not.toContain("This run is on record, but its steps aren't.");
+    expect(text).not.toContain('It happened before the current automations were loaded');
+  });
+
+  it('the trigger step: firingValue null → "{Trigger} set it off at {time} — the reading wasn\'t recorded." as the LINE (Q6), the L2 says value not recorded', () => {
+    const { container } = render(<CausalChain chain={liveNullChain({ automationName: 'Evening Lights', trigger: { type: 'state_changed', subjectRef: { type: 'ENTITY', id: 'ent_hallway_motion' }, matchedAt: AT, firingValue: null } })} />);
+    const text = container.textContent ?? '';
+    expect(text).toContain(`Hallway Motion set it off at ${clockTimeWithDate(AT)} — the reading wasn't recorded.`);
+    const stepLine = container.querySelector('li[data-kind="trigger"]')?.textContent ?? '';
+    expect(stepLine).not.toContain(`Hallway Motion changed at ${clockTimeWithDate(AT)}.`); // the headline's because-slot may say "changed"; the STEP line says the reading is unrecorded
+    expect(text).toContain('value not recorded');
+  });
+
+  it('the trigger step: subjectRef null AND firingValue null → the one unrecorded sentence, no reading marker', () => {
+    const { container } = render(<CausalChain chain={liveNullChain({ trigger: { type: 'state_changed', subjectRef: null, matchedAt: AT, firingValue: null } })} />);
+    const text = container.textContent ?? '';
+    expect(text).toContain(unrecordedTriggerLine(clockTimeWithDate(AT)));
+    expect(text).not.toContain("the reading wasn't recorded");
+  });
+
+  it('the trigger step with a firing value keeps the verb line [GREEN at HEAD by construction]', () => {
+    const { container } = render(<CausalChain chain={causalChains['run_eh_001']!} />);
+    expect(container.textContent).toMatch(/Hallway Motion detected motion at /);
+  });
+});
+
+/* ---- HERO-1b B7 (2026-09-12): the `hero-states` scenario — one run per SPEC §3 row today's
+ * emitter can produce (COMPLETED × each outcome · the silent skip · the era skeleton · one
+ * each of SKIPPED / FAILED / CANCELLED / INTERRUPTED · a replaced command for §10 sentence 6),
+ * carrying the wire's null arms as they are: `firingValue` null everywhere (all eras, 2026-07-27),
+ * `resultOutcome` null beside CONFIRMED (the R-4b record F-R4b-H — the zigbee handler publishes
+ * command_result only on failure). Each run stays in ONE era (audit O1). RED at HEAD: no such
+ * scenario exists (SCENARIOS is 14 entries, scenarios.ts:912–:927). ---- */
+describe('HERO-1b B7 — the hero-states scenario', () => {
+  const scenario = () => SCENARIOS.find((s) => s.id === 'hero-states');
+
+  it('exists, and every chain passes the tri-state validator', () => {
+    expect(scenario()).toBeTruthy();
+    const ds = scenario()!.build();
+    for (const c of Object.values(ds.causalChains)) {
+      expect(() => validators['B3:causalChain']({ data: c, meta: { viewPosition: 1, timestamp: 't' } })).not.toThrow();
+    }
+    for (const nf of Object.values(ds.nonFiring)) {
+      expect(() => validators['B3:nonFiring']({ data: nf, meta: { viewPosition: 1, timestamp: 't' } })).not.toThrow();
+    }
+  });
+
+  it('carries the twelve rows, one run each, in one era each', () => {
+    const ds = scenario()!.build();
+    const chains = Object.values(ds.causalChains);
+    expect(chains.length).toBe(12);
+    expect(ds.runs.length).toBe(12);
+    const cell = (c: Chain) => `${c.outcome.status}×${c.actions[0]?.outcome ?? (c.outcome.actionCount > 0 ? 'silentSkip' : c.automationName === null ? 'era' : 'none')}${c.actions[0]?.resultOutcome ? '/' + c.actions[0].resultOutcome : ''}`;
+    expect(new Set(chains.map(cell))).toEqual(
+      new Set([
+        'COMPLETED×CONFIRMED', 'COMPLETED×DISPATCHED', 'COMPLETED×UNCONFIRMED', 'COMPLETED×FAILED/rejected', 'COMPLETED×SKIPPED',
+        'COMPLETED×silentSkip', 'COMPLETED×era',
+        'SKIPPED×SKIPPED', 'FAILED×FAILED/rejected', 'CANCELLED×CONFIRMED', 'INTERRUPTED×FAILED/expired_on_restart',
+        'COMPLETED×DISPATCHED/superseded',
+      ]),
+    );
+    for (const c of chains) {
+      expect(c.trigger.firingValue, c.runId).toBeNull(); // today's wire: never a reading
+      for (const a of c.actions) {
+        if (a.outcome === 'CONFIRMED') expect(a.resultOutcome, c.runId).toBeNull(); // F-R4b-H: confirmed by the device's own report, no verdict row
+        if (a.outcome === 'SKIPPED') expect(a.command, c.runId).toBeNull(); // :776 — never issued
+      }
+    }
+  });
+
+  it('every chain renders without throwing, and no headline claims a reading or a delivery', () => {
+    const ds = scenario()!.build();
+    for (const c of Object.values(ds.causalChains)) {
+      const { container } = render(<CausalChain chain={c} />);
+      const text = container.textContent ?? '';
+      expect(text, c.runId).not.toMatch(/\bnull\b/);
+      expect(text, c.runId).not.toContain('detected motion'); // firingValue is null: the verb is "changed"
+      expect(text, c.runId).not.toMatch(/\bdelivered\b/i);
+      cleanup();
+    }
+  });
+
+  it('the default mock no longer carries the H8 false value: CONFIRMED actions have resultOutcome null', () => {
+    for (const c of Object.values(causalChains)) {
+      for (const a of c.actions) if (a.outcome === 'CONFIRMED') expect(a.resultOutcome, c.runId).toBeNull();
+    }
   });
 });

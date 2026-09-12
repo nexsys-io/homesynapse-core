@@ -11,6 +11,7 @@
  */
 import type { Tone } from '../lib/format';
 import styles from './StatusPill.module.css';
+import { t } from '../lib/i18n';
 
 const GLYPH: Record<Tone, string> = {
   ok: 'M3.5 7.2l2.2 2.3L10.5 4', // check
@@ -49,6 +50,9 @@ export function StatusPill({
         <path d={d} fill={filled ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
       </svg>
       <span>{label}</span>
+      {/* HERO-1b B5 (SPEC §8): the provisional signal never rides the dashed outline alone —
+          a screen-reader suffix says it (`explain.a11y.provisional`). */}
+      {provisional ? <span class="sr-only">{t('explain.a11y.provisional')}</span> : null}
     </span>
   );
 }
