@@ -6,10 +6,12 @@ package com.homesynapse.lifecycle;
 
 import static com.homesynapse.lifecycle.BusPositionCensusIT.NO_AWAITED_POSITION;
 import static com.homesynapse.lifecycle.BusPositionCensusIT.allEvents;
+import static com.homesynapse.lifecycle.BusPositionCensusIT.attachLineCapture;
 import static com.homesynapse.lifecycle.BusPositionCensusIT.awaitSettledCensus;
 import static com.homesynapse.lifecycle.BusPositionCensusIT.confirmedFor;
 import static com.homesynapse.lifecycle.BusPositionCensusIT.countCommandIssued;
 import static com.homesynapse.lifecycle.BusPositionCensusIT.heroMotionConfigYaml;
+import static com.homesynapse.lifecycle.BusPositionCensusIT.homesynapseLogger;
 import static com.homesynapse.lifecycle.BusPositionCensusIT.newestCommandIssued;
 import static com.homesynapse.lifecycle.BusPositionCensusIT.newestReportedPosition;
 import static com.homesynapse.lifecycle.BusPositionCensusIT.renderTokens;
@@ -39,7 +41,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.slf4j.LoggerFactory;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -85,10 +86,13 @@ import java.util.function.LongSupplier;
  * {@code -D} to the forked test JVM (this build's test task forwards none).</p>
  *
  * <p><strong>Anomalies.</strong> A logback {@link ListAppender} on the
- * {@code HomeSynapseCore} logger, attached BEFORE boot and detached after stop,
- * counts every message starting with {@code bus.delivery_anomaly} — the FIX-1a
- * detector's one token. The count is read after the census settles, when no
- * subscriber thread is appending.</p>
+ * {@code com.homesynapse} PARENT logger (FIX-2b-ii (i) — widened from
+ * {@code HomeSynapseCore}'s own leaf logger, which never saw an automation line),
+ * attached BEFORE boot and detached after stop, counts every message starting
+ * with {@code bus.delivery_anomaly} — the FIX-1a detector's one token, now
+ * including {@code NOTIFY_SKIPPED_LIVE}. The count is read after the census
+ * settles, when no subscriber thread is appending. On a timeout the same capture
+ * feeds the {@code automation.handoff_census:} line of the diagnostic.</p>
  *
  * <p>Harness: the {@link HeroLoopHardwareFreeIT} boot shape over the
  * {@link ZigbeeHardwareFreeRig}, copied; the census and the store reads are
@@ -126,7 +130,7 @@ final class BusSoakIT {
             core.stop();
         }
         if (anomalyCapture != null) {
-            coreLogger().detachAppender(anomalyCapture);
+            homesynapseLogger().detachAppender(anomalyCapture);
             anomalyCapture.stop();
         }
     }
@@ -135,7 +139,7 @@ final class BusSoakIT {
     @DisplayName("soak: K motion→On-frame→confirm loops in one core; bus.soak + bus.position_census tokens; timed_out=0, anomalies=0, missed=0 for every scored subscriber")
     void soak_kHeroLoops_reportsLatencyAndAnomalies(@TempDir Path tempDir) throws Exception {
         int loops = configuredLoops();
-        anomalyCapture = attachAnomalyCapture();   // before boot: a boot-time drop counts too
+        anomalyCapture = attachLineCapture();      // before boot: a boot-time drop counts too
         bootAndAdopt(tempDir);
 
         // The baseline: occupied=false, so the first true is a real edge.
@@ -192,7 +196,7 @@ final class BusSoakIT {
         long anomalies = anomalyCount();
         printSummary(loops, ok, 0, latencyNanos, anomalies, settled.census());
         if (!settled.settled()) {
-            throw timeoutDiagnostic(core, tempDir,
+            throw timeoutDiagnostic(core, tempDir, anomalyCapture.list,
                     "the position census settling to missed=0 for every scored subscriber",
                     settled.firstScoredMiss());
         }
@@ -279,7 +283,7 @@ final class BusSoakIT {
             sleepBriefly();
         }
         long position = awaitedPosition.getAsLong();
-        throw timeoutDiagnostic(core, tempDir, what,
+        throw timeoutDiagnostic(core, tempDir, anomalyCapture.list, what,
                 position < 0 ? OptionalLong.empty() : OptionalLong.of(position));
     }
 
@@ -294,17 +298,6 @@ final class BusSoakIT {
         return List.copyOf(anomalyCapture.list).stream()
                 .filter(event -> event.getFormattedMessage().startsWith("bus.delivery_anomaly"))
                 .count();
-    }
-
-    private static ListAppender<ILoggingEvent> attachAnomalyCapture() {
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        coreLogger().addAppender(appender);
-        return appender;
-    }
-
-    private static ch.qos.logback.classic.Logger coreLogger() {
-        return (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(HomeSynapseCore.class);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -418,7 +411,7 @@ final class BusSoakIT {
             sleepBriefly();
         }
         long position = awaitedPosition.getAsLong();
-        throw timeoutDiagnostic(core, tempDir, what,
+        throw timeoutDiagnostic(core, tempDir, anomalyCapture.list, what,
                 position < 0 ? OptionalLong.empty() : OptionalLong.of(position));
     }
 }

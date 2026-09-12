@@ -6,7 +6,10 @@ package com.homesynapse.lifecycle;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.device.Entity;
+import com.homesynapse.event.AutomationTriggeredEvent;
 import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.CommandResultEvent;
 import com.homesynapse.event.EventDraft;
@@ -32,6 +35,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -71,6 +75,12 @@ final class HeroLoopHardwareFreeIT {
     private EntityId hueEntity;
     /** FIX-2b-i: the test's temp dir, held so a timeout's thread dump has a home. */
     private Path tempDir;
+    /**
+     * FIX-2b-ii (i): the run hand-off lines (A–D) and the bus's anomaly WARNs, captured
+     * at the {@code com.homesynapse} parent for the hero test only ({@code null} in the
+     * other four).
+     */
+    private ListAppender<ILoggingEvent> lineCapture;
 
     /** Explicit no-arg constructor for {@code -Xlint:all -Werror} builds. */
     HeroLoopHardwareFreeIT() {
@@ -80,6 +90,10 @@ final class HeroLoopHardwareFreeIT {
     void tearDown() {
         if (core != null) {
             core.stop();
+        }
+        if (lineCapture != null) {
+            homesynapseLogger().detachAppender(lineCapture);
+            lineCapture.stop();
         }
     }
 
@@ -92,6 +106,7 @@ final class HeroLoopHardwareFreeIT {
             + "the On frame, the confirm report renders an honest state_confirmed with the causal "
             + "chain intact")
     void heroLoop_motionToHonestConfirmed(@TempDir Path tempDir) throws Exception {
+        lineCapture = attachLineCapture();      // before boot: a boot-time anomaly counts too
         bootAndAdopt(tempDir);
 
         // Step 2 — the motion edge (false → true so the projection publishes a real
@@ -157,6 +172,29 @@ final class HeroLoopHardwareFreeIT {
         assertThat(triggering.eventType()).isEqualTo(EventTypes.STATE_CHANGED);
         assertThat(((StateChangedEvent) triggering.payload()).attributeKey())
                 .isEqualTo("occupied");
+
+        // FIX-2b-ii (i): the run hand-off, named once per loop and keyed on the run
+        // the store says was triggered — exactly one hand-off (admitted), exactly one
+        // body entry, the first action step, no thread death, and no LIVE notify skip
+        // anywhere on the bus. A second hand-off for one run is a finding, not noise.
+        String runId = ((AutomationTriggeredEvent) triggered.payload()).runId().toString();
+        List<String> lines = capturedLines();
+        List<String> handoffs = startingWith(lines, "automation.run_handoff: ");
+        assertThat(handoffs).as("automation.run_handoff").hasSize(1);
+        assertThat(handoffs.get(0))
+                .contains("runId=" + runId + " ")
+                .contains(" mode=admitted ");
+        List<String> bodies = startingWith(lines, "automation.run_body_entered: ");
+        assertThat(bodies).as("automation.run_body_entered").hasSize(1);
+        assertThat(bodies.get(0)).contains("runId=" + runId + " ");
+        assertThat(startingWith(lines, "automation.action_step_started: runId=" + runId + " "))
+                .as("automation.action_step_started index=0 for runId=%s", runId)
+                .anySatisfy(line -> assertThat(line).contains(" index=0 "));
+        assertThat(startingWith(lines, "automation.run_thread_died: "))
+                .as("automation.run_thread_died").isEmpty();
+        assertThat(startingWith(lines, "bus.delivery_anomaly: "))
+                .as("bus.delivery_anomaly kind=NOTIFY_SKIPPED_LIVE")
+                .noneSatisfy(line -> assertThat(line).contains("kind=NOTIFY_SKIPPED_LIVE"));
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -693,5 +731,34 @@ final class HeroLoopHardwareFreeIT {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("interrupted awaiting the hero loop", ex);
         }
+    }
+
+    // ── FIX-2b-ii (i): the log-line capture ─────────────────────────────────
+
+    private static ListAppender<ILoggingEvent> attachLineCapture() {
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        homesynapseLogger().addAppender(appender);
+        return appender;
+    }
+
+    /**
+     * The {@code com.homesynapse} PARENT logger: an appender on it receives every
+     * module's lines. {@code HomeSynapseCore.class}'s own logger
+     * ({@code com.homesynapse.lifecycle.HomeSynapseCore}) is a leaf — it sees
+     * neither the automation lines nor the bus's anomaly WARN.
+     */
+    private static ch.qos.logback.classic.Logger homesynapseLogger() {
+        return (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("com.homesynapse");
+    }
+
+    private List<String> capturedLines() {
+        return List.copyOf(lineCapture.list).stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .toList();
+    }
+
+    private static List<String> startingWith(List<String> lines, String prefix) {
+        return lines.stream().filter(line -> line.startsWith(prefix)).toList();
     }
 }

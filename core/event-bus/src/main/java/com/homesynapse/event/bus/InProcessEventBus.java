@@ -369,6 +369,16 @@ public final class InProcessEventBus implements EventBus {
                 long checkpoint = checkpointStore.readCheckpoint(
                         runtime.info().subscriberId());
                 if (checkpoint >= globalPosition) {
+                    // FIX-2b-ii (i): a LIVE subscriber learns a position only from
+                    // the notify that would offer it, so for LIVE this skip is a
+                    // drop, never a no-op — name it (mode read under the read lock
+                    // already held; no queue lock). TRANSITION may legitimately
+                    // have drained the position before its notify arrived.
+                    if (runtime.mode() == SubscriberMode.LIVE) {
+                        emitAnomaly(DeliveryAnomaly.Kind.NOTIFY_SKIPPED_LIVE,
+                                runtime.info().subscriberId(), globalPosition,
+                                "notifyEvent: checkpoint=" + checkpoint + " at or past position");
+                    }
                     continue;
                 }
                 routeByMode(runtime, globalPosition);

@@ -31,9 +31,10 @@ import java.util.Objects;
  *
  * <p><strong>Emitter contract.</strong> The emitter is invoked on the thread
  * that observed the drop — the publisher's thread for
- * {@link Kind#NOTIFY_NOT_VISIBLE}, the subscriber's virtual thread for the
- * rest. The bus swallows any {@link RuntimeException} the emitter throws: an
- * instrument must never become a failure channel.</p>
+ * {@link Kind#NOTIFY_NOT_VISIBLE} and {@link Kind#NOTIFY_SKIPPED_LIVE}, the
+ * subscriber's virtual thread for the rest. The bus swallows any
+ * {@link RuntimeException} the emitter throws: an instrument must never
+ * become a failure channel.</p>
  *
  * @param subscriberId   the subscriber whose delivery dropped, or {@code "*"}
  *                       when the drop happened before fan-out
@@ -99,6 +100,16 @@ public record DeliveryAnomaly(
          * attempts on one queued position and suspended the subscriber
          * honestly ({@code drainAndPromote} returns {@code false}).
          */
-        TRANSITION_READ_EXHAUSTED
+        TRANSITION_READ_EXHAUSTED,
+
+        /**
+         * FIX-2b-ii (i): {@code notifyEvent(P)} skipped a LIVE subscriber
+         * because its persisted checkpoint was at or past {@code P}. Never
+         * legitimate for a LIVE subscriber — it learns a position only from
+         * the notify that would offer it, so the skip is a drop of {@code P},
+         * not a no-op. A TRANSITION subscriber keeps the silent skip (its
+         * drain may deliver a position before that position's notify arrives).
+         */
+        NOTIFY_SKIPPED_LIVE
     }
 }

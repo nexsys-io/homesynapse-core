@@ -99,6 +99,17 @@ import org.slf4j.LoggerFactory;
  *
  * <p><strong>Time (§4c).</strong> All timing derives from the injected {@link Clock}; new
  * {@link RunId}s are generated via {@link UlidFactory#generate(Clock)}.</p>
+ *
+ * <p><strong>Structured log tokens (FIX-2b-ii (i)).</strong> The run hand-off is named at
+ * INFO so a stall after {@code automation_triggered} names its step:
+ * {@code automation.run_handoff: runId= automationId= mode= thread=} after every
+ * {@code publishTriggered} (for an admitted or drained Run BEFORE {@code start()} — the line
+ * exists even when the virtual thread never mounts); {@code automation.run_body_entered:
+ * runId= automationId= thread=} as {@code runBody}'s first act, on the Run's virtual thread;
+ * and {@code automation.run_thread_died: runId= automationId= thread= error=} at ERROR from
+ * the thread's uncaught-exception handler — an observation only: {@code runBody} catches
+ * {@link RuntimeException} alone, so an {@link Error} still escapes, {@code finalizeRun} does
+ * not run and the Run stays in {@code activeRuns}.</p>
  */
 final class StandardRunManager implements RunManager, AutoCloseable {
 
@@ -271,6 +282,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         if (!conditionGate.conditionsHold(automation, context, triggeringEvent, snapshot)) {
             statuses.put(runId, RunStatus.CONDITION_NOT_MET);
             publishTriggered(run);
+            logHandoff(run, "condition_not_met", "none");
             publishCompleted(run, RunStatus.CONDITION_NOT_MET, null, null, 0, 0);
             return Optional.of(runId);                              // a Run, but it consumed no slot
         }
@@ -317,6 +329,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
                 publishRunCancelled(victim, triggeringEventId);
             }
             publishTriggered(run);                                  // before the VT — triggered precedes completed
+            logHandoff(run, "admitted", run.vt.getName());          // before start(): the line outlives a VT that never mounts
             run.vt.start();
             return Optional.of(runId);
         }
@@ -450,6 +463,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         LOG.error("Run {} for automation {} failed closed: trigger-time state snapshot read degraded",
                 runId, automationId, cause);
         publishTriggered(run);                 // before completed — keep the C1 pair
+        logHandoff(run, "failed_closed", "none");
         publishCompleted(run, RunStatus.FAILED, failureReason, null, 0, 0);
         return Optional.of(runId);
     }
@@ -458,6 +472,9 @@ final class StandardRunManager implements RunManager, AutoCloseable {
 
     private void runBody(ActiveRun run) {
         try {
+            LOG.info("automation.run_body_entered: runId={} automationId={} thread={}",
+                    run.runId.value(), run.automation.automationId(),
+                    Thread.currentThread().getName());
             RunStatus terminal;
             String failureReason = null;
             String abortReason = null;
@@ -536,6 +553,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         }
         if (drained != null) {
             publishTriggered(drained);                             // outside the lock
+            logHandoff(drained, "drained", drained.vt.getName());  // before start()
             drained.vt.start();
         }
     }
@@ -565,10 +583,19 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         return next;
     }
 
-    /** Creates the Run's VT (unstarted), registers it active and RUNNING (caller holds the lock). */
+    /**
+     * Creates the Run's VT (unstarted), registers it active and RUNNING (caller holds the lock).
+     * The uncaught-exception handler (FIX-2b-ii (i), line C) only names a thread that died
+     * with a {@link Throwable} {@code runBody} did not catch; the error propagates exactly as
+     * before — the handler never swallows.
+     */
     private void startRun(ActiveRun run) {
         Thread vt = Thread.ofVirtual()
                 .name("automation-run-" + run.automation.automationId() + "-" + run.runId)
+                .uncaughtExceptionHandler((thread, error) -> LOG.error(
+                        "automation.run_thread_died: runId={} automationId={} thread={} error={}",
+                        run.runId.value(), run.automation.automationId(), thread.getName(),
+                        error.toString(), error))
                 .unstarted(() -> runBody(run));
         run.vt = vt;
         activeRuns.put(run.runId, run);
@@ -639,6 +666,20 @@ final class StandardRunManager implements RunManager, AutoCloseable {
     }
 
     // ---- Publish helpers (always outside the lock) -------------------------
+
+    /**
+     * FIX-2b-ii (i), line A: names the hand-off that follows {@code publishTriggered}. For a
+     * Run that owns a virtual thread the caller logs BEFORE {@code start()}, so the line exists
+     * even when that thread never mounts — that ordering is the instrument.
+     *
+     * @param run    the Run just announced by {@code automation_triggered}
+     * @param mode   {@code admitted} / {@code drained} / {@code condition_not_met} / {@code failed_closed}
+     * @param thread the Run VT's name, or {@code none} when the Run never gets one
+     */
+    private static void logHandoff(ActiveRun run, String mode, String thread) {
+        LOG.info("automation.run_handoff: runId={} automationId={} mode={} thread={}",
+                run.runId.value(), run.automation.automationId(), mode, thread);
+    }
 
     private void publishTriggered(ActiveRun run) {
         AutomationTriggeredEvent payload = new AutomationTriggeredEvent(

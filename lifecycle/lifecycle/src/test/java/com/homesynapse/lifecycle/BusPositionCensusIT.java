@@ -6,9 +6,12 @@ package com.homesynapse.lifecycle;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.automation.CommandDispatchAssembly;
 import com.homesynapse.automation.PendingCommandLedgerAssembly;
 import com.homesynapse.device.Entity;
+import com.homesynapse.event.AutomationTriggeredEvent;
 import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventPage;
@@ -32,6 +35,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -93,6 +97,11 @@ final class BusPositionCensusIT {
     private EntityId hueEntity;
     /** FIX-2b-i: the test's temp dir, held so a timeout's thread dump has a home. */
     private Path tempDir;
+    /**
+     * FIX-2b-ii (i): every {@code com.homesynapse} line, captured before boot so a
+     * timeout's {@code automation.handoff_census:} reading has its source.
+     */
+    private ListAppender<ILoggingEvent> lineCapture;
 
     /** Explicit no-arg constructor for {@code -Xlint:all -Werror} builds. */
     BusPositionCensusIT() {
@@ -103,12 +112,17 @@ final class BusPositionCensusIT {
         if (core != null) {
             core.stop();
         }
+        if (lineCapture != null) {
+            homesynapseLogger().detachAppender(lineCapture);
+            lineCapture.stop();
+        }
     }
 
     @Test
     @DisplayName("one motion→On-frame→confirm loop, then bus.position_census per subscriber + bus.position_census_total: missed=0 for every scored subscriber; state_projection reported atomic=true")
     void positionCensus_afterOneHeroLoop_everyScoredSubscriberMissedZero(@TempDir Path tempDir)
             throws Exception {
+        lineCapture = attachLineCapture();
         bootAndAdopt(tempDir);
 
         // The hero loop (HeroLoopHardwareFreeIT steps 2–4): the motion edge, the
@@ -137,7 +151,7 @@ final class BusPositionCensusIT {
         SettledCensus settled = awaitSettledCensus(core);
         System.out.println(renderTokens(settled.census(), 1));
         if (!settled.settled()) {
-            throw timeoutDiagnostic(core, tempDir,
+            throw timeoutDiagnostic(core, tempDir, lineCapture.list,
                     "the position census settling to missed=0 for every scored subscriber",
                     settled.firstScoredMiss());
         }
@@ -375,16 +389,20 @@ final class BusPositionCensusIT {
      * FIX-2b-i (B): the thread dump ({@link BusThreadDump#capture}, virtual
      * threads included when {@code jcmd} attaches) is appended after the
      * subscriber lines in stdout (the XML {@code <system-out>}); the thrown
-     * message stays the reading alone (the XML {@code <failure message>}).
+     * message stays the reading (the XML {@code <failure message>}).
+     * FIX-2b-ii (i): one more line follows the reading in BOTH — the
+     * {@code automation.handoff_census:} of the newest triggered run
+     * ({@link #handoffCensus}), computed from the captured log lines.
      *
-     * @param core    the booted core
-     * @param dumpDir the directory for the dump file (the test's temp dir)
-     * @param what    what was awaited
-     * @param awaited the position the await was gated on, when known
+     * @param core     the booted core
+     * @param dumpDir  the directory for the dump file (the test's temp dir)
+     * @param captured the {@code com.homesynapse} lines captured since before boot
+     * @param what     what was awaited
+     * @param awaited  the position the await was gated on, when known
      * @return the error to throw
      */
-    static AssertionError timeoutDiagnostic(HomeSynapseCore core, Path dumpDir, String what,
-            OptionalLong awaited) {
+    static AssertionError timeoutDiagnostic(HomeSynapseCore core, Path dumpDir,
+            List<ILoggingEvent> captured, String what, OptionalLong awaited) {
         String reading;
         try {
             long storeHead = allEvents(core.eventStore()).stream()
@@ -395,8 +413,81 @@ final class BusPositionCensusIT {
             reading = "timed out awaiting " + what
                     + " (bus.await_timeout unavailable: " + gatherFailure + ")";
         }
+        String census;
+        try {
+            census = handoffCensus(allEvents(core.eventStore()), captured);
+        } catch (RuntimeException gatherFailure) {
+            census = "automation.handoff_census: unavailable: " + gatherFailure;
+        }
+        reading = reading + "\n" + census;
         System.out.println(reading + "\n" + BusThreadDump.capture(dumpDir));
         return new AssertionError(reading);
+    }
+
+    /**
+     * FIX-2b-ii (i): how far the newest triggered run got, read from the captured
+     * {@code automation.*} lines keyed on that run's id (the newest
+     * {@code automation_triggered} envelope's payload {@code runId} — the store's
+     * word, not the log's). Each value is a COUNT of lines for that run:
+     * {@code 1} is the healthy reading, {@code 0} names the step that never
+     * happened, {@code 2} a double hand-off. {@code runId=none} with zeros when
+     * nothing was triggered yet.
+     *
+     * @param events   every envelope in the store
+     * @param captured the captured log events
+     * @return {@code automation.handoff_census: runId=<ulid|none> handoff=<n> body=<n> step0=<n> died=<n>}
+     */
+    static String handoffCensus(List<EventEnvelope> events, List<ILoggingEvent> captured) {
+        List<EventEnvelope> triggered = events.stream()
+                .filter(event -> event.eventType().equals(EventTypes.AUTOMATION_TRIGGERED))
+                .toList();
+        if (triggered.isEmpty()) {
+            return "automation.handoff_census: runId=none handoff=0 body=0 step0=0 died=0";
+        }
+        String runId = ((AutomationTriggeredEvent) triggered.get(triggered.size() - 1).payload())
+                .runId().toString();
+        List<String> lines = List.copyOf(captured).stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .toList();
+        String keyed = "runId=" + runId + " ";
+        long handoff = countStartingWith(lines, "automation.run_handoff: " + keyed);
+        long body = countStartingWith(lines, "automation.run_body_entered: " + keyed);
+        long step0 = lines.stream()
+                .filter(line -> line.startsWith("automation.action_step_started: " + keyed))
+                .filter(line -> line.contains(" index=0 "))
+                .count();
+        long died = countStartingWith(lines, "automation.run_thread_died: " + keyed);
+        return "automation.handoff_census: runId=" + runId + " handoff=" + handoff
+                + " body=" + body + " step0=" + step0 + " died=" + died;
+    }
+
+    private static long countStartingWith(List<String> lines, String prefix) {
+        return lines.stream().filter(line -> line.startsWith(prefix)).count();
+    }
+
+    /**
+     * Attaches a fresh, started {@link ListAppender} to the {@code com.homesynapse}
+     * parent logger; the caller detaches it in {@code @AfterEach}.
+     *
+     * @return the appender, receiving every module's lines from now on
+     */
+    static ListAppender<ILoggingEvent> attachLineCapture() {
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        homesynapseLogger().addAppender(appender);
+        return appender;
+    }
+
+    /**
+     * The {@code com.homesynapse} PARENT logger. {@code HomeSynapseCore.class}'s
+     * own logger is the leaf {@code com.homesynapse.lifecycle.HomeSynapseCore}: an
+     * appender there sees the bus's anomaly WARN (logged by that class) but never
+     * an automation line — the parent sees both.
+     *
+     * @return the logback logger
+     */
+    static ch.qos.logback.classic.Logger homesynapseLogger() {
+        return (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("com.homesynapse");
     }
 
     // ── store reads shared with BusSoakIT (pure functions over the log) ──────
@@ -603,7 +694,7 @@ final class BusPositionCensusIT {
             sleepBriefly();
         }
         long position = awaitedPosition.getAsLong();
-        throw timeoutDiagnostic(core, tempDir, what,
+        throw timeoutDiagnostic(core, tempDir, lineCapture.list, what,
                 position < 0 ? OptionalLong.empty() : OptionalLong.of(position));
     }
 }

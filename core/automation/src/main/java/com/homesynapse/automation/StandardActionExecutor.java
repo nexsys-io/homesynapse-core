@@ -180,6 +180,11 @@ public final class StandardActionExecutor implements ActionExecutor {
         int commandCount = 0;
         for (int index = 0; index < actions.size(); index++) {
             ActionDefinition action = actions.get(index);
+            // FIX-2b-ii (i), line D: the Run's first act per action, named before the row-5
+            // publish — a stall between the hand-off and here is the executor's, not the bus's.
+            LOG.info("automation.action_step_started: runId={} automationId={} index={} type={}",
+                    context.runId().value(), automationId, index,
+                    action.getClass().getSimpleName());
             publishStarted(automationId, context, index, action, topLevelTargets(action),
                     triggeringEvent);
             actionCount++;
