@@ -24,6 +24,7 @@ import com.homesynapse.event.AutomationActionCompletedEvent;
 import com.homesynapse.event.AutomationActionStartedEvent;
 import com.homesynapse.event.AutomationCompletedEvent;
 import com.homesynapse.event.AutomationConditionEvaluatedEvent;
+import com.homesynapse.event.AutomationDisabledEvent;
 import com.homesynapse.event.AutomationTriggeredEvent;
 import com.homesynapse.event.CommandConfirmationTimedOutEvent;
 import com.homesynapse.event.CommandIssuedEvent;
@@ -33,7 +34,9 @@ import com.homesynapse.event.EventId;
 import com.homesynapse.event.EventPage;
 import com.homesynapse.event.EventStore;
 import com.homesynapse.event.EventTypes;
+import com.homesynapse.event.StateChangedEvent;
 import com.homesynapse.event.StateConfirmedEvent;
+import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
@@ -66,6 +69,17 @@ import com.homesynapse.platform.identity.Ulid;
  *       {@code CONFIRMED} (the honest-confirmation guarantee, DP-A2). Keeping the outcome a pure
  *       function of the log preserves INV-SA-03 determinism (a mutable registry read at read
  *       time would not be replay-safe).</li>
+ *   <li>Since v1.1.4 (EXPLAIN-114a) the projection also serves, from what the correlation
+ *       already holds and never by guess: the trigger's {@code firingValue} (the triggering
+ *       {@code state_changed}'s {@code newValue} in the module's one string dialect, or the
+ *       {@code state_reported} value; {@code null} for any other payload or an absent
+ *       envelope), each action's {@code settledAt} / {@code confirmedAt} (the CLASSIFYING
+ *       envelope's instant — never the command's), the run's {@code definitionKey}
+ *       ({@code automation_triggered.definitionHash}); and on the non-firing read the
+ *       {@code DISABLED} facts ({@code disabledAt} / {@code disabledReason} from the latest
+ *       {@code automation_disabled}, else the literal {@code "configuration"}) and the
+ *       registry definition's {@code definitionKey} via {@link DefinitionHashes} — the same
+ *       function the engine stamps, so the key agrees across the three reads.</li>
  * </ul>
  *
  * <h2>Ordering and cost</h2>
@@ -103,6 +117,12 @@ final class StandardExplanationService implements ExplanationService {
     /** {@code automation_action_completed} outcomes for a non-dispatched command action. */
     private static final String ACTION_SKIPPED = "skipped";
     private static final String ACTION_ERROR = "error";
+
+    /**
+     * The v1.1.4 {@code disabledReason} for an automation whose definition is disabled while the
+     * log holds no {@code automation_disabled} for it (DP-6): the configuration turned it off.
+     */
+    private static final String DISABLED_BY_CONFIGURATION = "configuration";
 
     private final EventStore eventStore;
     private final AutomationRegistry automationRegistry;
@@ -202,8 +222,9 @@ final class StandardExplanationService implements ExplanationService {
         RunExplanation.CascadeView cascade =
                 new RunExplanation.CascadeView(null, triggerPayload.cascadeDepth());
 
+        // v1.1.4: the stable definition key is the hash the engine stamped on this run.
         return Optional.of(new RunExplanation(runId, automationId, automationName,
-                trigger, conditions, actions, outcome, cascade));
+                trigger, conditions, actions, outcome, cascade, triggerPayload.definitionHash()));
     }
 
     // ---- non-firing projection (M7.5b) --------------------------------------
@@ -226,14 +247,28 @@ final class StandardExplanationService implements ExplanationService {
         // trigger or its first trigger names no single entity (never a fabricated id).
         RunExplanation.SubjectRefView triggerRef =
                 definition.triggers().isEmpty() ? null : refOf(definition.triggers().get(0));
+        // v1.1.4 (DP-5): the stable definition key over the registry's current definition — the
+        // SAME function and input the engine hashes into automation_triggered.definitionHash
+        // (StandardRunManager.initiateRun → RunContext.definitionHash), so it equals the causal
+        // chain's key for a run of this definition. No store read.
+        String definitionKey = DefinitionHashes.forDefinition(definition);
 
         // DISABLED short-circuits: a disabled automation's non-firing reason is that it is off,
         // regardless of any run history (DP-B2 step 3).
         if (!definition.enabled()) {
+            // v1.1.4: the disable facts come from the latest automation_disabled the log holds
+            // for this automation (the failure governor's marker); absent that, the definition
+            // itself is what turned it off (DP-6: the literal "configuration").
+            EventEnvelope disabled = latestDisabled(automationId);
+            Instant disabledAt = disabled == null ? null : instantOf(disabled);
+            String disabledReason = disabled == null
+                    ? DISABLED_BY_CONFIGURATION
+                    : ((AutomationDisabledEvent) disabled.payload()).reason();
             return Optional.of(new NonFiringExplanation(automationId, automationName, false,
                     NonFiringExplanation.NonFiringVerdict.DISABLED, null,
                     "Automation '" + automationName + "' is currently disabled.",
-                    triggerSummary, null, null, triggerRef));
+                    triggerSummary, null, null, triggerRef, disabledAt, disabledReason,
+                    definitionKey));
         }
 
         long sinceInclusive = Math.max(0L, expectedSincePosition);
@@ -244,7 +279,7 @@ final class StandardExplanationService implements ExplanationService {
                     NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, null,
                     "Automation '" + automationName + "' has not been triggered" + windowNote
                             + "; it fires on " + triggerSummary + ".",
-                    triggerSummary, null, null, triggerRef));
+                    triggerSummary, null, null, triggerRef, null, null, definitionKey));
         }
 
         AutomationCompletedEvent payload = (AutomationCompletedEvent) latest.payload();
@@ -254,18 +289,20 @@ final class StandardExplanationService implements ExplanationService {
         Instant evaluatedAt = derivedTriggerInstant(latest, payload.durationMs());
 
         return Optional.of(deriveNonFiring(automationId, automationName, triggerSummary,
-                triggerRef, latest, status, runId, evaluatedAt));
+                triggerRef, definitionKey, latest, status, runId, evaluatedAt));
     }
 
     /**
      * Maps the most-recent in-window terminal run to a verdict. Exhaustive over {@link RunStatus}
      * with no {@code default}, so a future status is a compile error here, not a silent miswire.
-     * Every construction is the canonical ten-component form carrying the derived
-     * {@code triggerRef} (v1.1.3).
+     * Every construction is the canonical thirteen-component form carrying the derived
+     * {@code triggerRef} (v1.1.3) and {@code definitionKey} (v1.1.4); the disable facts are
+     * {@code null} on every non-{@code DISABLED} verdict.
      */
     private NonFiringExplanation deriveNonFiring(AutomationId automationId, String automationName,
                                                  String triggerSummary,
                                                  RunExplanation.SubjectRefView triggerRef,
+                                                 String definitionKey,
                                                  EventEnvelope completed, RunStatus status,
                                                  RunId runId, Instant evaluatedAt) {
         return switch (status) {
@@ -275,9 +312,9 @@ final class StandardExplanationService implements ExplanationService {
                             + "' was triggered, but its conditions were not met, so no actions ran.",
                     triggerSummary,
                     new NonFiringExplanation.LastEvaluationView(evaluatedAt, "false"),
-                    null, triggerRef);
+                    null, triggerRef, null, null, definitionKey);
             case COMPLETED -> completedVerdict(automationId, automationName, triggerSummary,
-                    triggerRef, completed, runId, evaluatedAt);
+                    triggerRef, definitionKey, completed, runId, evaluatedAt);
             case FAILED, ABORTED, INTERRUPTED -> new NonFiringExplanation(automationId,
                     automationName, true,
                     NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED, runId,
@@ -286,7 +323,7 @@ final class StandardExplanationService implements ExplanationService {
                             + " without a confirmed result.",
                     triggerSummary,
                     new NonFiringExplanation.LastEvaluationView(evaluatedAt, null),
-                    null, triggerRef);
+                    null, triggerRef, null, null, definitionKey);
             case EVALUATING, RUNNING -> {
                 // A non-terminal status on a terminal marker is a producer anomaly. Report it
                 // honestly as "ran, outcome not confirmed" rather than fabricate a clean success.
@@ -298,7 +335,7 @@ final class StandardExplanationService implements ExplanationService {
                                 + "' fired recently; its outcome is not yet confirmed.",
                         triggerSummary,
                         new NonFiringExplanation.LastEvaluationView(evaluatedAt, null),
-                        null, triggerRef);
+                        null, triggerRef, null, null, definitionKey);
             }
         };
     }
@@ -312,16 +349,17 @@ final class StandardExplanationService implements ExplanationService {
      * unreachable for it (a do-nothing run asserting confirmation with zero confirmable commands
      * was the defect). Otherwise a {@code COMPLETED} run is {@code ACTED_BUT_UNCONFIRMED} when any
      * of its device actions did not confirm (outcome {@code UNCONFIRMED}/{@code FAILED}); else it
-     * is a clean confirmed success. The frozen 4-value verdict has no "fired fine" value, so per
-     * <strong>DP-B2</strong> the clean-success case reports {@code NEVER_TRIGGERED} with a
-     * <em>non-null</em> {@code lastRelevantRunId} and an explanation that distinguishes "ran fine"
-     * from "never ran" (the UI tells them apart by the non-null run id). A post-V1 additive
-     * {@code FIRED_CONFIRMED} verdict is the recommended growth path. The action-outcome check
-     * reuses {@link #buildActions} (the M7.5a honest-confirmation derivation) — no duplication.
+     * is a clean confirmed success, reported since v1.1.4 (EXPLAIN-114a, the growth path
+     * <strong>DP-B2</strong> named) as {@code FIRED_CONFIRMED} with that run's
+     * {@code lastRelevantRunId} and the unchanged "last fired and confirmed at" sentence — until
+     * v1.1.3 the frozen 4-value verdict had no "fired fine" value and this case borrowed
+     * {@code NEVER_TRIGGERED} with a non-null run id. The action-outcome check reuses
+     * {@link #buildActions} (the M7.5a honest-confirmation derivation) — no duplication.
      */
     private NonFiringExplanation completedVerdict(AutomationId automationId, String automationName,
                                                   String triggerSummary,
                                                   RunExplanation.SubjectRefView triggerRef,
+                                                  String definitionKey,
                                                   EventEnvelope completed, RunId runId,
                                                   Instant evaluatedAt) {
         AutomationCompletedEvent payload = (AutomationCompletedEvent) completed.payload();
@@ -333,7 +371,7 @@ final class StandardExplanationService implements ExplanationService {
                             + "unavailable or no device actions defined).",
                     triggerSummary,
                     new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"),
-                    Boolean.TRUE, triggerRef);
+                    Boolean.TRUE, triggerRef, null, null, definitionKey);
         }
         List<EventEnvelope> chain =
                 eventStore.readByCorrelation(completed.causalContext().correlationId());
@@ -348,15 +386,15 @@ final class StandardExplanationService implements ExplanationService {
                             + "' fired, but a device did not confirm the requested change.",
                     triggerSummary,
                     new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"),
-                    null, triggerRef);
+                    null, triggerRef, null, null, definitionKey);
         }
         return new NonFiringExplanation(automationId, automationName, true,
-                NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, runId,
+                NonFiringExplanation.NonFiringVerdict.FIRED_CONFIRMED, runId,
                 "Automation '" + automationName + "' last fired and confirmed at "
                         + evaluatedAt + "; no non-firing was detected in the requested window.",
                 triggerSummary,
                 new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"),
-                null, triggerRef);
+                null, triggerRef, null, null, definitionKey);
     }
 
     @Override
@@ -367,7 +405,8 @@ final class StandardExplanationService implements ExplanationService {
         for (AutomationDefinition definition : definitions) {
             summaries.add(new AutomationSummary(definition.automationId(), definition.name(),
                     definition.enabled(), componentsOf(definition),
-                    lastRuns.get(definition.automationId())));
+                    lastRuns.get(definition.automationId()),
+                    DefinitionHashes.forDefinition(definition)));
         }
         return summaries;
     }
@@ -404,6 +443,35 @@ final class StandardExplanationService implements ExplanationService {
                     continue;
                 }
                 newest = e; // ascending scan — the last match seen is the newest
+            }
+            if (!page.hasMore()) {
+                break;
+            }
+            after = page.nextPosition();
+        }
+        return newest;
+    }
+
+    /**
+     * The latest {@code automation_disabled} the log holds for one automation, or {@code null}
+     * (v1.1.4). One forward pass over that type's index — the same paging idiom as
+     * {@link #latestTerminalRun} (ascending scan ⇒ the last match is the newest) — matched on
+     * the payload's own {@code automationId}. Not window-bounded: the disabling event precedes
+     * any "expected since" window by definition, and the type is rare (one event per
+     * auto-disable), so the walk is {@code O(retained auto-disables)}, never {@code O(log)}.
+     * Read only on the {@code DISABLED} verdict, so an enabled automation pays nothing.
+     */
+    private EventEnvelope latestDisabled(AutomationId automationId) {
+        EventEnvelope newest = null;
+        long after = 0;
+        while (true) {
+            EventPage page =
+                    eventStore.readByType(EventTypes.AUTOMATION_DISABLED, after, SCAN_BATCH);
+            for (EventEnvelope e : page.events()) {
+                if (e.payload() instanceof AutomationDisabledEvent p
+                        && p.automationId().equals(automationId)) {
+                    newest = e; // ascending scan — the last match seen is the newest
+                }
             }
             if (!page.hasMore()) {
                 break;
@@ -641,17 +709,41 @@ final class StandardExplanationService implements ExplanationService {
                 .filter(d -> !d.triggers().isEmpty())
                 .map(d -> d.triggers().get(0).getClass().getSimpleName())
                 .orElse(null);
-        RunExplanation.SubjectRefView subjectRef = chain.stream()
+        // The triggering envelope, located by id inside the run's correlation. An engine run
+        // inherits that envelope's correlation (StandardRunManager.initiateRun), so it is here
+        // for every run whose triggering event is still retained; a retention-trimmed one is
+        // simply absent, and every fact read from it stays null (the v1.1.4 honesty law).
+        EventEnvelope triggering = chain.stream()
                 .filter(e -> e.eventId().equals(payload.triggeringEventId()))
                 .findFirst()
-                .map(e -> subjectRefView(e.subjectRef().type().name().toLowerCase(),
-                        e.subjectRef().id().toString()))
                 .orElse(null);
-        Instant matchedAt =
-                triggered.eventTime() != null ? triggered.eventTime() : triggered.ingestTime();
-        // firingValue is not captured on the lifecycle events in V1 (no payload-type-specific
-        // extraction); the field is present and nullable per the frozen shape.
-        return new RunExplanation.TriggerView(type, subjectRef, matchedAt, null);
+        RunExplanation.SubjectRefView subjectRef = triggering == null
+                ? null
+                : subjectRefView(triggering.subjectRef().type().name().toLowerCase(),
+                        triggering.subjectRef().id().toString());
+        Instant matchedAt = instantOf(triggered);
+        return new RunExplanation.TriggerView(type, subjectRef, matchedAt,
+                firingValueOf(triggering));
+    }
+
+    /**
+     * The value the triggering event carried (v1.1.4, EXPLAIN-114a): a {@code state_changed}'s
+     * {@code newValue} in the module's one string dialect ({@link AttributeValues#asString} —
+     * the rendering the chain's {@code observedState[].value} and the ledger's
+     * {@code state_confirmed} values already use; never a record {@code toString()}); a
+     * {@code state_reported}'s {@code value} as recorded; {@code null} for any other payload or
+     * when the triggering envelope is not in the correlation. A fact the log does not carry is
+     * never guessed.
+     */
+    private static String firingValueOf(EventEnvelope triggering) {
+        if (triggering == null) {
+            return null;
+        }
+        return switch (triggering.payload()) {
+            case StateChangedEvent p -> AttributeValues.asString(p.newValue());
+            case StateReportedEvent p -> p.value();
+            default -> null;
+        };
     }
 
     // ---- conditions ---------------------------------------------------------
@@ -683,17 +775,17 @@ final class StandardExplanationService implements ExplanationService {
     // ---- actions ------------------------------------------------------------
 
     private List<RunExplanation.ActionView> buildActions(List<EventEnvelope> chain, RunId runId) {
-        // This run's action_started events, in log order, plus its action_completed by index.
+        // This run's action_started events, in log order, plus its action_completed ENVELOPES by
+        // index (the envelope, not only the payload: its position bounds the command window and
+        // its instant is a non-dispatched action's settledAt, v1.1.4).
         List<EventEnvelope> started = new ArrayList<>();
-        Map<Integer, AutomationActionCompletedEvent> completedByIndex = new HashMap<>();
-        Map<Integer, Long> completedPositionByIndex = new HashMap<>();
+        Map<Integer, EventEnvelope> completedByIndex = new HashMap<>();
         for (EventEnvelope e : chain) {
             if (e.payload() instanceof AutomationActionStartedEvent p && p.runId().equals(runId.value())) {
                 started.add(e);
             } else if (e.payload() instanceof AutomationActionCompletedEvent p
                     && p.runId().equals(runId.value())) {
-                completedByIndex.put(p.actionIndex(), p);
-                completedPositionByIndex.put(p.actionIndex(), e.globalPosition());
+                completedByIndex.put(p.actionIndex(), e);
             }
         }
 
@@ -710,7 +802,8 @@ final class StandardExplanationService implements ExplanationService {
         for (EventEnvelope startEnv : started) {
             AutomationActionStartedEvent sp = (AutomationActionStartedEvent) startEnv.payload();
             long startPos = startEnv.globalPosition();
-            long endPos = completedPositionByIndex.getOrDefault(sp.actionIndex(), Long.MAX_VALUE);
+            EventEnvelope completedEnv = completedByIndex.get(sp.actionIndex());
+            long endPos = completedEnv == null ? Long.MAX_VALUE : completedEnv.globalPosition();
 
             List<EventEnvelope> actionCommands = new ArrayList<>();
             for (EventEnvelope c : commands) {
@@ -728,8 +821,7 @@ final class StandardExplanationService implements ExplanationService {
                     actions.add(commandActionView(sp.actionType(), c, chain));
                 }
             } else {
-                AutomationActionCompletedEvent cp = completedByIndex.get(sp.actionIndex());
-                RunExplanation.ActionView view = nonDispatchedActionView(sp, cp);
+                RunExplanation.ActionView view = nonDispatchedActionView(sp, completedEnv);
                 if (view != null) {
                     actions.add(view);
                 }
@@ -746,20 +838,23 @@ final class StandardExplanationService implements ExplanationService {
         Outcome outcome = deriveOutcome(commandEnv.eventId(), chain);
         return new RunExplanation.ActionView(actionType, targetRef, ci.commandType(),
                 ci.parameters(), outcome.value(), outcome.reason(), outcome.resultOutcome(),
-                outcome.settled());
+                outcome.settled(), outcome.settledAt(), outcome.confirmedAt());
     }
 
     /**
      * Surfaces a command action that issued no command: a {@code "skipped"} completion as
      * {@code SKIPPED}, an {@code "error"} completion as {@code FAILED}. Successful non-command
      * actions (delay/wait/branch/emit) are omitted — they are not device commands and have no
-     * place in the confirmation-centric outcome vocabulary.
+     * place in the confirmation-centric outcome vocabulary. The completion envelope is the
+     * classifying event, so its instant is the view's {@code settledAt} (v1.1.4); nothing
+     * confirmed it, so {@code confirmedAt} is {@code null}.
      */
     private RunExplanation.ActionView nonDispatchedActionView(AutomationActionStartedEvent sp,
-                                                              AutomationActionCompletedEvent cp) {
-        if (cp == null) {
+                                                              EventEnvelope completedEnv) {
+        if (completedEnv == null) {
             return null;
         }
+        AutomationActionCompletedEvent cp = (AutomationActionCompletedEvent) completedEnv.payload();
         RunExplanation.ActionOutcome outcome;
         if (ACTION_SKIPPED.equals(cp.outcome())) {
             outcome = RunExplanation.ActionOutcome.SKIPPED;
@@ -772,9 +867,10 @@ final class StandardExplanationService implements ExplanationService {
                 ? null
                 : subjectRefView("entity", sp.targetRefs().get(0).toString());
         // No command was issued, so no command_result can exist (resultOutcome null), and a
-        // SKIPPED/FAILED view is settled by the Q1b rule (only bare/acked DISPATCHED is provisional).
+        // SKIPPED/FAILED view is settled by the Q1b rule (only bare/acked DISPATCHED is provisional)
+        // — at the completion envelope's instant, the classifying event (v1.1.4).
         return new RunExplanation.ActionView(sp.actionType(), targetRef, null, "{}",
-                outcome, cp.errorDetail(), null, true);
+                outcome, cp.errorDetail(), null, true, instantOf(completedEnv), null);
     }
 
     // ---- outcome derivation (pure log) --------------------------------------
@@ -787,33 +883,40 @@ final class StandardExplanationService implements ExplanationService {
      * a superseded- or acknowledged-only result lands — supersession is an intent change, not a
      * failure). In every branch {@code resultOutcome} carries the LAST causation-matched
      * {@code command_result}'s raw outcome — a pure fact-carry, independent of which branch
-     * classified. "Last" is {@code readByCorrelation}'s stable log order; no re-sort.
+     * classified. "Last" is {@code readByCorrelation}'s stable log order; no re-sort. Since
+     * v1.1.4 the CLASSIFYING envelope's instant ({@link #instantOf}) rides along as
+     * {@code settledAt} — and, for CONFIRMED, as {@code confirmedAt} — the event's instant,
+     * never the command's; a superseded DISPATCHED carries the superseding result's instant as
+     * {@code settledAt} ({@code settledAt != null ⇔ settled}); a bare or acknowledged DISPATCHED
+     * carries neither.
      */
     private Outcome deriveOutcome(EventId commandEventId, List<EventEnvelope> chain) {
-        StateConfirmedEvent confirmed = null;
+        EventEnvelope confirmed = null;
         CommandResultEvent lastResult = null;
-        CommandResultEvent lastFailure = null;
-        CommandResultEvent lastUnconfirmed = null;
-        CommandConfirmationTimedOutEvent timedOut = null;
+        EventEnvelope lastResultEnv = null;
+        EventEnvelope lastFailure = null;
+        EventEnvelope lastUnconfirmed = null;
+        EventEnvelope timedOut = null;
         for (EventEnvelope e : chain) {
             switch (e.payload()) {
                 case StateConfirmedEvent p -> {
                     if (p.commandEventId().equals(commandEventId)) {
-                        confirmed = p;
+                        confirmed = e;
                     }
                 }
                 case CommandConfirmationTimedOutEvent p -> {
                     if (p.commandEventId().equals(commandEventId)) {
-                        timedOut = p;
+                        timedOut = e;
                     }
                 }
                 case CommandResultEvent p -> {
                     if (commandEventId.value().equals(e.causalContext().causationId())) {
                         lastResult = p;
+                        lastResultEnv = e;
                         if (isFailure(p.outcome())) {
-                            lastFailure = p;
+                            lastFailure = e;
                         } else if (OUTCOME_UNCONFIRMED.equals(p.outcome())) {
-                            lastUnconfirmed = p;
+                            lastUnconfirmed = e;
                         }
                     }
                 }
@@ -824,24 +927,34 @@ final class StandardExplanationService implements ExplanationService {
         }
         String resultOutcome = lastResult != null ? lastResult.outcome() : null;
         if (confirmed != null) {
-            return new Outcome(RunExplanation.ActionOutcome.CONFIRMED, null, resultOutcome);
+            Instant confirmedAt = instantOf(confirmed);
+            return new Outcome(RunExplanation.ActionOutcome.CONFIRMED, null, resultOutcome,
+                    confirmedAt, confirmedAt);
         }
         if (lastFailure != null) {
+            CommandResultEvent failure = (CommandResultEvent) lastFailure.payload();
             return new Outcome(RunExplanation.ActionOutcome.FAILED,
-                    firstNonBlank(lastFailure.failureReason(), lastFailure.outcome()),
-                    resultOutcome);
+                    firstNonBlank(failure.failureReason(), failure.outcome()),
+                    resultOutcome, instantOf(lastFailure), null);
         }
         if (lastUnconfirmed != null) {
             // The recorded reason verbatim (e.g. zigbee's), never the generic timeout text.
+            CommandResultEvent unconfirmed = (CommandResultEvent) lastUnconfirmed.payload();
             return new Outcome(RunExplanation.ActionOutcome.UNCONFIRMED,
-                    firstNonBlank(lastUnconfirmed.failureReason(), lastUnconfirmed.outcome()),
-                    resultOutcome);
+                    firstNonBlank(unconfirmed.failureReason(), unconfirmed.outcome()),
+                    resultOutcome, instantOf(lastUnconfirmed), null);
         }
         if (timedOut != null) {
             return new Outcome(RunExplanation.ActionOutcome.UNCONFIRMED, "confirmation timed out",
-                    resultOutcome);
+                    resultOutcome, instantOf(timedOut), null);
         }
-        return new Outcome(RunExplanation.ActionOutcome.DISPATCHED, null, resultOutcome);
+        // DISPATCHED: no classifying event. A superseded result settles the Q1b flag (the ledger
+        // dropped the command; nothing further arrives), so that envelope's instant is settledAt —
+        // settledAt != null ⇔ settled (v1.1.4, the EXPLAIN-114a R3 ruling). A bare or acknowledged
+        // DISPATCHED is provisional and carries neither instant.
+        boolean settledByResult = resultOutcome != null && !OUTCOME_ACKNOWLEDGED.equals(resultOutcome);
+        Instant settledAt = settledByResult ? instantOf(lastResultEnv) : null;
+        return new Outcome(RunExplanation.ActionOutcome.DISPATCHED, null, resultOutcome, settledAt, null);
     }
 
     /**
@@ -852,9 +965,14 @@ final class StandardExplanationService implements ExplanationService {
         return outcome != null && !NON_FAILURE_OUTCOMES.contains(outcome);
     }
 
-    /** A derived per-action outcome, its human reason, and the raw result-outcome fact-carry. */
+    /**
+     * A derived per-action outcome, its human reason, the raw result-outcome fact-carry and, since
+     * v1.1.4, the classifying envelope's instant ({@code settledAt}; {@code null} for DISPATCHED)
+     * and the {@code state_confirmed}'s instant ({@code confirmedAt}; {@code null} unless
+     * CONFIRMED).
+     */
     private record Outcome(RunExplanation.ActionOutcome value, String reason,
-                           String resultOutcome) {
+                           String resultOutcome, Instant settledAt, Instant confirmedAt) {
 
         /**
          * The Q1b settledness derivation (v1.1.2): an action is provisional exactly while it is
@@ -900,6 +1018,14 @@ final class StandardExplanationService implements ExplanationService {
     }
 
     // ---- helpers ------------------------------------------------------------
+
+    /**
+     * An envelope's instant for the wire (v1.1.4): its {@code eventTime} when present, else its
+     * {@code ingestTime} — the same rule {@code matchedAt} uses.
+     */
+    private static Instant instantOf(EventEnvelope envelope) {
+        return envelope.eventTime() != null ? envelope.eventTime() : envelope.ingestTime();
+    }
 
     private static AutomationId automationOf(EventEnvelope runLifecycleEvent) {
         // The producer publishes run-lifecycle events on SubjectRef.automation(...), so the

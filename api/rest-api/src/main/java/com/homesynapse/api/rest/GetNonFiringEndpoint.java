@@ -46,6 +46,14 @@ import java.util.function.LongSupplier;
  * {@code {type:"entity", id}} map the causal chain serves ({@link EndpointResponses#subjectRefMap}),
  * or JSON null when the first trigger names no single entity (a group selector, a device, or no
  * subject); appended after {@code noCommandsIssued}, always present.</p>
+ *
+ * <p>v1.1.4 amendment (additive-only, EXPLAIN-114a): the {@code data} object additionally carries,
+ * appended after {@code triggerRef} in this order and always present: {@code disabledAt} (the
+ * latest {@code automation_disabled}'s instant, {@code Instant.toString()} or JSON null),
+ * {@code disabledReason} (that event's reason, the literal {@code "configuration"} for a
+ * definition-disabled automation, or JSON null off the {@code DISABLED} verdict) and
+ * {@code definitionKey} (the definition's stable hash, or JSON null). {@code verdict} still
+ * renders the enum name, so the new {@code FIRED_CONFIRMED} value flows through unchanged.</p>
  */
 final class GetNonFiringEndpoint implements Handler {
 
@@ -114,7 +122,7 @@ final class GetNonFiringEndpoint implements Handler {
     }
 
     private static Map<String, Object> toWire(NonFiringExplanation e) {
-        Map<String, Object> data = new LinkedHashMap<>(10);
+        Map<String, Object> data = new LinkedHashMap<>(13);
         data.put("automationId", e.automationId().toString());
         data.put("automationName", e.automationName());
         data.put("enabled", e.enabled());
@@ -125,8 +133,12 @@ final class GetNonFiringEndpoint implements Handler {
         data.put("triggerSummary", e.triggerSummary());
         data.put("lastEvaluation", lastEvaluationMap(e.lastEvaluation()));
         data.put("noCommandsIssued", e.noCommandsIssued());
-        // v1.1.3 (CG-1): appended LAST — the LinkedHashMap order is the wire order.
+        // v1.1.3 (CG-1): appended after noCommandsIssued — the LinkedHashMap order is the wire order.
         data.put("triggerRef", EndpointResponses.subjectRefMap(e.triggerRef()));
+        // v1.1.4 (EXPLAIN-114a): appended LAST, in this order; the instant as Instant.toString().
+        data.put("disabledAt", e.disabledAt() == null ? null : e.disabledAt().toString());
+        data.put("disabledReason", e.disabledReason());
+        data.put("definitionKey", e.definitionKey());
         return data;
     }
 

@@ -49,6 +49,11 @@ final class RunEndpointsTest {
     private static final String RUN_ULID = "01H8000000000000000000000A";
     private static final String AUTO_ULID = "01H8000000000000000000000B";
     private static final String ENTITY_ULID = "01H8000000000000000000000C";
+    /** A v1.1.4 definition key — the engine's SHA-256 hex over the definition (any hex will do here). */
+    private static final String DEFINITION_KEY =
+            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    /** The sample CONFIRMED action's settling instant (+3 s after the fixed clock). */
+    private static final Instant SETTLED_INSTANT = Instant.parse("2026-01-01T00:00:03Z");
 
     RunEndpointsTest() {
     }
@@ -179,7 +184,7 @@ final class RunEndpointsTest {
         Map<String, Object> data = asMap(body.get("data"));
         assertThat(data).containsOnlyKeys(
                 "runId", "automationId", "automationName", "trigger", "conditions", "actions",
-                "outcome", "cascade");
+                "outcome", "cascade", "definitionKey");
         assertThat(data).containsEntry("runId", RUN_ULID);
         assertThat(data).containsEntry("automationId", AUTO_ULID);
 
@@ -200,7 +205,7 @@ final class RunEndpointsTest {
         Map<String, Object> action = asMap(((List<?>) data.get("actions")).get(0));
         assertThat(action).containsOnlyKeys(
                 "type", "targetRef", "command", "params", "outcome", "reason",
-                "resultOutcome", "settled");
+                "resultOutcome", "settled", "settledAt", "confirmedAt");
         assertThat(action).containsEntry("command", "turn_on");
         assertThat(action).containsEntry("outcome", "CONFIRMED");
         assertThat(asMap(action.get("params"))).containsEntry("level", 75);
@@ -252,6 +257,40 @@ final class RunEndpointsTest {
         List<?> actions = (List<?>) asMap(asMap(ctx.body).get("data")).get("actions");
         assertThat(asMap(actions.get(0))).containsEntry("settled", true);
         assertThat(asMap(actions.get(1))).containsEntry("settled", false);
+    }
+
+    @Test
+    @DisplayName("GET /runs/{id}/causal-chain appends the v1.1.4 keys LAST — settledAt/confirmedAt per action, definitionKey at the root — ISO-8601 or null (T13)")
+    void causalChain_v114KeysLastInOrder_iso8601OrNull() {
+        // The keyed sample: a CONFIRMED action settled and confirmed at +3 s; a definition key.
+        GetRunCausalChainEndpoint keyed = new GetRunCausalChainEndpoint(
+                fake().put(sampleExplanation()), VIEW_POSITION, FIXED_CLOCK);
+        RecordingEndpointContext ctx = new RecordingEndpointContext().withPathParam("runId", RUN_ULID);
+        keyed.apply(ctx);
+
+        Map<String, Object> data = asMap(asMap(ctx.body).get("data"));
+        // The LinkedHashMap order IS the wire order: v1.1.4 appends definitionKey at the END.
+        assertThat(data.keySet()).containsExactly("runId", "automationId", "automationName",
+                "trigger", "conditions", "actions", "outcome", "cascade", "definitionKey");
+        assertThat(data).containsEntry("definitionKey", DEFINITION_KEY);
+        Map<String, Object> action = asMap(((List<?>) data.get("actions")).get(0));
+        assertThat(action.keySet()).containsExactly("type", "targetRef", "command", "params",
+                "outcome", "reason", "resultOutcome", "settled", "settledAt", "confirmedAt");
+        assertThat(action).containsEntry("settledAt", "2026-01-01T00:00:03Z");
+        assertThat(action).containsEntry("confirmedAt", "2026-01-01T00:00:03Z");
+
+        // The 8-arg convenience fixture (no key; provisional/superseded actions): PRESENT, JSON null.
+        GetRunCausalChainEndpoint unkeyed = new GetRunCausalChainEndpoint(
+                fake().put(twoActionExplanation()), VIEW_POSITION, FIXED_CLOCK);
+        RecordingEndpointContext ctx2 = new RecordingEndpointContext().withPathParam("runId", RUN_ULID);
+        unkeyed.apply(ctx2);
+
+        Map<String, Object> data2 = asMap(asMap(ctx2.body).get("data"));
+        assertThat(data2).containsEntry("definitionKey", null);
+        for (Object a : (List<?>) data2.get("actions")) {
+            assertThat(asMap(a)).containsEntry("settledAt", null);
+            assertThat(asMap(a)).containsEntry("confirmedAt", null);
+        }
     }
 
     @Test
@@ -309,14 +348,18 @@ final class RunEndpointsTest {
                 List.of(new RunExplanation.ActionView("CommandAction",
                         new RunExplanation.SubjectRefView("entity", ENTITY_ULID),
                         "turn_on", "{\"level\":75}",
-                        RunExplanation.ActionOutcome.CONFIRMED, null, "acknowledged", true)),
+                        RunExplanation.ActionOutcome.CONFIRMED, null, "acknowledged", true,
+                        SETTLED_INSTANT, SETTLED_INSTANT)),
                 new RunExplanation.OutcomeView(RunStatus.COMPLETED, null, 1234L, 1, 1),
-                new RunExplanation.CascadeView(null, 0));
+                new RunExplanation.CascadeView(null, 0),
+                DEFINITION_KEY);
     }
 
     /**
      * Two actions for the v1.1.2 wire legs: a settled superseded {@code DISPATCHED} and a
-     * provisional bare {@code DISPATCHED} (resultOutcome absent).
+     * provisional bare {@code DISPATCHED} (resultOutcome absent). Built on the 8-arg pre-v1.1.4
+     * convenience constructor (no definition key) and with no settling instants — the
+     * present-with-null leg of the v1.1.4 wire.
      */
     private static RunExplanation twoActionExplanation() {
         return new RunExplanation(runId(), autoId(), "My Automation",
@@ -328,11 +371,13 @@ final class RunEndpointsTest {
                         new RunExplanation.ActionView("CommandAction",
                                 new RunExplanation.SubjectRefView("entity", ENTITY_ULID),
                                 "set_color_temp", "{}",
-                                RunExplanation.ActionOutcome.DISPATCHED, null, "superseded", true),
+                                RunExplanation.ActionOutcome.DISPATCHED, null, "superseded", true,
+                                null, null),
                         new RunExplanation.ActionView("CommandAction",
                                 new RunExplanation.SubjectRefView("entity", ENTITY_ULID),
                                 "turn_on", "{}",
-                                RunExplanation.ActionOutcome.DISPATCHED, null, null, false)),
+                                RunExplanation.ActionOutcome.DISPATCHED, null, null, false,
+                                null, null)),
                 new RunExplanation.OutcomeView(RunStatus.COMPLETED, null, 1234L, 2, 2),
                 new RunExplanation.CascadeView(null, 0));
     }

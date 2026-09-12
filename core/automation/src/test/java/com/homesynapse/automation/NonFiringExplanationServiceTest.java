@@ -20,6 +20,7 @@ import com.homesynapse.event.AutomationActionStartedEvent;
 import com.homesynapse.event.AutomationCompletedEvent;
 import com.homesynapse.event.AutomationConditionEvaluatedEvent;
 import com.homesynapse.event.AutomationConditionEvaluatedEvent.EvaluatedEntityState;
+import com.homesynapse.event.AutomationDisabledEvent;
 import com.homesynapse.event.AutomationTriggeredEvent;
 import com.homesynapse.event.CausalContext;
 import com.homesynapse.event.CommandConfirmationTimedOutEvent;
@@ -43,6 +44,7 @@ import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.state.Availability;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -161,7 +163,7 @@ final class NonFiringExplanationServiceTest {
     }
 
     @Test
-    @DisplayName("DP-B2: a clean confirmed run reports NEVER_TRIGGERED with a non-null run id")
+    @DisplayName("v1.1.4 (DP-B2 evolved): a clean confirmed run reports FIRED_CONFIRMED with its run id")
     void nonFiring_cleanConfirmedRun_perDpB2Default() {
         AutomationId autoId = automationId();
         EntityId target = entityId();
@@ -170,9 +172,9 @@ final class NonFiringExplanationServiceTest {
 
         NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
 
-        // The frozen 4-value enum has no "fired fine" value; DP-B2 reports NEVER_TRIGGERED but with
-        // a NON-NULL lastRelevantRunId so the UI can distinguish "ran fine" from "never ran".
-        assertThat(result.verdict()).isEqualTo(NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED);
+        // v1.1.4 grows the verdict enum by FIRED_CONFIRMED (appended LAST): the clean-success case
+        // no longer borrows NEVER_TRIGGERED; the run id stays non-null and the sentence unchanged.
+        assertThat(result.verdict()).isEqualTo(NonFiringExplanation.NonFiringVerdict.FIRED_CONFIRMED);
         assertThat(result.lastRelevantRunId()).isEqualTo(run);
         assertThat(result.explanation()).contains("last fired and confirmed");
     }
@@ -222,7 +224,7 @@ final class NonFiringExplanationServiceTest {
     }
 
     @Test
-    @DisplayName("a COMPLETED run with confirmed commands keeps the DP-B2 clean path, marker absent")
+    @DisplayName("a COMPLETED run with confirmed commands keeps the clean path (FIRED_CONFIRMED since v1.1.4), marker absent")
     void completedWithConfirmedCommands_cleanPathUnchanged() {
         AutomationId autoId = automationId();
         EntityId target = entityId();
@@ -232,7 +234,7 @@ final class NonFiringExplanationServiceTest {
         NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
 
         assertThat(result.verdict())
-                .isEqualTo(NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED);
+                .isEqualTo(NonFiringExplanation.NonFiringVerdict.FIRED_CONFIRMED);
         assertThat(result.lastRelevantRunId()).isEqualTo(run);
         assertThat(result.noCommandsIssued()).isNull();
     }
@@ -433,6 +435,113 @@ final class NonFiringExplanationServiceTest {
                 .containsExactly(null, ref(e4));
     }
 
+    // ---- v1.1.4 (EXPLAIN-114a): FIRED_CONFIRMED / disabledAt + disabledReason / definitionKey ----
+
+    @Test
+    @DisplayName("the verdict enum grows at the END: FIRED_CONFIRMED is the fifth and last value (T9b)")
+    void verdictEnum_growsAdditivelyAtTheEnd() {
+        assertThat(NonFiringExplanation.NonFiringVerdict.values())
+                .extracting(Enum::name)
+                .containsExactly("CONDITION_NOT_MET", "NEVER_TRIGGERED", "ACTED_BUT_UNCONFIRMED",
+                        "DISABLED", "FIRED_CONFIRMED");
+    }
+
+    @Test
+    @DisplayName("DISABLED with automation_disabled on the log: disabledAt/disabledReason from the LATEST one for this automation (T10)")
+    void disabled_autoDisabled_carriesDisabledAtAndReasonFromTheLatestEvent() {
+        AutomationId autoId = automationId();
+        AutomationId other = automationId();
+        registry.add(definition(autoId, "Flaky", false, entityId()));
+        Instant older = FIXED_INSTANT.plusSeconds(1);
+        Instant newest = FIXED_INSTANT.plusSeconds(11);
+        seedDisabled(autoId, "repeated_failure", 3, older);
+        seedDisabled(autoId, "repeated_failure", 5, newest);
+        seedDisabled(other, "repeated_failure", 9, FIXED_INSTANT.plusSeconds(20)); // another automation
+
+        NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+        assertThat(result.verdict()).isEqualTo(NonFiringExplanation.NonFiringVerdict.DISABLED);
+        assertThat(result.disabledAt()).isEqualTo(newest);
+        assertThat(result.disabledReason()).isEqualTo("repeated_failure");
+    }
+
+    @Test
+    @DisplayName("DISABLED by configuration alone: disabledAt null, disabledReason \"configuration\" (T11, DP-6)")
+    void disabled_configurationOnly_disabledAtNull_reasonConfiguration() {
+        AutomationId autoId = automationId();
+        registry.add(definition(autoId, "Off", false, entityId()));
+
+        NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+        assertThat(result.verdict()).isEqualTo(NonFiringExplanation.NonFiringVerdict.DISABLED);
+        assertThat(result.disabledAt()).isNull();
+        assertThat(result.disabledReason()).isEqualTo("configuration");
+    }
+
+    @Test
+    @DisplayName("an enabled automation carries null disabledAt/disabledReason on every other verdict (T11b)")
+    void enabledVerdicts_carryNullDisabledFacts() {
+        AutomationId never = automationId();
+        registry.add(definition(never, "Never", true, entityId()));
+        AutomationId notMet = automationId();
+        registry.add(definition(notMet, "NotMet", true, entityId()));
+        seedCompleted(notMet, "CONDITION_NOT_MET", null);
+
+        for (AutomationId autoId : List.of(never, notMet)) {
+            NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+            assertThat(result.disabledAt()).as("disabledAt").isNull();
+            assertThat(result.disabledReason()).as("disabledReason").isNull();
+        }
+    }
+
+    @Test
+    @DisplayName("definitionKey on the non-firing read is DefinitionHashes over the registry definition — the chain's key (T12, DP-5)")
+    void definitionKey_nonFiring_equalsDefinitionHashes_andTheChainsKey() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        AutomationDefinition def = definition(autoId, "Keyed", true, target);
+        registry.add(def);
+        String expected = DefinitionHashes.forDefinition(def);
+        // The engine stamps the same function's output on automation_triggered (StandardRunManager
+        // :261 -> RunContext.definitionHash -> publishTriggered :690); the fixture does the same.
+        RunId run = seedRun(autoId, target, "COMPLETED", null, ConfirmKind.CONFIRMED, expected);
+
+        NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+        assertThat(result.definitionKey()).isEqualTo(expected);
+        assertThat(result.definitionKey())
+                .isEqualTo(service.explainRun(run).orElseThrow().definitionKey());
+
+        // Present on the run-less and the disabled paths too — it is a fact of the definition.
+        AutomationId never = automationId();
+        AutomationDefinition neverDef = definition(never, "Never", true, entityId());
+        registry.add(neverDef);
+        assertThat(service.explainNonFiring(never, 0).orElseThrow().definitionKey())
+                .isEqualTo(DefinitionHashes.forDefinition(neverDef));
+        AutomationId off = automationId();
+        AutomationDefinition offDef = definition(off, "Off", false, entityId());
+        registry.add(offDef);
+        assertThat(service.explainNonFiring(off, 0).orElseThrow().definitionKey())
+                .isEqualTo(DefinitionHashes.forDefinition(offDef));
+    }
+
+    @Test
+    @DisplayName("listAutomations rows carry definitionKey = DefinitionHashes over each definition (T16, DP-5)")
+    void listAutomations_rowsCarryDefinitionKey() {
+        AutomationId a = automationId();
+        AutomationId b = automationId();
+        AutomationDefinition defA = fullDefinition(a, "A", true, entityId());
+        AutomationDefinition defB = definition(b, "B", false, entityId());
+        registry.add(defA);
+        registry.add(defB);
+
+        List<AutomationSummary> summaries = service.listAutomations();
+
+        assertThat(byId(summaries, a).definitionKey()).isEqualTo(DefinitionHashes.forDefinition(defA));
+        assertThat(byId(summaries, b).definitionKey()).isEqualTo(DefinitionHashes.forDefinition(defB));
+        assertThat(byId(summaries, a).definitionKey()).isNotEqualTo(byId(summaries, b).definitionKey());
+    }
+
     // ---- INV-SA-03: pure projection -----------------------------------------
 
     @Test
@@ -544,6 +653,12 @@ final class NonFiringExplanationServiceTest {
     /** Seeds a full run chain on its own (root) correlation, with a confirmation of the given kind. */
     private RunId seedRun(AutomationId autoId, EntityId target, String finalStatus,
                           String abortReason, ConfirmKind kind) {
+        return seedRun(autoId, target, finalStatus, abortReason, kind, "hash");
+    }
+
+    /** As {@link #seedRun} with an explicit {@code definitionHash} stamped on automation_triggered. */
+    private RunId seedRun(AutomationId autoId, EntityId target, String finalStatus,
+                          String abortReason, ConfirmKind kind, String definitionHash) {
         EventEnvelope trig = publishRoot("state_changed", SubjectRef.entity(target),
                 new StateChangedEvent("motion", str("idle"), str("active"), eventId()));
         Ulid corr = trig.causalContext().correlationId();
@@ -551,7 +666,7 @@ final class NonFiringExplanationServiceTest {
         RunId runId = new RunId(ulid());
         publishDerived(EventTypes.AUTOMATION_TRIGGERED, SubjectRef.automation(autoId),
                 new AutomationTriggeredEvent(runId.value(), trig.eventId(), List.of("t1"),
-                        Map.of("action:0", Set.of(target)), "hash", 0), corr, trigId);
+                        Map.of("action:0", Set.of(target)), definitionHash, 0), corr, trigId);
         publishDerived(EventTypes.AUTOMATION_CONDITION_EVALUATED, SubjectRef.automation(autoId),
                 new AutomationConditionEvaluatedEvent(runId.value(), 0, "StateCondition", true,
                         List.of(new EvaluatedEntityState(target, "motion", "active",
@@ -583,6 +698,19 @@ final class NonFiringExplanationServiceTest {
                 new AutomationCompletedEvent(runId.value(), finalStatus, 1234L, 1, 1, null,
                         abortReason), corr, trigId);
         return runId;
+    }
+
+    /** Seeds an automation_disabled marker on the automation subject with an explicit eventTime. */
+    private void seedDisabled(AutomationId autoId, String reason, int failureCount, Instant at) {
+        EventDraft draft = new EventDraft(EventTypes.AUTOMATION_DISABLED, 1, at,
+                SubjectRef.automation(autoId), EventPriority.NORMAL, EventOrigin.AUTOMATION,
+                new AutomationDisabledEvent(autoId, reason, failureCount, 60, "boom", null),
+                null, null);
+        try {
+            store.publishRoot(draft);
+        } catch (SequenceConflictException e) {
+            throw new AssertionError("seed publish failed", e);
+        }
     }
 
     private EventEnvelope publishRoot(String eventType, SubjectRef subject, DomainEvent payload) {

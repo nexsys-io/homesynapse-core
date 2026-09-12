@@ -38,6 +38,11 @@ import java.util.function.LongSupplier;
  * {@code {type:"entity", id}} map the causal chain serves ({@link EndpointResponses#subjectRefMap}),
  * or JSON null when the component names no single entity; appended after {@code summary},
  * always present.</p>
+ *
+ * <p>v1.1.4 amendment (additive-only, EXPLAIN-114a): each row additionally carries
+ * {@code definitionKey} — the definition's stable hash over the registry definition (the same
+ * value the causal chain and the non-firing read serve), or JSON null; appended after
+ * {@code lastRunId}, always present.</p>
  */
 final class ListAutomationsEndpoint implements Handler {
 
@@ -108,7 +113,7 @@ final class ListAutomationsEndpoint implements Handler {
     }
 
     private static Map<String, Object> toWire(AutomationSummary summary) {
-        Map<String, Object> map = new LinkedHashMap<>(5);
+        Map<String, Object> map = new LinkedHashMap<>(6);
         map.put("automationId", summary.automationId().toString());
         map.put("name", summary.name());
         map.put("enabled", summary.enabled());
@@ -123,6 +128,8 @@ final class ListAutomationsEndpoint implements Handler {
         }
         map.put("components", components);
         map.put("lastRunId", summary.lastRunId() == null ? null : summary.lastRunId().toString());
+        // v1.1.4 (EXPLAIN-114a): appended LAST — the LinkedHashMap order is the wire order.
+        map.put("definitionKey", summary.definitionKey());
         return map;
     }
 

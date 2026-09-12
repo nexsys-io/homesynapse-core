@@ -34,11 +34,13 @@ import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.StateChangedEvent;
 import com.homesynapse.event.StateConfirmedEvent;
+import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.test.InMemoryEventStore;
 import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
+import com.homesynapse.value.IntValue;
 
 import java.time.Instant;
 import java.util.List;
@@ -470,6 +472,215 @@ final class StandardExplanationServiceTest {
                 assertThat(s.triggeredAt()).isEqualTo(matchedAt));
     }
 
+    // ---- v1.1.4 (EXPLAIN-114a): firingValue / settledAt / confirmedAt / definitionKey ----
+
+    @Test
+    @DisplayName("firingValue is the in-correlation state_changed newValue in the string dialect (T1)")
+    void firingValue_fromInCorrelationStateChanged_isTheNewValueString() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        // seedRun's triggering state_changed (newValue str("active")) rides the run's correlation.
+        RunId runId = seedRun(autoId, target, "COMPLETED", null, ConfirmKind.CONFIRMED);
+
+        RunExplanation.TriggerView trigger = service.explainRun(runId).orElseThrow().trigger();
+
+        assertThat(trigger.subjectRef()).isNotNull();
+        assertThat(trigger.firingValue()).isEqualTo("active");
+    }
+
+    @Test
+    @DisplayName("a numeric newValue renders through the module's one string dialect, never a record toString (T1b)")
+    void firingValue_numericNewValue_rendersTheCanonicalString() {
+        EntityId target = entityId();
+        RunId runId = seedRunTriggeredBy(automationId(), target, EventTypes.STATE_CHANGED,
+                SubjectRef.entity(target),
+                new StateChangedEvent("brightness", new IntValue(10), new IntValue(72), eventId()),
+                ConfirmKind.CONFIRMED);
+
+        assertThat(service.explainRun(runId).orElseThrow().trigger().firingValue()).isEqualTo("72");
+    }
+
+    @Test
+    @DisplayName("firingValue is the in-correlation state_reported value as recorded (T2)")
+    void firingValue_fromInCorrelationStateReported_isTheReportedValue() {
+        EntityId target = entityId();
+        RunId runId = seedRunTriggeredBy(automationId(), target, EventTypes.STATE_REPORTED,
+                SubjectRef.entity(target),
+                new StateReportedEvent("temperature", "21.5", "C", "0x0866", null),
+                ConfirmKind.CONFIRMED);
+
+        assertThat(service.explainRun(runId).orElseThrow().trigger().firingValue()).isEqualTo("21.5");
+    }
+
+    @Test
+    @DisplayName("firingValue is null when the triggering event is not in the run's correlation (T3)")
+    void firingValue_nullWhenTriggeringEventOutsideTheCorrelation() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        // The triggering state_changed lives on its OWN root correlation ...
+        EventEnvelope trig = publishRoot(EventTypes.STATE_CHANGED, SubjectRef.entity(target),
+                new StateChangedEvent("motion", str("idle"), str("active"), eventId()));
+        // ... while the run chain rides a different correlation that names it by id only. An
+        // engine run always inherits the triggering envelope's correlation (StandardRunManager
+        // :218), so this shape arises only when that envelope is no longer retained — the
+        // correlation read then cannot see it (the F3 class).
+        EventEnvelope other = publishRoot(EventTypes.STATE_CHANGED, SubjectRef.entity(entityId()),
+                new StateChangedEvent("motion", str("idle"), str("active"), eventId()));
+        RunId runId = seedRunOnCorrelation(autoId, target, other.causalContext().correlationId(),
+                other.eventId().value(), "COMPLETED", null, ConfirmKind.CONFIRMED, trig.eventId());
+
+        RunExplanation.TriggerView trigger = service.explainRun(runId).orElseThrow().trigger();
+
+        assertThat(trigger.subjectRef()).isNull();
+        assertThat(trigger.firingValue()).isNull();
+    }
+
+    @Test
+    @DisplayName("firingValue is null for an in-correlation triggering event that is not a state event (T3b)")
+    void firingValue_nullForNonStateTriggeringPayload() {
+        EntityId target = entityId();
+        RunId runId = seedRunTriggeredBy(automationId(), target, EventTypes.COMMAND_ISSUED,
+                SubjectRef.entity(target),
+                new CommandIssuedEvent(target.value(), "turn_on", "{}", 5000,
+                        CommandIdempotency.IDEMPOTENT),
+                ConfirmKind.CONFIRMED);
+
+        RunExplanation.TriggerView trigger = service.explainRun(runId).orElseThrow().trigger();
+
+        assertThat(trigger.subjectRef()).isNotNull();
+        assertThat(trigger.firingValue()).isNull();
+    }
+
+    @Test
+    @DisplayName("CONFIRMED: settledAt and confirmedAt both equal the state_confirmed instant (T4)")
+    void settledAt_confirmedAt_forConfirmed_equalTheStateConfirmedInstant() {
+        Instant confirmedAt = FIXED_INSTANT.plusSeconds(3);
+        RunId runId = seedRunSettledAt(automationId(), entityId(), ConfirmKind.CONFIRMED, confirmedAt);
+
+        RunExplanation.ActionView action = actionOf(runId);
+
+        assertThat(action.outcome()).isEqualTo(RunExplanation.ActionOutcome.CONFIRMED);
+        assertThat(action.settledAt()).isEqualTo(confirmedAt);
+        assertThat(action.confirmedAt()).isEqualTo(confirmedAt);
+    }
+
+    @Test
+    @DisplayName("a classifying command_result sets settledAt to its instant; confirmedAt stays null (T5)")
+    void settledAt_forClassifyingResult_isTheResultInstant_confirmedAtNull() {
+        Instant unconfirmedAt = FIXED_INSTANT.plusSeconds(5);
+        Instant failedAt = FIXED_INSTANT.plusSeconds(4);
+        RunId unconfirmed = seedRunWithResultAt(automationId(), entityId(), "unconfirmed",
+                "DefaultResponse SUCCESS +90 ms, then no report, ever", unconfirmedAt);
+        RunId failed = seedRunWithResultAt(automationId(), entityId(), "rejected", "device offline",
+                failedAt);
+
+        assertThat(actionOf(unconfirmed).outcome()).isEqualTo(RunExplanation.ActionOutcome.UNCONFIRMED);
+        assertThat(actionOf(unconfirmed).settledAt()).isEqualTo(unconfirmedAt);
+        assertThat(actionOf(unconfirmed).confirmedAt()).isNull();
+        assertThat(actionOf(failed).outcome()).isEqualTo(RunExplanation.ActionOutcome.FAILED);
+        assertThat(actionOf(failed).settledAt()).isEqualTo(failedAt);
+        assertThat(actionOf(failed).confirmedAt()).isNull();
+    }
+
+    @Test
+    @DisplayName("a confirmation timeout sets settledAt to its instant; ingestTime when its eventTime is null (T6)")
+    void settledAt_forTimeout_isTheTimeoutInstant_ingestFallbackWhenEventTimeNull() {
+        Instant timedOutAt = FIXED_INSTANT.plusSeconds(9);
+        RunId timed = seedRunSettledAt(automationId(), entityId(), ConfirmKind.UNCONFIRMED, timedOutAt);
+        RunId noEventTime = seedRunSettledAt(automationId(), entityId(), ConfirmKind.UNCONFIRMED, null);
+
+        assertThat(actionOf(timed).outcome()).isEqualTo(RunExplanation.ActionOutcome.UNCONFIRMED);
+        assertThat(actionOf(timed).settledAt()).isEqualTo(timedOutAt);
+        assertThat(actionOf(timed).confirmedAt()).isNull();
+        // InMemoryEventStore stamps ingestTime = clock.instant() (FIXED_CLOCK) at append.
+        assertThat(actionOf(noEventTime).settledAt()).isEqualTo(FIXED_INSTANT);
+    }
+
+    @Test
+    @DisplayName("DISPATCHED: bare and acknowledged carry no settling instant; a superseded one settles at its result's instant (T7, R3)")
+    void settledAt_confirmedAt_forDispatched_followSettled() {
+        RunId bare = seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.DISPATCHED);
+        RunId acked = seedRunWithResultAt(automationId(), entityId(), "acknowledged", null,
+                FIXED_INSTANT.plusSeconds(1));
+        Instant supersededAt = FIXED_INSTANT.plusSeconds(2);
+        RunId superseded = seedRunWithResultAt(automationId(), entityId(), "superseded",
+                "superseded by a newer command", supersededAt);
+
+        for (RunId runId : List.of(bare, acked)) {
+            RunExplanation.ActionView action = actionOf(runId);
+            assertThat(action.outcome()).isEqualTo(RunExplanation.ActionOutcome.DISPATCHED);
+            assertThat(action.settled()).as("settled").isFalse();
+            assertThat(action.settledAt()).as("settledAt").isNull();
+            assertThat(action.confirmedAt()).as("confirmedAt").isNull();
+        }
+        // The superseded command_result IS the settling record (the ledger dropped the command;
+        // nothing further arrives): settled == true and settledAt is that envelope's instant.
+        RunExplanation.ActionView action = actionOf(superseded);
+        assertThat(action.outcome()).isEqualTo(RunExplanation.ActionOutcome.DISPATCHED);
+        assertThat(action.settled()).isTrue();
+        assertThat(action.settledAt()).isEqualTo(supersededAt);
+        assertThat(action.confirmedAt()).isNull();
+    }
+
+    @Test
+    @DisplayName("settledAt != null exactly when settled — the v1.1.4 invariant over every fixture (T7c, R3)")
+    void settledAt_presentIffSettled_overEveryFixture() {
+        String supersededReason = "superseded by a newer command";
+        String honestReason = "DefaultResponse SUCCESS +90 ms, then no report, ever";
+        List<RunId> fixtures = List.of(
+                seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.CONFIRMED),
+                seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.UNCONFIRMED),
+                seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.FAILED),
+                seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.DISPATCHED),
+                seedRunWithResult(automationId(), entityId(), "superseded", supersededReason, false, false),
+                seedRunWithResult(automationId(), entityId(), "superseded", supersededReason, true, false),
+                seedRunWithResult(automationId(), entityId(), "unconfirmed", honestReason, false, false),
+                seedRunWithResult(automationId(), entityId(), "rejected", "device offline", false, false),
+                seedRunWithResult(automationId(), entityId(), "zcl_weird_vendor_code", null, false, false),
+                seedRunWithResult(automationId(), entityId(), "acknowledged", null, false, false),
+                seedRunWithResult(automationId(), entityId(), "acknowledged", null, false, true),
+                seedRunSettledAt(automationId(), entityId(), ConfirmKind.CONFIRMED,
+                        FIXED_INSTANT.plusSeconds(3)),
+                seedRunSettledAt(automationId(), entityId(), ConfirmKind.UNCONFIRMED, null),
+                seedRunSettledAt(automationId(), entityId(), ConfirmKind.FAILED,
+                        FIXED_INSTANT.plusSeconds(4)),
+                seedRunWithResultAt(automationId(), entityId(), "acknowledged", null,
+                        FIXED_INSTANT.plusSeconds(1)),
+                seedRunWithResultAt(automationId(), entityId(), "superseded", supersededReason,
+                        FIXED_INSTANT.plusSeconds(2)),
+                seedSkippedRun(automationId(), entityId(), FIXED_INSTANT.plusSeconds(2)));
+
+        for (RunId runId : fixtures) {
+            RunExplanation.ActionView action = actionOf(runId);
+            assertThat(action.settledAt() != null)
+                    .as("settledAt present iff settled: %s / %s", action.outcome(),
+                            action.resultOutcome())
+                    .isEqualTo(action.settled());
+        }
+    }
+
+    @Test
+    @DisplayName("a SKIPPED command action settles at its automation_action_completed instant (T7b)")
+    void settledAt_forSkippedAction_isTheActionCompletedInstant() {
+        Instant skippedAt = FIXED_INSTANT.plusSeconds(2);
+        RunId runId = seedSkippedRun(automationId(), entityId(), skippedAt);
+
+        RunExplanation.ActionView action = actionOf(runId);
+
+        assertThat(action.outcome()).isEqualTo(RunExplanation.ActionOutcome.SKIPPED);
+        assertThat(action.settledAt()).isEqualTo(skippedAt);
+        assertThat(action.confirmedAt()).isNull();
+    }
+
+    @Test
+    @DisplayName("definitionKey is the run's automation_triggered definitionHash (T8)")
+    void definitionKey_equalsTheTriggeredEventsDefinitionHash() {
+        RunId runId = seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.CONFIRMED);
+
+        // seedRun stamps the fixture hash "hash" on automation_triggered.
+        assertThat(service.explainRun(runId).orElseThrow().definitionKey()).isEqualTo("hash");
+    }
+
     // ---- INV-SA-03: pure projection -----------------------------------------
 
     @Test
@@ -631,6 +842,112 @@ final class StandardExplanationServiceTest {
         return runId;
     }
 
+    /** Seeds a run whose triggering event has the given type/subject/payload on the run's correlation. */
+    private RunId seedRunTriggeredBy(AutomationId autoId, EntityId target, String triggerEventType,
+                                     SubjectRef triggerSubject, DomainEvent triggerPayload,
+                                     ConfirmKind kind) {
+        EventEnvelope trig = publishRoot(triggerEventType, triggerSubject, triggerPayload);
+        return seedRunOnCorrelation(autoId, target, trig.causalContext().correlationId(),
+                trig.eventId().value(), kind);
+    }
+
+    /**
+     * Seeds a full run chain whose classifying confirmation event carries an explicit envelope
+     * {@code eventTime} ({@code null} allowed — the ingest-fallback fixture); every other event
+     * stays at {@link #FIXED_INSTANT} so the settling instant is discriminable.
+     */
+    private RunId seedRunSettledAt(AutomationId autoId, EntityId target, ConfirmKind kind,
+                                   Instant classifyingTime) {
+        EventEnvelope trig = publishRoot("state_changed", SubjectRef.entity(target),
+                new StateChangedEvent("motion", str("idle"), str("active"), eventId()));
+        Ulid corr = trig.causalContext().correlationId();
+        Ulid trigId = trig.eventId().value();
+        RunId runId = new RunId(ulid());
+        publishDerived(EventTypes.AUTOMATION_TRIGGERED, SubjectRef.automation(autoId),
+                new AutomationTriggeredEvent(runId.value(), trig.eventId(), List.of("t1"),
+                        Map.of("action:0", Set.of(target)), "hash", 0), corr, trigId);
+        publishDerived(EventTypes.AUTOMATION_ACTION_STARTED, SubjectRef.automation(autoId),
+                new AutomationActionStartedEvent(runId.value(), 0, "CommandAction", List.of(target)),
+                corr, trigId);
+        EventEnvelope cmd = publishDerived(EventTypes.COMMAND_ISSUED, SubjectRef.entity(target),
+                new CommandIssuedEvent(target.value(), "turn_on", "{\"level\":75}", 5000,
+                        CommandIdempotency.IDEMPOTENT), corr, trigId);
+        switch (kind) {
+            case CONFIRMED -> publishDerivedAt(EventTypes.STATE_CONFIRMED, SubjectRef.entity(target),
+                    new StateConfirmedEvent(cmd.eventId(), eventId(), "on", "true", "true", "exact"),
+                    corr, cmd.eventId().value(), classifyingTime);
+            case UNCONFIRMED -> publishDerivedAt(EventTypes.COMMAND_CONFIRMATION_TIMED_OUT,
+                    SubjectRef.entity(target),
+                    new CommandConfirmationTimedOutEvent(cmd.eventId(), null),
+                    corr, cmd.eventId().value(), classifyingTime);
+            case FAILED -> publishDerivedAt(EventTypes.COMMAND_RESULT, SubjectRef.entity(target),
+                    new CommandResultEvent(target.value(), "turn_on", "rejected", "device offline"),
+                    corr, cmd.eventId().value(), classifyingTime);
+            case DISPATCHED -> {
+                // no classifying event
+            }
+        }
+        publishDerived(EventTypes.AUTOMATION_ACTION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationActionCompletedEvent(runId.value(), 0, "success", null), corr, trigId);
+        publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null),
+                corr, trigId);
+        return runId;
+    }
+
+    /** Seeds a run chain whose single command_result carries an explicit envelope eventTime. */
+    private RunId seedRunWithResultAt(AutomationId autoId, EntityId target, String resultOutcome,
+                                      String failureReason, Instant resultTime) {
+        EventEnvelope trig = publishRoot("state_changed", SubjectRef.entity(target),
+                new StateChangedEvent("motion", str("idle"), str("active"), eventId()));
+        Ulid corr = trig.causalContext().correlationId();
+        Ulid trigId = trig.eventId().value();
+        RunId runId = new RunId(ulid());
+        publishDerived(EventTypes.AUTOMATION_TRIGGERED, SubjectRef.automation(autoId),
+                new AutomationTriggeredEvent(runId.value(), trig.eventId(), List.of("t1"),
+                        Map.of("action:0", Set.of(target)), "hash", 0), corr, trigId);
+        publishDerived(EventTypes.AUTOMATION_ACTION_STARTED, SubjectRef.automation(autoId),
+                new AutomationActionStartedEvent(runId.value(), 0, "CommandAction", List.of(target)),
+                corr, trigId);
+        EventEnvelope cmd = publishDerived(EventTypes.COMMAND_ISSUED, SubjectRef.entity(target),
+                new CommandIssuedEvent(target.value(), "set_color_temp", "{\"mireds\":220}", 5000,
+                        CommandIdempotency.IDEMPOTENT), corr, trigId);
+        publishDerivedAt(EventTypes.COMMAND_RESULT, SubjectRef.entity(target),
+                new CommandResultEvent(target.value(), "set_color_temp", resultOutcome,
+                        failureReason), corr, cmd.eventId().value(), resultTime);
+        publishDerived(EventTypes.AUTOMATION_ACTION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationActionCompletedEvent(runId.value(), 0, "success", null), corr, trigId);
+        publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null),
+                corr, trigId);
+        return runId;
+    }
+
+    /**
+     * Seeds a run whose single command action issued no command and completed {@code "skipped"}
+     * at the given instant (the Doc 07 §3.9 skip shape).
+     */
+    private RunId seedSkippedRun(AutomationId autoId, EntityId target, Instant completedTime) {
+        EventEnvelope trig = publishRoot("state_changed", SubjectRef.entity(target),
+                new StateChangedEvent("motion", str("idle"), str("active"), eventId()));
+        Ulid corr = trig.causalContext().correlationId();
+        Ulid trigId = trig.eventId().value();
+        RunId runId = new RunId(ulid());
+        publishDerived(EventTypes.AUTOMATION_TRIGGERED, SubjectRef.automation(autoId),
+                new AutomationTriggeredEvent(runId.value(), trig.eventId(), List.of("t1"),
+                        Map.of("action:0", Set.of(target)), "hash", 0), corr, trigId);
+        publishDerived(EventTypes.AUTOMATION_ACTION_STARTED, SubjectRef.automation(autoId),
+                new AutomationActionStartedEvent(runId.value(), 0, "CommandAction", List.of(target)),
+                corr, trigId);
+        publishDerivedAt(EventTypes.AUTOMATION_ACTION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationActionCompletedEvent(runId.value(), 0, "skipped", "target unavailable"),
+                corr, trigId, completedTime);
+        publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 0, null, null),
+                corr, trigId);
+        return runId;
+    }
+
     private static AutomationDefinition definition(AutomationId autoId, String name, EntityId entity) {
         return new AutomationDefinition(autoId, "auto-slug", name, null, true,
                 ConcurrencyMode.SINGLE, 1, MaxExceededSeverity.INFO, 0,
@@ -651,7 +968,13 @@ final class StandardExplanationServiceTest {
 
     private EventEnvelope publishDerived(String eventType, SubjectRef subject, DomainEvent payload,
                                          Ulid correlationId, Ulid causationId) {
-        EventDraft draft = new EventDraft(eventType, 1, FIXED_INSTANT, subject,
+        return publishDerivedAt(eventType, subject, payload, correlationId, causationId, FIXED_INSTANT);
+    }
+
+    /** As {@link #publishDerived} with an explicit envelope {@code eventTime} ({@code null} allowed). */
+    private EventEnvelope publishDerivedAt(String eventType, SubjectRef subject, DomainEvent payload,
+                                           Ulid correlationId, Ulid causationId, Instant eventTime) {
+        EventDraft draft = new EventDraft(eventType, 1, eventTime, subject,
                 EventPriority.NORMAL, EventOrigin.AUTOMATION, payload, null, null);
         try {
             return store.publish(draft, CausalContext.chain(correlationId, causationId));

@@ -31,7 +31,9 @@ import com.homesynapse.platform.identity.AutomationId;
  * the (nullable) {@link #lastEvaluation} / {@link #lastRelevantRunId} to the frozen JSON; the
  * internal types never appear on the wire as objects (LTD-04: ULIDs are Crockford Base32 strings
  * at the boundary). Since v1.1.3 it also renders {@link #triggerRef} as the same
- * {@code {type, id}} map the causal chain serves for {@code trigger.subjectRef}.</p>
+ * {@code {type, id}} map the causal chain serves for {@code trigger.subjectRef}; since v1.1.4
+ * (EXPLAIN-114a) it renders {@link #disabledAt} as ISO-8601 and {@link #disabledReason} /
+ * {@link #definitionKey} as strings, each JSON null when absent.</p>
  *
  * @param automationId      the diagnosed automation; never {@code null}
  * @param automationName    the display name from the definition; never {@code null}
@@ -59,6 +61,24 @@ import com.homesynapse.platform.identity.AutomationId;
  *                          fabricated id (D5). Multi-trigger automations expose each trigger's
  *                          ref in {@code AutomationSummary.components[].ref}. Nullable by
  *                          contract (the additive-nullable idiom); NOT null-checked
+ * @param disabledAt        the v1.1.4 (EXPLAIN-114a) instant of the LATEST
+ *                          {@code automation_disabled} event the log holds for this automation
+ *                          (its envelope {@code eventTime}, else {@code ingestTime}) — read only
+ *                          on the {@code DISABLED} verdict; {@code null} when no such event
+ *                          exists (a configuration-disabled automation) and on every other
+ *                          verdict. Nullable by contract; NOT null-checked
+ * @param disabledReason    the v1.1.4 reason the automation is off: that event's recorded
+ *                          {@code reason} ({@code "repeated_failure"} from the failure governor)
+ *                          when {@link #disabledAt} is set; the literal {@code "configuration"}
+ *                          (DP-6) when the definition is disabled and the log holds no
+ *                          {@code automation_disabled}; {@code null} on every other verdict.
+ *                          Nullable by contract; NOT null-checked
+ * @param definitionKey     the v1.1.4 stable definition key: {@code DefinitionHashes} over the
+ *                          registry's current definition (DP-5) — the SAME SHA-256 hex the
+ *                          engine stamps on {@code automation_triggered.definitionHash}, so it
+ *                          equals the causal chain's {@code definitionKey} for a run of the
+ *                          same definition. Set on every construction the registry can answer;
+ *                          nullable by contract; NOT null-checked
  */
 public record NonFiringExplanation(
         AutomationId automationId,
@@ -70,13 +90,17 @@ public record NonFiringExplanation(
         String triggerSummary,
         LastEvaluationView lastEvaluation,
         Boolean noCommandsIssued,
-        RunExplanation.SubjectRefView triggerRef) {
+        RunExplanation.SubjectRefView triggerRef,
+        Instant disabledAt,
+        String disabledReason,
+        String definitionKey) {
 
     /**
      * Validates the non-nullable components. {@code lastRelevantRunId} and {@code lastEvaluation}
-     * are intentionally nullable (the "never triggered, no run" case); {@code noCommandsIssued}
-     * and {@code triggerRef} are nullable by contract (absent means "not the skip case" / "no
-     * single-entity ref") and are NOT null-checked.
+     * are intentionally nullable (the "never triggered, no run" case); {@code noCommandsIssued},
+     * {@code triggerRef}, {@code disabledAt}, {@code disabledReason} and {@code definitionKey}
+     * are nullable by contract (absent means "not the skip case" / "no single-entity ref" / "no
+     * disable fact on the log" / "no key") and are NOT null-checked.
      *
      * @throws NullPointerException if any non-nullable component is {@code null}
      */
@@ -86,6 +110,22 @@ public record NonFiringExplanation(
         Objects.requireNonNull(verdict, "verdict must not be null");
         Objects.requireNonNull(explanation, "explanation must not be null");
         Objects.requireNonNull(triggerSummary, "triggerSummary must not be null");
+    }
+
+    /**
+     * Convenience constructor for the pre-v1.1.4 ten-component form (test-convenience;
+     * production constructs the canonical form): delegates to the canonical constructor with
+     * {@code disabledAt = null}, {@code disabledReason = null} and {@code definitionKey = null}
+     * (validation lives ONLY in the canonical constructor). The eight- and nine-component
+     * conveniences below resolve through this one.
+     */
+    public NonFiringExplanation(AutomationId automationId, String automationName, boolean enabled,
+                                NonFiringVerdict verdict, RunId lastRelevantRunId,
+                                String explanation, String triggerSummary,
+                                LastEvaluationView lastEvaluation, Boolean noCommandsIssued,
+                                RunExplanation.SubjectRefView triggerRef) {
+        this(automationId, automationName, enabled, verdict, lastRelevantRunId, explanation,
+                triggerSummary, lastEvaluation, noCommandsIssued, triggerRef, null, null, null);
     }
 
     /**
@@ -127,11 +167,13 @@ public record NonFiringExplanation(
     }
 
     /**
-     * The frozen v1.1 non-firing verdict vocabulary (§B3) — exactly four values. This is the V1
-     * dashboard verdict, NOT a subset of the Doc-16 §4 {@code SuppressionReason}: the values
+     * The frozen v1.1 non-firing verdict vocabulary (§B3) — the four V1 values plus, since
+     * v1.1.4 (EXPLAIN-114a, appended LAST), {@link #FIRED_CONFIRMED}. This is the dashboard
+     * verdict, NOT a subset of the Doc-16 §4 {@code SuppressionReason}: the values
      * {@code NEVER_TRIGGERED}/{@code ACTED_BUT_UNCONFIRMED}/{@code DISABLED} are dashboard
      * vocabulary, not suppression reasons. The deeper {@code SuppressionReason}-keyed diagnosis is
      * a post-V1 enrichment (DP-B1) and would be an additive sibling, never a breaking rename here.
+     * The enum only ever grows at the end (the four-constraint law).
      */
     public enum NonFiringVerdict {
 
@@ -139,10 +181,11 @@ public record NonFiringExplanation(
         CONDITION_NOT_MET,
 
         /**
-         * No relevant terminal run in the window. Either the automation has genuinely not run
-         * (then {@code lastRelevantRunId} is {@code null}) or, per DP-B2, the most-recent in-window
-         * run was a clean confirmed success (then {@code lastRelevantRunId} is non-null and the
-         * explanation distinguishes "ran fine" from "never ran").
+         * No relevant terminal run in the window: the automation has genuinely not run, and
+         * {@code lastRelevantRunId} is {@code null}. Until v1.1.3 this value also stood in for
+         * the clean-confirmed-success case (DP-B2, with a non-null run id); since v1.1.4 that
+         * case is {@link #FIRED_CONFIRMED}, so a {@code NEVER_TRIGGERED} always carries a
+         * {@code null} run id.
          */
         NEVER_TRIGGERED,
 
@@ -150,6 +193,13 @@ public record NonFiringExplanation(
         ACTED_BUT_UNCONFIRMED,
 
         /** The automation is currently disabled — its non-firing reason is that it is off. */
-        DISABLED
+        DISABLED,
+
+        /**
+         * The DP-B2 clean-success case (v1.1.4, EXPLAIN-114a): the most recent in-window run
+         * completed and every device action confirmed; {@code lastRelevantRunId} is that run.
+         * Not a non-firing at all — the automation did what it was asked and the log proves it.
+         */
+        FIRED_CONFIRMED
     }
 }

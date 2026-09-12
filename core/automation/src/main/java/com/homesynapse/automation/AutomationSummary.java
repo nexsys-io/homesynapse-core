@@ -29,17 +29,24 @@ import com.homesynapse.platform.identity.AutomationId;
  * @param enabled      whether the automation is currently enabled
  * @param components   the per-trigger/condition/action presentation summaries; never {@code null}
  * @param lastRunId    the most-recent terminal Run for this automation, or {@code null} if it has never run
+ * @param definitionKey the v1.1.4 (EXPLAIN-114a) stable definition key: {@code DefinitionHashes}
+ *                     over the registry's current definition (DP-5) — the SAME SHA-256 hex the
+ *                     engine stamps on {@code automation_triggered.definitionHash}, so it equals
+ *                     the causal chain's and the non-firing read's {@code definitionKey} for the
+ *                     same definition; no store read. Nullable by contract; NOT null-checked
  */
 public record AutomationSummary(
         AutomationId automationId,
         String name,
         boolean enabled,
         List<ComponentView> components,
-        RunId lastRunId) {
+        RunId lastRunId,
+        String definitionKey) {
 
     /**
      * Validates non-nullable components and makes {@link #components} unmodifiable.
-     * {@code lastRunId} is intentionally nullable (an automation that has never run).
+     * {@code lastRunId} is intentionally nullable (an automation that has never run);
+     * {@code definitionKey} is nullable by contract and NOT null-checked.
      *
      * @throws NullPointerException if {@code automationId}, {@code name}, or {@code components} is {@code null}
      */
@@ -48,6 +55,16 @@ public record AutomationSummary(
         Objects.requireNonNull(name, "name must not be null");
         Objects.requireNonNull(components, "components must not be null");
         components = List.copyOf(components);
+    }
+
+    /**
+     * Convenience constructor for the pre-v1.1.4 five-component form (test-convenience;
+     * production constructs the canonical form): delegates with {@code definitionKey = null}
+     * (validation lives ONLY in the canonical constructor).
+     */
+    public AutomationSummary(AutomationId automationId, String name, boolean enabled,
+                             List<ComponentView> components, RunId lastRunId) {
+        this(automationId, name, enabled, components, lastRunId, null);
     }
 
     /**

@@ -43,6 +43,13 @@ import com.homesynapse.platform.identity.AutomationId;
  *                       {@code null} (may be empty)
  * @param outcome        the terminal Run outcome, never {@code null}
  * @param cascade        the cascade position view, never {@code null}
+ * @param definitionKey  the v1.1.4 (EXPLAIN-114a) stable definition key: the
+ *                       {@code definitionHash} the engine stamped on this run's
+ *                       {@code automation_triggered} (SHA-256 hex over the definition, Doc 07
+ *                       §3.7) — the same function the non-firing read and the automation list
+ *                       serve over the registry definition, so a consumer can tell "the same
+ *                       definition" across reloads and across reads; {@code null} only when the
+ *                       log carries none. Nullable by contract; NOT null-checked
  */
 public record RunExplanation(
         RunId runId,
@@ -52,10 +59,13 @@ public record RunExplanation(
         List<ConditionView> conditions,
         List<ActionView> actions,
         OutcomeView outcome,
-        CascadeView cascade) {
+        CascadeView cascade,
+        String definitionKey) {
 
     /**
      * Validates the structural components and defensively copies the lists.
+     * {@code definitionKey} is nullable by contract (the additive-nullable idiom) and is NOT
+     * null-checked.
      *
      * @throws NullPointerException if any non-nullable component is {@code null}
      */
@@ -72,12 +82,28 @@ public record RunExplanation(
     }
 
     /**
+     * Convenience constructor for the pre-v1.1.4 eight-component form (test-convenience;
+     * production constructs the canonical form): delegates to the canonical constructor with
+     * {@code definitionKey = null} (validation lives ONLY in the canonical constructor).
+     */
+    public RunExplanation(RunId runId, AutomationId automationId, String automationName,
+                          TriggerView trigger, List<ConditionView> conditions,
+                          List<ActionView> actions, OutcomeView outcome, CascadeView cascade) {
+        this(runId, automationId, automationName, trigger, conditions, actions, outcome, cascade,
+                null);
+    }
+
+    /**
      * The firing trigger. {@code type} is best-effort, resolved from the automation
      * definition's matched trigger (or {@code null} if the definition is gone);
      * {@code subjectRef} is the triggering event's subject; {@code matchedAt} is the trigger
-     * time from the {@code automation_triggered} envelope; {@code firingValue} is reserved
-     * for the value that crossed the trigger threshold (not captured in V1, may be
-     * {@code null}).
+     * time from the {@code automation_triggered} envelope; {@code firingValue} is, since v1.1.4
+     * (EXPLAIN-114a), the value the triggering event carried — read from that event's payload
+     * when it is in the run's correlation: a {@code state_changed}'s {@code newValue} in the
+     * module's one string dialect ({@code AttributeValues.asString}, the same rendering the
+     * chain's {@code observedState[].value} already uses), or a {@code state_reported}'s
+     * {@code value} as recorded. Any other payload, or a triggering event the correlation read
+     * cannot see, yields {@code null} — a fact the log does not carry is never guessed.
      *
      * @param type        the trigger type label, or {@code null}
      * @param subjectRef  the subject the trigger is about, or {@code null} if not recoverable
@@ -168,14 +194,30 @@ public record RunExplanation(
      *                      superseded {@code DISPATCHED} is settled — the ledger dropped it,
      *                      nothing further will arrive. Derived, never stored (INV-SA-03).
      *                      Additive v1.1.2 field (Q1b)
+     * @param settledAt     the instant of the event that classified {@code outcome} — the
+     *                      {@code state_confirmed} (CONFIRMED), the last classifying
+     *                      {@code command_result} (FAILED, or UNCONFIRMED by result), the
+     *                      {@code command_confirmation_timed_out} (UNCONFIRMED by timeout), or
+     *                      the {@code automation_action_completed} of a command action that
+     *                      issued no command (SKIPPED / FAILED); the envelope's {@code eventTime}
+     *                      when present, else its {@code ingestTime}. {@code null} for
+     *                      {@code DISPATCHED} (no classifying event — the command's own instant
+     *                      is never used). Additive v1.1.4 field (EXPLAIN-114a); nullable
+     * @param confirmedAt   the {@code state_confirmed} envelope's instant when one joined the
+     *                      command (then {@code outcome == CONFIRMED} and
+     *                      {@code confirmedAt == settledAt}); {@code null} otherwise. Additive
+     *                      v1.1.4 field (EXPLAIN-114a); nullable
      */
     public record ActionView(String type, SubjectRefView targetRef, String command,
                              String paramsJson, ActionOutcome outcome, String reason,
-                             String resultOutcome, boolean settled) {
+                             String resultOutcome, boolean settled, Instant settledAt,
+                             Instant confirmedAt) {
 
         /**
          * Validates the structural components. {@code resultOutcome} is intentionally nullable
-         * (absent means no {@code command_result} in the chain).
+         * (absent means no {@code command_result} in the chain); {@code settledAt} and
+         * {@code confirmedAt} are nullable by contract (no classifying / confirming event) and
+         * are NOT null-checked.
          *
          * @throws NullPointerException if {@code type}, {@code paramsJson}, or {@code outcome}
          *                              is {@code null}

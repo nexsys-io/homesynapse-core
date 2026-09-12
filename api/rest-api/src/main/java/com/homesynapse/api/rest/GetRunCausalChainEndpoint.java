@@ -44,6 +44,14 @@ import java.util.function.LongSupplier;
  * <p>v1.1.2 amendment (additive-only, Nick ruling 1): each action map additionally carries
  * {@code resultOutcome} (the raw {@code command_result.outcome} string, or null) and
  * {@code settled} (the derived Q1b settledness flag).</p>
+ *
+ * <p>v1.1.4 amendment (additive-only, EXPLAIN-114a): each action map additionally carries
+ * {@code settledAt} and {@code confirmedAt} (the classifying / confirming envelope's instant,
+ * rendered {@code Instant.toString()} — ISO-8601 UTC, the same rendering as {@code matchedAt}
+ * — or JSON null), appended after {@code settled}; the {@code data} object additionally carries
+ * {@code definitionKey} (the run's stamped definition hash, or JSON null), appended after
+ * {@code cascade}. {@code trigger.firingValue} keeps its key and position; since v1.1.4 the
+ * projection populates it when the log carries the value.</p>
  */
 final class GetRunCausalChainEndpoint implements Handler {
 
@@ -104,7 +112,7 @@ final class GetRunCausalChainEndpoint implements Handler {
     }
 
     private static Map<String, Object> toWire(RunExplanation e) {
-        Map<String, Object> data = new LinkedHashMap<>(8);
+        Map<String, Object> data = new LinkedHashMap<>(9);
         data.put("runId", e.runId().toString());
         data.put("automationId", e.automationId().toString());
         data.put("automationName", e.automationName());
@@ -113,6 +121,8 @@ final class GetRunCausalChainEndpoint implements Handler {
         data.put("actions", actionsList(e.actions()));
         data.put("outcome", outcomeMap(e.outcome()));
         data.put("cascade", cascadeMap(e.cascade()));
+        // v1.1.4 (EXPLAIN-114a): appended LAST — the LinkedHashMap order is the wire order.
+        data.put("definitionKey", e.definitionKey());
         return data;
     }
 
@@ -152,7 +162,7 @@ final class GetRunCausalChainEndpoint implements Handler {
     private static List<Map<String, Object>> actionsList(List<RunExplanation.ActionView> actions) {
         List<Map<String, Object>> list = new ArrayList<>(actions.size());
         for (RunExplanation.ActionView a : actions) {
-            Map<String, Object> map = new LinkedHashMap<>(8);
+            Map<String, Object> map = new LinkedHashMap<>(10);
             map.put("type", a.type());
             map.put("targetRef", EndpointResponses.subjectRefMap(a.targetRef()));
             map.put("command", a.command());
@@ -161,6 +171,9 @@ final class GetRunCausalChainEndpoint implements Handler {
             map.put("reason", a.reason());
             map.put("resultOutcome", a.resultOutcome());
             map.put("settled", a.settled());
+            // v1.1.4 (EXPLAIN-114a): appended LAST, in this order; Instant.toString() or null.
+            map.put("settledAt", a.settledAt() == null ? null : a.settledAt().toString());
+            map.put("confirmedAt", a.confirmedAt() == null ? null : a.confirmedAt().toString());
             list.add(map);
         }
         return list;
