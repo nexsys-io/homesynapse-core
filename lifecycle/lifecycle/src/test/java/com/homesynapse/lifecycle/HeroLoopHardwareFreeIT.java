@@ -38,7 +38,9 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.function.BooleanSupplier;
+import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 
 /**
@@ -113,7 +115,8 @@ final class HeroLoopHardwareFreeIT {
         // dispatch → router → the REAL zigbee handler → the scripted NCP receives
         // the byte-asserted OnOff frame.
         awaitTrue(() -> sentFrame(0x0006, 0x01).isPresent(),
-                "the On frame reaching the scripted NCP");
+                "the On frame reaching the scripted NCP",
+                () -> newestReportedPosition("occupied", "true"));
         ZigbeeHardwareFreeRig.SentZcl onFrame = sentFrame(0x0006, 0x01).orElseThrow();
         assertThat(onFrame.networkAddress()).isEqualTo(ZigbeeHardwareFreeRig.HUE_NWK);
         assertThat(onFrame.destinationEndpoint())
@@ -604,14 +607,73 @@ final class HeroLoopHardwareFreeIT {
         throw new AssertionError("timed out awaiting " + what);
     }
 
-    private static void awaitTrue(BooleanSupplier condition, String what) {
+    /** What a {@code LongSupplier} returns when the await cannot name its position. */
+    private static final long NO_AWAITED_POSITION = -1L;
+
+    /**
+     * FIX-2a (A): the polling shape is unchanged (500 × 20 ms); on timeout the
+     * failure carries the bus reading — {@link BusAwaitDiagnostic} — printed to
+     * stdout (the XML {@code <system-out>}) and thrown as the message (the XML
+     * {@code <failure message>}). This arm names no awaited position.
+     */
+    private void awaitTrue(BooleanSupplier condition, String what) {
+        awaitTrue(condition, what, () -> NO_AWAITED_POSITION);
+    }
+
+    /**
+     * The sibling for an await that can name the store position it is gated on.
+     * The supplier is read only on timeout (the newest such position at that
+     * moment); a negative value reads as {@code none}.
+     */
+    private void awaitTrue(BooleanSupplier condition, String what,
+            LongSupplier awaitedPosition) {
         for (int poll = 0; poll < 500; poll++) {
             if (condition.getAsBoolean()) {
                 return;
             }
             sleepBriefly();
         }
-        throw new AssertionError("timed out awaiting " + what);
+        long position = awaitedPosition.getAsLong();
+        throw timeoutDiagnostic(what,
+                position < 0 ? OptionalLong.empty() : OptionalLong.of(position));
+    }
+
+    /**
+     * Gathers the reading — the store head from {@link #events()}, every
+     * subscriber from {@code subscribers()} — prints it and returns the error to
+     * throw. An instrument never becomes the failure channel: when the gathering
+     * itself throws, the bare timeout message carries that cause instead.
+     */
+    private AssertionError timeoutDiagnostic(String what, OptionalLong awaited) {
+        String text;
+        try {
+            long storeHead = events().stream()
+                    .mapToLong(EventEnvelope::globalPosition).max().orElse(0L);
+            text = BusAwaitDiagnostic.render(what, storeHead, awaited,
+                    core.eventBus().subscribers());
+        } catch (RuntimeException gatherFailure) {
+            text = "timed out awaiting " + what
+                    + " (bus.await_timeout unavailable: " + gatherFailure + ")";
+        }
+        System.out.println(text);
+        return new AssertionError(text);
+    }
+
+    /**
+     * The newest {@code state_reported} position carrying {@code attributeKey=value}
+     * (the position an On-frame await is gated on), or the sentinel when none.
+     */
+    private long newestReportedPosition(String attributeKey, String value) {
+        return events().stream()
+                .filter(event -> event.eventType().equals(EventTypes.STATE_REPORTED))
+                .filter(event -> {
+                    StateReportedEvent reported = (StateReportedEvent) event.payload();
+                    return attributeKey.equals(reported.attributeKey())
+                            && value.equals(reported.value());
+                })
+                .mapToLong(EventEnvelope::globalPosition)
+                .max()
+                .orElse(NO_AWAITED_POSITION);
     }
 
     private static void sleepBriefly() {
