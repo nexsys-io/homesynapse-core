@@ -32,23 +32,34 @@ import java.util.function.IntSupplier;
  * {@link SubscriberMode#COLD COLD} → {@link SubscriberMode#REPLAY REPLAY}
  * → {@link SubscriberMode#TRANSITION TRANSITION} → {@link SubscriberMode#LIVE LIVE}
  * algorithm: {@link ReplayDriver} pages through the event log from the persisted
- * checkpoint, {@link TransitionCoordinator} drains the
- * {@link ReplayWindowQueue} with gap detection, and the LIVE pull loop
- * processes notifications dispatched by {@link #notifyEvent(long)}.</p>
+ * checkpoint, {@link TransitionCoordinator} reads forward from the cursor to
+ * the head and flips the mode, and the LIVE loop keeps reading forward, woken
+ * by {@link #notifyEvent(long)}'s hint or the idle tick.</p>
  *
- * <p><strong>Delivery drops are never silent (FAILCHAN-FIX-1a).</strong> The
- * LIVE loop and the TRANSITION drain process only OFFERED positions and never
- * page forward from the checkpoint, so a single-position read that returns an
- * empty page or throws loses that position to the subscriber. Each such point
- * — and {@code notifyEvent}'s own unfilterable empty page — emits one
- * {@link DeliveryAnomaly} through the constructor-injected
- * {@code Consumer<DeliveryAnomaly>} BEFORE the path returns or continues; the
- * composition root routes it to the log as {@code bus.delivery_anomaly}. The
- * bus module itself stays SLF4J-free and adds no eighth metric (AMD-43
- * §3.6.2). <strong>FIX-1b (DP-2):</strong> a drop is never a skip — a read
- * that misses is retried with a bounded backoff ({@link #LIVE_READ_ATTEMPTS}),
- * an invisible notification is still offered unfiltered, and exhaustion ends
- * in an honest SUSPEND, never a checkpoint past an undelivered position.</p>
+ * <p><strong>The delivery invariant (BUS-ORDER-1, AMD-101 §2).</strong> Every
+ * position whose event matches a LIVE subscriber's filter is delivered to that
+ * subscriber exactly once, in position order, regardless of the order in which
+ * notifications arrive. The read-forward cursor ({@link SubscriberRuntime#cursor()}
+ * — the highest position delivered or filtered past in this activation) is the
+ * source of truth for delivery: the LIVE loop and the TRANSITION drain page the
+ * store forward from it ({@code readFrom(cursor, liveReadBatch)}) and deliver
+ * each matching envelope in order through {@link #deliverStep}. The persisted
+ * checkpoint is the durable floor for restart — written after delivery,
+ * monotonic because it follows the cursor, and never read to decide whether to
+ * offer, wake or deliver. The notification is a wake hint plus a bounded idle
+ * tick ({@code liveIdleTick}): never skipped for a LIVE subscriber and never a
+ * reason to skip a position; a lost wake costs one tick, never a stalled run.</p>
+ *
+ * <p><strong>Delivery drops are never silent (FAILCHAN-FIX-1a).</strong>
+ * {@code notifyEvent}'s own unfilterable empty page ({@code NOTIFY_NOT_VISIBLE},
+ * then the unfiltered wake) and a LIVE page read that throws
+ * ({@code LIVE_READ_FAILED}, once per failed page; the next tick retries) emit
+ * one {@link DeliveryAnomaly} through the constructor-injected
+ * {@code Consumer<DeliveryAnomaly>}; the composition root routes it to the log
+ * as {@code bus.delivery_anomaly}. The bus module itself stays SLF4J-free and
+ * adds no eighth metric (AMD-43 §3.6.2). The FIX-1b per-position
+ * retry-and-suspend is retired by the read-forward — an empty page is "caught
+ * up", not a drop — and its kinds stay defined, never emitted (INV-GA-02).</p>
  *
  * <p><strong>Thread safety:</strong> The subscriber registry is guarded by a
  * {@link ReentrantReadWriteLock} per LTD-11 (no {@code synchronized}).
@@ -71,18 +82,6 @@ public final class InProcessEventBus implements EventBus {
      * has been resolved yet, so the anomaly belongs to all of them.
      */
     static final String ANOMALY_ALL_SUBSCRIBERS = "*";
-
-    /**
-     * DP-2 (FIX-1b): single-position read attempts on one offered position
-     * before the subscriber SUSPENDs honestly. Attempts are separated by a
-     * doubling {@code LockSupport.parkNanos} backoff starting at
-     * {@link #LIVE_READ_BACKOFF_FIRST_NANOS} (1 → 2 → 4 → 8 ms); a park is
-     * not a clock read (LTD-09 holds).
-     */
-    static final int LIVE_READ_ATTEMPTS = 5;
-
-    /** DP-2 (FIX-1b): the first inter-attempt park; doubled after every failed attempt. */
-    static final long LIVE_READ_BACKOFF_FIRST_NANOS = 1_000_000L;
 
     private final EventStore eventStore;
     private final CheckpointStore checkpointStore;
@@ -358,27 +357,17 @@ public final class InProcessEventBus implements EventBus {
                 }
             }
 
-            // Notify active subscribers — route based on mode.
+            // Notify active subscribers — route based on mode. BUS-ORDER-1
+            // (AMD-101 §2): no persisted-checkpoint guard on this path — the
+            // notification is a wake hint that carries no delivery decision, so
+            // it is never skipped (NOTIFY_SKIPPED_LIVE is unreachable and stays
+            // defined as the tripwire's name). The filter still decides whether
+            // to wake at all; the read-forward filters again on its own read.
             // The queue's lock is held across the mode read + routing decision
             // so the TRANSITION → LIVE CAS in TransitionCoordinator cannot
-            // interleave between our observation and our enqueue/offer.
+            // interleave between our observation and our enqueue/wake.
             for (SubscriberRuntime runtime : activeRegistry.values()) {
                 if (!runtime.info().filter().matches(envelope)) {
-                    continue;
-                }
-                long checkpoint = checkpointStore.readCheckpoint(
-                        runtime.info().subscriberId());
-                if (checkpoint >= globalPosition) {
-                    // FIX-2b-ii (i): a LIVE subscriber learns a position only from
-                    // the notify that would offer it, so for LIVE this skip is a
-                    // drop, never a no-op — name it (mode read under the read lock
-                    // already held; no queue lock). TRANSITION may legitimately
-                    // have drained the position before its notify arrived.
-                    if (runtime.mode() == SubscriberMode.LIVE) {
-                        emitAnomaly(DeliveryAnomaly.Kind.NOTIFY_SKIPPED_LIVE,
-                                runtime.info().subscriberId(), globalPosition,
-                                "notifyEvent: checkpoint=" + checkpoint + " at or past position");
-                    }
                     continue;
                 }
                 routeByMode(runtime, globalPosition);
@@ -482,6 +471,23 @@ public final class InProcessEventBus implements EventBus {
         return List.copyOf(snapshots);
     }
 
+    /**
+     * BUS-ORDER-1: the subscriber's read-forward cursor — the highest global
+     * position delivered or filtered past in this activation (AMD-101 §2), the
+     * in-memory truth the persisted checkpoint follows. Concrete-only, like
+     * {@link #abandon()}: the {@code EventBus} interface is unchanged. The
+     * lifecycle census scores {@code DELIVERED(S,P) := P <= lastDelivered(S)}.
+     *
+     * @param subscriberId the active subscriber's id
+     * @return the cursor, or {@code -1} when no active subscriber has that id
+     * @throws NullPointerException if {@code subscriberId} is {@code null}
+     */
+    public long lastDelivered(String subscriberId) {
+        Objects.requireNonNull(subscriberId, "subscriberId must not be null");
+        SubscriberRuntime runtime = activeRegistry.get(subscriberId);
+        return runtime == null ? -1L : runtime.cursor();
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────
 
     /**
@@ -493,11 +499,12 @@ public final class InProcessEventBus implements EventBus {
      *       checkpoint to the live tail; CASes mode REPLAY → TRANSITION on tail
      *       reach.</li>
      *   <li>{@link TransitionCoordinator#drainAndPromote()} — drains the
-     *       {@link ReplayWindowQueue} with gap detection; CASes mode TRANSITION
-     *       → LIVE; fires {@code onCaughtUp()} exactly once.</li>
-     *   <li>{@link #liveLoop} — steady-state LIVE delivery driven by
-     *       {@code notifyEvent} via the pending-positions queue and
-     *       {@code LockSupport.unpark()}.</li>
+     *       {@link ReplayWindowQueue}'s hints and reads forward from the cursor
+     *       to the head; CASes mode TRANSITION → LIVE; fires {@code onCaughtUp()}
+     *       exactly once.</li>
+     *   <li>{@link #liveLoop} — steady-state LIVE delivery: the read-forward
+     *       from the cursor, woken by {@code notifyEvent}'s hint or the idle
+     *       tick (BUS-ORDER-1).</li>
      * </ol>
      *
      * <p>Any phase returning {@code false} (circuit-breaker trip, interrupt,
@@ -514,7 +521,7 @@ public final class InProcessEventBus implements EventBus {
         }
 
         TransitionCoordinator coordinator = new TransitionCoordinator(
-                runtime, eventStore, checkpointStore, clock, anomalyEmitter);
+                runtime, eventStore, checkpointStore, clock, config.liveReadBatch());
         if (!coordinator.drainAndPromote()) {
             return;
         }
@@ -523,72 +530,147 @@ public final class InProcessEventBus implements EventBus {
     }
 
     /**
-     * Steady-state LIVE delivery loop. Polls the subscriber's pending-positions
-     * queue (populated by {@link #notifyEvent(long)}), loads each event through
-     * the dedicated {@link SubscriberReadExecutor}, and delivers via the
-     * supervisor. Writes a per-event checkpoint after each successful delivery.
+     * Steady-state LIVE delivery (BUS-ORDER-1, AMD-101 §2): the read-forward.
+     * On a wake ({@link SubscriberRuntime#wake}) or the idle tick the loop
+     * drains its hints, pages the store forward from the subscriber's cursor
+     * ({@code readFrom(cursor, liveReadBatch)} through the dedicated
+     * {@link SubscriberReadExecutor}) and hands every envelope, in position
+     * order, to {@link #deliverStep}; it keeps paging while pages come back
+     * full and parks for {@code liveIdleTick} on an empty or short page — but
+     * only when no wake hint has arrived since the drain: the hint queue is the
+     * durable wake signal, the unpark permit only the accelerator (a permit that
+     * lands while the thread is parked inside its own read is spent there). The
+     * notification carries no delivery decision; a lost wake costs one tick.
      *
-     * <p>The loop exits cleanly on thread interrupt or {@code SUSPENDED} mode.</p>
+     * <p>A page read that throws emits one {@code LIVE_READ_FAILED} at
+     * {@code cursor + 1} (the first position the page would have shown) and the
+     * next tick retries — the FIX-1b per-position retry-and-suspend is retired
+     * ({@code LIVE_READ_EMPTY} / {@code LIVE_READ_EXHAUSTED} stay defined, never
+     * emitted). The loop exits on thread interrupt, on {@code SUSPENDED} mode,
+     * or when a delivery SUSPENDs the subscriber.</p>
      *
      * @param runtime the subscriber's runtime bundle
      */
     private void liveLoop(SubscriberRuntime runtime) {
         String subscriberId = runtime.info().subscriberId();
-        SubscriptionFilter filter = runtime.info().filter();
+        int batch = config.liveReadBatch();
+        long idleTickNanos = config.liveIdleTick().toNanos();
 
         while (!Thread.currentThread().isInterrupted()) {
             if (runtime.mode() == SubscriberMode.SUSPENDED) {
                 return;
             }
+            runtime.drainHints();
 
-            Long position = runtime.pendingPositions().poll();
-            if (position == null) {
-                LockSupport.park();
+            List<EventEnvelope> page;
+            try {
+                long from = runtime.cursor();
+                page = runtime.readExecutor().executeRead(
+                        () -> eventStore.readFrom(from, batch)).events();
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                emitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_FAILED, subscriberId,
+                        runtime.cursor() + 1, e.getClass().getSimpleName() + ": " + e.getMessage());
+                LockSupport.parkNanos(idleTickNanos);
                 continue;
             }
 
-            // FIX-1b (DP-2): a drop is never a skip. The loop never pages forward
-            // from the checkpoint, so an offered position the store cannot show
-            // would be lost to this subscriber; the read is therefore retried with
-            // a bounded backoff and, on exhaustion, the subscriber SUSPENDs
-            // honestly — never a silent continue past an undelivered position.
-            EventEnvelope envelope = readLivePosition(runtime, subscriberId, position);
-            if (envelope == null) {
-                return; // SUSPENDED after exhaustion, or interrupted — both set by readLivePosition
+            for (int i = 0; i < page.size(); i++) {
+                EventEnvelope envelope = page.get(i);
+                StepOutcome outcome = deliverStep(runtime, envelope, checkpointStore);
+                if (outcome == StepOutcome.STOP) {
+                    return;
+                }
+                if (outcome == StepOutcome.DELIVERED) {
+                    // M3.3 (AMD-43 §3.6.2): record subscriber lag after delivery.
+                    // lagEvents — what is still ahead of this delivery that the loop
+                    // can count without a store query: the rest of this page plus
+                    // the un-consumed wake hints (one per publish since the drain).
+                    // lagMillis — wall-clock between event ingestion and observation.
+                    long lagEvents = (page.size() - 1 - i) + runtime.pendingPositions().size();
+                    Duration lagMillis = Duration.between(envelope.ingestTime(),
+                            clock.instant());
+                    if (lagMillis.isNegative()) {
+                        lagMillis = Duration.ZERO;
+                    }
+                    metrics.recordSubscriberLag(subscriberId, lagEvents, lagMillis);
+                }
             }
 
-            if (!filter.matches(envelope)) {
-                continue;
-            }
-
-            SubscriberSupervisor.DeliveryResult result =
-                    runtime.supervisor().deliver(
-                            runtime.subscriber(), envelope, runtime);
-            if (result == SubscriberSupervisor.DeliveryResult.SUCCESS) {
-                // AMD-45 §2.2 (Option A): skip the per-delivery subscriber
-                // checkpoint write for subscribers that couple their subscriber
-                // and view checkpoints atomically (e.g. the State Projection).
-                // For those, the subscriber checkpoint is written by the
-                // projection on its policy cadence via AtomicCheckpointSink, so
-                // a bus-side per-delivery write here would race ahead of the
-                // view checkpoint and reopen the crash window AMD-45 §1 closes.
-                if (!runtime.info().atomicCheckpoint()) {
-                    checkpointStore.writeCheckpoint(subscriberId, envelope.globalPosition());
-                }
-                // M3.3 (AMD-43 §3.6.2): record subscriber lag after delivery.
-                // lagEvents — the count of further enqueued positions ahead of
-                // this delivery in the subscriber's pending queue (approximates
-                // the distance to the writer tail without an extra store query).
-                // lagMillis — wall-clock between event ingestion and observation.
-                long lagEvents = runtime.pendingPositions().size();
-                Duration lagMillis = Duration.between(envelope.ingestTime(),
-                        clock.instant());
-                if (lagMillis.isNegative()) {
-                    lagMillis = Duration.ZERO;
-                }
-                metrics.recordSubscriberLag(subscriberId, lagEvents, lagMillis);
+            if (page.size() < batch && runtime.pendingPositions().isEmpty()) {
+                // Caught up as of this read AND no wake hint has arrived since the
+                // drain: park until a hint or the idle tick. The hint queue, not the
+                // unpark permit, is the durable wake signal — a permit that lands
+                // while this thread is parked elsewhere (the read executor's
+                // Future.get, a re-entrant publish's write wait) is spent there
+                // (JDK 21; measured 2026-09-12), so a wake during a read must be
+                // found here, in the queue, or it waits a full tick. A permit that
+                // lands between this check and the park is kept (the thread is
+                // running), so the park returns at once.
+                LockSupport.parkNanos(idleTickNanos);
             }
         }
+    }
+
+    /**
+     * BUS-ORDER-1: the per-envelope step shared by the LIVE loop and the
+     * TRANSITION drain ({@link TransitionCoordinator}). A non-matching envelope
+     * only advances the cursor. A matching one goes through the supervisor:
+     * SUCCESS advances the cursor and, for a non-atomic subscriber, writes the
+     * persisted checkpoint at the delivered position (AMD-45 §2.2 keeps the
+     * atomic projection's own sink as its sole writer); PARKED advances the
+     * cursor and continues (the DLQ row holds the position — today's semantic);
+     * a circuit-breaker trip or an infrastructure failure stops the pass — the
+     * supervisor has already SUSPENDED the subscriber.
+     *
+     * <p>Because the cursor advances past filtered positions and the checkpoint
+     * is written only after a matching SUCCESS, the persisted floor can rest
+     * below the cursor by the trailing non-matching span; REPLAY re-reads and
+     * re-filters that span on restart. The checkpoint is written only when the
+     * cursor actually advanced, so it is monotonic by construction.</p>
+     *
+     * @param runtime         the subscriber's runtime bundle
+     * @param envelope        the next envelope beyond the cursor, in position order
+     * @param checkpointStore the durable checkpoint store
+     * @return the outcome that decides whether the pass continues
+     */
+    static StepOutcome deliverStep(SubscriberRuntime runtime, EventEnvelope envelope,
+                                   CheckpointStore checkpointStore) {
+        long position = envelope.globalPosition();
+        if (!runtime.info().filter().matches(envelope)) {
+            runtime.advanceCursor(position);
+            return StepOutcome.FILTERED;
+        }
+        SubscriberSupervisor.DeliveryResult result =
+                runtime.supervisor().deliver(runtime.subscriber(), envelope, runtime);
+        return switch (result) {
+            case SUCCESS -> {
+                boolean advanced = runtime.advanceCursor(position);
+                if (advanced && !runtime.info().atomicCheckpoint()) {
+                    checkpointStore.writeCheckpoint(runtime.info().subscriberId(), position);
+                }
+                yield StepOutcome.DELIVERED;
+            }
+            case PARKED -> {
+                runtime.advanceCursor(position);
+                yield StepOutcome.PARKED;
+            }
+            case CIRCUIT_BREAKER_TRIPPED, INFRASTRUCTURE_FAILURE -> StepOutcome.STOP;
+        };
+    }
+
+    /** The outcome of one {@link #deliverStep}. */
+    enum StepOutcome {
+        /** The envelope did not match the filter; the cursor moved past it. */
+        FILTERED,
+        /** Delivered (SUCCESS); the cursor moved and a non-atomic subscriber was checkpointed. */
+        DELIVERED,
+        /** The supervisor parked the envelope in the DLQ; the cursor moved past it. */
+        PARKED,
+        /** The supervisor SUSPENDED the subscriber; the pass must end. */
+        STOP
     }
 
     /**
@@ -614,12 +696,9 @@ public final class InProcessEventBus implements EventBus {
                 // from the persisted checkpoint.
                 queue.enqueue(globalPosition);
             } else {
-                // LIVE — standard pull path.
-                runtime.pendingPositions().offer(globalPosition);
-                Thread vt = runtime.virtualThread();
-                if (vt != null) {
-                    LockSupport.unpark(vt);
-                }
+                // LIVE — a wake hint (BUS-ORDER-1); the loop reads the store
+                // forward from its cursor and decides what is delivered.
+                runtime.wake(globalPosition);
             }
         } finally {
             queue.unlock();
@@ -629,12 +708,12 @@ public final class InProcessEventBus implements EventBus {
     /**
      * DP-2 (FIX-1b): offers a position whose envelope the publisher's read could
      * not see to every ACTIVE subscriber without filtering — the LIVE loop and
-     * the TRANSITION drain filter after their own read, so a matching event is
-     * delivered once the store shows it and a non-matching one costs one read.
-     * The checkpoint guard is kept (a position at or below the subscriber's
-     * checkpoint is not offered). Passive registrations cannot be filtered
-     * without the envelope and are NOT offered; each gets its own
-     * {@code NOTIFY_NOT_VISIBLE} anomaly instead — the documented limitation.
+     * the TRANSITION drain filter on their own read-forward, so a matching event
+     * is delivered once the store shows it and a non-matching one costs one page
+     * read. BUS-ORDER-1: no checkpoint guard on the active path (a wake hint is
+     * never conditional on the persisted checkpoint). Passive registrations
+     * cannot be filtered without the envelope and are NOT offered; each gets its
+     * own {@code NOTIFY_NOT_VISIBLE} anomaly instead — the documented limitation.
      *
      * @param globalPosition the position the publisher's read could not see
      */
@@ -648,64 +727,11 @@ public final class InProcessEventBus implements EventBus {
                 }
             }
             for (SubscriberRuntime runtime : activeRegistry.values()) {
-                long checkpoint = checkpointStore.readCheckpoint(runtime.info().subscriberId());
-                if (checkpoint >= globalPosition) {
-                    continue;
-                }
                 routeByMode(runtime, globalPosition);
             }
         } finally {
             rwLock.readLock().unlock();
         }
-    }
-
-    /**
-     * DP-2 (FIX-1b): reads one offered position through the subscriber's
-     * dedicated read executor with a bounded retry. Each empty page emits
-     * {@code LIVE_READ_EMPTY}, each read exception {@code LIVE_READ_FAILED};
-     * attempts are separated by a doubling park (1 → 2 → 4 → 8 ms). On
-     * exhaustion the loop emits {@code LIVE_READ_EXHAUSTED} and SUSPENDs the
-     * subscriber — the {@code drainAndPromote} precedent: honest failure beats
-     * silent loss. The checkpoint is never written for a position that was not
-     * delivered (AMD-45 §2.2 untouched — no write happens here at all).
-     *
-     * @param runtime      the subscriber's runtime bundle
-     * @param subscriberId the subscriber's id (for the anomaly)
-     * @param pos          the offered position
-     * @return the envelope, or {@code null} when the LIVE loop must exit
-     *         (SUSPENDED after exhaustion, or interrupted — the flag re-asserted)
-     */
-    private EventEnvelope readLivePosition(SubscriberRuntime runtime, String subscriberId,
-                                           long pos) {
-        long backoff = LIVE_READ_BACKOFF_FIRST_NANOS;
-        for (int attempt = 1; attempt <= LIVE_READ_ATTEMPTS; attempt++) {
-            try {
-                EventPage page = runtime.readExecutor().executeRead(
-                        () -> eventStore.readFrom(pos - 1, 1));
-                if (!page.events().isEmpty()) {
-                    return page.events().get(0);
-                }
-                emitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_EMPTY, subscriberId, pos,
-                        "liveLoop: no envelope at position");
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return null;
-            } catch (Exception e) {
-                emitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_FAILED, subscriberId, pos,
-                        e.getClass().getSimpleName() + ": " + e.getMessage());
-            }
-            if (attempt < LIVE_READ_ATTEMPTS) {
-                LockSupport.parkNanos(backoff);
-                backoff <<= 1;
-            }
-        }
-        emitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_EXHAUSTED, subscriberId, pos,
-                "liveLoop: position unreadable after " + LIVE_READ_ATTEMPTS
-                        + " attempts; subscriber SUSPENDED");
-        runtime.transitionTo(SubscriberMode.SUSPENDED);
-        // M3.7 fix round 4: inform the subscriber of its new mode.
-        runtime.subscriber().setMode(SubscriberMode.SUSPENDED);
-        return null;
     }
 
     /**

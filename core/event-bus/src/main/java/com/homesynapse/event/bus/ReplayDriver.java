@@ -28,9 +28,11 @@ import java.util.Objects;
  *   <li>Pages through the event log via {@link EventStore#readFrom(long, int)}
  *       in bounded windows of {@link #MAX_REPLAY_PAGE} rows (AMD-38).</li>
  *   <li>Delivers matching events through the per-subscriber
- *       {@link SubscriberSupervisor} and tracks
- *       {@link SubscriberRuntime#lastReplayedPosition()} as the
- *       gap-detection high-water mark.</li>
+ *       {@link SubscriberSupervisor}, tracks
+ *       {@link SubscriberRuntime#lastReplayedPosition()} as REPLAY's own
+ *       high-water mark, and advances the runtime's read-forward cursor
+ *       ({@link SubscriberRuntime#advanceCursor}) past every paged position
+ *       so the TRANSITION → LIVE flip hands the cursor (BUS-ORDER-1, AMD-101 §2).</li>
  *   <li>Writes a checkpoint when either {@link #CHECKPOINT_EVENT_THRESHOLD}
  *       events have been processed since the last checkpoint or
  *       {@link #CHECKPOINT_MAX_INTERVAL_SECONDS} seconds have elapsed
@@ -108,6 +110,8 @@ final class ReplayDriver {
         // (1) Initialize from persisted checkpoint.
         long currentPosition = checkpointStore.readCheckpoint(subscriberId);
         runtime.setLastReplayedPosition(currentPosition);
+        // BUS-ORDER-1 (AMD-101 §2): the read-forward cursor starts at the durable floor.
+        runtime.advanceCursor(currentPosition);
 
         // (2) Move out of COLD if we haven't already.
         if (runtime.compareAndTransition(SubscriberMode.COLD, SubscriberMode.REPLAY)) {
@@ -189,6 +193,10 @@ final class ReplayDriver {
                     eventsSinceCheckpoint++;
                 }
                 currentPosition = envelope.globalPosition();
+                // BUS-ORDER-1: the cursor tracks every paged-past position, so the
+                // TRANSITION → LIVE flip hands the cursor and the drain's read-forward
+                // starts where REPLAY stopped — exactly once across the flip.
+                runtime.advanceCursor(currentPosition);
             }
 
             // (7) Checkpoint cadence per AMD-38: 200 events OR 2 seconds.

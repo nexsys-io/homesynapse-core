@@ -25,6 +25,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.device.Entity;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
+import com.homesynapse.event.bus.InProcessEventBus;
 import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.event.bus.SubscriberSnapshot;
 import com.homesynapse.integration.zigbee.ZigbeeHardwareFreeRig;
@@ -186,8 +187,9 @@ final class BusSoakIT {
         } catch (AssertionError timedOut) {
             // The instrument working: the diagnostic is printed and IS the message.
             // The run's summary and the instantaneous census ride beside it.
+            InProcessEventBus bus = BusPositionCensusIT.concreteBus(core);
             List<SubscriberCensus> census = BusPositionCensusIT.census(events(),
-                    core.eventBus().subscribers());
+                    bus.subscribers(), bus::lastDelivered);
             printSummary(loops, ok, 1, latencyNanos, anomalyCount(), census);
             throw timedOut;
         }

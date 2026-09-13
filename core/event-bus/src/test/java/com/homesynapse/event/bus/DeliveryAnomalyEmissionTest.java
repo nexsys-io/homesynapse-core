@@ -46,28 +46,28 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * path returns or continues, and the emitter can never become a failure
  * channel of its own.
  *
- * <p>The four drop points at {@code dc3328b}: {@code notifyEvent}'s empty page
- * ({@code NOTIFY_NOT_VISIBLE}), {@code liveLoop}'s empty page
- * ({@code LIVE_READ_EMPTY}), {@code liveLoop}'s read exception
- * ({@code LIVE_READ_FAILED}) and {@code drainAndPromote}'s empty page
- * ({@code TRANSITION_READ_EMPTY}). The first three are driven here; the
- * TRANSITION arm shares the emitter contract and is reached only through a
- * REPLAY/TRANSITION race the unit harness cannot schedule deterministically.</p>
+ * <p><strong>BUS-ORDER-1 (2026-09-12, AMD-101 §2).</strong> The LIVE loop and
+ * the TRANSITION drain no longer read the positions they are handed one at a
+ * time: they page the store forward from the subscriber's in-memory cursor. A
+ * page that comes back empty means "caught up" — the next wake or the bounded
+ * idle tick reads again — so the FIX-1b per-position retry-and-suspend is
+ * retired on both paths and its kinds ({@code LIVE_READ_EMPTY},
+ * {@code LIVE_READ_EXHAUSTED}, {@code TRANSITION_READ_EMPTY},
+ * {@code TRANSITION_READ_EXHAUSTED}) stay defined but are never emitted. What
+ * remains on the LIVE path is {@code LIVE_READ_FAILED}: one anomaly per page
+ * read that THREW, at {@code cursor + 1} (the first position the page would
+ * have shown), and the next tick retries. {@code notifyEvent}'s own arms
+ * ({@code NOTIFY_NOT_VISIBLE}, the unfiltered offer) are unchanged.</p>
  *
  * <p><strong>The read stub.</strong> {@link ScriptedReadStore} wraps the real
- * {@link InMemoryEventStore} and scripts ONLY the subscriber-thread reads —
- * single-position reads ({@code maxCount == 1}) issued on a virtual thread,
- * i.e. the LIVE loop's {@code readExecutor().executeRead(...)} through the
- * synchronous {@link RecordingReadConnectionFactory}. {@code notifyEvent}'s own
- * read of the same position runs on the publisher's platform thread and passes
- * through, so the position IS offered to the subscriber and the LIVE loop's
- * read is the one that misses — the S4 shape of the grounding audit.</p>
- *
- * <p>The assertions are chosen to hold under FIX-1a (a drop is skipped) AND
- * under FIX-1b (a drop is retried, then an honest SUSPEND): the anomaly is
- * emitted with the subscriber id and the position, the checkpoint never
- * advances to the undelivered position, and the loop survives a throwing
- * emitter. FIX-1b's retry/suspend semantics get their own pins (T5–T7).</p>
+ * {@link InMemoryEventStore} and scripts the subscriber-thread PAGE reads —
+ * {@code readFrom(afterPosition, batch)} issued on a virtual thread through the
+ * synchronous {@link RecordingReadConnectionFactory}, i.e. the read-forward of
+ * the LIVE loop and the TRANSITION drain — by {@code afterPosition} (the cursor
+ * the read starts from). It also counts them, so a test can assert that the
+ * bus paged from the cursor at all. {@code notifyEvent}'s own single-position
+ * read runs on the publisher's platform thread and is scripted separately
+ * ({@link ScriptedReadStore#emptyOnceForPublisher}).</p>
  *
  * <p>Time is the injected fixed {@link Clock} (LTD-09 / NO_DIRECT_TIME_ACCESS);
  * waiting is fixed-interval {@link Thread#sleep(long)} polling, never a clock
@@ -112,42 +112,43 @@ final class DeliveryAnomalyEmissionTest {
     // ── T1 ──────────────────────────────────────────────────────────────────
 
     @Test
-    @DisplayName("T1 — a LIVE read that returns an empty page emits LIVE_READ_EMPTY(subscriber, P) "
-            + "and the checkpoint never advances to P")
-    void liveReadEmpty_emits() throws Exception {
+    @DisplayName("T1 — a LIVE page read that comes back empty (a visibility miss) emits nothing: "
+            + "the next tick re-reads from the cursor and delivers P; the checkpoint reaches P")
+    void liveVisibilityMiss_deliversOnNextTickWithoutAnomaly() throws Exception {
         subscribeAndAwaitLive(bus);
         long p1 = publishAndNotify(bus);
         awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p1,
                 "the baseline delivery checkpointing " + p1);
 
         long p = p1 + 1;
-        scriptedStore.emptyForever(p);
+        scriptedStore.emptyPageOnce(p1); // the read-forward from the cursor misses once
         assertThat(publishAndNotify(bus)).isEqualTo(p);
 
-        DeliveryAnomaly anomaly = awaitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_EMPTY, p);
-        assertThat(anomaly.subscriberId()).isEqualTo(SUBSCRIBER_ID);
-        assertThat(anomaly.timestamp()).isEqualTo(CLOCK.instant());
-        assertThat(anomaly.detail()).isNotBlank();
-
-        settle();
-        assertThat(checkpointStore.readCheckpoint(SUBSCRIBER_ID))
-                .as("the checkpoint never advances to an undelivered position")
-                .isEqualTo(p1);
-        assertThat(delivered).as("P was never delivered").doesNotContain(p);
+        awaitTrue(() -> delivered.contains(p), "P delivered by the re-read from the cursor");
+        awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p, "the checkpoint reaching " + p);
+        awaitTrue(() -> scriptedStore.pageReadsFrom(p1) >= 2,
+                "the LIVE loop paging from the cursor (the empty page, then the real one)");
+        assertThat(anomalies).extracting(DeliveryAnomaly::kind)
+                .as("an empty page is caught-up, not a drop")
+                .doesNotContain(DeliveryAnomaly.Kind.LIVE_READ_EMPTY,
+                        DeliveryAnomaly.Kind.LIVE_READ_EXHAUSTED);
+        assertThat(delivered.stream().filter(pos -> pos == p).count())
+                .as("delivered exactly once").isEqualTo(1L);
     }
 
     // ── T2 ──────────────────────────────────────────────────────────────────
 
     @Test
-    @DisplayName("T2 — a LIVE read that throws emits LIVE_READ_FAILED with 'RuntimeException: boom'")
-    void liveReadFailed_emits() throws Exception {
+    @DisplayName("T2 — a LIVE page read that throws emits LIVE_READ_FAILED once, at cursor+1, with "
+            + "'RuntimeException: boom'; the next tick retries and delivers P")
+    void liveReadFailed_emitsOncePerFailedPage() throws Exception {
         subscribeAndAwaitLive(bus);
         long p1 = publishAndNotify(bus);
         awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p1,
                 "the baseline delivery checkpointing " + p1);
 
         long p = p1 + 1;
-        scriptedStore.throwForever(p, "boom");
+        scriptedStore.throwPageOnce(p1, "boom"); // the read-forward from the cursor throws once
         assertThat(publishAndNotify(bus)).isEqualTo(p);
 
         DeliveryAnomaly anomaly = awaitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_FAILED, p);
@@ -155,11 +156,13 @@ final class DeliveryAnomalyEmissionTest {
         assertThat(anomaly.detail()).isEqualTo("RuntimeException: boom");
         assertThat(anomaly.timestamp()).isEqualTo(CLOCK.instant());
 
-        settle();
-        assertThat(checkpointStore.readCheckpoint(SUBSCRIBER_ID))
-                .as("the checkpoint never advances past a position whose read failed")
-                .isEqualTo(p1);
-        assertThat(delivered).doesNotContain(p);
+        awaitTrue(() -> delivered.contains(p), "P delivered by the next tick's read");
+        awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p, "the checkpoint reaching " + p);
+        assertThat(countAnomalies(DeliveryAnomaly.Kind.LIVE_READ_FAILED, p))
+                .as("one anomaly per failed page, no per-position retry").isEqualTo(1L);
+        assertThat(anomalies).extracting(DeliveryAnomaly::kind)
+                .doesNotContain(DeliveryAnomaly.Kind.LIVE_READ_EXHAUSTED);
+        assertThat(bus.subscriberInfo(SUBSCRIBER_ID).mode()).isEqualTo(SubscriberMode.LIVE);
     }
 
     // ── T3 ──────────────────────────────────────────────────────────────────
@@ -201,7 +204,7 @@ final class DeliveryAnomalyEmissionTest {
             awaitTrue(() -> delivered.contains(p1), "the baseline delivery of " + p1);
 
             long p = p1 + 1;
-            scriptedStore.emptyOnce(p);
+            scriptedStore.throwPageOnce(p1, "page read failure"); // the LIVE loop's read-forward throws once
             assertThat(publishAndNotify(throwingBus)).isEqualTo(p);
             awaitTrue(() -> emitterCalls.get() >= 2, "the LIVE loop's anomaly reaching the emitter");
 
@@ -213,51 +216,48 @@ final class DeliveryAnomalyEmissionTest {
         }
     }
 
-    // ── FIX-1b — DP-2: a drop is retried, then an honest SUSPEND ────────────
+    // ── BUS-ORDER-1 — the read-forward retires the FIX-1b per-position retry-and-suspend ──
 
     @Test
-    @DisplayName("T5 — a LIVE read that is empty twice and real on the third attempt delivers P exactly once "
-            + "and checkpoints it; no LIVE_READ_EXHAUSTED; the subscriber stays LIVE")
-    void liveReadRetried_thenDelivered() throws Exception {
+    @DisplayName("T5 — two empty page reads then a real one deliver P exactly once and checkpoint it; "
+            + "no anomaly of any kind; the subscriber stays LIVE")
+    void liveVisibilityMissTwice_deliversOnceWithoutAnomaly() throws Exception {
         subscribeAndAwaitLive(bus);
         long p1 = publishAndNotify(bus);
         awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p1,
                 "the baseline delivery checkpointing " + p1);
 
         long p = p1 + 1;
-        scriptedStore.emptyTimes(p, 2);
+        scriptedStore.emptyPageTimes(p1, 2);
         assertThat(publishAndNotify(bus)).isEqualTo(p);
 
         awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p,
-                "the retried read delivering and checkpointing " + p);
+                "the re-read delivering and checkpointing " + p);
+        awaitTrue(() -> scriptedStore.pageReadsFrom(p1) >= 3,
+                "the LIVE loop paging from the cursor (two empty pages, then the real one)");
         assertThat(delivered.stream().filter(pos -> pos == p).count())
                 .as("delivered exactly once").isEqualTo(1L);
-        assertThat(countAnomalies(DeliveryAnomaly.Kind.LIVE_READ_EMPTY, p))
-                .as("one anomaly per empty attempt").isEqualTo(2L);
-        assertThat(anomalies).extracting(DeliveryAnomaly::kind)
-                .doesNotContain(DeliveryAnomaly.Kind.LIVE_READ_EXHAUSTED);
+        assertThat(anomalies).as("an empty page is never an anomaly").isEmpty();
         assertThat(bus.subscriberInfo(SUBSCRIBER_ID).mode()).isEqualTo(SubscriberMode.LIVE);
     }
 
     @Test
-    @DisplayName("T6 — five empty LIVE reads exhaust the retry: LIVE_READ_EXHAUSTED, mode SUSPENDED, "
-            + "the checkpoint never past P, P never delivered")
-    void liveReadExhausted_suspendsHonestly() throws Exception {
+    @DisplayName("T6 — page reads that stay empty never SUSPEND: no LIVE_READ_EXHAUSTED, mode LIVE, "
+            + "the checkpoint never past P, P not delivered while the store shows nothing")
+    void liveEmptyPages_neverSuspend() throws Exception {
         subscribeAndAwaitLive(bus);
         long p1 = publishAndNotify(bus);
         awaitTrue(() -> checkpointStore.readCheckpoint(SUBSCRIBER_ID) == p1,
                 "the baseline delivery checkpointing " + p1);
 
         long p = p1 + 1;
-        scriptedStore.emptyForever(p);
+        scriptedStore.emptyPageForever(p1);
         assertThat(publishAndNotify(bus)).isEqualTo(p);
 
-        DeliveryAnomaly exhausted = awaitAnomaly(DeliveryAnomaly.Kind.LIVE_READ_EXHAUSTED, p);
-        assertThat(exhausted.subscriberId()).isEqualTo(SUBSCRIBER_ID);
-        awaitTrue(() -> bus.subscriberInfo(SUBSCRIBER_ID).mode() == SubscriberMode.SUSPENDED,
-                "the honest SUSPEND");
-        assertThat(countAnomalies(DeliveryAnomaly.Kind.LIVE_READ_EMPTY, p))
-                .as("exactly the bounded attempt count (5)").isEqualTo(5L);
+        awaitTrue(() -> scriptedStore.pageReadsFrom(p1) >= 3,
+                "the idle tick re-reading from the cursor while the store shows nothing");
+        assertThat(anomalies).as("emptiness is never an anomaly and never a SUSPEND").isEmpty();
+        assertThat(bus.subscriberInfo(SUBSCRIBER_ID).mode()).isEqualTo(SubscriberMode.LIVE);
         assertThat(checkpointStore.readCheckpoint(SUBSCRIBER_ID)).isEqualTo(p1);
         assertThat(delivered).doesNotContain(p);
     }
@@ -273,7 +273,7 @@ final class DeliveryAnomalyEmissionTest {
 
         long p = p1 + 1;
         scriptedStore.emptyOnceForPublisher(p);   // notifyEvent's own read misses …
-        scriptedStore.emptyOnce(p);               // … and so does the LIVE loop's first read
+        scriptedStore.emptyPageOnce(p1);          // … and so does the LIVE loop's first read-forward
         assertThat(publishAndNotify(bus)).isEqualTo(p);
 
         DeliveryAnomaly notVisible = findAnomaly(DeliveryAnomaly.Kind.NOTIFY_NOT_VISIBLE, p)
@@ -318,9 +318,9 @@ final class DeliveryAnomalyEmissionTest {
     }
 
     @Test
-    @DisplayName("T-R2 — a queued position the TRANSITION drain cannot read is retried, then the subscriber "
-            + "SUSPENDs honestly with TRANSITION_READ_EXHAUSTED; the checkpoint stays at the last delivery")
-    void transitionReadExhausted_suspendsHonestly() throws Exception {
+    @DisplayName("T-R2 — a page read that throws during the TRANSITION drain SUSPENDs the subscriber "
+            + "honestly; the checkpoint stays at the last delivery; no TRANSITION_READ_* kind is emitted")
+    void transitionPageReadFailure_suspendsHonestly() throws Exception {
         long first = realStore.publishRoot(TestEventFactory.draft()).globalPosition();
         scriptedStore.onPageReadRunThenEmpty(first, () -> {
             try {
@@ -330,23 +330,24 @@ final class DeliveryAnomalyEmissionTest {
                 throw new IllegalStateException(e);
             }
         });
-        long readable = first + 1;
-        long unreadable = first + 2;
-        scriptedStore.emptyForever(unreadable);
+        // The drain's read-forward from the cursor (afterPosition == first) throws.
+        scriptedStore.throwPageOnce(first, "drain read failure");
 
         bus.subscribeRuntime(
                 new SubscriberInfo(SUBSCRIBER_ID, SubscriptionFilter.all(), false),
                 event -> delivered.add(event.globalPosition()));
 
-        awaitAnomaly(DeliveryAnomaly.Kind.TRANSITION_READ_EXHAUSTED, unreadable);
         awaitTrue(() -> bus.subscriberInfo(SUBSCRIBER_ID).mode() == SubscriberMode.SUSPENDED,
                 "the honest SUSPEND out of TRANSITION");
-        assertThat(delivered).containsExactly(first, readable);
+        assertThat(delivered).as("REPLAY delivered the first position; the drain delivered nothing")
+                .containsExactly(first);
         assertThat(checkpointStore.readCheckpoint(SUBSCRIBER_ID))
-                .as("the TRANSITION delivery of " + readable + " was checkpointed; the unreadable one never")
-                .isEqualTo(readable);
-        assertThat(countAnomalies(DeliveryAnomaly.Kind.TRANSITION_READ_EMPTY, unreadable))
-                .as("exactly the bounded attempt count (5)").isEqualTo(5L);
+                .as("the checkpoint rests at REPLAY's tail write")
+                .isEqualTo(first);
+        assertThat(anomalies).extracting(DeliveryAnomaly::kind)
+                .as("the retired per-position kinds are never emitted")
+                .doesNotContain(DeliveryAnomaly.Kind.TRANSITION_READ_EMPTY,
+                        DeliveryAnomaly.Kind.TRANSITION_READ_EXHAUSTED);
     }
 
     // ── Harness ─────────────────────────────────────────────────────────────
@@ -405,17 +406,14 @@ final class DeliveryAnomalyEmissionTest {
         throw new AssertionError("timed out awaiting " + what);
     }
 
-    /** A short fixed settle for the LIVE loop to act on the anomaly before a negative assert. */
-    private static void settle() throws InterruptedException {
-        Thread.sleep(200L);
-    }
-
     // ── The scripted read store ─────────────────────────────────────────────
 
     /**
-     * Delegating {@link EventStore} whose single-position reads on a VIRTUAL
-     * thread (the subscriber's LIVE loop through the synchronous read
-     * executor) follow a per-position script; every other read passes through
+     * Delegating {@link EventStore} whose subscriber-thread PAGE reads (the
+     * read-forward from the cursor, issued on a VIRTUAL thread through the
+     * synchronous read executor) follow a per-{@code afterPosition} script and
+     * are counted; {@code notifyEvent}'s single-position read on the publisher's
+     * platform thread follows its own script; every other read passes through
      * to the real store. Guarded by a {@link ReentrantLock} (LTD-11).
      */
     private static final class ScriptedReadStore implements EventStore {
@@ -424,52 +422,27 @@ final class DeliveryAnomalyEmissionTest {
 
         private final EventStore delegate;
         private final ReentrantLock lock = new ReentrantLock();
-        private final Map<Long, Deque<Response>> queued = new HashMap<>();
         private final Map<Long, Deque<Response>> publisherQueued = new HashMap<>();
-        private final Map<Long, Response> steady = new HashMap<>();
-        private final Map<Long, String> throwMessages = new HashMap<>();
+        private final Map<Long, Deque<Response>> pageQueued = new HashMap<>();
+        private final Map<Long, Response> pageSteady = new HashMap<>();
+        private final Map<Long, String> pageThrowMessages = new HashMap<>();
+        private final Map<Long, Long> pageReads = new HashMap<>();
         private final Map<Long, Runnable> pageHooks = new HashMap<>();
 
         ScriptedReadStore(EventStore delegate) {
             this.delegate = Objects.requireNonNull(delegate, "delegate");
         }
 
-        /** Every subscriber-thread read of {@code position} returns an empty page. */
-        void emptyForever(long position) {
-            lock.lock();
-            try {
-                steady.put(position, Response.EMPTY);
-            } finally {
-                lock.unlock();
-            }
+        /** The FIRST subscriber-thread page read from {@code afterPosition} is empty; later reads are real. */
+        void emptyPageOnce(long afterPosition) {
+            emptyPageTimes(afterPosition, 1);
         }
 
-        /** Every subscriber-thread read of {@code position} throws {@code RuntimeException(message)}. */
-        void throwForever(long position, String message) {
+        /** The first {@code n} subscriber-thread page reads from {@code afterPosition} are empty; later reads are real. */
+        void emptyPageTimes(long afterPosition, int n) {
             lock.lock();
             try {
-                steady.put(position, Response.THROW);
-                throwMessages.put(position, message);
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        /** The FIRST subscriber-thread read of {@code position} is empty; later reads are real. */
-        void emptyOnce(long position) {
-            lock.lock();
-            try {
-                queued.computeIfAbsent(position, ignored -> new ArrayDeque<>()).add(Response.EMPTY);
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        /** The first {@code n} subscriber-thread reads of {@code position} are empty; later reads are real. */
-        void emptyTimes(long position, int n) {
-            lock.lock();
-            try {
-                Deque<Response> script = queued.computeIfAbsent(position, ignored -> new ArrayDeque<>());
+                Deque<Response> script = pageQueued.computeIfAbsent(afterPosition, ignored -> new ArrayDeque<>());
                 for (int i = 0; i < n; i++) {
                     script.add(Response.EMPTY);
                 }
@@ -478,10 +451,41 @@ final class DeliveryAnomalyEmissionTest {
             }
         }
 
+        /** Every subscriber-thread page read from {@code afterPosition} returns an empty page. */
+        void emptyPageForever(long afterPosition) {
+            lock.lock();
+            try {
+                pageSteady.put(afterPosition, Response.EMPTY);
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        /** The FIRST subscriber-thread page read from {@code afterPosition} throws {@code RuntimeException(message)}. */
+        void throwPageOnce(long afterPosition, String message) {
+            lock.lock();
+            try {
+                pageQueued.computeIfAbsent(afterPosition, ignored -> new ArrayDeque<>()).add(Response.THROW);
+                pageThrowMessages.put(afterPosition, message);
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        /** How many subscriber-thread page reads started from {@code afterPosition} (scripted or real). */
+        long pageReadsFrom(long afterPosition) {
+            lock.lock();
+            try {
+                return pageReads.getOrDefault(afterPosition, 0L);
+            } finally {
+                lock.unlock();
+            }
+        }
+
         /**
          * The FIRST PUBLISHER-thread single-position read of {@code position} is empty
          * — {@code notifyEvent}'s own read misses while the store already holds the
-         * envelope (the LIVE loop's read is scripted separately).
+         * envelope (the subscriber's read-forward is scripted separately).
          */
         void emptyOnceForPublisher(long position) {
             lock.lock();
@@ -494,12 +498,13 @@ final class DeliveryAnomalyEmissionTest {
         }
 
         /**
-         * The next subscriber-thread PAGE read (the REPLAY driver's
-         * {@code readFrom(afterPosition, 500)}) runs {@code hook} and then
-         * returns an EMPTY page — the tail as it stood when the read began. The
-         * hook is the concurrent publisher, executed inside the read on the one
-         * thread, so the interleaving is real and deterministic (the FAILCHAN
-         * §10-O pattern).
+         * The next subscriber-thread PAGE read from {@code afterPosition} (the
+         * REPLAY driver's {@code readFrom(afterPosition, 500)}) runs {@code hook}
+         * and then returns an EMPTY page — the tail as it stood when the read
+         * began. The hook is the concurrent publisher, executed inside the read on
+         * the one thread, so the interleaving is real and deterministic (the
+         * FAILCHAN §10-O pattern). A hook outranks a page script at the same
+         * position for that one read.
          */
         void onPageReadRunThenEmpty(long afterPosition, Runnable hook) {
             lock.lock();
@@ -514,36 +519,48 @@ final class DeliveryAnomalyEmissionTest {
         public EventPage readFrom(long afterPosition, int maxCount) {
             boolean virtual = Thread.currentThread().isVirtual();
             if (maxCount == 1) {
-                long position = afterPosition + 1;
-                Response response = virtual
-                        ? nextResponse(position) : nextPublisherResponse(position);
-                switch (response) {
-                    case EMPTY -> {
-                        return new EventPage(List.of(), afterPosition, false);
-                    }
-                    case THROW -> throw new RuntimeException(throwMessageFor(position));
-                    case REAL -> {
-                        // fall through to the delegate
-                    }
+                if (!virtual && nextPublisherResponse(afterPosition + 1) == Response.EMPTY) {
+                    return new EventPage(List.of(), afterPosition, false);
                 }
-            } else if (virtual) {
+                return delegate.readFrom(afterPosition, maxCount);
+            }
+            if (virtual) {
+                countPageRead(afterPosition);
                 Runnable hook = takePageHook(afterPosition);
                 if (hook != null) {
                     hook.run();
                     return new EventPage(List.of(), afterPosition, false);
                 }
+                switch (nextPageResponse(afterPosition)) {
+                    case EMPTY -> {
+                        return new EventPage(List.of(), afterPosition, false);
+                    }
+                    case THROW -> throw new RuntimeException(pageThrowMessageFor(afterPosition));
+                    case REAL -> {
+                        // fall through to the delegate
+                    }
+                }
             }
             return delegate.readFrom(afterPosition, maxCount);
         }
 
-        private Response nextResponse(long position) {
+        private void countPageRead(long afterPosition) {
             lock.lock();
             try {
-                Deque<Response> script = queued.get(position);
+                pageReads.merge(afterPosition, 1L, Long::sum);
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private Response nextPageResponse(long afterPosition) {
+            lock.lock();
+            try {
+                Deque<Response> script = pageQueued.get(afterPosition);
                 if (script != null && !script.isEmpty()) {
                     return script.poll();
                 }
-                return steady.getOrDefault(position, Response.REAL);
+                return pageSteady.getOrDefault(afterPosition, Response.REAL);
             } finally {
                 lock.unlock();
             }
@@ -571,10 +588,10 @@ final class DeliveryAnomalyEmissionTest {
             }
         }
 
-        private String throwMessageFor(long position) {
+        private String pageThrowMessageFor(long afterPosition) {
             lock.lock();
             try {
-                return throwMessages.getOrDefault(position, "scripted read failure");
+                return pageThrowMessages.getOrDefault(afterPosition, "scripted page read failure");
             } finally {
                 lock.unlock();
             }

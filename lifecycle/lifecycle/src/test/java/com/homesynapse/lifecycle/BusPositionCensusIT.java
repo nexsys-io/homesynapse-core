@@ -19,6 +19,7 @@ import com.homesynapse.event.EventStore;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.StateConfirmedEvent;
 import com.homesynapse.event.StateReportedEvent;
+import com.homesynapse.event.bus.InProcessEventBus;
 import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.event.bus.SubscriberSnapshot;
 import com.homesynapse.event.bus.SubscriptionFilter;
@@ -44,16 +45,25 @@ import java.util.List;
 import java.util.OptionalLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
+import java.util.function.ToLongFunction;
 
 /**
  * FIX-2a (B) — TR-1b's position census, computed in-process after ONE hero loop
  * (the TR-1 §1 definition, the TR-1 §3 frozen tokens). For every subscriber the
  * composition root registers and every position the store holds:
  * {@code MATCHED(S,P)} := S's filter accepts P; {@code DELIVERED(S,P)} :=
- * {@code checkpoint(S) >= P}; {@code MISS} := matched and not delivered. The
- * checkpoint is the PERSISTED one ({@code subscribers()} reads the checkpoint
- * store), so a miss is a position the bus never wrote past — the
- * OR-BUS-SILENT-DROP class made countable.
+ * {@code P <= lastDelivered(S)}; {@code MISS} := matched and not delivered.
+ * BUS-ORDER-1 (2026-09-12): {@code lastDelivered} is the bus's in-memory cursor
+ * ({@code InProcessEventBus.lastDelivered(id)} — the highest position delivered
+ * or filtered past in this activation, AMD-101 §2), read through the concrete
+ * bus; before it the census scored the PERSISTED checkpoint, which the
+ * notification-ordered delivery could regress ({@code missed=1 first_missed=head}
+ * on samples #11/#12 with every position delivered). The persisted checkpoint is
+ * still printed ({@code checkpoint=}) beside the cursor ({@code delivered_max=}):
+ * for a filtered subscriber the cursor sits ahead of it by the trailing
+ * non-matching positions, by design — the checkpoint is written only after a
+ * matching delivery. A miss is a matching position the cursor never passed —
+ * the OR-BUS-SILENT-DROP class made countable.
  *
  * <p><strong>What is scored, and what is only reported.</strong> The DLQ is
  * visible through {@code SubscriberSnapshot} as a DEPTH only, never per position,
@@ -72,7 +82,8 @@ import java.util.function.LongSupplier;
  * resolves inside it, an in-flight delivery resolves in milliseconds. Positions
  * come from the store (paged, never a range — retention and
  * {@code AUTOINCREMENT} make the set non-dense); the store is read BEFORE the
- * snapshots so a checkpoint can only ever be AHEAD of the position set.</p>
+ * snapshots and the cursors, so a cursor can only ever be AHEAD of the position
+ * set.</p>
  *
  * <p>Harness: the {@link HeroLoopHardwareFreeIT} boot shape over the
  * {@link ZigbeeHardwareFreeRig}, copied. Time is the injected {@link TestClock};
@@ -80,7 +91,7 @@ import java.util.function.LongSupplier;
  * census and the token rendering are package-private statics so
  * {@link BusSoakIT} computes the same census the same way.</p>
  */
-@DisplayName("BusPositionCensusIT — after one hero loop every scored subscriber's persisted checkpoint covers every position its filter matches (FIX-2a B, TR-1 §1)")
+@DisplayName("BusPositionCensusIT — after one hero loop every scored subscriber's cursor covers every position its filter matches (FIX-2a B, TR-1 §1; BUS-ORDER-1 scores the in-memory cursor)")
 @Tag("bus-soak")
 final class BusPositionCensusIT {
 
@@ -193,16 +204,20 @@ final class BusPositionCensusIT {
      * @param subscriberId the bus subscriber id
      * @param atomic       whether the subscriber's checkpoint is atomic (unscored)
      * @param dlqDepth     the snapshot's DLQ depth ({@code > 0} ⇒ unscored)
-     * @param pendingDepth the snapshot's pending-queue depth — offered to the LIVE
-     *                     queue, not yet consumed (FIX-2b-i; reported, never scored)
-     * @param checkpoint   the persisted checkpoint the census was scored against
+     * @param pendingDepth the snapshot's hint-queue depth — wake hints offered to
+     *                     the LIVE loop and not yet consumed (FIX-2b-i, re-read by
+     *                     BUS-ORDER-1; reported, never scored)
+     * @param checkpoint   the persisted checkpoint (the durable floor for restart)
+     * @param deliveredMax the bus's in-memory cursor for the subscriber — the highest
+     *                     position delivered or filtered past (BUS-ORDER-1); the
+     *                     census is scored against it
      * @param matched      positions the filter accepts
-     * @param delivered    matched positions at or below the checkpoint
+     * @param delivered    matched positions at or below the cursor
      * @param missed       {@code matched − delivered}
      * @param firstMissed  the lowest missed position, or empty
      */
     record SubscriberCensus(String subscriberId, boolean atomic, int dlqDepth, int pendingDepth,
-            long checkpoint, long matched, long delivered, long missed,
+            long checkpoint, long deliveredMax, long matched, long delivered, long missed,
             OptionalLong firstMissed) {
 
         /** True when {@code missed} is an assertion, not a reading. */
@@ -257,15 +272,19 @@ final class BusPositionCensusIT {
     }
 
     /**
-     * Scores the manifest over one position set and one set of snapshots.
+     * Scores the manifest over one position set, one set of snapshots and the
+     * bus's cursors.
      *
      * @param events    every envelope in the store (the position set — never a range)
      * @param snapshots the bus's {@code subscribers()} read AFTER the events
+     * @param cursorOf  the bus's in-memory cursor per subscriber id
+     *                  ({@code InProcessEventBus::lastDelivered}), read AFTER the
+     *                  events — {@code DELIVERED(S,P) := P <= cursorOf(S)} (BUS-ORDER-1)
      * @return one census per manifest entry, in manifest order
      * @throws AssertionError if a manifest subscriber is not registered on the bus
      */
     static List<SubscriberCensus> census(List<EventEnvelope> events,
-            List<SubscriberSnapshot> snapshots) {
+            List<SubscriberSnapshot> snapshots, ToLongFunction<String> cursorOf) {
         List<SubscriberCensus> out = new ArrayList<>(manifest().size());
         for (ManifestEntry entry : manifest()) {
             SubscriberSnapshot snapshot = snapshots.stream()
@@ -273,6 +292,7 @@ final class BusPositionCensusIT {
                     .findFirst()
                     .orElseThrow(() -> new AssertionError(
                             "subscriber " + entry.subscriberId() + " is not registered on the bus"));
+            long deliveredMax = cursorOf.applyAsLong(entry.subscriberId());
             long matched = 0L;
             long delivered = 0L;
             long firstMissed = Long.MAX_VALUE;
@@ -281,7 +301,7 @@ final class BusPositionCensusIT {
                     continue;
                 }
                 matched++;
-                if (event.globalPosition() <= snapshot.checkpoint()) {
+                if (event.globalPosition() <= deliveredMax) {
                     delivered++;
                 } else {
                     firstMissed = Math.min(firstMissed, event.globalPosition());
@@ -290,7 +310,7 @@ final class BusPositionCensusIT {
             long missed = matched - delivered;
             out.add(new SubscriberCensus(entry.subscriberId(), entry.atomic(),
                     snapshot.dlqDepth(), snapshot.pendingDepth(), snapshot.checkpoint(),
-                    matched, delivered, missed,
+                    deliveredMax, matched, delivered, missed,
                     missed == 0 ? OptionalLong.empty() : OptionalLong.of(firstMissed)));
         }
         return List.copyOf(out);
@@ -304,10 +324,11 @@ final class BusPositionCensusIT {
      * @return the last census and whether it settled
      */
     static SettledCensus awaitSettledCensus(HomeSynapseCore core) {
+        InProcessEventBus bus = concreteBus(core);
         List<SubscriberCensus> last = List.of();
         for (int poll = 0; poll < 500; poll++) {
             List<EventEnvelope> events = allEvents(core.eventStore());
-            last = census(events, core.eventBus().subscribers());
+            last = census(events, bus.subscribers(), bus::lastDelivered);
             if (last.stream().filter(SubscriberCensus::scored)
                     .allMatch(subscriber -> subscriber.missed() == 0)) {
                 return new SettledCensus(last, true);
@@ -319,8 +340,9 @@ final class BusPositionCensusIT {
 
     /**
      * The frozen TR-1 §3 grammar — the five frozen keys first, then the readings
-     * this instrument adds after them ({@code checkpoint}, {@code dlq},
-     * {@code pending} (FIX-2b-i — offered to LIVE, not yet consumed), the
+     * this instrument adds after them ({@code checkpoint}, {@code delivered_max}
+     * (BUS-ORDER-1 — the cursor the census is scored against), {@code dlq},
+     * {@code pending} (FIX-2b-i — un-consumed wake hints since BUS-ORDER-1), the
      * {@code atomic=true} / {@code dlq_unscored=true} flags). The total's
      * {@code missed} counts SCORED subscribers only; {@code unscored_missed}
      * carries the rest so nothing is hidden.
@@ -341,6 +363,7 @@ final class BusPositionCensusIT {
                     .append(" first_missed=").append(subscriber.firstMissed().isPresent()
                             ? Long.toString(subscriber.firstMissed().getAsLong()) : "none")
                     .append(" checkpoint=").append(subscriber.checkpoint())
+                    .append(" delivered_max=").append(subscriber.deliveredMax())
                     .append(" dlq=").append(subscriber.dlqDepth())
                     .append(" pending=").append(subscriber.pendingDepth());
             if (subscriber.atomic()) {
@@ -393,6 +416,12 @@ final class BusPositionCensusIT {
      * FIX-2b-ii (i): one more line follows the reading in BOTH — the
      * {@code automation.handoff_census:} of the newest triggered run
      * ({@link #handoffCensus}), computed from the captured log lines.
+     * BUS-ORDER-1: the subscriber lines carry {@code cursor=} (the bus's
+     * in-memory cursor, read through the concrete bus) and {@code hints=} (the
+     * renamed {@code pending=}); between the reading and the hand-off census sit
+     * {@code bus.head: position=<H> type=<eventType>} and up to three
+     * {@code bus.tail: position=<P> type=<eventType>} lines — the head's event
+     * type and the three positions below it, oldest first ({@link #headAndTail}).
      *
      * @param core     the booted core
      * @param dumpDir  the directory for the dump file (the test's temp dir)
@@ -405,10 +434,13 @@ final class BusPositionCensusIT {
             List<ILoggingEvent> captured, String what, OptionalLong awaited) {
         String reading;
         try {
-            long storeHead = allEvents(core.eventStore()).stream()
+            List<EventEnvelope> events = allEvents(core.eventStore());
+            long storeHead = events.stream()
                     .mapToLong(EventEnvelope::globalPosition).max().orElse(0L);
+            InProcessEventBus bus = concreteBus(core);
             reading = BusAwaitDiagnostic.render(what, storeHead, awaited,
-                    core.eventBus().subscribers());
+                    bus.subscribers(), bus::lastDelivered)
+                    + "\n" + headAndTail(events);
         } catch (RuntimeException gatherFailure) {
             reading = "timed out awaiting " + what
                     + " (bus.await_timeout unavailable: " + gatherFailure + ")";
@@ -422,6 +454,49 @@ final class BusPositionCensusIT {
         reading = reading + "\n" + census;
         System.out.println(reading + "\n" + BusThreadDump.capture(dumpDir));
         return new AssertionError(reading);
+    }
+
+    /**
+     * BUS-ORDER-1: the composition root's bus as its concrete type — the census
+     * scores the in-memory cursor ({@link InProcessEventBus#lastDelivered}), which
+     * the {@code EventBus} interface does not expose (the {@code abandon()}
+     * precedent: concrete-only, reached by a cast from test code).
+     *
+     * @param core the booted core
+     * @return the bus as {@link InProcessEventBus}
+     * @throws AssertionError if the core's bus is not an {@link InProcessEventBus}
+     */
+    static InProcessEventBus concreteBus(HomeSynapseCore core) {
+        if (core.eventBus() instanceof InProcessEventBus bus) {
+            return bus;
+        }
+        throw new AssertionError("the composition root's bus is not an InProcessEventBus: "
+                + core.eventBus().getClass().getName());
+    }
+
+    /**
+     * BUS-ORDER-1: the head's event type and the three positions below it, so a
+     * red names WHAT sits at the head, not only where it is.
+     *
+     * @param events every envelope in the store, in position order
+     * @return {@code bus.head: position=<H> type=<T>} then up to three
+     *         {@code bus.tail: position=<P> type=<T>} lines (oldest first),
+     *         {@code \n}-joined; {@code bus.head: position=0 type=none} on an empty store
+     */
+    static String headAndTail(List<EventEnvelope> events) {
+        if (events.isEmpty()) {
+            return "bus.head: position=0 type=none";
+        }
+        EventEnvelope head = events.get(events.size() - 1);
+        StringBuilder out = new StringBuilder(160);
+        out.append("bus.head: position=").append(head.globalPosition())
+                .append(" type=").append(head.eventType());
+        for (int i = Math.max(0, events.size() - 4); i < events.size() - 1; i++) {
+            EventEnvelope tail = events.get(i);
+            out.append("\nbus.tail: position=").append(tail.globalPosition())
+                    .append(" type=").append(tail.eventType());
+        }
+        return out.toString();
     }
 
     /**

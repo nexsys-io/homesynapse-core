@@ -21,6 +21,7 @@ import com.homesynapse.event.StateChangedEvent;
 import com.homesynapse.event.StateConfirmedEvent;
 import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.event.SubjectRef;
+import com.homesynapse.event.bus.InProcessEventBus;
 import com.homesynapse.event.bus.SubscriberMode;
 import com.homesynapse.event.bus.SubscriberSnapshot;
 import com.homesynapse.integration.zigbee.ZigbeeHardwareFreeRig;
@@ -697,8 +698,11 @@ final class HeroLoopHardwareFreeIT {
         try {
             long storeHead = events().stream()
                     .mapToLong(EventEnvelope::globalPosition).max().orElse(0L);
+            // BUS-ORDER-1: the cursor= reading needs the concrete bus (lastDelivered
+            // is concrete-only, the abandon() precedent).
+            InProcessEventBus bus = (InProcessEventBus) core.eventBus();
             reading = BusAwaitDiagnostic.render(what, storeHead, awaited,
-                    core.eventBus().subscribers());
+                    bus.subscribers(), bus::lastDelivered);
         } catch (RuntimeException gatherFailure) {
             reading = "timed out awaiting " + what
                     + " (bus.await_timeout unavailable: " + gatherFailure + ")";
