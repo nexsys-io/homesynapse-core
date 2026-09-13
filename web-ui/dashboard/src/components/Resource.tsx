@@ -5,22 +5,32 @@ import type { ApiState } from '../lib/poll';
 import type { ResponseMeta } from '../lib/api/contract';
 import { ErrorState, Loading, OfflineState, ReplayingBanner } from './feedback';
 
+/** HERO-1c correction D3: the hero views pass their §7 rows (`explain.loading` / `explain.error.*`)
+ *  here; every other view takes the primitives' app defaults (`ui.loading` / `ui.error.*`). */
+export interface ResourceLabels {
+  loading?: string;
+  errorTitle?: string;
+  errorBody?: string;
+}
+
 export function Resource<T>({
   state,
+  labels,
   children,
 }: {
   state: ApiState<T>;
+  labels?: ResourceLabels;
   children: (data: T, meta?: ResponseMeta) => ComponentChildren;
 }) {
   switch (state.status) {
     case 'loading':
-      return <Loading />;
+      return <Loading label={labels?.loading} />;
     case 'replaying':
       return <ReplayingBanner />;
     case 'auth':
       return <Loading label="Signing in…" />;
     case 'error':
-      return <ErrorState error={state.error} onRetry={state.reload} />;
+      return <ErrorState error={state.error} onRetry={state.reload} title={labels?.errorTitle} body={labels?.errorBody} />;
     case 'offline':
       return <OfflineState onRetry={state.reload} />;
     case 'ok':

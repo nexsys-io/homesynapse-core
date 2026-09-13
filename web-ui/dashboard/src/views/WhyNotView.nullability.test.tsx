@@ -22,6 +22,7 @@ import { WIRE_20260820_NEVER_TRIGGERED_BENCH_HERO } from '../lib/api/fixtures/wi
 import { validateAgainstContract } from '../lib/api/shapes';
 import { RENDER_ERROR_TITLE } from '../components/ErrorBoundary';
 import { UNRESOLVED_REF_PHRASE, UNRESOLVED_REF_PILL } from '../lib/format';
+import { t } from '../lib/i18n';
 import type { EntitySummary } from '../lib/api/contract';
 
 afterEach(() => {
@@ -46,9 +47,10 @@ describe('the REAL 2026-08-16 wire body (lastEvaluation: null) renders honestly'
     expect(text).toContain('Nothing set it off'); // the honest NEVER_TRIGGERED verdict pill
     expect(text).toContain("It hasn't run yet."); // HERO-1b B3: the keyed L1 (SPEC §3 N2) — the wire's own `explanation` string has no slot on the card
     expect(text).toContain('What would make it run'); // the surviving row still renders
-    expect(text).not.toContain('Last checked'); // the null case: the row simply does not render
+    expect(text).toContain('Last checked'); // HERO-1c C6: FLIPPED from not.toContain — the null case now SAYS so in the value cell
+    expect(text).toContain(t('whyNot.kv.neverChecked')); // "Never checked yet." (SPEC §7)
     expect(text).not.toContain(RENDER_ERROR_TITLE); // the VIEW is honest — not the boundary card
-    expect(text).not.toContain('Loading…'); // and never the eternal spinner
+    expect(text).not.toContain(t('explain.loading')); // and never the eternal spinner (HERO-1c C5: the catalog row, was the literal)
   });
 
   it('the fixture validates against the contract mirror (object-OR-null is the recorded wire truth)', () => {
@@ -80,12 +82,12 @@ describe('the REAL 2026-08-20 wire body (second deployment, same null arm) rende
     expect(text).toContain("It hasn't run yet."); // HERO-1b B3: the keyed L1 (SPEC §3 N2) — the wire's own `explanation` string has no slot on the card
     expect(text).toContain('What would make it run');
     expect(text).toContain('state change');
-    expect(text).not.toContain('Last checked');
+    expect(text).toContain(t('whyNot.kv.neverChecked')); // HERO-1c C6: FLIPPED from not.toContain('Last checked') — the keyed sentence
     expect(text).not.toContain('It did run'); // lastRelevantRunId null → never the ran-fine pill
     expect(text).not.toContain('Ran, but sent nothing'); // noCommandsIssued null → never the silent-skip pill
     expect(text).not.toContain('null'); // never the string "null" on a surface
     expect(text).not.toContain(RENDER_ERROR_TITLE);
-    expect(text).not.toContain('Loading…');
+    expect(text).not.toContain(t('explain.loading')); // HERO-1c C5: the spinner's default label is the catalog row (this pin was the literal 'Loading…')
   });
 
   it('renders text-identical to the 2026-08-16 body once the freshness stamp is masked — the surface does not see the deployment', async () => {

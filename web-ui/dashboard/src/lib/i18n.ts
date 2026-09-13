@@ -40,6 +40,13 @@ const en = {
   'devices.freshness.nullTitle': 'This hub has no report time on record for this entity.',
   // The muted secondary line under an entity when the wire carried its device's id.
   'devices.deviceIdLabel': 'Device',
+  // HERO-1c correction D3 (2026-09-13): the app's generic state-card pair — every non-hero page's
+  // loading / error card (feedback.tsx defaults). App copy, not SPEC §7 (§7 is the hero's table);
+  // the hero views pass their own `explain.*` rows through Resource's `labels`.
+  'ui.loading': 'Loading…',
+  'ui.error.title': "This page couldn't be loaded.",
+  'ui.error.body': 'The hub answered with an error. Try again.',
+  'ui.error.retry': 'Try again',
   /* ---- HERO-1b B2 (2026-09-12): the explainability hero copy — SPEC §7, all 140 keyed rows,
    * verbatim (design/hero-v1/SPEC.md:136–:275). Register C: no product name, no "we", never
    * blames, never celebrates. The permanence footer is the Q3 (a) sentence (name-free,
@@ -68,6 +75,10 @@ const en = {
   "explain.headline.tail.expiredRestart": "{Target} was asked to {verb}; the hub restarted before it could confirm.",
   "explain.headline.completed.superseded": "{Target} was asked to {verb} because {because}, then a newer command replaced it.",
   "explain.headline.completed.expiredRestart": "{Target} was asked to {verb} because {because}; the hub restarted before it could confirm.",
+  // HERO-1c C0 (2026-09-13): the hub's §7 amendment rows (SPEC.md:276–:279, the HERO-1b audit's
+  // D2/D3/D5). This one is D5's headline cell for a null/unknown leading outcome — ADDED, not yet
+  // consumed (the headline audit gates it; today the headline renders explain.mode.notRecorded.line).
+  "explain.headline.completed.notRecorded": "{Target} was asked to {verb} because {because}; what happened isn't recorded.",
   // explain.slot.*
   "explain.slot.because": "{Trigger} {triggerVerb} at {time}",
   "explain.slot.because.unrecorded": "something set it off at {time} (what isn't recorded)",
@@ -114,6 +125,8 @@ const en = {
   "explain.mode.ackedSilent.unconfirmable": "This kind of command is acknowledged but never reported back, so it cannot be confirmed.",
   "explain.mode.settledFailed.label": "Failed",
   "explain.mode.settledFailed.line": "The command to {verb} {target} failed{reasonClause}.",
+  // HERO-1c correction D2 (SPEC.md:281): a FAILED step that never issued a command (`command` null, a named target).
+  "explain.mode.settledFailed.lineNoCommand": "No command was sent to {target} — this step failed{reasonClause}.",
   "explain.mode.settledFailed.help": "The recorded reason says why.",
   "explain.mode.expiredRestart.label": "Expired at restart",
   "explain.mode.expiredRestart.line": "{Target} was asked to {verb}; the hub restarted before it could confirm.",
@@ -123,6 +136,8 @@ const en = {
   "explain.mode.skipped.lineNamed": "Nothing was sent to {target} — this step was skipped.",
   "explain.mode.notRecorded.label": "Not recorded",
   "explain.mode.notRecorded.line": "What happened to {target} isn't recorded.",
+  // HERO-1c correction D2 (SPEC.md:280): the not-recorded help, given its key (the sentence unchanged).
+  "explain.mode.notRecorded.help": "What happened to this step was not recorded. The step itself is preserved.",
   "explain.mode.unknownOutcome.label": "Recorded as \"{outcome}\"",
   "explain.mode.unknownOutcome.help": "The device reported an outcome this dashboard does not recognise yet — shown as recorded.",
   // explain.terminal.*
@@ -133,6 +148,8 @@ const en = {
   "explain.terminal.failed": "Failed{reasonClause}.",
   "explain.terminal.cancelled": "Cancelled.",
   "explain.terminal.interrupted": "Cut off before it finished.",
+  // HERO-1c C0 (D2): SPEC §4's terminal sentence for a completed run with `actionCount` 0, given its key.
+  "explain.terminal.noSteps": "Done, recorded no steps.",
   // whyNot.headline.*
   "whyNot.headline.conditionNotMet": "It was set off at {time}, but a condition was false, so it didn't act.",
   "whyNot.headline.conditionNotMet.noTime": "It was set off, but a condition was false, so it didn't act.",
@@ -140,8 +157,11 @@ const en = {
   "whyNot.headline.neverTriggered.ranFine": "It has run — most recently at {time}.",
   "whyNot.headline.neverTriggered.ranFine.noTime": "It has run. The most recent run is on record.",
   "whyNot.headline.actedButUnconfirmed": "It ran at {time}, but the device never confirmed it acted.",
+  // HERO-1c C0 (D3): the N4/N6 no-time arms, given their keys (today rendered by dropping " at {time}").
+  "whyNot.headline.actedButUnconfirmed.noTime": "It ran, but the device never confirmed it acted.",
   "whyNot.headline.disabled": "It's turned off, so it can't run.",
   "whyNot.headline.sentNothing": "It ran at {time}, but sent nothing — every step was skipped.",
+  "whyNot.headline.sentNothing.noTime": "It ran, but sent nothing — every step was skipped.",
   "whyNot.headline.unknown": "Recorded as \"{verdict}\" — a verdict this dashboard can't explain yet.",
   // whyNot.body.*
   "whyNot.body.conditionNotMet": "It ran on {triggerSummary}, checked its conditions, and one was false. The run shows which.",

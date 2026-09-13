@@ -12,7 +12,7 @@
  */
 import type { ComponentChildren } from 'preact';
 import { useLayoutEffect, useRef } from 'preact/hooks';
-import type { CausalChain as Chain } from '../lib/api/contract';
+import type { CausalAction, CausalChain as Chain } from '../lib/api/contract';
 import { StatusPill } from './StatusPill';
 import { href } from '../lib/router';
 import {
@@ -20,6 +20,7 @@ import {
   CASCADE_PARENT_UNRECORDED,
   causalSentence,
   clockTimeWithDate,
+  commandVerbs,
   danglingTargetLine,
   danglingTriggerLine,
   EMPTY_CHAIN_NOTE,
@@ -30,7 +31,6 @@ import {
   pendingHint,
   refLabel,
   runStatusMeta,
-  SKIPPED_BEFORE_COMMAND,
   triggerVerbFromValue,
   unconfirmableHint,
   UNNAMED_TARGET,
@@ -41,9 +41,9 @@ import {
   type Tone,
 } from '../lib/format';
 import { UNVERIFIED_RESOLVER, type RefResolver } from '../lib/registry';
-import { actionVerdict, isDoNothingRun } from '../lib/verdicts';
+import { actionVerdict, isDoNothingRun, type ActionMode } from '../lib/verdicts';
 import styles from './CausalChain.module.css';
-import { t } from '../lib/i18n';
+import { t, type MessageKey } from '../lib/i18n';
 
 export function CausalChain({
   chain,
@@ -195,9 +195,11 @@ export function CausalChain({
             const targetId = a.targetRef?.id;
             const targetRes = resolveRef(targetId);
             const targetDangling = !!targetId && targetRes.kind === 'dangling';
+            // HERO-1c C2: an acked-silent effect-class step carries the §7 `.unconfirmable`
+            // sentence as its help (verdicts.actionVerdict), so no second hint repeats it.
             const hint =
               v.mode === 'held-dispatched' ? pendingHint(a.command)
-              : v.mode === 'timed-out' || v.mode === 'acked-silent' ? unconfirmableHint(a.command)
+              : v.mode === 'timed-out' ? unconfirmableHint(a.command)
               : null;
             const showHelp =
               v.provisional || v.mode === 'superseded' || v.mode === 'acked-silent' || v.mode === 'expired-restart';
@@ -206,18 +208,21 @@ export function CausalChain({
               tone: targetDangling ? 'error' : v.tone,
               marker: targetDangling ? '!' : '→',
               label: targetDangling ? `${UNRESOLVED_REF_PILL}, ${v.label}` : v.label,
-              /* FE-NULL-1: `command` null = a SKIPPED/FAILED action that never issued a
-                 command (:776) — the honest sentence, not actionPhrase(null)'s fallback
-                 (a dangling target keeps its pill + help below). `targetRef` null = no
-                 target refs (:771) — the phrase names no device and accuses no registry. */
+              /* HERO-1c C1 (SPEC §5/§7; the HERO-1b audit's D6): the LINE is the mode's own §7
+                 sentence (`explain.mode.<key>.line`, keyed on actionVerdict().mode — see
+                 actionStepLine), so a step that never confirmed never reads as done. The
+                 HERO-1b null arms keep their sentences: `command` null with no resolvable
+                 target (:776) is the skipped sentence, never actionPhrase(null)'s fallback;
+                 a dangling target keeps its loud line (pill + help below); a null `targetRef`
+                 (:771) keeps the unnamed-target sentence — names no device, accuses none. */
               line:
-                a.command === null
-                  ? SKIPPED_BEFORE_COMMAND
+                a.command === null && (targetDangling || a.targetRef === null)
+                  ? heroCopy('explain.mode.skipped.line')
                   : targetDangling
                     ? danglingTargetLine(actionPhrase(a.command), targetId)
-                    : a.targetRef === null
+                    : a.targetRef === null && v.mode !== 'skipped'
                       ? `${actionPhrase(a.command)} ${UNNAMED_TARGET}.`
-                      : `${actionPhrase(a.command)} ${refLabel(targetId, targetRes)}.`,
+                      : actionStepLine(v.mode, a, refLabel(targetId, targetRes)),
               pill: (
                 <>
                   {targetDangling ? (
@@ -314,8 +319,8 @@ interface StepSpec {
   tone: Tone;
   marker: string;
   line: string;
-  /** The state the marker carries, in words — read to screen readers as
-   *  "Step n of N: kind — label." (SPEC §8, `explain.a11y.step`). */
+  /** The state the marker carries, in words — read to screen readers through
+   *  `explain.a11y.step` (SPEC §8): the step's index and count, its kind, then this label. */
   label: string;
   pill?: ComponentChildren;
   kind: string;
@@ -364,6 +369,32 @@ function actionPhrase(command: string | null | undefined): string {
       // Present-but-null guard: never "Ran null on" — say what is known.
       return command ? `Ran ${command} on` : 'Ran an unrecorded command on';
   }
+}
+/* HERO-1c C1 (SPEC §5/§7; the HERO-1b audit's D6): the action step LINE per confirmation
+ * mode — each `explain.mode.<key>.line` filled at the resolved label (never lower-cased:
+ * `{Target}` and `{target}` are the same name), the command's verbs (format.commandVerbs,
+ * with the §7 null arms) and the recorded reason as " — {reason}" or "". The skipped pair
+ * keys on the target: `skipped.line` with none, `skipped.lineNamed` with one. */
+const MODE_LINE_KEY: Record<Exclude<ActionMode, 'skipped'>, MessageKey> = {
+  confirmed: 'explain.mode.confirmed.line',
+  'held-dispatched': 'explain.mode.heldDispatched.line',
+  'timed-out': 'explain.mode.timedOut.line',
+  superseded: 'explain.mode.superseded.line',
+  'acked-silent': 'explain.mode.ackedSilent.line',
+  'settled-failed': 'explain.mode.settledFailed.line',
+  'expired-restart': 'explain.mode.expiredRestart.line',
+  'not-recorded': 'explain.mode.notRecorded.line',
+};
+function actionStepLine(mode: ActionMode, a: CausalAction, target: string): string {
+  if (mode === 'skipped') {
+    return a.targetRef === null ? heroCopy('explain.mode.skipped.line') : heroCopy('explain.mode.skipped.lineNamed', { target });
+  }
+  const reasonClause = a.reason ? ` — ${a.reason}` : '';
+  // HERO-1c correction D2 (SPEC §7 :281): a FAILED step that never issued a command (:776) says so —
+  // never the null verb's "to act".
+  if (mode === 'settled-failed' && a.command === null) return heroCopy('explain.mode.settledFailed.lineNoCommand', { target, reasonClause });
+  const { verb, verbPast } = commandVerbs(a.command);
+  return heroCopy(MODE_LINE_KEY[mode], { Target: target, target, verb, verbPast, reasonClause });
 }
 function terminalLine(chain: Chain): string {
   const outcome = chain.outcome;

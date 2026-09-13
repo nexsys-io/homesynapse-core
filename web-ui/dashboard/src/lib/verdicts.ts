@@ -31,8 +31,11 @@
  *
  * Copy rules: Register C (Direct Neutral) — no self-reference, never blames the
  * user, never cheerful, never apologetic. Stranger-test locked by verdicts.test.ts.
+ * Since HERO-1c C2 the MODE labels and helps are the §7 catalog (i18n.ts) behind t();
+ * the ten-value sub-labels and their reason strings below are this layer's own.
  */
 import type { Tone } from './format';
+import { t } from './i18n';
 
 /** The ten live outcome values (pointer: CommandResultEvent.java:22-27). */
 export const COMMAND_RESULT_OUTCOMES = [
@@ -140,6 +143,24 @@ const FALLBACK: VerdictMeta = {
 
 export function resultOutcomeMeta(outcome: string): VerdictMeta {
   return (VERDICTS as Record<string, VerdictMeta>)[outcome] ?? FALLBACK;
+}
+
+/* ---- The command CLASS — moved here from format.ts by HERO-1c C2 so the verdict layer can
+ * pick the effect-class help without importing format.ts (a cycle: format.ts imports
+ * actionVerdict). format.ts re-exports it unchanged; every caller keeps its import. ---- */
+export type CommandKind = 'effect' | 'color' | 'other';
+
+/** Classify a command for confirmation-copy purposes. Effect/identify-class first —
+ *  those are the measured UNCONFIRMABLE-by-report paths (an ACK is not confirmation). */
+export function commandKind(command: string | null | undefined): CommandKind {
+  // Null-guard (the live present-but-null class): no command string, no class.
+  const c = (command ?? '').toLowerCase();
+  // Measured unconfirmable-by-report class (bench 2026-07-01: identify + color_loop).
+  if (/(identify|effect|loop|blink|flash)/.test(c)) return 'effect';
+  // Color-class only when the command SAYS color (set_temperature on a thermostat is
+  // NOT color; set_color_temperature contains "color" and matches).
+  if (/(color|hue|saturation|kelvin|mired)/.test(c)) return 'color';
+  return 'other';
 }
 
 /* ---------------------------------------------------------------------------
@@ -280,6 +301,9 @@ export interface ActionVerdictInput {
   reason: string | null;
   resultOutcome?: string | null;
   settled?: boolean;
+  /** The action's command (HERO-1c C2): an effect/identify-class command that lands
+   *  acked-silent takes the §7 `.unconfirmable` help. Absent → the plain mode help. */
+  command?: string | null;
 }
 
 export type ActionMode =
@@ -336,18 +360,23 @@ export function isActionSettled(a: ActionVerdictInput): boolean {
 
 const KNOWN_FAILED = new Set(['rejected', 'invalid', 'unsupported', 'handler_error', 'integration_unavailable']);
 
-/** Classify one causal-chain action into its honest render mode. */
+/** Classify one causal-chain action into its honest render mode. The label and help of
+ *  every mode are the §7 catalog's rows (`explain.mode.<key>.label` / `.help`, HERO-1c C2),
+ *  read through t() from i18n.ts directly — format.ts imports this module, so the catalog
+ *  is reached without a cycle. The settled-failed sub-labels (Rejected · Invalid · Not
+ *  supported · Error · Bridge offline · No reply) stay the ten-value layer's words. */
 export function actionVerdict(a: ActionVerdictInput): ActionVerdict {
   // Present-but-null hardening (FE-LIVE-V112 item 1): a null/absent OUTCOME is
   // not a failure and not a guess — it is said plainly. (An unrecognized
-  // non-null string still takes the conservative FAILED default below, SD-7.)
+  // non-null string takes the honest `default` arm below — SPEC §5's last row.)
   if (a.outcome == null || a.outcome === '') {
     return {
       mode: 'not-recorded',
-      label: 'Not recorded',
+      label: t('explain.mode.notRecorded.label'),
       tone: 'unknown',
       glyph: MODE_GLYPHS['not-recorded'],
-      help: 'What happened to this step was not recorded. The step itself is preserved.',
+      // The §7 row (`explain.mode.notRecorded.help`, given its key by the HERO-1c D2 correction).
+      help: t('explain.mode.notRecorded.help'),
       provisional: false,
       recovered: false,
       resultOutcome: a.resultOutcome ?? null,
@@ -363,128 +392,91 @@ export function actionVerdict(a: ActionVerdictInput): ActionVerdict {
     recovered,
     resultOutcome: ro,
   };
+  // Mode 2 — superseded-same-attribute, wherever the wire carries it (DISPATCHED, UNCONFIRMED,
+  // or a pre-v1.1.2 FAILED recovered from the ledger string): an intent change, never a failure.
+  const superseded = (): ActionVerdict => ({
+    ...base,
+    mode: 'superseded',
+    label: t('explain.mode.superseded.label'),
+    tone: 'neutral',
+    glyph: MODE_GLYPHS.superseded,
+    help: t('explain.mode.superseded.help'),
+  });
 
   switch (a.outcome) {
     case 'CONFIRMED':
-      return {
-        ...base,
-        mode: 'confirmed',
-        label: 'Confirmed',
-        tone: 'ok',
-        glyph: MODE_GLYPHS.confirmed,
-        help: 'The device reported it actually did it.',
-      };
+      return { ...base, mode: 'confirmed', label: t('explain.mode.confirmed.label'), tone: 'ok', glyph: MODE_GLYPHS.confirmed, help: t('explain.mode.confirmed.help') };
     case 'SKIPPED':
-      return {
-        ...base,
-        mode: 'skipped',
-        label: 'Skipped',
-        tone: 'unknown',
-        glyph: MODE_GLYPHS.skipped,
-        help: 'This step did not run.',
-      };
+      // SPEC §5 gives the skipped row no help ("—"): the pill carries no tooltip.
+      return { ...base, mode: 'skipped', label: t('explain.mode.skipped.label'), tone: 'unknown', glyph: MODE_GLYPHS.skipped, help: '' };
     case 'DISPATCHED': {
-      if (ro === 'superseded') {
-        return {
-          ...base,
-          mode: 'superseded',
-          label: 'Replaced',
-          tone: 'neutral',
-          glyph: MODE_GLYPHS.superseded,
-          help: VERDICTS.superseded.help,
-        };
-      }
+      if (ro === 'superseded') return superseded();
       // Mode 4 — held-DISPATCHED (bare, or protocol-acked with no settling
       // record). The §5.9 field truth: a late report can settle this after the
       // run reads COMPLETED — the text itself says "not settled yet" so the
-      // provisionality never rides styling alone.
-      return {
-        ...base,
-        mode: 'held-dispatched',
-        label: 'Sent — not settled yet',
-        tone: 'info',
-        glyph: MODE_GLYPHS['held-dispatched'],
-        help:
-          ro === 'acknowledged'
-            ? 'The device accepted the command. What finally happened has not been recorded yet — this can still settle, and the record updates itself when it does.'
-            : 'The command was sent. What finally happened has not been recorded yet — this can still settle, and the record updates itself when it does.',
-      };
+      // provisionality never rides styling alone. (An `acknowledged` disposition
+      // stays visible in the L2 "Recorded outcome" detail; the help is the one §7 row.)
+      return { ...base, mode: 'held-dispatched', label: t('explain.mode.heldDispatched.label'), tone: 'info', glyph: MODE_GLYPHS['held-dispatched'], help: t('explain.mode.heldDispatched.help') };
     }
     case 'UNCONFIRMED': {
       if (ro === 'unconfirmed') {
         // Mode 3 — acked-then-silent-forever: the system explicitly refusing to
-        // treat an ACK as proof. The recorded reason is shown VERBATIM.
+        // treat an ACK as proof. The recorded reason is shown VERBATIM in L2. An
+        // effect/identify-class command is acknowledged and never reports (measured,
+        // bench 2026-07-01), so its help is the §7 `.unconfirmable` sentence.
         return {
           ...base,
           mode: 'acked-silent',
-          label: 'Accepted, never confirmed',
+          label: t('explain.mode.ackedSilent.label'),
           tone: 'warn',
           glyph: MODE_GLYPHS['acked-silent'],
-          help: 'The device accepted the command but never reported doing it. The recorded reason below is shown exactly as recorded — an acceptance is not proof.',
+          help: commandKind(a.command) === 'effect' ? t('explain.mode.ackedSilent.unconfirmable') : t('explain.mode.ackedSilent.help'),
         };
       }
-      if (ro === 'superseded') {
-        // Mode 2's timed-out variant (UNCONFIRMED / "superseded" / timeout text):
-        // still an intent change, never a failure.
-        return {
-          ...base,
-          mode: 'superseded',
-          label: 'Replaced',
-          tone: 'neutral',
-          glyph: MODE_GLYPHS.superseded,
-          help: VERDICTS.superseded.help,
-        };
-      }
+      // Mode 2's timed-out variant (UNCONFIRMED / "superseded" / timeout text):
+      // still an intent change, never a failure.
+      if (ro === 'superseded') return superseded();
       // Mode 1 — dispatched-and-timed-out: sent, window closed, honestly unknown.
-      return {
-        ...base,
-        mode: 'timed-out',
-        label: 'Sent — no reply',
-        tone: 'warn',
-        glyph: MODE_GLYPHS['timed-out'],
-        help: 'The command was sent, but no confirmation arrived before the window closed. Whether the device acted is unknown — reported honestly instead of guessed.',
-      };
+      return { ...base, mode: 'timed-out', label: t('explain.mode.timedOut.label'), tone: 'warn', glyph: MODE_GLYPHS['timed-out'], help: t('explain.mode.timedOut.help') };
     }
-    case 'FAILED':
-    default: {
-      if (ro === 'superseded') {
-        // Pre-v1.1.2 flattening recovered (or an anomalous wire): an intent
-        // change NEVER renders as a failure.
-        return {
-          ...base,
-          mode: 'superseded',
-          label: 'Replaced',
-          tone: 'neutral',
-          glyph: MODE_GLYPHS.superseded,
-          help: VERDICTS.superseded.help,
-        };
-      }
+    case 'FAILED': {
+      // Pre-v1.1.2 flattening recovered (or an anomalous wire): an intent
+      // change NEVER renders as a failure.
+      if (ro === 'superseded') return superseded();
       if (ro === 'expired_on_restart') {
         return {
           ...base,
           mode: 'expired-restart',
-          label: VERDICTS.expired_on_restart.label,
+          label: t('explain.mode.expiredRestart.label'),
           tone: VERDICTS.expired_on_restart.tone,
           glyph: MODE_GLYPHS['expired-restart'],
-          help: VERDICTS.expired_on_restart.help,
+          help: t('explain.mode.expiredRestart.help'),
         };
       }
       // Mode 5 — settled-FAILED. The ten-value sub-verdict layer carries the
       // distinct label/tone where the disposition is known (rejected vs error vs
       // bridge-offline vs the D-1 calm "No reply" for timed_out); an unknown
       // adapter string stays conservative FAILED (SD-7), reason shown verbatim.
+      // The help is the one §7 row: the recorded reason (L2) says why.
       if (ro && (KNOWN_FAILED.has(ro) || ro === 'timed_out')) {
         const m = resultOutcomeMeta(ro);
-        return { ...base, mode: 'settled-failed', label: m.label, tone: m.tone, glyph: MODE_GLYPHS['settled-failed'], help: m.help };
+        return { ...base, mode: 'settled-failed', label: m.label, tone: m.tone, glyph: MODE_GLYPHS['settled-failed'], help: t('explain.mode.settledFailed.help') };
       }
+      return { ...base, mode: 'settled-failed', label: t('explain.mode.settledFailed.label'), tone: 'error', glyph: MODE_GLYPHS['settled-failed'], help: t('explain.mode.settledFailed.help') };
+    }
+    default:
+      // Open-vocabulary hardening (HERO-1c C3; SPEC §5's last row — the pin moved here from the
+      // retired format.ts command-outcome map): an OUTCOME string this build does not know is shown as
+      // recorded in the honest register — the not-recorded mode with `explain.mode.unknownOutcome.*`
+      // — never success, never "Failed", never a crash. (SD-7's conservative FAILED still governs
+      // an unknown resultOutcome on a FAILED action, above.)
       return {
         ...base,
-        mode: 'settled-failed',
-        label: 'Failed',
-        tone: 'error',
-        glyph: MODE_GLYPHS['settled-failed'],
-        help: 'The command failed. The recorded reason says why.',
+        mode: 'not-recorded',
+        label: t('explain.mode.unknownOutcome.label').replace('{outcome}', String(a.outcome)),
+        tone: 'unknown',
+        glyph: MODE_GLYPHS['not-recorded'],
+        help: t('explain.mode.unknownOutcome.help'),
       };
-    }
   }
 }

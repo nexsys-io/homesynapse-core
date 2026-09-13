@@ -172,7 +172,7 @@ describe('EventsView — the teaching card for the discriminator; the honest gen
     expect(text).toContain(t('events.notServedYet.hint'));
     expect(container.querySelector('[role="alert"]')).toBeNull();
     expect(text).not.toContain('Try again');
-    expect(text).not.toContain('Loading…');
+    expect(text).not.toContain(t('ui.loading')); // HERO-1c C5 + D3: the spinner's default is the app row (a non-hero page; this pin was the literal 'Loading…')
   });
 
   it('a problem+json not-found on the same path renders the GENERIC honest card + Try again (the fallback for every OTHER 404)', async () => {

@@ -202,3 +202,52 @@ describe('HERO-1b B2 — the §7 copy table is the catalog', () => {
     expect(t('hero.permanence' as MessageKey)).toBeUndefined();
   });
 });
+
+/*
+ * HERO-1c C0 (2026-09-13) — the hub's SPEC §7 amendment (design/hero-v1/SPEC.md:276–:279:
+ * the HERO-1b audit's D2/D3/D5 rows) is in the catalog with the same strings, verbatim.
+ * RED at HEAD: none of the four keys exists (the catalog ends at `explain.loading`,
+ * i18n.ts:213), so each `t()` read is undefined. The Register-C row is green by construction
+ * at HEAD (an undefined string carries nothing) — disclosed.
+ */
+const SPEC7_HERO1C_KEYS = {
+  'explain.terminal.noSteps': 'Done, recorded no steps.',
+  'whyNot.headline.actedButUnconfirmed.noTime': 'It ran, but the device never confirmed it acted.',
+  'whyNot.headline.sentNothing.noTime': 'It ran, but sent nothing — every step was skipped.',
+  'explain.headline.completed.notRecorded': "{Target} was asked to {verb} because {because}; what happened isn't recorded.",
+} as const;
+
+describe('HERO-1c C0 — the four amendment rows are in the catalog, verbatim', () => {
+  it('carries the four keys with the SPEC strings (140 + 4 = 144 §7 rows)', () => {
+    expect(Object.keys(SPEC7_HERO1C_KEYS).length).toBe(4);
+    for (const [k, s] of Object.entries(SPEC7_HERO1C_KEYS)) {
+      expect(t(k as MessageKey), k).toBe(s);
+    }
+  });
+
+  it('Register C holds on the four: no product name, no token, no "we" [GREEN at HEAD by construction]', () => {
+    for (const k of Object.keys(SPEC7_HERO1C_KEYS)) {
+      const s = t(k as MessageKey) ?? '';
+      expect(s, k).not.toContain(BRAND.productName);
+      expect(s, k).not.toContain('{{NAME}}');
+      expect(s, k).not.toMatch(/\bwe\b/i);
+    }
+  });
+});
+
+/* HERO-1c correction D2 (2026-09-13) — the hub's two further §7 rows (design/hero-v1/SPEC.md:280–:281),
+ * the R3 check extended: catalog strings == SPEC strings. RED at the HERO-1c tree: neither key exists. */
+const SPEC7_HERO1C_D2_KEYS = {
+  'explain.mode.notRecorded.help': 'What happened to this step was not recorded. The step itself is preserved.',
+  'explain.mode.settledFailed.lineNoCommand': 'No command was sent to {target} — this step failed{reasonClause}.',
+} as const;
+
+describe('HERO-1c D2 — the two correction rows are in the catalog, verbatim', () => {
+  it('carries the two keys with the SPEC strings (144 + 2 = 146 §7 rows), Register C', () => {
+    for (const [k, s] of Object.entries(SPEC7_HERO1C_D2_KEYS)) {
+      expect(t(k as MessageKey), k).toBe(s);
+      expect(s, k).not.toContain(BRAND.productName);
+      expect(s, k).not.toMatch(/\bwe\b/i);
+    }
+  });
+});

@@ -141,13 +141,8 @@ describe('open string vocabularies render honestly (the closed-switch class, §4
     expect(fmt.runStatusMeta(null).tone).toBe('unknown');
   });
 
-  it('outcomeMeta: an unrecognized action outcome renders honest-can\'t-know — never success, never a crash', () => {
-    const m = fmt.outcomeMeta('PARTIALLY_APPLIED' as never);
-    expect(m).toBeTruthy();
-    expect(m.label).toBe('Recorded as "PARTIALLY_APPLIED"');
-    expect(m.tone).toBe('unknown');
-    expect(fmt.outcomeMeta('CONFIRMED').tone).toBe('ok'); // preservation pin
-  });
+  // The command-outcome-map row (an unrecognized ACTION outcome → honest can't-know) moved to
+  // verdicts.test.ts (HERO-1c C3): the verdict layer's not-recorded arm carries it now.
 
   it('availabilityMeta: an unrecognized availability renders honestly — never undefined on the trust surface', () => {
     const m = fmt.availabilityMeta('DEGRADED' as never);

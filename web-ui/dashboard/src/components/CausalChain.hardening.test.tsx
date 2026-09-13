@@ -310,7 +310,7 @@ describe("FE-NULL-1 — the chain's null arms render the honest sentence, never 
     const { container } = render(<CausalChain chain={causalChains['run_eh_001']!} resolveRef={census()} />);
     const text = container.textContent ?? '';
     expect(text).toMatch(/Hallway Motion detected motion at /);
-    expect(text).toContain('Turned on Hallway Light.');
+    expect(text).toContain('Hallway Light turned on.'); // HERO-1c C1: the confirmed mode's own line (flipped from HEAD's 'Turned on Hallway Light.')
     expect(text).toContain('Sun elevation = -6.2°');
     expect(text).not.toContain(SKIPPED_BEFORE_COMMAND);
     expect(text).not.toContain(UNNAMED_TARGET);

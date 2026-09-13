@@ -7,7 +7,6 @@
  * component adds the icon shape) — never color alone (WCAG 1.4.1).
  */
 import type {
-  ActionOutcome,
   Availability,
   CausalChain,
   IntegrationHealth,
@@ -17,7 +16,7 @@ import type {
   TypedValue,
 } from './api/contract';
 import { t, type MessageKey } from './i18n';
-import { actionVerdict } from './verdicts';
+import { actionVerdict, commandKind } from './verdicts';
 
 export type Tone = 'ok' | 'warn' | 'error' | 'info' | 'unknown' | 'neutral';
 
@@ -43,7 +42,7 @@ export function noReadingLine(entityLabel: string, attribute: string): string {
   return `${entityLabel} ${attribute} ${NO_READING_YET}`;
 }
 /** `actions[].command` null — a SKIPPED/FAILED action that never issued a command. */
-export const SKIPPED_BEFORE_COMMAND = 'Skipped before any command was sent.';
+export const SKIPPED_BEFORE_COMMAND = t('explain.mode.skipped.line'); // the §7 row (HERO-1c: the chain renders the key; this constant is its test-side name)
 /** `actions[].targetRef` null — the action line ends with this; no target is named, none accused. */
 export const UNNAMED_TARGET = "a device the run didn't name";
 /** `cascade.depth > 0` with `parentRunId` null (always null in V1 — F4): started by a run the record cannot name. */
@@ -193,31 +192,9 @@ export const LIST_FRESHNESS_NO_CLAIM_TITLE = t('devices.freshness.noClaimTitle')
  *  two sentences: absence ≠ null (FE-HONEST-1 §10-H/I). Test-locked. */
 export const LIST_FRESHNESS_NULL_TITLE = t('devices.freshness.nullTitle');
 
-/* ---- Command outcome (the trust win) ---- */
-export function outcomeMeta(o: ActionOutcome | string | null | undefined): { label: string; tone: Tone; help: string } {
-  switch (o) {
-    case 'CONFIRMED':
-      return { label: 'Confirmed', tone: 'ok', help: 'The device reported it actually did it.' };
-    case 'DISPATCHED':
-      return { label: 'Sent', tone: 'info', help: 'The command was sent. Waiting for the device to confirm.' };
-    case 'UNCONFIRMED':
-      return {
-        label: 'Sent, not confirmed',
-        tone: 'warn',
-        // Neutral on WHY (some devices never report; some were briefly offline) —
-        // the per-action reason carries the specifics. Calm and honest, never alarm.
-        help: 'We sent it, but the device did not confirm it acted.',
-      };
-    case 'FAILED':
-      return { label: 'Failed', tone: 'error', help: 'The command failed. See the reason.' };
-    case 'SKIPPED':
-      return { label: 'Skipped', tone: 'unknown', help: 'This step did not run.' };
-  }
-  // Open-vocabulary hardening (NEW-3 sweep; the §4a law: a value the mapping
-  // does not cover renders honest-can't-know — never success, never a crash).
-  if (o == null || o === '') return { label: `Outcome ${NOT_RECORDED}`, tone: 'unknown', help: 'No outcome was recorded for this step.' };
-  return { label: `Recorded as "${o}"`, tone: 'unknown', help: 'The device reported an outcome this dashboard does not recognize yet — shown as recorded.' };
-}
+/* ---- Command outcome: the format-side map RETIRED (HERO-1c C3) — the verdict layer
+ * (verdicts.actionVerdict, one source per mode from the §7 catalog) is the command-
+ * outcome rendering; its open-vocabulary arm carries the former NEW-3 pin. ---- */
 
 /* ---- Measured confirmation-rendering semantics (AMD-97, ratified 2026-07-01) ----
  * The moat's honesty is a UI behavior too. The UI NEVER runs its own confirmation
@@ -227,20 +204,10 @@ export function outcomeMeta(o: ActionOutcome | string | null | undefined): { lab
  * COMMAND CLASS only: no numbers, no timers, no hardcoded global (SK-INV-01-safe).
  */
 
-export type CommandKind = 'effect' | 'color' | 'other';
-
-/** Classify a command for confirmation-copy purposes. Effect/identify-class first —
- *  those are the measured UNCONFIRMABLE-by-report paths (an ACK is not confirmation). */
-export function commandKind(command: string | null | undefined): CommandKind {
-  // Null-guard (the live present-but-null class): no command string, no class.
-  const c = (command ?? '').toLowerCase();
-  // Measured unconfirmable-by-report class (bench 2026-07-01: identify + color_loop).
-  if (/(identify|effect|loop|blink|flash)/.test(c)) return 'effect';
-  // Color-class only when the command SAYS color (set_temperature on a thermostat is
-  // NOT color; set_color_temperature contains "color" and matches).
-  if (/(color|hue|saturation|kelvin|mired)/.test(c)) return 'color';
-  return 'other';
-}
+/* The command CLASS (`commandKind`) lives in verdicts.ts since HERO-1c C2 — the verdict
+ * layer picks the effect-class help and cannot import this module (a cycle); it is
+ * re-exported here unchanged, so every caller keeps its import. */
+export { commandKind, type CommandKind } from './verdicts';
 
 /** Shown while an action is DISPATCHED (pending). Color-class capabilities legitimately
  *  confirm slowly (measured: batched color reporting) — say so calmly, so waiting reads
@@ -257,7 +224,7 @@ export function pendingHint(command: string | null | undefined): string | null {
  *  EXPECTED behavior — not a fault. Returns null for other command kinds. */
 export function unconfirmableHint(command: string | null | undefined): string | null {
   if (commandKind(command) === 'effect') {
-    return 'This kind of command is acknowledged but never reported back, so it cannot be confirmed.';
+    return t('explain.mode.ackedSilent.unconfirmable'); // the §7 row, byte-identical to the former literal (HERO-1c C2)
   }
   return null;
 }

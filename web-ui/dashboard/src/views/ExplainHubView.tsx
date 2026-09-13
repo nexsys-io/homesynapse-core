@@ -1,5 +1,5 @@
 /*
- * ExplainHubView — "Ask your home why." THE differentiator's front door.
+ * ExplainHubView — the front door (`explain.hub.title`): THE differentiator's two questions.
  * Two co-equal questions as peer entry points (research §4 #1):
  *   - "Why did something happen?"  -> recent runs -> causal chain
  *   - "Why didn't something happen?" -> pick an automation -> non-firing verdict
@@ -12,36 +12,34 @@ import { href } from '../lib/router';
 import { Page } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { StatusPill } from '../components/StatusPill';
+import { t } from '../lib/i18n';
 import styles from './ExplainHubView.module.css';
 
 export function ExplainHubView() {
   const autos = useApi(() => api.listAutomations());
+  // HERO-1c C4 (SPEC §7 `explain.hub.*`; the HERO-1b audit's D7): every sentence on this page
+  // is a catalog row behind t(). The two per-automation link texts and the subhead below
+  // have no §7 key yet and stay literal (filed in the HERO-1c return).
   return (
-    <Page title="Ask your home why" lede="Understand what your home did — and just as importantly, what it didn't.">
+    <Page title={t('explain.hub.title')} lede={t('explain.hub.lede')}>
       <div class={styles.questions}>
         <a class={`${styles.q} ${styles.qFire}`} href={href('/explain/runs')}>
-          <span class={styles.qKicker}>Why did</span>
-          <span class={styles.qTitle}>something happen?</span>
-          <span class={styles.qText}>
-            See any automation run, step by step — what set it off, what it checked, and whether the device actually
-            confirmed.
-          </span>
-          <span class={styles.qGo}>See recent runs →</span>
+          <span class={styles.qKicker}>{t('explain.hub.fire.kicker')}</span>
+          <span class={styles.qTitle}>{t('explain.hub.fire.title')}</span>
+          <span class={styles.qText}>{t('explain.hub.fire.text')}</span>
+          <span class={styles.qGo}>{t('explain.hub.fire.go')}</span>
         </a>
 
         <a class={`${styles.q} ${styles.qNot}`} href={href('/explain/why-not')}>
-          <span class={styles.qKicker}>Why didn&rsquo;t</span>
-          <span class={styles.qTitle}>something happen?</span>
-          <span class={styles.qText}>
-            Expected a light to come on and it didn&rsquo;t? Find out whether a condition was false, nothing triggered
-            it, or the device never confirmed.
-          </span>
-          <span class={styles.qGo}>Diagnose an automation →</span>
+          <span class={styles.qKicker}>{t('explain.hub.not.kicker')}</span>
+          <span class={styles.qTitle}>{t('explain.hub.not.title')}</span>
+          <span class={styles.qText}>{t('explain.hub.not.text')}</span>
+          <span class={styles.qGo}>{t('explain.hub.not.go')}</span>
         </a>
       </div>
 
       <h2 class={styles.subhead}>Your automations</h2>
-      <Resource state={autos}>
+      <Resource state={autos} labels={{ loading: t('explain.loading'), errorTitle: t('explain.error.title'), errorBody: t('explain.error.body') }}>
         {(rows: AutomationSummary[]) => (
           <ul class={styles.autoList}>
             {rows.map((a) => (
@@ -61,7 +59,7 @@ export function ExplainHubView() {
                   {a.lastRunId ? (
                     <a href={href(`/explain/run/${a.lastRunId}`)}>Why did it fire?</a>
                   ) : (
-                    <span class={styles.dim}>No runs yet</span>
+                    <span class={styles.dim}>{t('explain.hub.autos.noRuns')}</span>
                   )}
                   <a href={href(`/explain/why-not/${a.automationId}`)}>Why didn&rsquo;t it?</a>
                 </div>

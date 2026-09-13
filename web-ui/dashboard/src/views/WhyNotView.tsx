@@ -58,7 +58,7 @@ function WhyNotPicker() {
   const autos = useApi(() => api.listAutomations());
   return (
     <Page title="Why didn't it happen?" lede="Choose the automation you expected to run.">
-      <Resource state={autos}>
+      <Resource state={autos} labels={{ loading: t('explain.loading'), errorTitle: t('explain.error.title'), errorBody: t('explain.error.body') }}>
         {(rows: AutomationSummary[]) => (
           <ul class={styles.pick}>
             {rows.map((a) => (
@@ -156,7 +156,8 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
       <p style={{ marginTop: 'calc(-1 * var(--hs-space-2))' }}>
         <a href={href('/explain/why-not')}>← Pick another automation</a>
       </p>
-      <Resource state={state}>
+      {/* HERO-1c correction D3: the hero's own loading / error rows (SPEC §7) ride Resource's labels. */}
+      <Resource state={state} labels={{ loading: t('explain.loading'), errorTitle: t('explain.error.title'), errorBody: t('explain.error.body') }}>
         {(nf: NonFiringExplanation) => {
           const card = whyNotCard(nf);
           return (
@@ -194,14 +195,21 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
                     </dd>
                   </div>
                   {/* OBSERVED LIVE NULLABILITY (2026-08-16, §4.5): the wire serves
-                      `lastEvaluation: null` — the null case renders ABSENCE (the
-                      row simply doesn't render), never fabrication, never a
-                      throw. This exact dereference, unguarded, was DX-16's crash
-                      (`can't access property "at"`). Date-qualified stamp per
-                      NEW-6: an evaluation can be >24 h old. A null conditionsResult
-                      beside a time is the FAILED/ABORTED/INTERRUPTED class
+                      `lastEvaluation: null` — since HERO-1c C6 the null case SAYS so
+                      (SPEC §7 `whyNot.kv.neverChecked`, the HERO-1b audit's D7): a fact
+                      in the value cell, never fabrication, never a throw. This exact
+                      dereference, unguarded, was DX-16's crash (`can't access property
+                      "at"`). An object with `at: null` keeps the pre-existing suppression
+                      (no time to date-qualify). Date-qualified stamp per NEW-6: an
+                      evaluation can be >24 h old. A null conditionsResult beside a time
+                      is the FAILED/ABORTED/INTERRUPTED class
                       (StandardExplanationService:281–:288) — said in words. */}
-                  {nf.lastEvaluation?.at ? (
+                  {nf.lastEvaluation === null ? (
+                    <div class="kvRow">
+                      <dt>{t('whyNot.kv.lastChecked')}</dt>
+                      <dd>{t('whyNot.kv.neverChecked')}</dd>
+                    </div>
+                  ) : nf.lastEvaluation?.at ? (
                     <div class="kvRow">
                       <dt>{t('whyNot.kv.lastChecked')}</dt>
                       <dd>

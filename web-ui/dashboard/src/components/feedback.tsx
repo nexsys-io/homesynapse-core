@@ -10,7 +10,13 @@ import { timeAgo } from '../lib/format';
 import { t } from '../lib/i18n';
 import styles from './feedback.module.css';
 
-export function Loading({ label = 'Loading…' }: { label?: string }) {
+/* HERO-1c C5 (SPEC §7 `explain.offline.*` · `explain.replaying.*`; the HERO-1b audit's D7) and its
+ * D3 correction (the intake's ruling): the four state cards are catalog rows behind t(). Resource
+ * mounts these primitives on EVERY view, so Loading and ErrorState DEFAULT to the app's generic
+ * pair (`ui.loading` / `ui.error.*`) and take the hero's rows (`explain.loading` /
+ * `explain.error.*`) as props — the hero views pass them through Resource's `labels`. The
+ * offline and replaying copy is generic and stays the §7 rows. */
+export function Loading({ label = t('ui.loading') }: { label?: string }) {
   return (
     <div class={styles.center} role="status" aria-live="polite">
       <span class={styles.spinner} aria-hidden="true" />
@@ -28,17 +34,32 @@ export function EmptyState({ title, hint }: { title: string; hint?: string }) {
   );
 }
 
-export function ErrorState({ error, onRetry }: { error?: Error; onRetry?: () => void }) {
+export function ErrorState({
+  error,
+  onRetry,
+  title = t('ui.error.title'),
+  body = t('ui.error.body'),
+  retry = t('ui.error.retry'),
+}: {
+  error?: Error;
+  onRetry?: () => void;
+  /** The hero passes its §7 rows (`explain.error.title` / `.body` / `.retry`); the app pair is the default. */
+  title?: string;
+  body?: string;
+  retry?: string;
+}) {
+  // The hub's own words (a problem's title and detail, or an Error's message) stay visible
+  // beneath the keyed body — wire data, never hidden; the sentences around them are the catalog's.
   const isProblem = error instanceof ApiProblem;
-  const title = isProblem ? error.problem.title : 'Something went wrong';
-  const detail = isProblem ? error.problem.detail : error?.message;
+  const said = isProblem ? [error.problem.title, error.problem.detail].filter(Boolean).join(' — ') : error?.message;
   return (
     <div class={styles.center} role="alert">
       <p class={styles.errorTitle}>{title}</p>
-      {detail ? <p class={styles.muted}>{detail}</p> : null}
+      <p class={styles.muted}>{body}</p>
+      {said ? <p class={styles.muted}>{said}</p> : null}
       {onRetry ? (
         <button class={styles.retry} onClick={onRetry}>
-          Try again
+          {retry}
         </button>
       ) : null}
     </div>
@@ -51,7 +72,7 @@ export function ReplayingBanner() {
     <div class={styles.replaying} role="status" aria-live="polite">
       <span class={styles.spinner} aria-hidden="true" />
       <span>
-        <strong>Starting up.</strong> {t('boot.startingBody')}
+        <strong>{t('explain.replaying.title')}</strong> {t('explain.replaying.body')}
       </span>
     </div>
   );
@@ -62,13 +83,11 @@ export function ReplayingBanner() {
 export function OfflineState({ onRetry }: { onRetry?: () => void }) {
   return (
     <div class={styles.center} role="status" aria-live="polite">
-      <p class={styles.emptyTitle}>Can&rsquo;t reach your home right now</p>
-      <p class={styles.muted}>
-        The dashboard lost contact with the hub. It keeps trying — nothing in your home is affected.
-      </p>
+      <p class={styles.emptyTitle}>{t('explain.offline.title')}</p>
+      <p class={styles.muted}>{t('explain.offline.body')}</p>
       {onRetry ? (
         <button class={styles.retry} onClick={onRetry}>
-          Try again
+          {t('explain.error.retry')}
         </button>
       ) : null}
     </div>

@@ -273,6 +273,12 @@ Every string the hero shows, in Register C (no self-reference, no "we", never bl
 | `explain.replaying.title` | The hub is catching up after a restart. | replaying card title | — | 3.8 | 8 |
 | `explain.replaying.body` | This takes a moment. Explanations appear as the log is replayed. | replaying card body | — | 4.8 | 7 |
 | `explain.loading` | Loading this run… | loading state (never an eternal spinner: becomes the error card on failure) | — | frag. | 3 |
+| `explain.terminal.noSteps` | Done, recorded no steps. | terminal step line, a completed run with `actionCount` 0 (SPEC §4's sentence, given its key) | — | 0.7 | 4 |
+| `whyNot.headline.actedButUnconfirmed.noTime` | It ran, but the device never confirmed it acted. | why-not L1, N4 with `lastEvaluation` null (§3 N4's no-time arm, given its key) | — | 3.7 | 9 |
+| `whyNot.headline.sentNothing.noTime` | It ran, but sent nothing — every step was skipped. | why-not L1, N6 with `lastEvaluation` null (§3 N6's no-time arm, given its key) | — | 3.7 | 9 |
+| `explain.headline.completed.notRecorded` | {Target} was asked to {verb} because {because}; what happened isn't recorded. | L1 headline, the headline action's outcome null or a string this build does not know (D5; today rendered through `explain.mode.notRecorded.line`) | Target·verb·because | 6.8 | 15 |
+| `explain.mode.notRecorded.help` | What happened to this step was not recorded. The step itself is preserved. | action step help / pill title, outcome null (HEAD's sentence, given its key) | — | 4.1 | 7 |
+| `explain.mode.settledFailed.lineNoCommand` | No command was sent to {target} — this step failed{reasonClause}. | action step line, FAILED with `command` null and a named target (D2: the `act` arm is the SPEC's null verb and reads wrongly) | target·reasonClause | 4.9 | 13 |
 
 ## §8 Accessibility
 

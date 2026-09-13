@@ -11,6 +11,7 @@ import { Resource } from '../components/Resource';
 import { CausalChain } from '../components/CausalChain';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { useRefResolver } from '../lib/registry';
+import { t } from '../lib/i18n';
 
 export function RunChainView({ runId }: { runId: string }) {
   const state = useApi(() => api.getCausalChain(runId));
@@ -28,7 +29,10 @@ export function RunChainView({ runId }: { runId: string }) {
             app. A fetch failure renders Resource's honest error card; a RENDER
             failure is contained to this card — the poll loop survives both. */}
         <ErrorBoundary resetKey={runId} onRetry={state.reload}>
-          <Resource state={state}>{(chain) => <CausalChain chain={chain} resolveRef={resolveRef} />}</Resource>
+          {/* HERO-1c correction D3: the hero's own loading / error rows (SPEC §7) ride Resource's labels. */}
+          <Resource state={state} labels={{ loading: t('explain.loading'), errorTitle: t('explain.error.title'), errorBody: t('explain.error.body') }}>
+            {(chain) => <CausalChain chain={chain} resolveRef={resolveRef} />}
+          </Resource>
         </ErrorBoundary>
       </Card>
     </Page>

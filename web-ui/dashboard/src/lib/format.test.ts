@@ -16,7 +16,6 @@ import {
   LIST_FRESHNESS_NO_CLAIM_TITLE,
   LIST_FRESHNESS_NULL_TITLE,
   NULL_NAME_NOTE,
-  outcomeMeta,
   originMeta,
   refLabel,
   runName,
@@ -43,11 +42,8 @@ describe('plain-language formatting', () => {
     expect(s.split(' ').length).toBeLessThanOrEqual(20);
   });
 
-  it('tells the honest command-outcome truth', () => {
-    expect(outcomeMeta('CONFIRMED')).toMatchObject({ tone: 'ok' });
-    expect(outcomeMeta('UNCONFIRMED')).toMatchObject({ tone: 'warn', label: 'Sent, not confirmed' });
-    expect(outcomeMeta('FAILED')).toMatchObject({ tone: 'error' });
-  });
+  // 'tells the honest command-outcome truth' (format.ts's command-outcome map) retired by HERO-1c C3 — the
+  // command-outcome truth is verdicts.test.ts's (actionVerdict: modes, labels, helps).
 
   it('never leaves origin a silent blank — UNKNOWN is an honest value', () => {
     expect(originMeta('UNKNOWN').label).toBe('Unknown');

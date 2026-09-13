@@ -16,7 +16,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveScenario, SCENARIOS } from './mock/scenarios';
-import { commandKind, pendingHint, unconfirmableHint, outcomeMeta } from '../format';
+import { commandKind, pendingHint, unconfirmableHint } from '../format';
+import { actionVerdict } from '../verdicts'; // HERO-1c C3: format.ts's command-outcome map retired — the verdict layer is the one source
 
 describe('E5 scenario — the four measured confirmation semantics', () => {
   beforeEach(() => {
@@ -47,7 +48,7 @@ describe('E5 scenario — the four measured confirmation semantics', () => {
   });
 
   it('1b: the pending state renders calm (info tone), never failure-anxiety', () => {
-    const m = outcomeMeta('DISPATCHED');
+    const m = actionVerdict({ outcome: 'DISPATCHED', reason: null, resultOutcome: null, settled: false });
     expect(m.tone).toBe('info'); // not warn/error inside the window
     expect(pendingHint('set_color_temperature')).toMatch(/slowly/i);
     expect(pendingHint('turn_on')).toBeNull(); // fast-confirming class gets no slow-hint
@@ -93,8 +94,8 @@ describe('E5 scenario — the four measured confirmation semantics', () => {
     for (const text of [
       pendingHint('set_color_temperature'),
       unconfirmableHint('identify'),
-      outcomeMeta('DISPATCHED').help,
-      outcomeMeta('UNCONFIRMED').help,
+      actionVerdict({ outcome: 'DISPATCHED', reason: null, resultOutcome: null, settled: false }).help,
+      actionVerdict({ outcome: 'UNCONFIRMED', reason: null, resultOutcome: null, settled: true }).help,
     ]) {
       expect(text ?? '').not.toMatch(/\d/);
     }

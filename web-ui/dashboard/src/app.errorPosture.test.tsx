@@ -27,6 +27,7 @@ import { App } from './app';
 import { api } from './lib/api';
 import { setToken, clearToken } from './lib/auth';
 import { RENDER_ERROR_TITLE } from './components/ErrorBoundary';
+import { t } from './lib/i18n';
 
 /** Data that throws on ANY property access during render — the contained-crash
  *  stand-in (the poll.survival Bomb, generalized to arrive AS the payload). */
@@ -99,7 +100,7 @@ describe('the error-posture law holds on every view (render throw → honest car
       expect(text).toContain(RENDER_ERROR_TITLE);
       expect(text).toMatch(/Try again/);
       // 2. The eternal spinner is unreachable past a thrown render.
-      expect(text).not.toContain('Loading…');
+      expect(text).not.toContain(t('ui.loading')); // HERO-1c C5 + D3: the spinner's default is the app row (this pin was the literal 'Loading…')
       // 3. The shell chrome survived — the user can still navigate away.
       expect(text).toContain('Automations');
       expect(text).toContain('Health');
@@ -113,6 +114,31 @@ describe('the error-posture law holds on every view (render throw → honest car
       expect(projSpy.mock.calls.length).toBeGreaterThan(before);
     });
   }
+
+  /* HERO-1c correction D3 (2026-09-13): the state primitives default to the app's generic pair
+     (`ui.loading` / `ui.error.*`); the hero views pass the `explain.*` rows through Resource's
+     `labels`. RED at the HERO-1c tree: Loading's default was `explain.loading` on EVERY page. */
+  it('D3: the DEVICES page loads with the app row ui.loading — never the hero\'s "Loading this run…"', async () => {
+    vi.spyOn(api, 'listEntities').mockReturnValue(new Promise(() => {}) as never); // never resolves: the loading state stands
+    window.location.hash = '#/devices';
+    const { container } = render(<App />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    const text = container.textContent ?? '';
+    expect(text).toContain(t('ui.loading'));
+    expect(text).not.toContain(t('explain.loading'));
+  });
+
+  it('D3: the run page loads with the hero row explain.loading through Resource labels [GREEN at the HERO-1c tree by construction — it was then the default]', async () => {
+    vi.spyOn(api, 'getCausalChain').mockReturnValue(new Promise(() => {}) as never);
+    window.location.hash = '#/explain/run/run_eh_001';
+    const { container } = render(<App />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+    expect(container.textContent ?? '').toContain(t('explain.loading'));
+  });
 
   it('"Try again" on the app-level card remounts the view and refetches (recovery, not a dead end)', async () => {
     let blow = true;
