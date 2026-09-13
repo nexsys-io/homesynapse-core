@@ -18,6 +18,7 @@ import com.homesynapse.event.AutomationActionStartedEvent;
 import com.homesynapse.event.AutomationCompletedEvent;
 import com.homesynapse.event.AutomationConditionEvaluatedEvent;
 import com.homesynapse.event.AutomationConditionEvaluatedEvent.EvaluatedEntityState;
+import com.homesynapse.event.AutomationDisabledEvent;
 import com.homesynapse.event.AutomationTriggeredEvent;
 import com.homesynapse.event.CausalContext;
 import com.homesynapse.event.CommandConfirmationTimedOutEvent;
@@ -29,7 +30,9 @@ import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventId;
 import com.homesynapse.event.EventOrigin;
+import com.homesynapse.event.EventPage;
 import com.homesynapse.event.EventPriority;
+import com.homesynapse.event.EventStore;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.StateChangedEvent;
@@ -43,6 +46,8 @@ import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.value.IntValue;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -60,6 +65,13 @@ import org.junit.jupiter.api.Test;
  */
 @DisplayName("StandardExplanationService")
 final class StandardExplanationServiceTest {
+
+    /**
+     * Mirrors {@code StandardExplanationService.SCAN_BATCH} (private there): the page size the one
+     * type-index scan reads with. T1/T2 seed one more than a page so the walk pages twice; T3 pins
+     * this mirror against the {@code maxCount} the service actually passes.
+     */
+    private static final int SCAN_BATCH = 500;
 
     private InMemoryEventStore store;
     private AutomationTestSupport.MapAutomationRegistry registry;
@@ -681,6 +693,70 @@ final class StandardExplanationServiceTest {
         assertThat(service.explainRun(runId).orElseThrow().definitionKey()).isEqualTo("hash");
     }
 
+    // ---- EXPLAIN-114b: the one type-index scan crosses the SCAN_BATCH boundary ----
+
+    @Test
+    @DisplayName("listRuns pages across the SCAN_BATCH boundary: the newest five of 501 markers, page 2 seen (T1)")
+    void listRuns_pagesAcrossScanBatchBoundary() {
+        AutomationId autoId = automationId();
+        List<RunId> seeded = new ArrayList<>(SCAN_BATCH + 1);
+        for (int i = 0; i < SCAN_BATCH + 1; i++) {
+            seeded.add(seedCompleted(autoId, "COMPLETED", null));
+        }
+        CountingEventStore counting = new CountingEventStore(store);
+        ExplanationService paged = ExplanationService.over(counting, registry);
+
+        RunPage page = paged.listRuns(Optional.of(autoId), 0, 5);
+
+        // The 501st marker is alone on page 2 and is the newest — it must lead the page.
+        int last = seeded.size() - 1;
+        assertThat(page.runs()).extracting(RunSummary::runId).containsExactly(
+                seeded.get(last), seeded.get(last - 1), seeded.get(last - 2),
+                seeded.get(last - 3), seeded.get(last - 4));
+        assertThat(page.hasMore()).isTrue();
+        assertThat(counting.reads(EventTypes.AUTOMATION_COMPLETED)).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("latestDisabled scans to the last page: the target's marker behind 500 of another automation (T2)")
+    void latestDisabled_seesMarkerOnSecondPage() {
+        AutomationId other = automationId();
+        AutomationId autoId = automationId();
+        registry.add(definition(autoId, "Night Arrival", false, entityId()));
+        for (int i = 0; i < SCAN_BATCH; i++) {
+            seedDisabled(other, "repeated_failure", 3, FIXED_INSTANT);
+        }
+        Instant disabledAt = FIXED_INSTANT.plusSeconds(7);
+        seedDisabled(autoId, "repeated_failure", 3, disabledAt);
+        CountingEventStore counting = new CountingEventStore(store);
+        ExplanationService paged = ExplanationService.over(counting, registry);
+
+        NonFiringExplanation result = paged.explainNonFiring(autoId, 0).orElseThrow();
+
+        assertThat(result.verdict()).isEqualTo(NonFiringExplanation.NonFiringVerdict.DISABLED);
+        assertThat(result.disabledAt()).isEqualTo(disabledAt);
+        assertThat(result.disabledReason()).isEqualTo("repeated_failure");
+        assertThat(counting.reads(EventTypes.AUTOMATION_DISABLED)).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("explainRun stops at the first automation_triggered match: one page read of two (T3)")
+    void explainRun_stopsAtFirstTriggeredMatch() {
+        RunId runId = seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.CONFIRMED);
+        for (int i = 0; i < SCAN_BATCH; i++) {
+            seedTriggeredMarker(automationId());
+        }
+        // Construction check: the type index spans two pages and the run's marker is on page 1.
+        assertThat(store.readByType(EventTypes.AUTOMATION_TRIGGERED, 0, SCAN_BATCH).hasMore()).isTrue();
+        CountingEventStore counting = new CountingEventStore(store);
+        ExplanationService paged = ExplanationService.over(counting, registry);
+
+        assertThat(paged.explainRun(runId)).isPresent();
+
+        assertThat(counting.reads(EventTypes.AUTOMATION_TRIGGERED)).isEqualTo(1);
+        assertThat(counting.lastMaxCount()).isEqualTo(SCAN_BATCH);
+    }
+
     // ---- INV-SA-03: pure projection -----------------------------------------
 
     @Test
@@ -948,8 +1024,34 @@ final class StandardExplanationServiceTest {
         return runId;
     }
 
+    /** Seeds an automation_disabled marker on the automation subject with an explicit eventTime. */
+    private void seedDisabled(AutomationId autoId, String reason, int failureCount, Instant at) {
+        EventDraft draft = new EventDraft(EventTypes.AUTOMATION_DISABLED, 1, at,
+                SubjectRef.automation(autoId), EventPriority.NORMAL, EventOrigin.AUTOMATION,
+                new AutomationDisabledEvent(autoId, reason, failureCount, 60, "boom", null),
+                null, null);
+        try {
+            store.publishRoot(draft);
+        } catch (SequenceConflictException e) {
+            throw new AssertionError("seed publish failed", e);
+        }
+    }
+
+    /** Seeds a bare {@code automation_triggered} marker on its own root correlation (type-index filler). */
+    private void seedTriggeredMarker(AutomationId autoId) {
+        publishRoot(EventTypes.AUTOMATION_TRIGGERED, SubjectRef.automation(autoId),
+                new AutomationTriggeredEvent(ulid(), eventId(), List.of("t1"),
+                        Map.of("action:0", Set.of(entityId())), "hash", 0));
+    }
+
     private static AutomationDefinition definition(AutomationId autoId, String name, EntityId entity) {
-        return new AutomationDefinition(autoId, "auto-slug", name, null, true,
+        return definition(autoId, name, true, entity);
+    }
+
+    /** An enabled or disabled automation with a single {@code StateTrigger} on {@code entity}. */
+    private static AutomationDefinition definition(AutomationId autoId, String name, boolean enabled,
+                                                   EntityId entity) {
+        return new AutomationDefinition(autoId, "auto-slug", name, null, enabled,
                 ConcurrencyMode.SINGLE, 1, MaxExceededSeverity.INFO, 0,
                 List.of(new StateTrigger(new DirectRefSelector(entity), "motion", "active", null,
                         "t1")),
@@ -980,6 +1082,62 @@ final class StandardExplanationServiceTest {
             return store.publish(draft, CausalContext.chain(correlationId, causationId));
         } catch (SequenceConflictException e) {
             throw new AssertionError("seed publish failed", e);
+        }
+    }
+
+    /**
+     * A read-through {@link EventStore} decorator that counts {@code readByType} calls per event
+     * type and records the last page size asked for: the instrument for the early stop (T3) and
+     * the two-page walks (T1/T2), and the pin that keeps {@link #SCAN_BATCH} honest. Delegates
+     * every read to the seeded store; reads no clock.
+     */
+    private static final class CountingEventStore implements EventStore {
+        private final EventStore delegate;
+        private final Map<String, Integer> readsByType = new HashMap<>();
+        private int lastMaxCount = -1;
+
+        CountingEventStore(EventStore delegate) {
+            this.delegate = delegate;
+        }
+
+        int reads(String eventType) {
+            return readsByType.getOrDefault(eventType, 0);
+        }
+
+        int lastMaxCount() {
+            return lastMaxCount;
+        }
+
+        @Override
+        public EventPage readFrom(long afterPosition, int maxCount) {
+            return delegate.readFrom(afterPosition, maxCount);
+        }
+
+        @Override
+        public EventPage readBySubject(SubjectRef subject, long afterSequence, int maxCount) {
+            return delegate.readBySubject(subject, afterSequence, maxCount);
+        }
+
+        @Override
+        public List<EventEnvelope> readByCorrelation(Ulid correlationId) {
+            return delegate.readByCorrelation(correlationId);
+        }
+
+        @Override
+        public EventPage readByType(String eventType, long afterPosition, int maxCount) {
+            readsByType.merge(eventType, 1, Integer::sum);
+            lastMaxCount = maxCount;
+            return delegate.readByType(eventType, afterPosition, maxCount);
+        }
+
+        @Override
+        public EventPage readByTimeRange(Instant from, Instant to, long afterPosition, int maxCount) {
+            return delegate.readByTimeRange(from, to, afterPosition, maxCount);
+        }
+
+        @Override
+        public long latestPosition() {
+            return delegate.latestPosition();
         }
     }
 }

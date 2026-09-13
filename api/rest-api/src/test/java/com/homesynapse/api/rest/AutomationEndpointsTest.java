@@ -58,13 +58,13 @@ final class AutomationEndpointsTest {
     @Test
     @DisplayName("GET /automations/{id}/non-firing serializes exactly the frozen v1.1 shape")
     void nonFiring_v11ShapeTest() {
-        NonFiringExplanation explanation = new NonFiringExplanation(
+        NonFiringExplanation explanation = NonFiringExplanations.of(
                 AutomationId.parse(AUTO_ULID), "My Automation", true,
                 NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED,
                 new RunId(Ulid.parse(RUN_ULID)),
                 "Automation 'My Automation' fired, but a device did not confirm the requested change.",
                 "Fires on state change",
-                new NonFiringExplanation.LastEvaluationView(FIXED_INSTANT, "true"));
+                new NonFiringExplanation.LastEvaluationView(FIXED_INSTANT, "true")).build();
         GetNonFiringEndpoint endpoint =
                 new GetNonFiringEndpoint(fake().withNonFiring(explanation), VIEW_POSITION, FIXED_CLOCK);
         RecordingEndpointContext ctx = new RecordingEndpointContext().withPathParam("id", AUTO_ULID);
@@ -115,11 +115,11 @@ final class AutomationEndpointsTest {
     @Test
     @DisplayName("GET /automations/{id}/non-firing renders nullable run id + lastEvaluation as null")
     void nonFiring_neverTriggered_nullsRenderedAsNull() {
-        NonFiringExplanation explanation = new NonFiringExplanation(
+        NonFiringExplanation explanation = NonFiringExplanations.of(
                 AutomationId.parse(AUTO_ULID), "My Automation", true,
                 NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, null,
                 "Automation 'My Automation' has not been triggered; it fires on state change.",
-                "Fires on state change", null);
+                "Fires on state change", null).build();
         GetNonFiringEndpoint endpoint =
                 new GetNonFiringEndpoint(fake().withNonFiring(explanation), VIEW_POSITION, FIXED_CLOCK);
         RecordingEndpointContext ctx = new RecordingEndpointContext().withPathParam("id", AUTO_ULID);
@@ -135,7 +135,7 @@ final class AutomationEndpointsTest {
     @Test
     @DisplayName("GET /automations/{id}/non-firing carries the v1.1.2 noCommandsIssued skip marker")
     void nonFiring_noCommandsIssuedOnWire() {
-        NonFiringExplanation skipCase = new NonFiringExplanation(
+        NonFiringExplanation skipCase = NonFiringExplanations.of(
                 AutomationId.parse(AUTO_ULID), "My Automation", true,
                 NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED,
                 new RunId(Ulid.parse(RUN_ULID)),
@@ -143,8 +143,9 @@ final class AutomationEndpointsTest {
                         + "actions were skipped or issued nothing (targets unavailable or no "
                         + "device actions defined).",
                 "Fires on state change",
-                new NonFiringExplanation.LastEvaluationView(FIXED_INSTANT, "true"),
-                Boolean.TRUE);
+                new NonFiringExplanation.LastEvaluationView(FIXED_INSTANT, "true"))
+                .withNoCommandsIssued(Boolean.TRUE)
+                .build();
         GetNonFiringEndpoint endpoint =
                 new GetNonFiringEndpoint(fake().withNonFiring(skipCase), VIEW_POSITION, FIXED_CLOCK);
         RecordingEndpointContext ctx = new RecordingEndpointContext().withPathParam("id", AUTO_ULID);
@@ -154,10 +155,10 @@ final class AutomationEndpointsTest {
         assertThat(asMap(asMap(ctx.body).get("data"))).containsEntry("noCommandsIssued", true);
 
         // The absent (non-skip) construction renders JSON null — never false.
-        NonFiringExplanation nonSkip = new NonFiringExplanation(
+        NonFiringExplanation nonSkip = NonFiringExplanations.of(
                 AutomationId.parse(AUTO_ULID), "My Automation", true,
                 NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, null,
-                "n/a", "Fires on state change", null);
+                "n/a", "Fires on state change", null).build();
         GetNonFiringEndpoint absent =
                 new GetNonFiringEndpoint(fake().withNonFiring(nonSkip), VIEW_POSITION, FIXED_CLOCK);
         RecordingEndpointContext ctx2 = new RecordingEndpointContext().withPathParam("id", AUTO_ULID);
@@ -168,12 +169,13 @@ final class AutomationEndpointsTest {
     @Test
     @DisplayName("GET /automations/{id}/non-firing carries the v1.1.3 triggerRef as {type, id}")
     void nonFiring_triggerRefOnWire() {
-        NonFiringExplanation explanation = new NonFiringExplanation(
+        NonFiringExplanation explanation = NonFiringExplanations.of(
                 AutomationId.parse(AUTO_ULID), "My Automation", true,
                 NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, null,
                 "Automation 'My Automation' has not been triggered; it fires on state change.",
-                "state change", null, null,
-                new RunExplanation.SubjectRefView("entity", ENTITY_ULID));
+                "state change", null)
+                .withTriggerRef(new RunExplanation.SubjectRefView("entity", ENTITY_ULID))
+                .build();
         GetNonFiringEndpoint endpoint =
                 new GetNonFiringEndpoint(fake().withNonFiring(explanation), VIEW_POSITION, FIXED_CLOCK);
         RecordingEndpointContext ctx = new RecordingEndpointContext().withPathParam("id", AUTO_ULID);
@@ -191,12 +193,14 @@ final class AutomationEndpointsTest {
     @Test
     @DisplayName("GET /automations/{id}/non-firing carries the v1.1.4 disabledAt (ISO-8601), disabledReason and definitionKey (T14)")
     void nonFiring_v114DisabledKeysOnWire() {
-        NonFiringExplanation explanation = new NonFiringExplanation(
+        NonFiringExplanation explanation = NonFiringExplanations.of(
                 AutomationId.parse(AUTO_ULID), "My Automation", false,
                 NonFiringExplanation.NonFiringVerdict.DISABLED, null,
                 "Automation 'My Automation' is currently disabled.",
-                "state change", null, null, null,
-                Instant.parse("2026-01-01T00:00:11Z"), "repeated_failure", DEFINITION_KEY);
+                "state change", null)
+                .withDisabledFacts(Instant.parse("2026-01-01T00:00:11Z"), "repeated_failure")
+                .withDefinitionKey(DEFINITION_KEY)
+                .build();
         GetNonFiringEndpoint endpoint =
                 new GetNonFiringEndpoint(fake().withNonFiring(explanation), VIEW_POSITION, FIXED_CLOCK);
         RecordingEndpointContext ctx = new RecordingEndpointContext().withPathParam("id", AUTO_ULID);
@@ -213,15 +217,16 @@ final class AutomationEndpointsTest {
     @Test
     @DisplayName("GET /automations/{id}/non-firing renders the v1.1.4 FIRED_CONFIRMED verdict by name (T15)")
     void nonFiring_firedConfirmedVerdictFlowsThrough() {
-        NonFiringExplanation explanation = new NonFiringExplanation(
+        NonFiringExplanation explanation = NonFiringExplanations.of(
                 AutomationId.parse(AUTO_ULID), "My Automation", true,
                 NonFiringExplanation.NonFiringVerdict.FIRED_CONFIRMED,
                 new RunId(Ulid.parse(RUN_ULID)),
                 "Automation 'My Automation' last fired and confirmed at 2026-01-01T00:00:00Z; "
                         + "no non-firing was detected in the requested window.",
                 "state change",
-                new NonFiringExplanation.LastEvaluationView(FIXED_INSTANT, "true"),
-                null, null, null, null, DEFINITION_KEY);
+                new NonFiringExplanation.LastEvaluationView(FIXED_INSTANT, "true"))
+                .withDefinitionKey(DEFINITION_KEY)
+                .build();
         GetNonFiringEndpoint endpoint =
                 new GetNonFiringEndpoint(fake().withNonFiring(explanation), VIEW_POSITION, FIXED_CLOCK);
         RecordingEndpointContext ctx = new RecordingEndpointContext().withPathParam("id", AUTO_ULID);
@@ -266,10 +271,10 @@ final class AutomationEndpointsTest {
     @Test
     @DisplayName("GET /automations/{id}/non-firing returns 400 for a malformed expectedSince cursor")
     void nonFiring_malformedCursor_400() {
-        NonFiringExplanation explanation = new NonFiringExplanation(
+        NonFiringExplanation explanation = NonFiringExplanations.of(
                 AutomationId.parse(AUTO_ULID), "My Automation", true,
                 NonFiringExplanation.NonFiringVerdict.NEVER_TRIGGERED, null, "n/a",
-                "Fires on state change", null);
+                "Fires on state change", null).build();
         GetNonFiringEndpoint endpoint =
                 new GetNonFiringEndpoint(fake().withNonFiring(explanation), VIEW_POSITION, FIXED_CLOCK);
         RecordingEndpointContext ctx = new RecordingEndpointContext()

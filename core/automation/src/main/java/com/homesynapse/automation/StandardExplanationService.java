@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -83,12 +84,15 @@ import com.homesynapse.platform.identity.Ulid;
  * </ul>
  *
  * <h2>Ordering and cost</h2>
- * The {@link EventStore} pages forward (ascending {@code globalPosition}) only. {@code listRuns}
- * therefore scans the type-indexed {@code automation_completed} stream and keeps the newest
- * page in an {@code O(limit)} sliding window, reversing for newest-first; {@code explainRun}
- * locates the run's {@code automation_triggered} by a bounded type scan, then reads the bounded
- * correlation. Cost is {@code O(retained-runs-of-that-type)} (the type index, not the whole
- * log); a future backward-read store primitive would make it strictly {@code O(page)}.
+ * The {@link EventStore} pages forward (ascending {@code globalPosition}) only, and every walk of
+ * a type index in this class goes through ONE paging helper, {@link #scanType}: {@code SCAN_BATCH}
+ * envelopes per page from position 0, a visitor per caller that either runs to the end of the
+ * index or stops early (EXPLAIN-114b — one loop, five visitors). {@code listRuns} keeps the
+ * newest page of the type-indexed {@code automation_completed} stream in an {@code O(limit)}
+ * sliding window, reversing for newest-first; {@code explainRun} locates the run's
+ * {@code automation_triggered} by a bounded type scan that stops at the first match, then reads
+ * the bounded correlation. Cost is {@code O(retained-runs-of-that-type)} (the type index, not the
+ * whole log); a future backward-read store primitive would make it strictly {@code O(page)}.
  */
 final class StandardExplanationService implements ExplanationService {
 
@@ -141,26 +145,19 @@ final class StandardExplanationService implements ExplanationService {
         // Forward scan of the type-indexed terminal markers; keep the newest (cap + 1) below
         // the cursor in a sliding window (ascending). The extra one detects hasMore.
         Deque<EventEnvelope> window = new ArrayDeque<>(cap + 1);
-        long after = 0;
-        while (true) {
-            EventPage page = eventStore.readByType(EventTypes.AUTOMATION_COMPLETED, after, SCAN_BATCH);
-            for (EventEnvelope e : page.events()) {
-                if (e.globalPosition() >= before) {
-                    continue;
-                }
-                if (automationId.isPresent() && !automationOf(e).equals(automationId.get())) {
-                    continue;
-                }
-                window.addLast(e);
-                if (window.size() > cap + 1) {
-                    window.removeFirst();
-                }
+        scanType(EventTypes.AUTOMATION_COMPLETED, e -> {
+            if (e.globalPosition() >= before) {
+                return true;
             }
-            if (!page.hasMore()) {
-                break;
+            if (automationId.isPresent() && !automationOf(e).equals(automationId.get())) {
+                return true;
             }
-            after = page.nextPosition();
-        }
+            window.addLast(e);
+            if (window.size() > cap + 1) {
+                window.removeFirst();
+            }
+            return true;
+        });
 
         List<EventEnvelope> ascending = new ArrayList<>(window);
         boolean hasMore = ascending.size() > cap;
@@ -416,69 +413,44 @@ final class StandardExplanationService implements ExplanationService {
     /**
      * The most-recent terminal run for one automation at or after the inclusive lower-bound global
      * position {@code sinceInclusive}, or {@code null} if none. Reuses {@link #automationOf} and
-     * {@link #parseStatus} over the same forward type-scan idiom as {@code listRuns}, but is a
-     * distinct scan: the bound is a <em>lower</em> bound (the "expected since" window) and the
-     * caller needs the full envelope (to read the run's correlation for the action-outcome check).
-     * Runs with an unrecognized status are logged and skipped, matching {@code toSummary}.
+     * {@link #parseStatus} over the same type index as {@code listRuns}, but is a distinct walk
+     * ({@link #lastMatching}): the bound is a <em>lower</em> bound (the "expected since" window)
+     * and the caller needs the full envelope (to read the run's correlation for the action-outcome
+     * check). Runs with an unrecognized status are logged and skipped, matching {@code toSummary}.
      */
     private EventEnvelope latestTerminalRun(AutomationId automationId, long sinceInclusive) {
-        EventEnvelope newest = null;
-        long after = 0;
-        while (true) {
-            EventPage page =
-                    eventStore.readByType(EventTypes.AUTOMATION_COMPLETED, after, SCAN_BATCH);
-            for (EventEnvelope e : page.events()) {
-                if (e.globalPosition() < sinceInclusive) {
-                    continue;
-                }
-                if (!(e.payload() instanceof AutomationCompletedEvent p)) {
-                    continue;
-                }
-                if (!automationOf(e).equals(automationId)) {
-                    continue;
-                }
-                if (parseStatus(p.finalStatus()) == null) {
-                    LOG.warn("Skipping run {} with unrecognized finalStatus '{}'",
-                            p.runId(), p.finalStatus());
-                    continue;
-                }
-                newest = e; // ascending scan — the last match seen is the newest
+        return lastMatching(EventTypes.AUTOMATION_COMPLETED, e -> {
+            if (e.globalPosition() < sinceInclusive) {
+                return false;
             }
-            if (!page.hasMore()) {
-                break;
+            if (!(e.payload() instanceof AutomationCompletedEvent p)) {
+                return false;
             }
-            after = page.nextPosition();
-        }
-        return newest;
+            if (!automationOf(e).equals(automationId)) {
+                return false;
+            }
+            if (parseStatus(p.finalStatus()) == null) {
+                LOG.warn("Skipping run {} with unrecognized finalStatus '{}'",
+                        p.runId(), p.finalStatus());
+                return false;
+            }
+            return true;
+        });
     }
 
     /**
      * The latest {@code automation_disabled} the log holds for one automation, or {@code null}
-     * (v1.1.4). One forward pass over that type's index — the same paging idiom as
-     * {@link #latestTerminalRun} (ascending scan ⇒ the last match is the newest) — matched on
-     * the payload's own {@code automationId}. Not window-bounded: the disabling event precedes
-     * any "expected since" window by definition, and the type is rare (one event per
-     * auto-disable), so the walk is {@code O(retained auto-disables)}, never {@code O(log)}.
-     * Read only on the {@code DISABLED} verdict, so an enabled automation pays nothing.
+     * (v1.1.4). One forward pass over that type's index through {@link #lastMatching} (ascending
+     * scan ⇒ the last match is the newest), matched on the payload's own {@code automationId}.
+     * Not window-bounded: the disabling event precedes any "expected since" window by
+     * definition, and the type is rare (one event per auto-disable), so the walk is
+     * {@code O(retained auto-disables)}, never {@code O(log)}. Read only on the {@code DISABLED}
+     * verdict, so an enabled automation pays nothing.
      */
     private EventEnvelope latestDisabled(AutomationId automationId) {
-        EventEnvelope newest = null;
-        long after = 0;
-        while (true) {
-            EventPage page =
-                    eventStore.readByType(EventTypes.AUTOMATION_DISABLED, after, SCAN_BATCH);
-            for (EventEnvelope e : page.events()) {
-                if (e.payload() instanceof AutomationDisabledEvent p
-                        && p.automationId().equals(automationId)) {
-                    newest = e; // ascending scan — the last match seen is the newest
-                }
-            }
-            if (!page.hasMore()) {
-                break;
-            }
-            after = page.nextPosition();
-        }
-        return newest;
+        return lastMatching(EventTypes.AUTOMATION_DISABLED, e ->
+                e.payload() instanceof AutomationDisabledEvent p
+                        && p.automationId().equals(automationId));
     }
 
     /**
@@ -489,20 +461,12 @@ final class StandardExplanationService implements ExplanationService {
      */
     private Map<AutomationId, RunId> latestRunByAutomation() {
         Map<AutomationId, RunId> latest = new HashMap<>();
-        long after = 0;
-        while (true) {
-            EventPage page =
-                    eventStore.readByType(EventTypes.AUTOMATION_COMPLETED, after, SCAN_BATCH);
-            for (EventEnvelope e : page.events()) {
-                if (e.payload() instanceof AutomationCompletedEvent p) {
-                    latest.put(automationOf(e), new RunId(p.runId()));
-                }
+        scanType(EventTypes.AUTOMATION_COMPLETED, e -> {
+            if (e.payload() instanceof AutomationCompletedEvent p) {
+                latest.put(automationOf(e), new RunId(p.runId()));
             }
-            if (!page.hasMore()) {
-                break;
-            }
-            after = page.nextPosition();
-        }
+            return true;
+        });
         return latest;
     }
 
@@ -986,22 +950,70 @@ final class StandardExplanationService implements ExplanationService {
         }
     }
 
-    // ---- lookups ------------------------------------------------------------
+    // ---- the one type-index scan (EXPLAIN-114b) -----------------------------
 
-    private EventEnvelope locateTriggered(RunId runId) {
+    /**
+     * The ONE paging walk over a type index (EXPLAIN-114b, SD-1): visits every retained envelope
+     * of {@code eventType} in ascending global position, {@link #SCAN_BATCH} per page from
+     * position 0, handing each to {@code visitor}, which returns {@code true} to continue and
+     * {@code false} to stop. The walk ends at the first {@code false} or when the store reports
+     * no further page. Reads only and never catches — a malformed payload surfaces to the caller
+     * exactly as it did when each caller paged for itself. The five type-index readers of this
+     * class are visitors over this loop; this is the class's only {@code readByType} call site.
+     */
+    private void scanType(String eventType, Predicate<EventEnvelope> visitor) {
         long after = 0;
         while (true) {
-            EventPage page = eventStore.readByType(EventTypes.AUTOMATION_TRIGGERED, after, SCAN_BATCH);
+            EventPage page = eventStore.readByType(eventType, after, SCAN_BATCH);
             for (EventEnvelope e : page.events()) {
-                if (e.payload() instanceof AutomationTriggeredEvent p && p.runId().equals(runId.value())) {
-                    return e;
+                if (!visitor.test(e)) {
+                    return;
                 }
             }
             if (!page.hasMore()) {
-                return null;
+                return;
             }
             after = page.nextPosition();
         }
+    }
+
+    /**
+     * The newest envelope of {@code eventType} satisfying {@code match}, or {@code null}: a full
+     * {@link #scanType} walk in which the last match seen wins (ascending scan ⇒ the newest is
+     * last). The two "latest" reads, {@link #latestTerminalRun} and {@link #latestDisabled}, are
+     * this walk with their own match rule.
+     */
+    private EventEnvelope lastMatching(String eventType, Predicate<EventEnvelope> match) {
+        Slot newest = new Slot();
+        scanType(eventType, e -> {
+            if (match.test(e)) {
+                newest.envelope = e;
+            }
+            return true;
+        });
+        return newest.envelope;
+    }
+
+    /** A one-envelope cell a visitor lambda writes into (a lambda captures references, not locals). */
+    private static final class Slot {
+        EventEnvelope envelope;
+
+        Slot() {
+        }
+    }
+
+    // ---- lookups ------------------------------------------------------------
+
+    private EventEnvelope locateTriggered(RunId runId) {
+        Slot found = new Slot();
+        scanType(EventTypes.AUTOMATION_TRIGGERED, e -> {
+            if (e.payload() instanceof AutomationTriggeredEvent p && p.runId().equals(runId.value())) {
+                found.envelope = e;
+                return false; // the early stop: the first match is the run's one marker
+            }
+            return true;
+        });
+        return found.envelope;
     }
 
     private static EventEnvelope firstForRun(List<EventEnvelope> chain, String eventType,

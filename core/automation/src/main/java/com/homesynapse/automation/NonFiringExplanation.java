@@ -35,6 +35,12 @@ import com.homesynapse.platform.identity.AutomationId;
  * (EXPLAIN-114a) it renders {@link #disabledAt} as ISO-8601 and {@link #disabledReason} /
  * {@link #definitionKey} as strings, each JSON null when absent.</p>
  *
+ * <p><strong>One constructor (EXPLAIN-114b).</strong> The canonical thirteen-component
+ * constructor is this record's only one: production constructs it in full, and the rest-api tests
+ * build their shapes through {@code NonFiringExplanations} in that module's test tree. The
+ * pre-v1.1.4 eight-, nine- and ten-component conveniences were deleted with it — a new additive
+ * component is a fixture edit there, never a constructor here.</p>
+ *
  * @param automationId      the diagnosed automation; never {@code null}
  * @param automationName    the display name from the definition; never {@code null}
  * @param enabled           whether the automation is currently enabled
@@ -110,49 +116,6 @@ public record NonFiringExplanation(
         Objects.requireNonNull(verdict, "verdict must not be null");
         Objects.requireNonNull(explanation, "explanation must not be null");
         Objects.requireNonNull(triggerSummary, "triggerSummary must not be null");
-    }
-
-    /**
-     * Convenience constructor for the pre-v1.1.4 ten-component form (test-convenience;
-     * production constructs the canonical form): delegates to the canonical constructor with
-     * {@code disabledAt = null}, {@code disabledReason = null} and {@code definitionKey = null}
-     * (validation lives ONLY in the canonical constructor). The eight- and nine-component
-     * conveniences below resolve through this one.
-     */
-    public NonFiringExplanation(AutomationId automationId, String automationName, boolean enabled,
-                                NonFiringVerdict verdict, RunId lastRelevantRunId,
-                                String explanation, String triggerSummary,
-                                LastEvaluationView lastEvaluation, Boolean noCommandsIssued,
-                                RunExplanation.SubjectRefView triggerRef) {
-        this(automationId, automationName, enabled, verdict, lastRelevantRunId, explanation,
-                triggerSummary, lastEvaluation, noCommandsIssued, triggerRef, null, null, null);
-    }
-
-    /**
-     * Convenience constructor for the pre-v1.1.3 nine-component form (test-convenience;
-     * production constructs the canonical form): delegates to the canonical constructor with
-     * {@code triggerRef = null} (validation lives ONLY in the canonical constructor).
-     */
-    public NonFiringExplanation(AutomationId automationId, String automationName, boolean enabled,
-                                NonFiringVerdict verdict, RunId lastRelevantRunId,
-                                String explanation, String triggerSummary,
-                                LastEvaluationView lastEvaluation, Boolean noCommandsIssued) {
-        this(automationId, automationName, enabled, verdict, lastRelevantRunId, explanation,
-                triggerSummary, lastEvaluation, noCommandsIssued, null);
-    }
-
-    /**
-     * Convenience constructor for the pre-v1.1.2 eight-component form (test-convenience;
-     * production constructs the canonical form): delegates to the canonical constructor with
-     * {@code noCommandsIssued = null} and {@code triggerRef = null} (validation lives ONLY in the
-     * canonical constructor). Pre-v1.1.2 call sites compile unchanged through this overload.
-     */
-    public NonFiringExplanation(AutomationId automationId, String automationName, boolean enabled,
-                                NonFiringVerdict verdict, RunId lastRelevantRunId,
-                                String explanation, String triggerSummary,
-                                LastEvaluationView lastEvaluation) {
-        this(automationId, automationName, enabled, verdict, lastRelevantRunId, explanation,
-                triggerSummary, lastEvaluation, null, null);
     }
 
     /**
