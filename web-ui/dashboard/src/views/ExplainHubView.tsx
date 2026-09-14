@@ -18,8 +18,9 @@ import styles from './ExplainHubView.module.css';
 export function ExplainHubView() {
   const autos = useApi(() => api.listAutomations());
   // HERO-1c C4 (SPEC §7 `explain.hub.*`; the HERO-1b audit's D7): every sentence on this page
-  // is a catalog row behind t(). The two per-automation link texts and the subhead below
-  // have no §7 key yet and stay literal (filed in the HERO-1c return).
+  // is a catalog row behind t(). HERO-1d D3 keyed the last three — the subhead and the two
+  // per-automation links (`explain.hub.autos.title` / `.whyFire` / `.whyNot`) — and the On / Off
+  // pills (`ui.on` / `ui.off`, the app's register); the literal lint of eslint.config.js keeps it so.
   return (
     <Page title={t('explain.hub.title')} lede={t('explain.hub.lede')}>
       <div class={styles.questions}>
@@ -38,7 +39,7 @@ export function ExplainHubView() {
         </a>
       </div>
 
-      <h2 class={styles.subhead}>Your automations</h2>
+      <h2 class={styles.subhead}>{t('explain.hub.autos.title')}</h2>
       <Resource state={autos} labels={{ loading: t('explain.loading'), errorTitle: t('explain.error.title'), errorBody: t('explain.error.body') }}>
         {(rows: AutomationSummary[]) => (
           <ul class={styles.autoList}>
@@ -51,17 +52,17 @@ export function ExplainHubView() {
                   </span>
                 </div>
                 {a.enabled ? (
-                  <StatusPill tone="ok" label="On" size="sm" />
+                  <StatusPill tone="ok" label={t('ui.on')} size="sm" />
                 ) : (
-                  <StatusPill tone="unknown" label="Off" size="sm" />
+                  <StatusPill tone="unknown" label={t('ui.off')} size="sm" />
                 )}
                 <div class={styles.autoLinks}>
                   {a.lastRunId ? (
-                    <a href={href(`/explain/run/${a.lastRunId}`)}>Why did it fire?</a>
+                    <a href={href(`/explain/run/${a.lastRunId}`)}>{t('explain.hub.autos.whyFire')}</a>
                   ) : (
                     <span class={styles.dim}>{t('explain.hub.autos.noRuns')}</span>
                   )}
-                  <a href={href(`/explain/why-not/${a.automationId}`)}>Why didn&rsquo;t it?</a>
+                  <a href={href(`/explain/why-not/${a.automationId}`)}>{t('explain.hub.autos.whyNot')}</a>
                 </div>
               </li>
             ))}

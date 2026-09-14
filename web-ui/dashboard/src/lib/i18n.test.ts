@@ -251,3 +251,67 @@ describe('HERO-1c D2 — the two correction rows are in the catalog, verbatim', 
     }
   });
 });
+
+/*
+ * HERO-1d D1–D4 (2026-09-13) — the last literal hero sentences, keyed byte-identically (the SPEC §7
+ * amendment rows tagged HERO-1d). RED at HEAD: none of the keys exists. Every string is HEAD's
+ * literal, character for character — the recovered suffix keeps its leading space; the hub link's
+ * `&rsquo;` is the rendered ’; `{slots}` stand where the component interpolated. `ui.on` / `ui.off`
+ * are the app's register (the HERO-1c D3 ruling), listed here because this lane added them.
+ */
+const SPEC7_HERO1D_KEYS = {
+  // D1 — terminalLine
+  'explain.terminal.unrecorded': 'Outcome {notRecorded}.',
+  'explain.terminal.completed.noTime': 'Done.',
+  'explain.terminal.completed.nothing.noTime': 'Finished, but nothing was changed.',
+  'explain.terminal.completed.open.one': 'Done in {secs}s — one outcome has not settled yet.',
+  'explain.terminal.completed.open.noTime': 'Done — {count} outcomes have not settled yet.',
+  'explain.terminal.completed.open.one.noTime': 'Done — one outcome has not settled yet.',
+  'explain.terminal.status': '{label}.',
+  // D2 — the do-nothing step and the recovered suffix
+  'explain.step.nothing.one': 'Nothing was changed: the planned step ended without sending a command.',
+  'explain.step.nothing.many': 'Nothing was changed: all {count} planned steps ended without sending a command.',
+  'explain.step.nothing.hint': 'This usually means the devices this automation targets were unavailable, so each was skipped by design. The step-by-step record of these skips is not kept yet.',
+  'explain.action.detail.outcome.recovered': ' (recovered from the recorded reason — this record predates the current hub software)',
+  // D3 — the hub page
+  'explain.hub.autos.title': 'Your automations',
+  'explain.hub.autos.whyFire': 'Why did it fire?',
+  'explain.hub.autos.whyNot': 'Why didn’t it?',
+  'ui.on': 'On',
+  'ui.off': 'Off',
+  // D4 — the why-not, runs and run pages
+  'explain.whyNot.pick.title': "Why didn't it happen?",
+  'explain.whyNot.pick.lede': 'Choose the automation you expected to run.',
+  'explain.whyNot.title': "Why this didn't happen",
+  'explain.whyNot.back': '← Pick another automation',
+  'explain.runs.title': 'Why did something happen?',
+  'explain.runs.lede': 'Pick a run to see exactly why it fired, step by step.',
+  'explain.runs.empty': 'No automation runs yet.',
+  'explain.run.title': 'Why this happened',
+} as const;
+
+describe('HERO-1d — the amendment rows are in the catalog, verbatim (146 + 24 = 170 rows)', () => {
+  it('carries the twenty-four keys with the literals of HEAD, character for character', () => {
+    expect(Object.keys(SPEC7_HERO1D_KEYS).length).toBe(24);
+    for (const [k, s] of Object.entries(SPEC7_HERO1D_KEYS)) {
+      expect(t(k as MessageKey), k).toBe(s);
+    }
+  });
+
+  it('Register C holds on the twenty-four: no product name, no token, no "we"', () => {
+    for (const [k, s] of Object.entries(SPEC7_HERO1D_KEYS)) {
+      expect(s, k).not.toContain(BRAND.productName);
+      expect(s, k).not.toContain('{{NAME}}');
+      expect(s, k).not.toMatch(/\bwe\b/i);
+    }
+  });
+});
+
+/* HERO-1d D6 (2026-09-13) — the spelling of record is the key's own (`explain.action.pending.color`): the
+ * UK → US sweep of that word (arc 25). RED at HEAD: the catalog string carried the UK spelling. After the
+ * sweep the row is byte-identical to format.ts pendingHint's literal (still a literal there — filed). */
+describe('HERO-1d D6 — the spelling of record', () => {
+  it('explain.action.pending.color reads "Color", the US spelling of its own key', () => {
+    expect(t('explain.action.pending.color')).toBe('Color changes confirm slowly on some bulbs — this can take several seconds.');
+  });
+});

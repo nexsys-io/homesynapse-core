@@ -97,7 +97,7 @@ describe("HERO-1c C1 — the action step line is the mode's §7 sentence", () =>
     expect(text).not.toContain('failed —');
   });
 
-  it('held-DISPATCHED on a colour-class command: the mode line, the slow-confirm hint beneath it, the provisional suffix for screen readers', () => {
+  it('held-DISPATCHED on a color-class command: the mode line, the slow-confirm hint beneath it, the provisional suffix for screen readers', () => {
     const { text, li } = actionStep(action({ outcome: 'DISPATCHED', settled: false, command: 'set_color_temperature' }));
     expect(text).toContain('Hallway Light was asked to run "set_color_temperature"; waiting for it to confirm.');
     expect(text).toMatch(/confirm slowly/); // pendingHint, still appended to the help — not the line

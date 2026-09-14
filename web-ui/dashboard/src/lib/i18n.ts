@@ -47,6 +47,10 @@ const en = {
   'ui.error.title': "This page couldn't be loaded.",
   'ui.error.body': 'The hub answered with an error. Try again.',
   'ui.error.retry': 'Try again',
+  // HERO-1d D3 (2026-09-13): the enabled / disabled pill labels of the hub's automation rows — app copy
+  // in the `ui.*` register like the pair above (AutomationsView still carries its own literals).
+  'ui.on': 'On',
+  'ui.off': 'Off',
   /* ---- HERO-1b B2 (2026-09-12): the explainability hero copy — SPEC §7, all 140 keyed rows,
    * verbatim (design/hero-v1/SPEC.md:136–:275). Register C: no product name, no "we", never
    * blames, never celebrates. The permanence footer is the Q3 (a) sentence (name-free,
@@ -98,6 +102,11 @@ const en = {
   // explain.chain.*
   "explain.chain.noDetail.title": "This run is on record, but its steps aren't.",
   "explain.chain.noDetail.body": "It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed.",
+  // explain.step.* — HERO-1d D2 (2026-09-13): the do-nothing step (the silent-skip run class), keyed
+  // byte-identically from CausalChain.tsx; the hint is the paragraph whole.
+  "explain.step.nothing.one": "Nothing was changed: the planned step ended without sending a command.",
+  "explain.step.nothing.many": "Nothing was changed: all {count} planned steps ended without sending a command.",
+  "explain.step.nothing.hint": "This usually means the devices this automation targets were unavailable, so each was skipped by design. The step-by-step record of these skips is not kept yet.",
   // explain.trigger.*
   "explain.trigger.readingNotRecorded": "{Trigger} set it off at {time} — the reading wasn't recorded.",
   // explain.action.*
@@ -105,7 +114,7 @@ const en = {
   "explain.action.unconfirmed.body": "The command was sent; no confirmation came back{reasonClause}. It may have worked — the record can't say.",
   "explain.action.pending.title": "Sent — waiting for the device to confirm.",
   "explain.action.pending.body": "Most devices confirm within a second or two. This updates when the device reports.",
-  "explain.action.pending.color": "Colour changes confirm slowly on some bulbs — this can take several seconds.",
+  "explain.action.pending.color": "Color changes confirm slowly on some bulbs — this can take several seconds.",
   // explain.mode.*
   "explain.mode.confirmed.label": "Confirmed",
   "explain.mode.confirmed.line": "{Target} {verbPast}.",
@@ -150,6 +159,18 @@ const en = {
   "explain.terminal.interrupted": "Cut off before it finished.",
   // HERO-1c C0 (D2): SPEC §4's terminal sentence for a completed run with `actionCount` 0, given its key.
   "explain.terminal.noSteps": "Done, recorded no steps.",
+  // HERO-1d D1 (2026-09-13): the terminalLine arms that had no row — HEAD's literals, byte for byte.
+  // `{notRecorded}` is format.ts NOT_RECORDED (the constant stays a constant; the sentence is keyed);
+  // the `.noTime` arms are the HERO-1b honesty row (a missing duration is omitted, never "0.0s");
+  // `.status` is HEAD's tail for INTERRUPTED and any status this build does not know — the recorded
+  // label's own sentence (`explain.terminal.interrupted` stays unconsumed: a text change is not this lane's).
+  "explain.terminal.unrecorded": "Outcome {notRecorded}.",
+  "explain.terminal.completed.noTime": "Done.",
+  "explain.terminal.completed.nothing.noTime": "Finished, but nothing was changed.",
+  "explain.terminal.completed.open.one": "Done in {secs}s — one outcome has not settled yet.",
+  "explain.terminal.completed.open.noTime": "Done — {count} outcomes have not settled yet.",
+  "explain.terminal.completed.open.one.noTime": "Done — one outcome has not settled yet.",
+  "explain.terminal.status": "{label}.",
   // whyNot.headline.*
   "whyNot.headline.conditionNotMet": "It was set off at {time}, but a condition was false, so it didn't act.",
   "whyNot.headline.conditionNotMet.noTime": "It was set off, but a condition was false, so it didn't act.",
@@ -193,6 +214,21 @@ const en = {
   "explain.hub.not.go": "Diagnose an automation →",
   "explain.hub.autos.noRuns": "No runs yet",
   "explain.hub.autos.noRunsSinceLoad": "Hasn't run since it was loaded",
+  // HERO-1d D3 (2026-09-13): the subhead and the two per-automation links HERO-1c filed (the link's
+  // `&rsquo;` is this ’, asserted on the rendered text).
+  "explain.hub.autos.title": "Your automations",
+  "explain.hub.autos.whyFire": "Why did it fire?",
+  "explain.hub.autos.whyNot": "Why didn’t it?",
+  // explain.whyNot.* / explain.runs.* / explain.run.* — HERO-1d D4 (2026-09-13): the page titles, ledes,
+  // the back link and the empty label of the why-not, runs and run pages.
+  "explain.whyNot.pick.title": "Why didn't it happen?",
+  "explain.whyNot.pick.lede": "Choose the automation you expected to run.",
+  "explain.whyNot.title": "Why this didn't happen",
+  "explain.whyNot.back": "← Pick another automation",
+  "explain.runs.title": "Why did something happen?",
+  "explain.runs.lede": "Pick a run to see exactly why it fired, step by step.",
+  "explain.runs.empty": "No automation runs yet.",
+  "explain.run.title": "Why this happened",
   // explain.permanence.*
   "explain.permanence": "Rebuilt from the permanent activity log. Nothing here is ever deleted, so this run is always here.",
   // explain.nullName.*
@@ -212,6 +248,8 @@ const en = {
   "explain.action.detail.command": "Command",
   "explain.action.detail.reason": "Recorded reason",
   "explain.action.detail.outcome": "Recorded outcome",
+  // HERO-1d D2 (2026-09-13): the L2 suffix after a recovered outcome — the leading space is the literal's.
+  "explain.action.detail.outcome.recovered": " (recovered from the recorded reason — this record predates the current hub software)",
   // explain.detail.*
   "explain.detail.notRecorded": "not recorded",
   // explain.a11y.*

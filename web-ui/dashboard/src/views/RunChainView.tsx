@@ -19,7 +19,7 @@ export function RunChainView({ runId }: { runId: string }) {
   // rendering. Until it is in (or if it is incomplete), nothing is accused.
   const resolveRef = useRefResolver();
   return (
-    <Page title="Why this happened" lede={undefined} meta={state.meta}>
+    <Page title={t('explain.run.title')} lede={undefined} meta={state.meta}>
       <p style={{ marginTop: 'calc(-1 * var(--hs-space-2))' }}>
         <a href={href('/explain/runs')}>← All runs</a>
       </p>

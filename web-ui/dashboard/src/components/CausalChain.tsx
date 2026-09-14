@@ -158,7 +158,7 @@ export function CausalChain({
               tone,
               marker: c.result ? '✓' : c.evaluated ? '✕' : '?',
               label: verdict,
-              line: `The rule "${c.expression ?? NOT_RECORDED}" ${verdict}.`,
+              line: heroCopy('explain.condition.line', { condition: c.expression ?? NOT_RECORDED, verdict }),
               children:
                 observed.length > 0 ? (
                   <Detail label={t('explain.condition.atTheTime')}>
@@ -248,7 +248,7 @@ export function CausalChain({
                   {v.resultOutcome ? (
                     <Detail label={t('explain.action.detail.outcome')}>
                       {v.resultOutcome}
-                      {v.recovered ? ' (recovered from the recorded reason — this record predates the current hub software)' : ''}
+                      {v.recovered ? t('explain.action.detail.outcome.recovered') : ''}
                     </Detail>
                   ) : null}
                 </>
@@ -266,13 +266,9 @@ export function CausalChain({
               tone: 'warn',
               marker: '→',
               label: status.label,
-              line: `Nothing was changed: ${outcome.actionCount === 1 ? 'the planned step' : `all ${outcome.actionCount} planned steps`} ended without sending a command.`,
-              children: (
-                <p class={styles.hint}>
-                  This usually means the devices this automation targets were unavailable, so each was
-                  skipped by design. The step-by-step record of these skips is not kept yet.
-                </p>
-              ),
+              // HERO-1d D2: the step's line and its hint are §7 rows (`explain.step.nothing.*`), byte-identical.
+              line: outcome.actionCount === 1 ? t('explain.step.nothing.one') : heroCopy('explain.step.nothing.many', { count: String(outcome.actionCount) }),
+              children: <p class={styles.hint}>{t('explain.step.nothing.hint')}</p>,
             });
           }
 
@@ -304,7 +300,7 @@ export function CausalChain({
           depth 0 renders nothing, as before; a parent id (a later Core) keeps the link. */}
       {chain.cascade?.parentRunId ? (
         <p class={styles.cascade}>
-          <a href={href(`/explain/run/${chain.cascade.parentRunId}`)}>← See what triggered this run</a>
+          <a href={href(`/explain/run/${chain.cascade.parentRunId}`)}>{t('explain.cascade.parent')}</a>
         </p>
       ) : (chain.cascade?.depth ?? 0) > 0 ? (
         <p class={styles.cascade}>{CASCADE_PARENT_UNRECORDED}</p>
@@ -396,9 +392,16 @@ function actionStepLine(mode: ActionMode, a: CausalAction, target: string): stri
   const { verb, verbPast } = commandVerbs(a.command);
   return heroCopy(MODE_LINE_KEY[mode], { Target: target, target, verb, verbPast, reasonClause });
 }
+/* HERO-1d D1 (2026-09-13): every arm of the terminal line is a §7 `explain.terminal.*` row read through
+ * heroCopy(), byte-identical to the literal it replaced. `{notRecorded}` carries the NOT_RECORDED constant;
+ * `{secs}` is omitted with the whole clause when the record has no duration (the HERO-1b honesty row — the
+ * `.noTime` arms exist for exactly that, never "0.0s"); `{reasonClause}` is " — {reason}" or "". The tail
+ * (INTERRUPTED and any status this build does not know) is HEAD's `${runStatusMeta(s).label}.` sentence,
+ * keyed as `.status` — `explain.terminal.interrupted` ("Cut off before it finished.") stays unconsumed,
+ * since a text change is not this lane's. */
 function terminalLine(chain: Chain): string {
   const outcome = chain.outcome;
-  if (!outcome) return `Outcome ${NOT_RECORDED}.`;
+  if (!outcome) return heroCopy('explain.terminal.unrecorded', { notRecorded: NOT_RECORDED });
   const actions = chain.actions ?? [];
   const s = outcome.status;
   // durationMs guarded: a missing duration is omitted honestly, never "0.0s"
@@ -407,24 +410,27 @@ function terminalLine(chain: Chain): string {
     typeof outcome.durationMs === 'number' && Number.isFinite(outcome.durationMs)
       ? (outcome.durationMs / 1000).toFixed(1)
       : null;
+  const reasonClause = outcome.reason ? ` — ${outcome.reason}` : '';
   if (s === 'COMPLETED') {
     // A do-nothing run must never read as clean success (the silent-skip class).
     if (isDoNothingRun(outcome, actions.length)) {
-      return secs ? `Finished in ${secs}s, but nothing was changed.` : 'Finished, but nothing was changed.';
+      return secs ? heroCopy('explain.terminal.completed.nothing', { secs }) : heroCopy('explain.terminal.completed.nothing.noTime');
     }
     // §5.9 honesty: a COMPLETED run's action outcome can settle AFTER the run
     // finishes (a late report re-derives on the next read) — while any action is
     // still unsettled, the terminal line must not read as the final word.
     const open = actions.filter((a) => actionVerdict(a).provisional).length;
     if (open > 0) {
-      const inSecs = secs ? ` in ${secs}s` : '';
-      return open === 1
-        ? `Done${inSecs} — one outcome has not settled yet.`
-        : `Done${inSecs} — ${open} outcomes have not settled yet.`;
+      const count = String(open);
+      if (open === 1) return secs ? heroCopy('explain.terminal.completed.open.one', { secs }) : heroCopy('explain.terminal.completed.open.one.noTime');
+      return secs ? heroCopy('explain.terminal.completed.open', { secs, count }) : heroCopy('explain.terminal.completed.open.noTime', { count });
     }
-    return secs ? `Done in ${secs}s.` : 'Done.';
+    return secs ? heroCopy('explain.terminal.completed', { secs }) : heroCopy('explain.terminal.completed.noTime');
   }
-  if (s === 'SKIPPED') return outcome.reason ? `Skipped — ${outcome.reason}.` : 'Skipped.';
-  if (s === 'FAILED') return outcome.reason ? `Failed — ${outcome.reason}.` : 'Failed.';
-  return `${runStatusMeta(s).label}.`;
+  if (s === 'SKIPPED') return heroCopy('explain.terminal.skipped', { reasonClause });
+  if (s === 'FAILED') return heroCopy('explain.terminal.failed', { reasonClause });
+  if (s === 'CANCELLED') return heroCopy('explain.terminal.cancelled');
+  // Open-vocabulary hardening (the closed-switch class): INTERRUPTED and any status this build does
+  // not know render the recorded label's own sentence — shown as recorded, never a crash, never a guess.
+  return heroCopy('explain.terminal.status', { label: runStatusMeta(s).label });
 }

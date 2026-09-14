@@ -12,11 +12,12 @@ import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { DataTable } from '../components/DataTable';
 import { StatusPill } from '../components/StatusPill';
+import { t } from '../lib/i18n';
 
 export function RunsView() {
   const state = useApi(() => api.listRuns({ limit: 50 }));
   return (
-    <Page title="Why did something happen?" lede="Pick a run to see exactly why it fired, step by step." meta={state.meta}>
+    <Page title={t('explain.runs.title')} lede={t('explain.runs.lede')} meta={state.meta}>
       <Card pad={false}>
         <Resource state={state}>
           {(rows: RunSummary[]) => (
@@ -24,7 +25,7 @@ export function RunsView() {
               rows={rows}
               rowKey={(r) => r.runId}
               onActivate={(r) => navigate(`/explain/run/${r.runId}`)}
-              emptyLabel="No automation runs yet."
+              emptyLabel={t('explain.runs.empty')}
               columns={[
                 {
                   key: 'name',

@@ -57,7 +57,7 @@ export function WhyNotView({ automationId }: { automationId?: string }) {
 function WhyNotPicker() {
   const autos = useApi(() => api.listAutomations());
   return (
-    <Page title="Why didn't it happen?" lede="Choose the automation you expected to run.">
+    <Page title={t('explain.whyNot.pick.title')} lede={t('explain.whyNot.pick.lede')}>
       <Resource state={autos} labels={{ loading: t('explain.loading'), errorTitle: t('explain.error.title'), errorBody: t('explain.error.body') }}>
         {(rows: AutomationSummary[]) => (
           <ul class={styles.pick}>
@@ -152,9 +152,9 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
   // causal chain uses); 'unverified' until it is in — nothing is accused without it.
   const resolveRef = useRefResolver();
   return (
-    <Page title="Why this didn't happen" meta={state.meta}>
+    <Page title={t('explain.whyNot.title')} meta={state.meta}>
       <p style={{ marginTop: 'calc(-1 * var(--hs-space-2))' }}>
-        <a href={href('/explain/why-not')}>← Pick another automation</a>
+        <a href={href('/explain/why-not')}>{t('explain.whyNot.back')}</a>
       </p>
       {/* HERO-1c correction D3: the hero's own loading / error rows (SPEC §7) ride Resource's labels. */}
       <Resource state={state} labels={{ loading: t('explain.loading'), errorTitle: t('explain.error.title'), errorBody: t('explain.error.body') }}>

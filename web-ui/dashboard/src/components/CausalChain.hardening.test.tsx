@@ -26,6 +26,7 @@ import {
   CASCADE_PARENT_UNRECORDED,
   clockTimeWithDate,
   EMPTY_CHAIN_NOTE,
+  heroCopy,
   NO_READING_YET,
   NOT_RECORDED,
   NULL_NAME_NOTE,
@@ -36,6 +37,7 @@ import {
 } from '../lib/format';
 import { makeRefResolver } from '../lib/registry';
 import { causalChains } from '../lib/api/mock/mockData';
+import { t, type MessageKey } from '../lib/i18n';
 
 afterEach(cleanup);
 
@@ -454,5 +456,81 @@ describe('HERO-1b B7 — the hero-states scenario', () => {
     for (const c of Object.values(causalChains)) {
       for (const a of c.actions) if (a.outcome === 'CONFIRMED') expect(a.resultOutcome, c.runId).toBeNull();
     }
+  });
+});
+
+/* ---- HERO-1d D2 (2026-09-13): the four chain sentences that still lived in the component are
+ * catalog rows — the condition line (`explain.condition.line`, a key HERO-1b minted and the
+ * component never read), the cascade link (`explain.cascade.parent`, the same), the do-nothing
+ * step (`explain.step.nothing.one` / `.many` and its hint `.hint`) and the L2 recovered-reason
+ * suffix (`explain.action.detail.outcome.recovered`). Byte-identical on screen (charter §0).
+ * RED at HEAD: the four NEW keys are undefined (heroCopy → ''); the condition line and the
+ * cascade link already matched their existing rows byte for byte, so those rows are GREEN at
+ * HEAD — named preservation (the charter predicted them red; the catalog text equals the
+ * literal, so the assertion cannot tell the two apart — disclosed). ---- */
+describe('HERO-1d D2 — the condition line, the cascade link, the do-nothing step and the recovered suffix are the catalog', () => {
+  const lineOf = (li: Element | null) => li?.querySelector('div > div > span')?.textContent ?? '';
+  const key = (k: string, slots: Record<string, string> = {}) => heroCopy(k as MessageKey, slots);
+
+  it('the condition line → explain.condition.line at {condition}·{verdict} [GREEN at HEAD — byte-identical; preservation]', () => {
+    const chain = liveNullChain({ automationName: 'Named', conditions: [{ expression: 'time is after sunset', evaluated: true, result: true, observedState: [] }] });
+    const { container } = render(<CausalChain chain={chain} />);
+    const line = lineOf(container.querySelector('li[data-kind="condition"]'));
+    expect(line).toBe('The rule "time is after sunset" was true.');
+    expect(line).toBe(key('explain.condition.line', { condition: 'time is after sunset', verdict: 'was true' }));
+  });
+
+  it('the condition line, expression null and not evaluated → the NOT_RECORDED slot, "was not checked" [GREEN at HEAD; preservation]', () => {
+    const chain = liveNullChain({ automationName: 'Named', conditions: [{ expression: null as unknown as string, evaluated: false, result: false, observedState: [] }] });
+    const { container } = render(<CausalChain chain={chain} />);
+    const line = lineOf(container.querySelector('li[data-kind="condition"]'));
+    expect(line).toBe(`The rule "${NOT_RECORDED}" was not checked.`);
+    expect(line).toBe(key('explain.condition.line', { condition: NOT_RECORDED, verdict: 'was not checked' }));
+  });
+
+  it('the cascade link → explain.cascade.parent [GREEN at HEAD — byte-identical; preservation]', () => {
+    const { container } = render(<CausalChain chain={liveNullChain({ automationName: 'Named', cascade: { parentRunId: 'run_parent', depth: 1 } })} />);
+    const a = container.querySelector('a[href*="/explain/run/run_parent"]')!;
+    expect(a).toBeTruthy();
+    expect(a.textContent).toBe('← See what triggered this run');
+    expect(a.textContent).toBe(key('explain.cascade.parent'));
+  });
+
+  const doNothing = (actionCount: number) =>
+    liveNullChain({ automationName: 'Named', actions: [], outcome: { status: 'COMPLETED', reason: null, durationMs: 41, actionCount, commandCount: 0 } });
+
+  it('the do-nothing step, one planned step → explain.step.nothing.one', () => {
+    const { container } = render(<CausalChain chain={doNothing(1)} />);
+    const line = lineOf(container.querySelector('li[data-kind="action"]'));
+    expect(line).toBe('Nothing was changed: the planned step ended without sending a command.');
+    expect(line).toBe(key('explain.step.nothing.one'));
+  });
+
+  it('the do-nothing step, several planned steps → explain.step.nothing.many at {count}', () => {
+    const { container } = render(<CausalChain chain={doNothing(3)} />);
+    const line = lineOf(container.querySelector('li[data-kind="action"]'));
+    expect(line).toBe('Nothing was changed: all 3 planned steps ended without sending a command.');
+    expect(line).toBe(key('explain.step.nothing.many', { count: '3' }));
+  });
+
+  it('the do-nothing hint → explain.step.nothing.hint, the paragraph whole (JSX collapsed its source line break to one space)', () => {
+    const { container } = render(<CausalChain chain={doNothing(2)} />);
+    const hint = container.querySelector('li[data-kind="action"] p')?.textContent ?? '';
+    expect(hint).toBe('This usually means the devices this automation targets were unavailable, so each was skipped by design. The step-by-step record of these skips is not kept yet.');
+    expect(hint).toBe(key('explain.step.nothing.hint'));
+  });
+
+  it('the L2 recovered-reason suffix → explain.action.detail.outcome.recovered (a pre-v1.1.2 payload: resultOutcome ABSENT, the reason classifiable; the leading space belongs to the row)', () => {
+    const legacy = liveNullAction({ outcome: 'FAILED', reason: 'rejected' });
+    delete (legacy as Partial<CausalAction>).resultOutcome; // ABSENT, not null — verdicts.ts actionVerdict's recovery path
+    const chain = liveNullChain({ automationName: 'Named', actions: [legacy], outcome: { status: 'FAILED', reason: null, durationMs: 90, actionCount: 1, commandCount: 1 } });
+    const { container } = render(<CausalChain chain={chain} />);
+    const outcomeDetail = Array.from(container.querySelectorAll('li[data-kind="action"] details')).find(
+      (d) => d.querySelector('summary')?.textContent === t('explain.action.detail.outcome'),
+    )!;
+    expect(outcomeDetail).toBeTruthy();
+    const body = outcomeDetail.querySelector('div')?.textContent ?? '';
+    expect(body).toBe('rejected (recovered from the recorded reason — this record predates the current hub software)');
+    expect(body).toBe(`rejected${key('explain.action.detail.outcome.recovered')}`);
   });
 });

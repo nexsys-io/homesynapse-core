@@ -11,6 +11,7 @@ import { render, cleanup, act } from '@testing-library/preact';
 import { WhyNotView } from './WhyNotView';
 import { api } from '../lib/api';
 import { clockTimeWithDate } from '../lib/format';
+import { t } from '../lib/i18n';
 import type { NonFiringExplanation } from '../lib/api/contract';
 
 afterEach(() => {
@@ -141,5 +142,37 @@ describe('HERO-1b B3 — the why-not L1 sentence per verdict', () => {
     expect(text).toContain('Last checked');
     expect(text).toContain("It ran, but didn't finish cleanly.");
     expect(text).not.toContain('null');
+  });
+});
+
+/* ---- HERO-1d D4 (2026-09-13): the two page titles, the picker lede and the back link are
+ * catalog rows (`explain.whyNot.pick.title` · `.pick.lede` · `explain.whyNot.title` ·
+ * `explain.whyNot.back`), byte-identical on screen. RED at HEAD: none of the four keys exists. ---- */
+describe('HERO-1d D4 — the why-not pages are the catalog', () => {
+  const META = () => ({ viewPosition: 1, timestamp: new Date().toISOString() });
+
+  it('the picker: title and lede → explain.whyNot.pick.title / .pick.lede', async () => {
+    vi.spyOn(api, 'listAutomations').mockResolvedValue({ data: [], meta: META() } as never);
+    const { container } = render(<WhyNotView />);
+    await act(async () => {});
+    const h1 = container.querySelector('h1')?.textContent;
+    expect(h1).toBe("Why didn't it happen?");
+    expect(h1).toBe(t('explain.whyNot.pick.title'));
+    const lede = container.querySelector('header p')?.textContent;
+    expect(lede).toBe('Choose the automation you expected to run.');
+    expect(lede).toBe(t('explain.whyNot.pick.lede'));
+  });
+
+  it('the detail: title → explain.whyNot.title; the back link → explain.whyNot.back', async () => {
+    vi.spyOn(api, 'getNonFiring').mockResolvedValue({ data: nf({ verdict: 'DISABLED', enabled: false, lastEvaluation: null }), meta: META() } as never);
+    const { container } = render(<WhyNotView automationId="auto_x" />);
+    await act(async () => {});
+    const h1 = container.querySelector('h1')?.textContent;
+    expect(h1).toBe("Why this didn't happen");
+    expect(h1).toBe(t('explain.whyNot.title'));
+    const back = container.querySelector('a[href$="/explain/why-not"]')!;
+    expect(back).toBeTruthy();
+    expect(back.textContent).toBe('← Pick another automation');
+    expect(back.textContent).toBe(t('explain.whyNot.back'));
   });
 });

@@ -30,7 +30,7 @@ Slots and their null arms (each arm is a keyed string in §7, so no cell is left
 
 The mode override: when `actionVerdict()` classifies the leading action as superseded (a DISPATCHED or FAILED outcome whose `resultOutcome` is `superseded`) the cell's clause is replaced by the superseded key, and when it classifies it as expired-restart, by the expired-restart key — a replaced command is an intent change, not a failure, and the headline may not say "failed" for it. The thirty cells:
 
-| # | RunStatus | Leading ActionOutcome | Sentence (sample slots) | Key(s) | Pill / shape / colour role |
+| # | RunStatus | Leading ActionOutcome | Sentence (sample slots) | Key(s) | Pill / shape / color role |
 |---|---|---|---|---|---|
 | 1 | COMPLETED | CONFIRMED | Hallway Light turned on because Hallway Motion detected motion at 9:42 pm. | `explain.headline.completed.confirmed` | Confirmed · check · ok |
 | 2 | COMPLETED | DISPATCHED | Hallway Light was asked to turn on because Hallway Motion detected motion at 9:42 pm — no confirmation yet. | `explain.headline.completed.dispatched` | Sent — not settled yet · arrow, dashed · info (provisional) |
@@ -67,7 +67,7 @@ Rows 2–4, 8–10, 14–16, 20–22 and 26–28 are refined by the mode overrid
 
 The "why didn't it" headline, one row per `NonFiringVerdict` plus the two derived states the wire already carries. `{time}` is `lastEvaluation.at` and is nullable (`lastEvaluation` is object-or-null on the observed wire), so every row has a no-time arm.
 
-| # | Verdict / derived state | Sentence (sample slots) | Null arm | Key | Pill · shape · colour role |
+| # | Verdict / derived state | Sentence (sample slots) | Null arm | Key | Pill · shape · color role |
 |---|---|---|---|---|---|
 | N1 | CONDITION_NOT_MET | It was set off at 9:42 pm, but a condition was false, so it didn't act. | It was set off, but a condition was false, so it didn't act. | `whyNot.headline.conditionNotMet` · `.noTime` | A condition was not met · ✕ · warn |
 | N2 | NEVER_TRIGGERED, `lastRelevantRunId` null | It hasn't run yet. | — | `whyNot.headline.neverTriggered` | Nothing set it off · ○ · neutral |
@@ -175,7 +175,7 @@ Every string the hero shows, in Register C (no self-reference, no "we", never bl
 | `explain.action.unconfirmed.body` | The command was sent; no confirmation came back{reasonClause}. It may have worked — the record can't say. | action step help, settled UNCONFIRMED | reasonClause = ' — {reason}' | '' | 2.0 | 8 |
 | `explain.action.pending.title` | Sent — waiting for the device to confirm. | action step, unsettled DISPATCHED | — | 4.0 | 7 |
 | `explain.action.pending.body` | Most devices confirm within a second or two. This updates when the device reports. | action step help, unsettled DISPATCHED | — | 4.8 | 8 |
-| `explain.action.pending.color` | Colour changes confirm slowly on some bulbs — this can take several seconds. | action step help, unsettled DISPATCHED, colour-class command | — | 6.8 | 12 |
+| `explain.action.pending.color` | Color changes confirm slowly on some bulbs — this can take several seconds. | action step help, unsettled DISPATCHED, color-class command | — | 6.8 | 12 |
 | `explain.mode.confirmed.label` | Confirmed | action pill | — | frag. | 1 |
 | `explain.mode.confirmed.line` | {Target} {verbPast}. | action step line | Target·verbPast | frag. | 4 |
 | `explain.mode.confirmed.help` | The device's own report confirms it. | action step help / pill title | — | 4.4 | 6 |
@@ -279,6 +279,32 @@ Every string the hero shows, in Register C (no self-reference, no "we", never bl
 | `explain.headline.completed.notRecorded` | {Target} was asked to {verb} because {because}; what happened isn't recorded. | L1 headline, the headline action's outcome null or a string this build does not know (D5; today rendered through `explain.mode.notRecorded.line`) | Target·verb·because | 6.8 | 15 |
 | `explain.mode.notRecorded.help` | What happened to this step was not recorded. The step itself is preserved. | action step help / pill title, outcome null (HEAD's sentence, given its key) | — | 4.1 | 7 |
 | `explain.mode.settledFailed.lineNoCommand` | No command was sent to {target} — this step failed{reasonClause}. | action step line, FAILED with `command` null and a named target (D2: the `act` arm is the SPEC's null verb and reads wrongly) | target·reasonClause | 4.9 | 13 |
+| `explain.terminal.unrecorded` | Outcome {notRecorded}. | terminal step line, `outcome` null (`{notRecorded}` = format.ts NOT_RECORDED; the constant stays a constant) | HERO-1d |
+| `explain.terminal.completed.noTime` | Done. | terminal step line, COMPLETED with no recorded duration | HERO-1d |
+| `explain.terminal.completed.nothing.noTime` | Finished, but nothing was changed. | terminal step line, silent skip with no recorded duration | HERO-1d |
+| `explain.terminal.completed.open.one` | Done in {secs}s — one outcome has not settled yet. | terminal step line, one outcome still provisional (the note on `.completed.open`, given its key) | HERO-1d |
+| `explain.terminal.completed.open.noTime` | Done — {count} outcomes have not settled yet. | terminal step line, several outcomes provisional, no recorded duration | HERO-1d |
+| `explain.terminal.completed.open.one.noTime` | Done — one outcome has not settled yet. | terminal step line, one outcome provisional, no recorded duration | HERO-1d |
+| `explain.terminal.status` | {label}. | terminal step line, INTERRUPTED ("Interrupted.") and any status this build does not know (`{label}` = format.ts runStatusMeta, shown as recorded; `explain.terminal.interrupted` stays unconsumed) | HERO-1d |
+| `explain.step.nothing.one` | Nothing was changed: the planned step ended without sending a command. | the do-nothing step line, `actionCount` 1 | HERO-1d |
+| `explain.step.nothing.many` | Nothing was changed: all {count} planned steps ended without sending a command. | the do-nothing step line, `actionCount` > 1 | HERO-1d |
+| `explain.step.nothing.hint` | This usually means the devices this automation targets were unavailable, so each was skipped by design. The step-by-step record of these skips is not kept yet. | the do-nothing step help | HERO-1d |
+| `explain.action.detail.outcome.recovered` | (recovered from the recorded reason — this record predates the current hub software) | L2 "Recorded outcome" detail, appended to the outcome value — the catalog string carries the literal's leading space | HERO-1d |
+| `explain.hub.autos.title` | Your automations | hub automation list subhead | HERO-1d |
+| `explain.hub.autos.whyFire` | Why did it fire? | hub automation row link, `lastRunId` present | HERO-1d |
+| `explain.hub.autos.whyNot` | Why didn’t it? | hub automation row link (the former `&rsquo;`, the rendered ’) | HERO-1d |
+| `ui.on` | On | hub automation row pill, `enabled` true (the app's `ui.*` register, HERO-1c D3) | HERO-1d |
+| `ui.off` | Off | hub automation row pill, `enabled` false (the app's `ui.*` register) | HERO-1d |
+| `explain.whyNot.pick.title` | Why didn't it happen? | why-not picker page title | HERO-1d |
+| `explain.whyNot.pick.lede` | Choose the automation you expected to run. | why-not picker page lede | HERO-1d |
+| `explain.whyNot.title` | Why this didn't happen | why-not page title | HERO-1d |
+| `explain.whyNot.back` | ← Pick another automation | why-not page back link | HERO-1d |
+| `explain.runs.title` | Why did something happen? | runs page title | HERO-1d |
+| `explain.runs.lede` | Pick a run to see exactly why it fired, step by step. | runs page lede | HERO-1d |
+| `explain.runs.empty` | No automation runs yet. | runs page, empty list | HERO-1d |
+| `explain.run.title` | Why this happened | run page title | HERO-1d |
+
+*§7 amendment, HERO-1d (2026-09-13): the keys above moved the last literal hero sentences into the catalog; the lint of `eslint.config.js` (IR-8) is the instrument. No sentence changed.*
 
 ## §8 Accessibility
 

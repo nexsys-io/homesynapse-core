@@ -61,3 +61,39 @@ describe('HERO-1c C4 — the hub page is the catalog', () => {
     expect(text).toContain('Porch Light');
   });
 });
+
+/* ---- HERO-1d D3 (2026-09-13): the three literals HERO-1c filed — the subhead and the two
+ * per-automation link texts — and the On / Off pills are catalog rows (`explain.hub.autos.title` ·
+ * `.whyFire` · `.whyNot` · `ui.on` · `ui.off`), byte-identical on screen; the link's `&rsquo;` is
+ * the catalog's ’ (asserted on the rendered text, charter §4). RED at HEAD: none of the five keys
+ * exists (t() reads undefined). ---- */
+describe('HERO-1d D3 — the subhead, the per-automation links and the On / Off pills are the catalog', () => {
+  it('the subhead → explain.hub.autos.title', async () => {
+    const h2 = (await renderHub()).querySelector('h2')!;
+    expect(h2.textContent).toBe('Your automations');
+    expect(h2.textContent).toBe(t('explain.hub.autos.title'));
+  });
+
+  it('"Why did it fire?" → explain.hub.autos.whyFire (the run link of an automation with a run)', async () => {
+    const a = (await renderHub()).querySelector('a[href$="/explain/run/run_1"]')!;
+    expect(a).toBeTruthy();
+    expect(a.textContent).toBe('Why did it fire?');
+    expect(a.textContent).toBe(t('explain.hub.autos.whyFire'));
+  });
+
+  it('"Why didn’t it?" → explain.hub.autos.whyNot — the typographic apostrophe, asserted on the screen text', async () => {
+    const a = (await renderHub()).querySelector('a[href$="/explain/why-not/auto_1"]')!;
+    expect(a).toBeTruthy();
+    expect(a.textContent).toBe('Why didn’t it?');
+    expect(a.textContent).toBe(t('explain.hub.autos.whyNot'));
+  });
+
+  it('the On / Off pills → ui.on / ui.off', async () => {
+    const c = await renderHub();
+    const pillTexts = Array.from(c.querySelectorAll('li span span')).map((s) => s.textContent);
+    expect(pillTexts).toContain('On');
+    expect(pillTexts).toContain('Off');
+    expect(t('ui.on')).toBe('On');
+    expect(t('ui.off')).toBe('Off');
+  });
+});
