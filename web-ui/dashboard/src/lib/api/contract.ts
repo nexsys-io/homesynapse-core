@@ -11,7 +11,36 @@
  *   B-class = FROZEN-UNBUILT (mock to these shapes; Core implements TO them).
  */
 
-export const CONTRACT_VERSION = 'v1.1.3-2026-09-06' as const;
+export const CONTRACT_VERSION = 'v1.1.4-2026-09-13' as const;
+/* v1.1.4 (HERO-0 §3 / Nick's `EXPLAIN: three`; landed core-side 2026-09-12 EXPLAIN-114a at
+ * 5f918c7 with its R3 correction, 2026-09-13 EXPLAIN-114b at fed99e8 wire byte-identical; the
+ * freeze doc's amendment date is the 13th; the FE mirror is FE-114). The same four-constraint
+ * law. SEVEN ADDITIVE keys across THREE reads + ONE enum value, zero changes to any existing
+ * field/casing/nesting/order (each new key APPENDED at the END of its object):
+ *   - causal-chain `actions[].settledAt: string | null` (9th, after settled) — the CLASSIFYING
+ *     envelope's instant (state_confirmed / the last classifying command_result / the timeout /
+ *     a command-less action's completion); null for a bare or acknowledged DISPATCHED.
+ *   - causal-chain `actions[].confirmedAt: string | null` (10th) — the `state_confirmed`
+ *     instant; null when there is none. `settled: true` beside `confirmedAt: null` is LAWFUL
+ *     (a FAILED or UNCONFIRMED action settles without a confirmation).
+ *   - causal-chain `data.definitionKey: string | null` (9th, after cascade) — the run's
+ *     `automation_triggered.definitionHash` (SHA-256 hex); null when the log carries none.
+ *   - non-firing `data.disabledAt: string | null` (11th, after triggerRef) · `disabledReason:
+ *     string | null` (12th) · `definitionKey: string | null` (13th) — the LATEST
+ *     `automation_disabled`'s instant and reason ("repeated_failure"), else `disabledReason`
+ *     "configuration" on the DISABLED verdict (DP-6); both null on any non-DISABLED verdict;
+ *     `definitionKey` never null in production (null only for a fixture).
+ *   - non-firing `data.verdict` gains the value `FIRED_CONFIRMED` (the enum grows LAST) — the
+ *     DP-B2 clean-confirmed-success case, with a non-null `lastRelevantRunId`.
+ *   - automations `data[].definitionKey: string | null` (6th, after lastRunId) — never null in
+ *     production (null only for a fixture).
+ * Every instant is `Instant.toString()` (ISO-8601 UTC, nanos when present) — NEVER epoch
+ * seconds; parse only via format.parseInstant. EVERY new key is PRESENT in every v1.1.4
+ * payload — JSON null when the log carries no value, never absent. A pre-v1.1.4 hub omits them
+ * (lawful): the mirror marks them OPTIONAL and the validators enforce the TRI-STATE (absent
+ * passes · null passes · a present key must be typed). NO LIVE v1.1.4 CAPTURE exists in the
+ * corpus yet — the mirror is MIRRORED, not VERIFIED, until H8's real-wire read (charter §4).
+ * v1.1.5 (`conditions[].definition`, EXPLAIN-114c) is NOT read by this mirror — FE-115. */
 /* v1.1.3 (docket Row 14 RULED (a) 2026-09-03; landed core-side 2026-09-06, CG-123 at
  * f25291b, the SKIP-VIS shape; the FE mirror is FE-113). The same four-constraint law.
  * FOUR ADDITIVE keys across THREE reads, zero changes to any existing field/casing/
@@ -149,12 +178,17 @@ export type RunStatus = 'COMPLETED' | 'FAILED' | 'SKIPPED' | 'CANCELLED' | 'INTE
  */
 export type ActionOutcome = 'DISPATCHED' | 'CONFIRMED' | 'UNCONFIRMED' | 'FAILED' | 'SKIPPED';
 
-/** "Why didn't it fire?" — the three-way verdict (+ DISABLED). The most differentiated read. */
+/** "Why didn't it fire?" — the three-way verdict (+ DISABLED). The most differentiated read.
+ *  v1.1.4 ADDITIVE (EXPLAIN-114a): `FIRED_CONFIRMED` joins LAST — the DP-B2 clean-confirmed-success
+ *  case (the most recent in-window run completed and every device action confirmed;
+ *  `lastRelevantRunId` is that run — NonFiringExplanation.java:159–:165). Not a non-firing at
+ *  all; rendered "as recorded" (the Q1 register: the claim is Core's). */
 export type NonFiringVerdict =
   | 'CONDITION_NOT_MET'
   | 'NEVER_TRIGGERED'
   | 'ACTED_BUT_UNCONFIRMED'
-  | 'DISABLED';
+  | 'DISABLED'
+  | 'FIRED_CONFIRMED';
 
 export type IntegrationHealth = 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | 'UNKNOWN';
 
@@ -359,6 +393,17 @@ export interface CausalAction {
    *  OPTIONAL for pre-v1.1.2 payloads; verdicts.isActionSettled derives the same
    *  rule client-side when absent. */
   settled?: boolean;
+  /** v1.1.4 ADDITIVE (EXPLAIN-114a; 9th, after settled): the CLASSIFYING envelope's instant as
+   *  `Instant.toString()` — `state_confirmed`, the last classifying `command_result`, the
+   *  timeout, or a command-less action's `automation_action_completed`; JSON null for a bare or
+   *  acknowledged DISPATCHED (no classifying event). OPTIONAL = absent on a pre-v1.1.4 hub.
+   *  Typed and validated by FE-114; not rendered yet (no §7 row asks for it). */
+  settledAt?: string | null;
+  /** v1.1.4 ADDITIVE (EXPLAIN-114a; 10th): the `state_confirmed` instant, or JSON null when
+   *  there is none — `settled: true` beside `confirmedAt: null` is LAWFUL (a FAILED or
+   *  UNCONFIRMED action settles without a confirmation). A value renders EXPLAIN-9's sentence
+   *  (`explain.action.detail.confirmedAt`); null / absent keep the mode help. */
+  confirmedAt?: string | null;
 }
 
 /** B3 — GET /api/v1/runs/{runId}/causal-chain (the hero "why did this fire?" tree).
@@ -382,6 +427,11 @@ export interface CausalChain {
    *  the flattened depth). A null is NOT "root": depth > 0 with a null parent renders the honest
    *  "started by another run — which one isn't recorded" line (HERO-0 F4, FE-NULL-1). */
   cascade: { parentRunId: string | null; depth: number };
+  /** v1.1.4 ADDITIVE (EXPLAIN-114a; 9th, after cascade): the run's definition hash —
+   *  `automation_triggered.definitionHash`, a SHA-256 hex string — or JSON null when the log
+   *  carries none. Equals the non-firing / automations `definitionKey` for the same definition
+   *  (DP-5). OPTIONAL = absent on a pre-v1.1.4 hub. Typed and validated; not rendered. */
+  definitionKey?: string | null;
 }
 
 /** B3 — GET /api/v1/automations/{id}/non-firing (the co-equal "why didn't it fire?" read). */
@@ -421,6 +471,17 @@ export interface NonFiringExplanation {
    *  pre-v1.1.3 payloads (the two recorded fixtures carry no key — lawful). The
    *  surface resolves it through the registry census: dangling renders LOUD. */
   triggerRef?: SubjectRef | null;
+  /** v1.1.4 ADDITIVE (EXPLAIN-114a; 11th, after triggerRef): the LATEST `automation_disabled`
+   *  instant for this automation as `Instant.toString()`, or JSON null — no marker on the log,
+   *  or any non-DISABLED verdict. A value renders EXPLAIN-8's body (`whyNot.body.disabled.at`);
+   *  null / absent keep `whyNot.body.disabled`. OPTIONAL = absent on a pre-v1.1.4 hub. */
+  disabledAt?: string | null;
+  /** v1.1.4 ADDITIVE (12th): the marker's reason ("repeated_failure"), else "configuration" on
+   *  the DISABLED verdict (DP-6); JSON null on any non-DISABLED verdict. Shown as recorded. */
+  disabledReason?: string | null;
+  /** v1.1.4 ADDITIVE (13th): `DefinitionHashes` over the registry definition — never null in
+   *  production (the registry answered); null only for a fixture. Typed and validated; not rendered. */
+  definitionKey?: string | null;
 }
 
 /** B3 — one component of an automation (trigger · condition · action), as listed. */
@@ -441,4 +502,8 @@ export interface AutomationSummary {
   enabled: boolean;
   components: ComponentSummary[];
   lastRunId: string | null;
+  /** v1.1.4 ADDITIVE (EXPLAIN-114a; 6th, after lastRunId): `DefinitionHashes` over each registry
+   *  definition, no store read (DP-5) — never null in production; null only for a fixture.
+   *  OPTIONAL = absent on a pre-v1.1.4 hub. Typed and validated; not rendered. */
+  definitionKey?: string | null;
 }

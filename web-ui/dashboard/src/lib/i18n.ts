@@ -148,7 +148,8 @@ const en = {
   // HERO-1c correction D2 (SPEC.md:280): the not-recorded help, given its key (the sentence unchanged).
   "explain.mode.notRecorded.help": "What happened to this step was not recorded. The step itself is preserved.",
   "explain.mode.unknownOutcome.label": "Recorded as \"{outcome}\"",
-  "explain.mode.unknownOutcome.help": "The device reported an outcome this dashboard does not recognise yet — shown as recorded.",
+  // FE-114 D5 (2026-09-14, IR-13): US is the dialect of record — a §7 TEXT-CHANGE row (SPEC :207): the UK "-ise" → "recognize".
+  "explain.mode.unknownOutcome.help": "The device reported an outcome this dashboard does not recognize yet — shown as recorded.",
   // explain.terminal.*
   "explain.terminal.completed": "Done in {secs}s.",
   "explain.terminal.completed.open": "Done in {secs}s — {count} outcomes have not settled yet.",
@@ -171,6 +172,17 @@ const en = {
   "explain.terminal.completed.open.noTime": "Done — {count} outcomes have not settled yet.",
   "explain.terminal.completed.open.one.noTime": "Done — one outcome has not settled yet.",
   "explain.terminal.status": "{label}.",
+  // FE-114 D4 (2026-09-14, IR-12): the literals the widened lint reached in the six hero files, keyed
+  // byte-identically — the do-nothing run's status pill / step label (an object property), the loud /
+  // unnamed action line's verb for a command with no plain verb (a template beside `${`) and its null arm.
+  "explain.terminal.completed.nothing.pill": "Completed, nothing changed",
+  "explain.action.ran.on": "Ran {command} on",
+  "explain.action.ran.unrecorded.on": "Ran an unrecorded command on",
+  // explain.run.back — FE-114 D4: the run page's back link (a two-word JSX text node; HERO-1d D4's row
+  // pattern, beside `explain.whyNot.back`).
+  "explain.run.back": "← All runs",
+  // ui.signingIn — FE-114 D4: Resource's auth-state label, the app's `ui.*` register (Resource is generic).
+  "ui.signingIn": "Signing in…",
   // whyNot.headline.*
   "whyNot.headline.conditionNotMet": "It was set off at {time}, but a condition was false, so it didn't act.",
   "whyNot.headline.conditionNotMet.noTime": "It was set off, but a condition was false, so it didn't act.",
@@ -183,11 +195,21 @@ const en = {
   "whyNot.headline.disabled": "It's turned off, so it can't run.",
   "whyNot.headline.sentNothing": "It ran at {time}, but sent nothing — every step was skipped.",
   "whyNot.headline.sentNothing.noTime": "It ran, but sent nothing — every step was skipped.",
+  // FE-114 D3 (2026-09-14) — EXPLAIN-6: the v1.1.4 FIRED_CONFIRMED verdict's L1. "the record says" is the
+  // register (Core's claim, shown as recorded — the Q1 ruling); {time} is lastEvaluation.at, the EVALUATION
+  // instant, so it sits in the run clause and never attaches to "confirmed" (the read carries no confirmation
+  // instant). The `.noTime` twin for lastEvaluation null.
+  "whyNot.headline.firedConfirmed": "It ran at {time}, and the record says the device confirmed it.",
+  "whyNot.headline.firedConfirmed.noTime": "It ran, and the record says the device confirmed it.",
   "whyNot.headline.unknown": "Recorded as \"{verdict}\" — a verdict this dashboard can't explain yet.",
   // whyNot.body.*
   "whyNot.body.conditionNotMet": "It ran on {triggerSummary}, checked its conditions, and one was false. The run shows which.",
   "whyNot.body.actedButUnconfirmed": "The command was sent. No confirmation came back, so whether it worked isn't known.",
   "whyNot.body.disabled": "Turn it on in your automation settings to let it run. When it was turned off isn't recorded.",
+  // FE-114 D2 (2026-09-14) — EXPLAIN-8: the DISABLED body when the v1.1.4 `disabledAt` is a value: {when} =
+  // timeAgo(disabledAt); {reason} = " — {disabledReason}" (shown as recorded) or "". Null / absent keep
+  // `whyNot.body.disabled` above.
+  "whyNot.body.disabled.at": "Turned off {when}{reason}. Turn it on in your automation settings to let it run.",
   "whyNot.body.sentNothing": "Every step ended without sending a command. Why each was skipped isn't recorded yet.",
   "whyNot.body.ranFine": "Whether anything changed is on the run's own page.",
   // whyNot.link.*
@@ -195,6 +217,12 @@ const en = {
   "whyNot.link.ranFine": "See that run — including whether anything changed →",
   "whyNot.link.actedButUnconfirmed": "See the run where the device never confirmed →",
   "whyNot.link.sentNothing": "See the run that sent no commands →",
+  // whyNot.pill.* — FE-114 (2026-09-14): the why-not card's pill labels that were object-property
+  // literals (D4's widened lint reaches them) plus the D3 FIRED_CONFIRMED pill; each byte-identical
+  // to the literal it replaced (D4) or the charter's form (D3).
+  "whyNot.pill.firedConfirmed": "Ran and confirmed",
+  "whyNot.pill.sentNothing": "Ran, but sent nothing",
+  "whyNot.pill.didRun": "It did run",
   // whyNot.kv.*
   "whyNot.kv.trigger": "What would make it run",
   "whyNot.kv.watching": "Watching: {entity}",
@@ -250,6 +278,12 @@ const en = {
   "explain.action.detail.outcome": "Recorded outcome",
   // HERO-1d D2 (2026-09-13): the L2 suffix after a recovered outcome — the leading space is the literal's.
   "explain.action.detail.outcome.recovered": " (recovered from the recorded reason — this record predates the current hub software)",
+  // FE-114 D1 (2026-09-14) — EXPLAIN-9 (SPEC §6): the confirmed step's help slot when the v1.1.4
+  // `confirmedAt` is a value: {time} = clockTimeWithDate(confirmedAt); {delta} = confirmedAt − trigger.matchedAt
+  // in the terminal line's seconds format ("0.4s"); the `.noDelta` twin when the trigger instant does not
+  // parse or is later than the confirmation. Null / absent keep `explain.mode.confirmed.help`.
+  "explain.action.detail.confirmedAt": "Confirmed at {time}, {delta} after it fired.",
+  "explain.action.detail.confirmedAt.noDelta": "Confirmed at {time}.",
   // explain.detail.*
   "explain.detail.notRecorded": "not recorded",
   // explain.a11y.*

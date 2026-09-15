@@ -11,8 +11,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/preact';
 import { CausalChain } from './CausalChain';
 import type { CausalChain as Chain, CausalAction, RunStatus } from '../lib/api/contract';
-import { t } from '../lib/i18n';
-import { UNNAMED_TARGET } from '../lib/format';
+import { t, type MessageKey } from '../lib/i18n';
+import { clockTimeWithDate, UNNAMED_TARGET } from '../lib/format';
 import type { ActionMode } from '../lib/verdicts';
 
 afterEach(cleanup);
@@ -145,5 +145,68 @@ describe('HERO-1c D2 — a FAILED step with no command and a named target', () =
   it('and without a recorded reason the clause is empty', () => {
     const { text } = actionStep(action({ outcome: 'FAILED', command: null, resultOutcome: null, reason: null }), 'FAILED');
     expect(text).toContain('No command was sent to Hallway Light — this step failed.');
+  });
+});
+
+/* ---- FE-114 D1 (2026-09-14) — EXPLAIN-9 (SPEC §6 :126): the confirmed action's help slot carries the
+ * v1.1.4 `confirmedAt` instant — `explain.action.detail.confirmedAt` "Confirmed at {time}, {delta} after it
+ * fired." ({time} = clockTimeWithDate(confirmedAt); {delta} = confirmedAt − trigger.matchedAt in the
+ * terminal line's seconds format) — rendered as the pill's title AND as a hint line (SPEC §8: nothing is
+ * hover-only); the `.noDelta` twin when the trigger instant does not parse or is later than the
+ * confirmation. The tri-state: null / absent keep `explain.mode.confirmed.help`; `settled: true` beside
+ * `confirmedAt: null` renders nothing extra (charter §4). RED at HEAD: neither key exists, no arm reads
+ * the field. NO LIVE v1.1.4 CAPTURE exists — the fixtures are hand-built (charter §4). ---- */
+describe('FE-114 D1 — EXPLAIN-9: the confirmed step says WHEN the device confirmed (confirmedAt)', () => {
+  const CONFIRMED_AT = '2026-07-27T23:47:00.400Z'; // 0.4 s after the trigger's matchedAt (AT)
+  const SENTENCE = `Confirmed at ${clockTimeWithDate(CONFIRMED_AT)}, 0.4s after it fired.`;
+  const titles = (li: Element) => Array.from(li.querySelectorAll('[title]')).map((e) => e.getAttribute('title'));
+
+  it('confirmedAt a value → the §7 sentence, as the pill title and as a visible hint — never the plain mode help alone', () => {
+    const { text, li } = actionStep(action({ outcome: 'CONFIRMED', settled: true, settledAt: CONFIRMED_AT, confirmedAt: CONFIRMED_AT }));
+    expect(text).toContain(SENTENCE);
+    expect(titles(li)).toContain(SENTENCE);
+    expect(titles(li)).not.toContain(t('explain.mode.confirmed.help'));
+    expect(text).toContain('Hallway Light turned on.'); // the mode line is untouched
+  });
+
+  it('the catalog rows are the charter\'s forms, verbatim', () => {
+    expect(t('explain.action.detail.confirmedAt' as MessageKey)).toBe('Confirmed at {time}, {delta} after it fired.');
+    expect(t('explain.action.detail.confirmedAt.noDelta' as MessageKey)).toBe('Confirmed at {time}.');
+  });
+
+  it('confirmedAt ABSENT (a pre-v1.1.4 hub) → today\'s help, no "Confirmed at" anywhere [GREEN at HEAD; preservation]', () => {
+    const { text, li } = actionStep(action({ outcome: 'CONFIRMED', settled: true }));
+    expect(text).not.toContain('Confirmed at');
+    expect(titles(li)).toContain(t('explain.mode.confirmed.help'));
+  });
+
+  it('confirmedAt PRESENT-null (a v1.1.4 hub with no state_confirmed on record) → the same as absent', () => {
+    const { text, li } = actionStep(action({ outcome: 'CONFIRMED', settled: true, settledAt: CONFIRMED_AT, confirmedAt: null }));
+    expect(text).not.toContain('Confirmed at');
+    expect(titles(li)).toContain(t('explain.mode.confirmed.help'));
+  });
+
+  it('settled: true beside confirmedAt: null on an UNCONFIRMED action renders nothing extra (charter §4)', () => {
+    const { text } = actionStep(action({ outcome: 'UNCONFIRMED', resultOutcome: 'unconfirmed', reason: 'DefaultResponse SUCCESS, then no report', settled: true, settledAt: CONFIRMED_AT, confirmedAt: null }));
+    expect(text).not.toContain('Confirmed at');
+    expect(text).toContain('Hallway Light accepted the command to turn on, but never reported acting.');
+  });
+
+  it('the .noDelta twin: the trigger instant does not parse → "Confirmed at {time}." with no delta claimed', () => {
+    const c = chain(action({ outcome: 'CONFIRMED', settled: true, settledAt: CONFIRMED_AT, confirmedAt: CONFIRMED_AT }));
+    c.trigger = { ...c.trigger, matchedAt: 'not-an-instant' };
+    const { container } = render(<CausalChain chain={c} />);
+    const text = container.querySelector('li[data-kind="action"]')?.textContent ?? '';
+    expect(text).toContain(`Confirmed at ${clockTimeWithDate(CONFIRMED_AT)}.`);
+    expect(text).not.toContain('after it fired');
+  });
+
+  it('the .noDelta twin: a confirmation recorded BEFORE the trigger (clock skew) claims no delta — never a negative one', () => {
+    const c = chain(action({ outcome: 'CONFIRMED', settled: true, settledAt: AT, confirmedAt: '2026-07-27T23:46:59Z' }));
+    const { container } = render(<CausalChain chain={c} />);
+    const text = container.querySelector('li[data-kind="action"]')?.textContent ?? '';
+    expect(text).toContain(`Confirmed at ${clockTimeWithDate('2026-07-27T23:46:59Z')}.`);
+    expect(text).not.toMatch(/-\d/);
+    expect(text).not.toContain('after it fired');
   });
 });

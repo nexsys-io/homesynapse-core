@@ -94,7 +94,7 @@ export function DevicesView() {
                     // omission). v1.1.3 (FE-113 / CG-3) splits that into the TRI-STATE
                     // the wire actually serves — three facts, three renders:
                     //   key ABSENT  → a pre-v1.1.3 hub: em-dash + the no-claim title
-                    //                 (unchanged behaviour);
+                    //                 (unchanged behavior);
                     //   PRESENT-null → this hub serves report times and has none on
                     //                 record for this entity: em-dash + ITS OWN title;
                     //   PRESENT-string → the date-qualified stamp (lastReportedCell —

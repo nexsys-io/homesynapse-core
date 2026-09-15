@@ -21,7 +21,8 @@ export function RunChainView({ runId }: { runId: string }) {
   return (
     <Page title={t('explain.run.title')} lede={undefined} meta={state.meta}>
       <p style={{ marginTop: 'calc(-1 * var(--hs-space-2))' }}>
-        <a href={href('/explain/runs')}>← All runs</a>
+        {/* FE-114 D4: the back link is a §7 row (`explain.run.back`), byte-identical — the widened lint reached the two-word run. */}
+        <a href={href('/explain/runs')}>{t('explain.run.back')}</a>
       </p>
       <Card>
         {/* The error boundary is LOAD-BEARING (2026-07-27 field evidence): an

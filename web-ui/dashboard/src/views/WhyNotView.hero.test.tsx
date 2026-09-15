@@ -10,8 +10,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, act } from '@testing-library/preact';
 import { WhyNotView } from './WhyNotView';
 import { api } from '../lib/api';
-import { clockTimeWithDate } from '../lib/format';
-import { t } from '../lib/i18n';
+import { clockTimeWithDate, timeAgo } from '../lib/format';
+import { t, type MessageKey } from '../lib/i18n';
 import type { NonFiringExplanation } from '../lib/api/contract';
 
 afterEach(() => {
@@ -174,5 +174,96 @@ describe('HERO-1d D4 — the why-not pages are the catalog', () => {
     expect(back).toBeTruthy();
     expect(back.textContent).toBe('← Pick another automation');
     expect(back.textContent).toBe(t('explain.whyNot.back'));
+  });
+});
+
+/* ---- FE-114 D2 (2026-09-14) — EXPLAIN-8 (SPEC §6 :125): the DISABLED body reads the v1.1.4 wire —
+ * `whyNot.body.disabled.at` "Turned off {when}{reason}. Turn it on in your automation settings to let it
+ * run." with {when} = timeAgo(disabledAt) and {reason} = " — {disabledReason}" or "". The tri-state:
+ * `disabledAt` null / absent keep `whyNot.body.disabled` (HEAD's "…isn't recorded" sentence). RED at HEAD:
+ * no key, no arm. NO LIVE v1.1.4 CAPTURE exists — the payloads are hand-built (charter §4). ---- */
+describe('FE-114 D2 — EXPLAIN-8: the DISABLED body says WHEN it was turned off (disabledAt) and why (disabledReason)', () => {
+  const DISABLED_AT = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(); // "3 hr ago"
+  const OLD_BODY = "Turn it on in your automation settings to let it run. When it was turned off isn't recorded.";
+
+  it('disabledAt + disabledReason → the §7 sentence with the reason clause, shown as recorded; the headline unchanged', async () => {
+    const text = await renderCard(nf({ verdict: 'DISABLED', enabled: false, lastEvaluation: null, disabledAt: DISABLED_AT, disabledReason: 'repeated_failure', definitionKey: null }));
+    expect(text).toContain(`Turned off ${timeAgo(DISABLED_AT)} — repeated_failure. Turn it on in your automation settings to let it run.`);
+    expect(text).not.toContain(OLD_BODY);
+    expect(text).toContain("It's turned off, so it can't run.");
+    expect(text).toContain('It is turned off');
+  });
+
+  it('disabledAt with disabledReason null → the sentence without a reason clause', async () => {
+    const text = await renderCard(nf({ verdict: 'DISABLED', enabled: false, lastEvaluation: null, disabledAt: DISABLED_AT, disabledReason: null }));
+    expect(text).toContain(`Turned off ${timeAgo(DISABLED_AT)}. Turn it on in your automation settings to let it run.`);
+    expect(text).not.toContain('— null');
+  });
+
+  it('the catalog row is the charter\'s form, verbatim', () => {
+    expect(t('whyNot.body.disabled.at' as MessageKey)).toBe('Turned off {when}{reason}. Turn it on in your automation settings to let it run.');
+  });
+
+  it('disabledAt PRESENT-null (DP-6: DISABLED by configuration, no marker on the log) → today\'s body, unchanged', async () => {
+    const text = await renderCard(nf({ verdict: 'DISABLED', enabled: false, lastEvaluation: null, disabledAt: null, disabledReason: 'configuration' }));
+    expect(text).toContain(OLD_BODY);
+    expect(text).not.toContain('Turned off ');
+  });
+
+  it('disabledAt ABSENT (a pre-v1.1.4 hub) → today\'s body, unchanged [GREEN at HEAD; preservation]', async () => {
+    const text = await renderCard(nf({ verdict: 'DISABLED', enabled: false, lastEvaluation: null }));
+    expect(text).toContain(OLD_BODY);
+    expect(text).not.toContain('Turned off ');
+  });
+});
+
+/* ---- FE-114 D3 (2026-09-14) — the FIRED_CONFIRMED arm (EXPLAIN-6, SPEC §6 :123): the v1.1.4 verdict
+ * renders its own L1 (`whyNot.headline.firedConfirmed` / `.noTime`), the ok pill `whyNot.pill.firedConfirmed`
+ * "Ran and confirmed" and the run link — never the unknown arm. "the record says" is the register: the
+ * claim is Core's, shown as recorded (the Q1 ruling). The `{time}` is `lastEvaluation.at` — the EVALUATION
+ * instant, so it attaches to "It ran at", never to "confirmed" (the wire carries no confirmation instant on
+ * this read). N6 (noCommandsIssued true) still wins. RED at HEAD: WhyNotView.tsx:143's unknown arm renders
+ * `Recorded as "FIRED_CONFIRMED" — a verdict this dashboard can't explain yet.` ---- */
+describe('FE-114 D3 — FIRED_CONFIRMED renders as a confirmed run, not as a verdict this dashboard cannot explain', () => {
+  async function renderFired(over: Partial<NonFiringExplanation> = {}) {
+    vi.spyOn(api, 'getNonFiring').mockResolvedValue({
+      data: nf({ verdict: 'FIRED_CONFIRMED', lastRelevantRunId: 'run_7', lastEvaluation: { at: AT, conditionsResult: 'true' }, disabledAt: null, disabledReason: null, definitionKey: null, ...over }),
+      meta: { viewPosition: 1, timestamp: new Date().toISOString() },
+    } as never);
+    const u = render(<WhyNotView automationId="auto_x" />);
+    await act(async () => {});
+    return u.container;
+  }
+
+  it('with a time: the L1, the ok pill with its label, the run link — never the unknown arm', async () => {
+    const container = await renderFired();
+    const text = container.textContent ?? '';
+    expect(text).toContain(`It ran at ${WHEN}, and the record says the device confirmed it.`);
+    expect(text).not.toContain('Recorded as "FIRED_CONFIRMED"');
+    expect(text).not.toContain("can't explain yet");
+    const pill = Array.from(container.querySelectorAll('span')).find((s) => s.textContent === 'Ran and confirmed')!;
+    expect(pill).toBeTruthy();
+    expect(pill.className).toMatch(/_ok_/);
+    const link = container.querySelector('a[href$="/explain/run/run_7"]')!;
+    expect(link).toBeTruthy();
+    expect(link.textContent).toBe(t('whyNot.link.ranFine'));
+  });
+
+  it('the no-time arm (lastEvaluation null)', async () => {
+    const text = (await renderFired({ lastEvaluation: null })).textContent ?? '';
+    expect(text).toContain('It ran, and the record says the device confirmed it.');
+    expect(text).not.toContain('at —');
+  });
+
+  it('the catalog rows, verbatim (the time slot sits in the run clause — lastEvaluation.at is the evaluation instant)', () => {
+    expect(t('whyNot.headline.firedConfirmed' as MessageKey)).toBe('It ran at {time}, and the record says the device confirmed it.');
+    expect(t('whyNot.headline.firedConfirmed.noTime' as MessageKey)).toBe('It ran, and the record says the device confirmed it.');
+    expect(t('whyNot.pill.firedConfirmed' as MessageKey)).toBe('Ran and confirmed');
+  });
+
+  it('N6 still wins: FIRED_CONFIRMED beside noCommandsIssued true is the sent-nothing card', async () => {
+    const text = (await renderFired({ noCommandsIssued: true })).textContent ?? '';
+    expect(text).toContain(`It ran at ${WHEN}, but sent nothing — every step was skipped.`);
+    expect(text).not.toContain('Ran and confirmed');
   });
 });

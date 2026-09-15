@@ -74,7 +74,9 @@ const KEYLESS_AT_HEAD: Row[] = [
   ['COMPLETED, one open outcome → .completed.open.one at {secs}', () => chain(done(), [held()]), 'explain.terminal.completed.open.one', { secs: '0.4' }, 'Done in 0.4s — one outcome has not settled yet.'],
   ['COMPLETED, one open outcome, no duration → .completed.open.one.noTime', () => chain(done({ durationMs: NO_TIME }), [held()]), 'explain.terminal.completed.open.one.noTime', {}, 'Done — one outcome has not settled yet.'],
   ['COMPLETED, two open outcomes, no duration → .completed.open.noTime at {count}', () => chain(done({ durationMs: NO_TIME, actionCount: 2, commandCount: 2 }), [held(), held()]), 'explain.terminal.completed.open.noTime', { count: '2' }, 'Done — 2 outcomes have not settled yet.'],
-  ['INTERRUPTED → .status at the recorded label (HEAD\'s "Interrupted.")', () => chain(done({ status: 'INTERRUPTED' })), 'explain.terminal.status', { label: 'Interrupted' }, 'Interrupted.'],
+  // FE-114 D7 (2026-09-14): the INTERRUPTED arm reads its own §7 row — a TEXT change ruled in the charter (the fourth
+  // named flip's first home: this row read `'explain.terminal.status', { label: 'Interrupted' }, 'Interrupted.'` at HEAD).
+  ['INTERRUPTED → .interrupted, the §7 sentence (HEAD read "Interrupted." through .status)', () => chain(done({ status: 'INTERRUPTED' })), 'explain.terminal.interrupted', {}, 'Cut off before it finished.'],
   ['a status this build does not know → .status, shown as recorded', () => chain(done({ status: 'PAUSED' as RunStatus })), 'explain.terminal.status', { label: runStatusMeta('PAUSED').label }, 'Recorded as "PAUSED".'],
 ];
 const PRESERVATION: Row[] = [
@@ -111,9 +113,45 @@ describe('HERO-1d D1 — terminalLine is the catalog', () => {
     expect(terminalText(chain(done({ actionCount: 3, commandCount: 3 }), [held(), held(), action()]))).toBe('Done in 0.4s — 2 outcomes have not settled yet.');
   });
 
-  it('no sentence changed: INTERRUPTED keeps HEAD\'s recorded label — `explain.terminal.interrupted` ("Cut off before it finished.") is a §7 row this lane does not consume', () => {
+  it('FE-114 D7 — INTERRUPTED reads `explain.terminal.interrupted` ("Cut off before it finished."); `.status` stays the tail for statuses this build does not know [the fourth named flip: old toBe(\'Interrupted.\') + not.toBe(k(\'explain.terminal.interrupted\')) → toBe(k(\'explain.terminal.interrupted\'))]', () => {
     const line = terminalText(chain(done({ status: 'INTERRUPTED' })));
-    expect(line).toBe('Interrupted.');
-    expect(line).not.toBe(k('explain.terminal.interrupted'));
+    expect(line).toBe('Cut off before it finished.');
+    expect(line).toBe(k('explain.terminal.interrupted'));
+    expect(line).not.toBe('Interrupted.');
+  });
+});
+
+/* ---- FE-114 D7 (2026-09-14): the second unconsumed terminal row. `explain.terminal.noSteps` ("Done, recorded no
+ * steps.", SPEC :276) is the terminal line of a COMPLETED run with `actionCount` 0 and no action rows (the
+ * `actions[] ⊂ actionCount` law) — the era skeleton and the current-instance empty chain alike (SPEC §4 :88 names it
+ * for the skeleton); no duration is claimed for a run that recorded no steps. RED at HEAD: those chains render
+ * `.completed` ("Done in 0.4s.") / `.completed.noTime` ("Done."). The do-nothing run (actionCount > 0) keeps its own arm. ---- */
+describe('FE-114 D7 — the no-steps terminal row', () => {
+  const empty = (over: Partial<Outcome> = {}) => chain(done({ actionCount: 0, commandCount: 0, ...over }), []);
+
+  it('COMPLETED, actionCount 0, a recorded duration → "Done, recorded no steps." — the duration is not claimed [RED at HEAD: "Done in 0.4s."]', () => {
+    const line = terminalText(empty());
+    expect(line).toBe('Done, recorded no steps.');
+    expect(line).toBe(k('explain.terminal.noSteps'));
+    expect(line).not.toMatch(/\d\.\ds/);
+  });
+
+  it('COMPLETED, actionCount 0, no duration → the same sentence [RED at HEAD: "Done."]', () => {
+    expect(terminalText(empty({ durationMs: NO_TIME }))).toBe(k('explain.terminal.noSteps'));
+  });
+
+  it('the era skeleton (automationName null, trigger.type null, actionCount 0) → the same sentence — SPEC §4: "the terminal step (Done, recorded no steps)" [RED at HEAD]', () => {
+    const c = empty();
+    c.automationName = null;
+    c.trigger = { ...c.trigger, type: null };
+    expect(terminalText(c)).toBe(k('explain.terminal.noSteps'));
+  });
+
+  it('a COMPLETED run with a step keeps its arm — "Done in 0.4s." [GREEN at HEAD; preservation]', () => {
+    expect(terminalText(chain(done()))).toBe('Done in 0.4s.');
+  });
+
+  it('the do-nothing run (actionCount > 0, no rows) is NOT the no-steps row — "Finished in 0.4s, but nothing was changed." [GREEN at HEAD; preservation]', () => {
+    expect(terminalText(chain(done({ actionCount: 3, commandCount: 0 }), []))).toBe(k('explain.terminal.completed.nothing', { secs: '0.4' }));
   });
 });

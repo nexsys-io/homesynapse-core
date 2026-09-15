@@ -71,7 +71,7 @@ describe('the device list is store-truth (§10-H/I)', () => {
  * never a placeholder that could be mistaken for a device).
  * Red-first: the PRESENT-null, PRESENT-string and Device-line rows are RED at
  * HEAD (HEAD renders the em-dash + no-claim title unconditionally and never a
- * device line); the ABSENT row is green-by-construction (unchanged behaviour). */
+ * device line); the ABSENT row is green-by-construction (unchanged behavior). */
 const DEVICE_ULID = '01M0GPZFVANYA5TZMZSXRCV063';
 const REPORTED = '2026-09-06T02:45:29.123456Z'; // the wire form: Instant.toString(), nanos
 const base = { entityId: 'ent_hallway_light', name: 'Hallway Light', availability: 'AVAILABLE', stale: false } as const;

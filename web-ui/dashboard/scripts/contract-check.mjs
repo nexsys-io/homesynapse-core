@@ -7,12 +7,15 @@
 import { readFileSync } from 'node:fs';
 
 const SHAPES = 'src/lib/api/shapes.ts';
-// v1.1.3 (docket Row 14 RULED 2026-09-03; landed core-side 2026-09-06, CG-123 at
-// f25291b): four ADDITIVE keys (entities[].deviceId, entities[].lastReported,
-// nonFiring triggerRef, automations components[].ref); v1.1.2 = three ADDITIVE
-// keys (actions[].resultOutcome, actions[].settled, nonFiring noCommandsIssued);
-// the v1.1 base stays byte-stable. This pin and contract.test.ts:35 move together.
-const EXPECTED_VERSION = 'v1.1.3-2026-09-06';
+// v1.1.4 (HERO-0 §3 / `EXPLAIN: three`; landed core-side 2026-09-12 EXPLAIN-114a 5f918c7 and
+// 2026-09-13 EXPLAIN-114b fed99e8; the freeze doc's amendment date is the 13th): SEVEN ADDITIVE
+// keys across THREE reads (actions[].settledAt / confirmedAt, causal-chain definitionKey,
+// nonFiring disabledAt / disabledReason / definitionKey, automations[].definitionKey) + the
+// verdict value FIRED_CONFIRMED; v1.1.3 = four ADDITIVE keys (entities[].deviceId,
+// entities[].lastReported, nonFiring triggerRef, automations components[].ref); v1.1.2 = three
+// (actions[].resultOutcome, actions[].settled, nonFiring noCommandsIssued); the v1.1 base stays
+// byte-stable. This pin, contract.test.ts's and v113-additive.test.ts's move together (FE-114 D0).
+const EXPECTED_VERSION = 'v1.1.4-2026-09-13';
 // v1.1.1: the ratified problem-type URI prefix (Doc 09 §3.8 / ProblemType.TYPE_URI_PREFIX).
 const EXPECTED_PROBLEM_PREFIX = 'https://homesynapse.local/problems/';
 const REQUIRED = [

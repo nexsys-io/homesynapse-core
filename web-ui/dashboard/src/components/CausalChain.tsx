@@ -28,6 +28,7 @@ import {
   noReadingLine,
   NOT_RECORDED,
   NULL_NAME_NOTE,
+  parseInstant,
   pendingHint,
   refLabel,
   runStatusMeta,
@@ -75,8 +76,9 @@ export function CausalChain({
   // (Q6 ruled (a): this tell now; a Core marker is a v1.1.5 ask). A CURRENT automation
   // that planned nothing keeps the completed.none headline and the empty note.
   const eraSkeleton = genuinelyEmpty && (chain.automationName === null || trigger?.type === null);
+  // FE-114 D4: the do-nothing run's status label is a §7 row (`explain.terminal.completed.nothing.pill`), byte-identical.
   const status = doNothing
-    ? ({ label: 'Completed, nothing changed', tone: 'warn' } as const)
+    ? ({ label: t('explain.terminal.completed.nothing.pill'), tone: 'warn' } as const)
     : runStatusMeta(outcome?.status);
   /* HERO-1b B5 (SPEC §5/§8): a held-DISPATCHED action that settles on a later poll is
      announced ONCE through a polite role="status" region (`explain.a11y.live`) — the
@@ -203,6 +205,13 @@ export function CausalChain({
               : null;
             const showHelp =
               v.provisional || v.mode === 'superseded' || v.mode === 'acked-silent' || v.mode === 'expired-restart';
+            /* FE-114 D1 (EXPLAIN-9, SPEC §6): a confirmed step whose v1.1.4 `confirmedAt` is a VALUE says
+               when — the §7 sentence fills the help slot (the pill's title) and is repeated as a hint line
+               (SPEC §8: nothing is hover-only). Null / absent keep the mode help: the tri-state, and
+               nothing the wire did not carry is shown. `settledAt` is typed and validated, not rendered. */
+            const confirmedLine =
+              v.mode === 'confirmed' && typeof a.confirmedAt === 'string' ? confirmedAtLine(a.confirmedAt, trigger?.matchedAt) : null;
+            const help = confirmedLine ?? v.help;
             steps.push({
               kind: 'action',
               tone: targetDangling ? 'error' : v.tone,
@@ -231,7 +240,7 @@ export function CausalChain({
                   <StatusPill
                     tone={v.tone}
                     label={v.label}
-                    title={v.help}
+                    title={help}
                     size="sm"
                     glyph={v.glyph}
                     provisional={v.provisional}
@@ -241,6 +250,7 @@ export function CausalChain({
               children: (
                 <>
                   {targetDangling ? <p class={styles.hint}>{UNRESOLVED_REF_HELP}</p> : null}
+                  {confirmedLine ? <p class={styles.hint}>{confirmedLine}</p> : null}
                   {showHelp ? <p class={styles.hint}>{v.help}</p> : null}
                   {hint ? <p class={styles.hint}>{hint}</p> : null}
                   <Detail label={t('explain.action.detail.command')}>{a.command ?? NOT_RECORDED}{attrValueList(a.params)}</Detail>
@@ -362,8 +372,9 @@ function actionPhrase(command: string | null | undefined): string {
     case 'dim':
       return 'Dimmed';
     default:
-      // Present-but-null guard: never "Ran null on" — say what is known.
-      return command ? `Ran ${command} on` : 'Ran an unrecorded command on';
+      // Present-but-null guard: never "Ran null on" — say what is known. FE-114 D4: both arms are §7 rows
+      // (`explain.action.ran.on` / `.ran.unrecorded.on`), byte-identical to the former template and literal.
+      return command ? heroCopy('explain.action.ran.on', { command }) : t('explain.action.ran.unrecorded.on');
   }
 }
 /* HERO-1c C1 (SPEC §5/§7; the HERO-1b audit's D6): the action step LINE per confirmation
@@ -392,13 +403,28 @@ function actionStepLine(mode: ActionMode, a: CausalAction, target: string): stri
   const { verb, verbPast } = commandVerbs(a.command);
   return heroCopy(MODE_LINE_KEY[mode], { Target: target, target, verb, verbPast, reasonClause });
 }
+/* FE-114 D1 (2026-09-14) — EXPLAIN-9's sentence for a confirmed step whose v1.1.4 `confirmedAt` is a value:
+ * `{time}` = clockTimeWithDate(confirmedAt); `{delta}` = confirmedAt − trigger.matchedAt in the terminal
+ * line's seconds format ("0.4s" — the same `toFixed(1)`). The `.noDelta` twin claims no interval when the
+ * trigger instant does not parse or is LATER than the confirmation (clock skew): never a negative delta,
+ * never a number the record does not support. The wire's only earlier instant on the chain is the
+ * trigger's — the action carries no `issuedAt` — so the delta reads "after it fired", never "after the
+ * command" (charter §2). */
+function confirmedAtLine(confirmedAt: string, matchedAt: string | null | undefined): string {
+  const time = clockTimeWithDate(confirmedAt);
+  const at = parseInstant(confirmedAt);
+  const fired = parseInstant(matchedAt);
+  const ms = at && fired ? at.getTime() - fired.getTime() : null;
+  if (ms === null || ms < 0) return heroCopy('explain.action.detail.confirmedAt.noDelta', { time });
+  return heroCopy('explain.action.detail.confirmedAt', { time, delta: `${(ms / 1000).toFixed(1)}s` });
+}
 /* HERO-1d D1 (2026-09-13): every arm of the terminal line is a §7 `explain.terminal.*` row read through
  * heroCopy(), byte-identical to the literal it replaced. `{notRecorded}` carries the NOT_RECORDED constant;
  * `{secs}` is omitted with the whole clause when the record has no duration (the HERO-1b honesty row — the
  * `.noTime` arms exist for exactly that, never "0.0s"); `{reasonClause}` is " — {reason}" or "". The tail
- * (INTERRUPTED and any status this build does not know) is HEAD's `${runStatusMeta(s).label}.` sentence,
- * keyed as `.status` — `explain.terminal.interrupted` ("Cut off before it finished.") stays unconsumed,
- * since a text change is not this lane's. */
+ * (any status this build does not know) is HEAD's `${runStatusMeta(s).label}.` sentence, keyed as
+ * `.status`. FE-114 D7 consumed the two rows HERO-1d left: `explain.terminal.interrupted` ("Cut off before
+ * it finished.") for INTERRUPTED and `explain.terminal.noSteps` for a completed run with no steps. */
 function terminalLine(chain: Chain): string {
   const outcome = chain.outcome;
   if (!outcome) return heroCopy('explain.terminal.unrecorded', { notRecorded: NOT_RECORDED });
@@ -416,6 +442,11 @@ function terminalLine(chain: Chain): string {
     if (isDoNothingRun(outcome, actions.length)) {
       return secs ? heroCopy('explain.terminal.completed.nothing', { secs }) : heroCopy('explain.terminal.completed.nothing.noTime');
     }
+    // FE-114 D7 (SPEC §4 :88, the §7 row at :276): a completed run that recorded NO steps — `actionCount` 0
+    // and no action rows (the `actions[] ⊂ actionCount` law; a wire that carried rows against a zero count
+    // would not be told it recorded none) — says so; no duration is claimed for it. The era skeleton and
+    // the current-instance empty chain alike (the headline tells them apart; `genuinelyEmpty` :69–:70).
+    if (outcome.actionCount === 0 && actions.length === 0) return heroCopy('explain.terminal.noSteps');
     // §5.9 honesty: a COMPLETED run's action outcome can settle AFTER the run
     // finishes (a late report re-derives on the next read) — while any action is
     // still unsettled, the terminal line must not read as the final word.
@@ -430,7 +461,10 @@ function terminalLine(chain: Chain): string {
   if (s === 'SKIPPED') return heroCopy('explain.terminal.skipped', { reasonClause });
   if (s === 'FAILED') return heroCopy('explain.terminal.failed', { reasonClause });
   if (s === 'CANCELLED') return heroCopy('explain.terminal.cancelled');
-  // Open-vocabulary hardening (the closed-switch class): INTERRUPTED and any status this build does
-  // not know render the recorded label's own sentence — shown as recorded, never a crash, never a guess.
+  // FE-114 D7: INTERRUPTED reads its own §7 row ("Cut off before it finished." — a text change the charter
+  // ruled; HEAD rendered "Interrupted." through `.status`).
+  if (s === 'INTERRUPTED') return heroCopy('explain.terminal.interrupted');
+  // Open-vocabulary hardening (the closed-switch class): a status this build does not know renders the
+  // recorded label's own sentence — shown as recorded, never a crash, never a guess.
   return heroCopy('explain.terminal.status', { label: runStatusMeta(s).label });
 }

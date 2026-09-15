@@ -24,8 +24,9 @@ export type Tone = 'ok' | 'warn' | 'error' | 'info' | 'unknown' | 'neutral';
  * The LIVE wire serves optionals PRESENT-BUT-NULL beside populated siblings
  * (field evidence, 2026-07-27): the real seam is absent / null / value. Where a
  * value is null, the surface says so in words — never a placeholder that could
- * be mistaken for data, never the string "null", never an invented value. */
-export const NOT_RECORDED = 'not recorded';
+ * be mistaken for data, never the string "null", never an invented value.
+ * FE-114 D8: the §7 row `explain.detail.notRecorded` is the one home (byte-identical to the former literal). */
+export const NOT_RECORDED = t('explain.detail.notRecorded');
 
 /* ---- FE-NULL-1 (2026-09-10): the causal chain's REQUIRED-NULLABLE arms — the honest
  * sentences HERO-0 wrote (context/research/2026-09-06_HERO-0_null-census_v1.1.3_return.md
@@ -36,17 +37,20 @@ export const NOT_RECORDED = 'not recorded';
 export function unrecordedTriggerLine(when: string): string {
   return `Something set it off at ${when} — what isn't recorded.`;
 }
-/** `observedState[].value` null — rendered as `${entity} ${attribute} ${NO_READING_YET}`. */
+/** `observedState[].value` null — the §7 row `explain.condition.noReading` ("{entity} {attr} had no reading
+ *  yet."), read through heroCopy (FE-114 D8); `NO_READING_YET` is the sentence's tail, the test-side name. */
 export const NO_READING_YET = 'had no reading yet.';
 export function noReadingLine(entityLabel: string, attribute: string): string {
-  return `${entityLabel} ${attribute} ${NO_READING_YET}`;
+  return heroCopy('explain.condition.noReading', { entity: entityLabel, attr: attribute });
 }
 /** `actions[].command` null — a SKIPPED/FAILED action that never issued a command. */
 export const SKIPPED_BEFORE_COMMAND = t('explain.mode.skipped.line'); // the §7 row (HERO-1c: the chain renders the key; this constant is its test-side name)
-/** `actions[].targetRef` null — the action line ends with this; no target is named, none accused. */
-export const UNNAMED_TARGET = "a device the run didn't name";
-/** `cascade.depth > 0` with `parentRunId` null (always null in V1 — F4): started by a run the record cannot name. */
-export const CASCADE_PARENT_UNRECORDED = "Started by another run — which one isn't recorded.";
+/** `actions[].targetRef` null — the action line ends with this; no target is named, none accused.
+ *  FE-114 D8: the §7 row `explain.slot.target.unnamed` is the one home (a sixth twin the census missed). */
+export const UNNAMED_TARGET = t('explain.slot.target.unnamed');
+/** `cascade.depth > 0` with `parentRunId` null (always null in V1 — F4): started by a run the record cannot name.
+ *  FE-114 D8: the §7 row `explain.cascade.parentUnrecorded` is the one home. */
+export const CASCADE_PARENT_UNRECORDED = t('explain.cascade.parentUnrecorded');
 
 /** The genuinely-empty chain (a real, successful response with nothing planned):
  *  an explicit, calm statement — nothing failed, and nothing is hidden. */
@@ -214,7 +218,7 @@ export { commandKind, type CommandKind } from './verdicts';
  *  as normal, never as failure. Returns null when there is nothing useful to add. */
 export function pendingHint(command: string | null | undefined): string | null {
   if (commandKind(command) === 'color') {
-    return 'Color changes confirm slowly on some bulbs — this can take several seconds.';
+    return t('explain.action.pending.color'); // the §7 row — FE-114 D6 (IR-14): one home for the sentence; byte-identical to the former literal
   }
   return null;
 }
@@ -384,13 +388,13 @@ export function verdictMeta(v: NonFiringVerdict | string | null | undefined): { 
  * so runs from an earlier load lose their name. Render the class honestly and
  * calmly; NEVER invent a name for a null. */
 export function runName(name: string | null | undefined): string {
-  return name ?? 'An earlier automation';
+  return name ?? t('explain.slot.automation.earlier'); // the §7 row — FE-114 D8: one home, byte-identical
 }
 
 /** One plain sentence explaining WHY a run can have no name — shown wherever the
- *  null-name class surfaces (calm, honest; not an error). */
-export const NULL_NAME_NOTE =
-  'This run happened under an earlier version of your automations, so its name is no longer on record. The run itself is preserved.';
+ *  null-name class surfaces (calm, honest; not an error). FE-114 D8: the §7 row
+ *  `explain.nullName.note` is the one home (byte-identical to the former literal). */
+export const NULL_NAME_NOTE = t('explain.nullName.note');
 
 /* ---- Brightness: percent comes from the DERIVED key, never a client rescale ----
  * Canonical brightness state is 0–254 LEVEL units (Doc 08 §3.5); the percentage is

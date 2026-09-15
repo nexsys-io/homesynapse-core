@@ -8,25 +8,31 @@ import {
   availabilityEvidence,
   availabilityMeta,
   brightnessDisplay,
+  CASCADE_PARENT_UNRECORDED,
   causalSentence,
   danglingTargetLine,
   danglingTriggerLine,
+  heroCopy,
   labelFor,
   lastReportedCell,
   LIST_FRESHNESS_NO_CLAIM_TITLE,
   LIST_FRESHNESS_NULL_TITLE,
+  NO_READING_YET,
+  noReadingLine,
+  NOT_RECORDED,
   NULL_NAME_NOTE,
   originMeta,
   refLabel,
   runName,
   runStatusMeta,
   timeAgo,
+  UNNAMED_TARGET,
   UNRESOLVED_REF_PHRASE,
   UNRESOLVED_REF_PILL,
   verdictMeta,
 } from './format';
 import { causalChains } from './api/mock/mockData';
-import { BRAND } from './i18n';
+import { BRAND, t } from './i18n';
 
 describe('plain-language formatting', () => {
   it('humanizes entity ids into readable names', () => {
@@ -437,5 +443,28 @@ describe('HERO-1b — the §10 acceptance sentences the headline layer owns (1 �
     expect(causalSentence(mk('SKIPPED', 'DISPATCHED', { resultOutcome: 'superseded', settled: true }))).toContain(
       'Hallway Light was asked to turn on, then a newer command replaced it.',
     );
+  });
+});
+
+/* ---- FE-114 D8 (2026-09-14) — the twins fold: the format-side constants and helpers that carried a sentence
+ * the §7 catalog also carried now READ the catalog (one home; the screen bytes unchanged). GREEN at HEAD by
+ * construction — the bytes were already equal (preservation; disclosed): these rows lock the fold. ---- */
+describe('FE-114 D8 — the twins read the catalog', () => {
+  it('each constant and helper equals its §7 row', () => {
+    expect(NOT_RECORDED).toBe(t('explain.detail.notRecorded'));
+    expect(CASCADE_PARENT_UNRECORDED).toBe(t('explain.cascade.parentUnrecorded'));
+    expect(UNNAMED_TARGET).toBe(t('explain.slot.target.unnamed'));
+    expect(NULL_NAME_NOTE).toBe(t('explain.nullName.note'));
+    expect(runName(null)).toBe(t('explain.slot.automation.earlier'));
+    expect(noReadingLine('Sun', 'elevation')).toBe(heroCopy('explain.condition.noReading', { entity: 'Sun', attr: 'elevation' }));
+  });
+
+  it('and the screen bytes are HEAD\'s literals, character for character', () => {
+    expect(NOT_RECORDED).toBe('not recorded');
+    expect(CASCADE_PARENT_UNRECORDED).toBe("Started by another run — which one isn't recorded.");
+    expect(UNNAMED_TARGET).toBe("a device the run didn't name");
+    expect(runName(null)).toBe('An earlier automation');
+    expect(noReadingLine('Sun', 'elevation')).toBe(`Sun elevation ${NO_READING_YET}`);
+    expect(noReadingLine('Sun', 'elevation')).toBe('Sun elevation had no reading yet.');
   });
 });

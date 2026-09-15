@@ -4,6 +4,7 @@ import type { ComponentChildren } from 'preact';
 import type { ApiState } from '../lib/poll';
 import type { ResponseMeta } from '../lib/api/contract';
 import { ErrorState, Loading, OfflineState, ReplayingBanner } from './feedback';
+import { t } from '../lib/i18n';
 
 /** HERO-1c correction D3: the hero views pass their §7 rows (`explain.loading` / `explain.error.*`)
  *  here; every other view takes the primitives' app defaults (`ui.loading` / `ui.error.*`). */
@@ -28,7 +29,8 @@ export function Resource<T>({
     case 'replaying':
       return <ReplayingBanner />;
     case 'auth':
-      return <Loading label="Signing in…" />;
+      // FE-114 D4: the auth-state label is the app's `ui.signingIn` row, byte-identical (the widened lint reached it).
+      return <Loading label={t('ui.signingIn')} />;
     case 'error':
       return <ErrorState error={state.error} onRetry={state.reload} title={labels?.errorTitle} body={labels?.errorBody} />;
     case 'offline':

@@ -31,8 +31,11 @@ const REQUESTS: Record<EndpointId, string> = {
 
 describe('frozen read-API contract', () => {
   it('pins the contract version', () => {
-    // v1.1.3 (CG-123, landed core-side 2026-09-06 at f25291b): the four additive keys.
-    expect(CONTRACT_VERSION).toBe('v1.1.3-2026-09-06');
+    // v1.1.4 (EXPLAIN-114a/b, landed core-side 2026-09-12/13; the freeze doc's amendment date is the
+    // 13th): seven additive keys + FIRED_CONFIRMED (FE-114 D0 — the first named flip:
+    // 'v1.1.3-2026-09-06' → 'v1.1.4-2026-09-13'). This pin, scripts/contract-check.mjs and
+    // v113-additive.test.ts's pin move together.
+    expect(CONTRACT_VERSION).toBe('v1.1.4-2026-09-13');
   });
 
   it('has a validator for every canonical endpoint', () => {

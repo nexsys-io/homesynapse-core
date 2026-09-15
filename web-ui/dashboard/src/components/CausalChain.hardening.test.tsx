@@ -353,7 +353,10 @@ describe('HERO-1b B4 — two empty facts, two sentences (the era boundary vs a c
     expect(text).toContain("This run is on record, but its steps aren't.");
     expect(text).toContain('It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed.');
     expect(text).not.toContain(EMPTY_CHAIN_NOTE);
-    expect(text).not.toContain('recorded no steps');
+    // FE-114 D7: narrowed by one token to the headline fact it guards (`explain.headline.completed.none` ends
+    // "…and recorded no steps.") — the terminal step now reads SPEC §4's "Done, recorded no steps." for this
+    // skeleton (SPEC.md:88, the `explain.terminal.noSteps` row). Old: not.toContain('recorded no steps').
+    expect(text).not.toContain('and recorded no steps');
     expect(text).toContain(NULL_NAME_NOTE); // the name note still explains the null name
     expect(container.querySelector('li[data-kind="outcome"]')).toBeTruthy(); // the terminal step stays
   });

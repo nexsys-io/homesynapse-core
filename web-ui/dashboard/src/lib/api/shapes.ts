@@ -41,7 +41,8 @@ const AVAILABILITY: Availability[] = ['AVAILABLE', 'UNAVAILABLE', 'UNKNOWN'];
 const ORIGIN: Origin[] = ['AUTOMATION', 'DEVICE', 'USER', 'EXTERNAL', 'UNKNOWN'];
 const RUN_STATUS: RunStatus[] = ['COMPLETED', 'FAILED', 'SKIPPED', 'CANCELLED', 'INTERRUPTED'];
 const ACTION_OUTCOME: ActionOutcome[] = ['DISPATCHED', 'CONFIRMED', 'UNCONFIRMED', 'FAILED', 'SKIPPED'];
-const VERDICT: NonFiringVerdict[] = ['CONDITION_NOT_MET', 'NEVER_TRIGGERED', 'ACTED_BUT_UNCONFIRMED', 'DISABLED'];
+// v1.1.4 (EXPLAIN-114a): FIRED_CONFIRMED joins LAST — the enum grows; the four v1.1 values are byte-stable.
+const VERDICT: NonFiringVerdict[] = ['CONDITION_NOT_MET', 'NEVER_TRIGGERED', 'ACTED_BUT_UNCONFIRMED', 'DISABLED', 'FIRED_CONFIRMED'];
 const INTEGRATION_HEALTH: IntegrationHealth[] = ['HEALTHY', 'DEGRADED', 'UNHEALTHY', 'UNKNOWN'];
 const PROJECTION_MODE: ProjectionMode[] = ['REPLAY', 'TRANSITION', 'LIVE'];
 
@@ -295,8 +296,17 @@ export const validators: Record<EndpointId, Validator> = {
       // presence is validated: resultOutcome is string|null, settled is boolean.
       if ('resultOutcome' in a) strOrNull(a.resultOutcome, `${p}.resultOutcome`);
       if ('settled' in a) isBool(a.settled, `${p}.settled`);
+      // v1.1.4 ADDITIVE (EXPLAIN-114a, FE-114 D0): the tri-state — absent is lawful (a pre-v1.1.4
+      // hub); PRESENT must be string-or-null. Both are `Instant.toString()` (ISO-8601) — a number on
+      // the wire is the epoch-seconds misread class, FAIL it. `settled: true` beside
+      // `confirmedAt: null` is lawful (a FAILED / UNCONFIRMED action settles unconfirmed).
+      if ('settledAt' in a) strOrNull(a.settledAt, `${p}.settledAt`);
+      if ('confirmedAt' in a) strOrNull(a.confirmedAt, `${p}.confirmedAt`);
     });
     if (!isObj(req(d, 'outcome', 'B3chain.data'))) throw new ContractError('B3chain.outcome must be object');
+    // v1.1.4 ADDITIVE (EXPLAIN-114a): the run's definition hash, appended after cascade — a SHA-256
+    // hex string or JSON null (the log carries none). Absence lawful; present must be typed.
+    if ('definitionKey' in d) strOrNull(d.definitionKey, 'B3chain.data.definitionKey');
     meta(req(b, 'meta', 'B3chain'), 'B3chain.meta');
   },
   'B3:nonFiring': (b) => {
@@ -333,6 +343,14 @@ export const validators: Record<EndpointId, Validator> = {
     // noCommandsIssued. Absence is lawful (pre-v1.1.3 — the two recorded fixtures);
     // a present key must be a typed ref or null.
     if ('triggerRef' in d) refOrNull(d.triggerRef, 'B3nf.data.triggerRef');
+    // v1.1.4 ADDITIVE (EXPLAIN-114a, FE-114 D0), appended after triggerRef in this order:
+    // disabledAt (Instant.toString() or null — no marker on the log, or a non-DISABLED verdict),
+    // disabledReason ("repeated_failure" / "configuration" or null on a non-DISABLED verdict),
+    // definitionKey (a SHA-256 hex string; null only for a fixture). The tri-state on each:
+    // absence lawful (pre-v1.1.4 — the two recorded fixtures); present must be string-or-null.
+    if ('disabledAt' in d) strOrNull(d.disabledAt, 'B3nf.data.disabledAt');
+    if ('disabledReason' in d) strOrNull(d.disabledReason, 'B3nf.data.disabledReason');
+    if ('definitionKey' in d) strOrNull(d.definitionKey, 'B3nf.data.definitionKey');
     meta(req(b, 'meta', 'B3nf'), 'B3nf.meta');
   },
   'B3:automations': (b) => {
@@ -354,6 +372,9 @@ export const validators: Record<EndpointId, Validator> = {
       components.forEach((c, j) => {
         if (isObj(c) && 'ref' in c) refOrNull(c.ref, `${p}.components[${j}].ref`);
       });
+      // v1.1.4 ADDITIVE (EXPLAIN-114a, FE-114 D0): definitionKey appended after lastRunId — a
+      // SHA-256 hex string (never null in production; null only for a fixture). Absence lawful.
+      if ('definitionKey' in a) strOrNull(a.definitionKey, `${p}.definitionKey`);
     });
     meta(req(b, 'meta', 'B3auto'), 'B3auto.meta');
   },

@@ -315,3 +315,59 @@ describe('HERO-1d D6 — the spelling of record', () => {
     expect(t('explain.action.pending.color')).toBe('Color changes confirm slowly on some bulbs — this can take several seconds.');
   });
 });
+
+/* FE-114 D5 (2026-09-14, IR-13) — US is the dialect of record: the one RENDERED UK string
+ * (`explain.mode.unknownOutcome.help`, the "-ise" spelling) takes the US "-ize" — a §7 TEXT-CHANGE row
+ * (SPEC :207). RED at HEAD: the catalog string carried the UK spelling. (The charter named an existing pin
+ * on this string as the third flip; no test pinned the string at HEAD — verdicts.test.ts:385 is
+ * key-relative — so this is a NEW red-first pin, not a flip.) */
+describe('FE-114 D5 — the dialect of record on the last rendered UK spelling', () => {
+  it('explain.mode.unknownOutcome.help reads "recognize"', () => {
+    expect(t('explain.mode.unknownOutcome.help')).toBe('The device reported an outcome this dashboard does not recognize yet — shown as recorded.');
+    expect(t('explain.mode.unknownOutcome.help')).toMatch(/recognize yet/);
+  });
+});
+
+/*
+ * FE-114 D1–D4 (2026-09-14) — the v1.1.4 keys' sentences (D1 EXPLAIN-9 · D2 EXPLAIN-8 · D3 EXPLAIN-6) and
+ * the literals D4's widened lint reached, as SPEC §7 amendment rows tagged FE-114. RED at HEAD: none of the
+ * thirteen keys exists. D4's strings are HEAD's literals character for character (`{command}` stands where
+ * the template interpolated); D1–D3's are the charter's forms, with D3's `{time}` in the run clause
+ * (lastEvaluation.at is the evaluation instant — the FE-114 return §0 names the deviation).
+ */
+const SPEC7_FE114_KEYS = {
+  // D1 — EXPLAIN-9
+  'explain.action.detail.confirmedAt': 'Confirmed at {time}, {delta} after it fired.',
+  'explain.action.detail.confirmedAt.noDelta': 'Confirmed at {time}.',
+  // D2 — EXPLAIN-8
+  'whyNot.body.disabled.at': 'Turned off {when}{reason}. Turn it on in your automation settings to let it run.',
+  // D3 — EXPLAIN-6 (FIRED_CONFIRMED)
+  'whyNot.headline.firedConfirmed': 'It ran at {time}, and the record says the device confirmed it.',
+  'whyNot.headline.firedConfirmed.noTime': 'It ran, and the record says the device confirmed it.',
+  'whyNot.pill.firedConfirmed': 'Ran and confirmed',
+  // D4 — the six lint hits, byte-identical
+  'explain.terminal.completed.nothing.pill': 'Completed, nothing changed',
+  'explain.action.ran.on': 'Ran {command} on',
+  'explain.action.ran.unrecorded.on': 'Ran an unrecorded command on',
+  'ui.signingIn': 'Signing in…',
+  'explain.run.back': '← All runs',
+  'whyNot.pill.sentNothing': 'Ran, but sent nothing',
+  'whyNot.pill.didRun': 'It did run',
+} as const;
+
+describe('FE-114 — the amendment rows are in the catalog, verbatim (170 + 13 = 183 §7-tagged rows)', () => {
+  it('carries the thirteen keys with their strings, character for character', () => {
+    expect(Object.keys(SPEC7_FE114_KEYS).length).toBe(13);
+    for (const [k, s] of Object.entries(SPEC7_FE114_KEYS)) {
+      expect(t(k as MessageKey), k).toBe(s);
+    }
+  });
+
+  it('Register C holds on the thirteen: no product name, no token, no "we"', () => {
+    for (const [k, s] of Object.entries(SPEC7_FE114_KEYS)) {
+      expect(s, k).not.toContain(BRAND.productName);
+      expect(s, k).not.toContain('{{NAME}}');
+      expect(s, k).not.toMatch(/\bwe\b/i);
+    }
+  });
+});

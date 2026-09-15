@@ -203,13 +203,18 @@ function makeNonFiring(
     NEVER_TRIGGERED: 'Nothing set it off. The trigger has not matched in the last hour.',
     ACTED_BUT_UNCONFIRMED: 'It ran, but the device never confirmed it acted — it may be slow or briefly offline.',
     DISABLED: 'This automation is turned off, so it cannot run.',
+    // FE-114 D0 (type-forced by the v1.1.4 verdict union; no scenario constructs it yet — the next mock
+    // touch): the wire's own sentence shape for the clean-confirmed case; the dashboard renders no
+    // `explanation` string (SPEC §2 gives it no slot).
+    FIRED_CONFIRMED: 'It last fired and its device confirmed; no non-firing was detected in the requested window.',
   };
   const nf: NonFiringExplanation = {
     automationId,
     automationName: over.automationName ?? 'Demo automation',
     enabled: verdict !== 'DISABLED',
     verdict,
-    lastRelevantRunId: verdict === 'CONDITION_NOT_MET' || verdict === 'ACTED_BUT_UNCONFIRMED' ? 'run_demo_ref' : null,
+    // v1.1.4: FIRED_CONFIRMED always carries its run id (the rest-api table); NEVER_TRIGGERED never does.
+    lastRelevantRunId: verdict === 'CONDITION_NOT_MET' || verdict === 'ACTED_BUT_UNCONFIRMED' || verdict === 'FIRED_CONFIRMED' ? 'run_demo_ref' : null,
     explanation: EXPLAIN[verdict],
     triggerSummary: 'This runs when Hallway Motion detects motion, after sunset.',
     // OBSERVED LIVE SHAPE (2026-08-16, §4.5): the wire nulls the WHOLE object

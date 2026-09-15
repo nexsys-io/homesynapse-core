@@ -15,6 +15,7 @@ import {
   heroCopy,
   parseInstant,
   refLabel,
+  timeAgo,
   type Tone,
   UNRESOLVED_REF_HELP,
   UNRESOLVED_REF_PHRASE,
@@ -78,11 +79,12 @@ function WhyNotPicker() {
 
 /* ---- HERO-1b B3 (2026-09-12): the why-not card's L1 sentence, body and link per verdict
  * (SPEC §3 N1–N7; the copy is §7 `whyNot.*` behind t()). `{time}` is `lastEvaluation.at`
- * (object-or-null on the observed wire — DX-16), so every row has a no-time arm: N1 and N3
- * carry an explicit `.noTime` key; N4/N6 drop " at {time}" as the §7 slot note says. N3 is
- * an INFERENCE from a non-null run id (a run that lawfully skipped every target also carries
- * one), so it renders in the info register, never ok (Q1 ruled (a)) — until FIRED_CONFIRMED
- * lands (EXPLAIN-6, gated). N6 (noCommandsIssued true) wins over any verdict. */
+ * (object-or-null on the observed wire — DX-16), so every row has a no-time arm: each carries
+ * its explicit `.noTime` key (FE-114 D8 retired the " at {time}" string surgery N4/N6 used — the
+ * HERO-1c C0 twins are consumed, byte-identical on screen). N3 is an INFERENCE from a non-null
+ * run id (a run that lawfully skipped every target also carries one), so it renders in the info
+ * register, never ok (Q1 ruled (a)); the v1.1.4 FIRED_CONFIRMED verdict (EXPLAIN-6, FE-114 D3)
+ * is the ok arm — Core's claim, shown as recorded. N6 (noCommandsIssued true) wins over any verdict. */
 interface WhyNotCard {
   pill: { label: string; tone: Tone; glyph?: string };
   headline: string;
@@ -93,13 +95,12 @@ interface WhyNotCard {
 function whyNotCard(nf: NonFiringExplanation): WhyNotCard {
   const at = nf.lastEvaluation?.at ?? null;
   const time = parseInstant(at) ? clockTimeWithDate(at) : null;
-  /** Drop the " at {time}" clause when the wire carries no time (§7: "null → drop 'at {time}'"). */
-  const timed = (key: MessageKey) => (time ? heroCopy(key, { time }) : heroCopy(key, {}).replace(' at {time}', ''));
   const ranFine = nf.verdict === 'NEVER_TRIGGERED' && nf.lastRelevantRunId !== null;
   if (nf.noCommandsIssued === true) {
     return {
-      pill: { label: 'Ran, but sent nothing', tone: 'warn', glyph: MODE_GLYPHS.skipped },
-      headline: timed('whyNot.headline.sentNothing'),
+      // FE-114 D4: the pill labels are §7 rows (`whyNot.pill.*`), byte-identical — the widened lint reaches object properties.
+      pill: { label: t('whyNot.pill.sentNothing'), tone: 'warn', glyph: MODE_GLYPHS.skipped },
+      headline: time ? heroCopy('whyNot.headline.sentNothing', { time }) : heroCopy('whyNot.headline.sentNothing.noTime'),
       body: heroCopy('whyNot.body.sentNothing'),
       link: 'whyNot.link.sentNothing',
     };
@@ -115,7 +116,7 @@ function whyNotCard(nf: NonFiringExplanation): WhyNotCard {
     case 'NEVER_TRIGGERED':
       return ranFine
         ? {
-            pill: { label: 'It did run', tone: 'info' },
+            pill: { label: t('whyNot.pill.didRun'), tone: 'info' },
             headline: time ? heroCopy('whyNot.headline.neverTriggered.ranFine', { time }) : heroCopy('whyNot.headline.neverTriggered.ranFine.noTime'),
             body: heroCopy('whyNot.body.ranFine'),
             link: 'whyNot.link.ranFine',
@@ -129,12 +130,23 @@ function whyNotCard(nf: NonFiringExplanation): WhyNotCard {
     case 'ACTED_BUT_UNCONFIRMED':
       return {
         pill: { ...verdictMeta(nf.verdict), glyph: MODE_GLYPHS['timed-out'] },
-        headline: timed('whyNot.headline.actedButUnconfirmed'),
+        headline: time ? heroCopy('whyNot.headline.actedButUnconfirmed', { time }) : heroCopy('whyNot.headline.actedButUnconfirmed.noTime'),
         body: heroCopy('whyNot.body.actedButUnconfirmed'),
         link: 'whyNot.link.actedButUnconfirmed',
       };
     case 'DISABLED':
-      return { pill: verdictMeta(nf.verdict), headline: heroCopy('whyNot.headline.disabled'), body: heroCopy('whyNot.body.disabled'), link: null };
+      return { pill: verdictMeta(nf.verdict), headline: heroCopy('whyNot.headline.disabled'), body: disabledBody(nf), link: null };
+    case 'FIRED_CONFIRMED':
+      // FE-114 D3 (EXPLAIN-6): the v1.1.4 clean-confirmed-success verdict — Core's claim, shown as recorded
+      // ("the record says", the Q1 register). `{time}` is lastEvaluation.at, the EVALUATION instant, so it
+      // sits in the run clause. The run link as the other arms; the check glyph pairs the ok tone (label +
+      // shape, never hue alone). Placed after the noCommandsIssued check: N6 still wins.
+      return {
+        pill: { label: t('whyNot.pill.firedConfirmed'), tone: 'ok', glyph: MODE_GLYPHS.confirmed },
+        headline: time ? heroCopy('whyNot.headline.firedConfirmed', { time }) : heroCopy('whyNot.headline.firedConfirmed.noTime'),
+        body: null,
+        link: 'whyNot.link.ranFine',
+      };
   }
   // Open-vocabulary hardening (the closed-switch class): a verdict this build does not
   // know is shown as recorded — never a crash, never invented meaning, never success.
@@ -144,6 +156,16 @@ function whyNotCard(nf: NonFiringExplanation): WhyNotCard {
     body: null,
     link: null,
   };
+}
+
+/** FE-114 D2 (EXPLAIN-8, SPEC §6): the DISABLED body when the v1.1.4 `disabledAt` is a VALUE —
+ *  "Turned off {when}{reason}. …" with {when} = timeAgo(disabledAt) and {reason} = " — {disabledReason}"
+ *  (shown as recorded: "repeated_failure" / "configuration") or "". Null / absent keep HEAD's
+ *  "…isn't recorded" body — the tri-state; nothing the wire did not carry is claimed. */
+function disabledBody(nf: NonFiringExplanation): string {
+  if (typeof nf.disabledAt !== 'string' || !parseInstant(nf.disabledAt)) return heroCopy('whyNot.body.disabled');
+  const reason = typeof nf.disabledReason === 'string' && nf.disabledReason !== '' ? ` — ${nf.disabledReason}` : '';
+  return heroCopy('whyNot.body.disabled.at', { when: timeAgo(nf.disabledAt), reason });
 }
 
 function WhyNotDetail({ automationId }: { automationId: string }) {

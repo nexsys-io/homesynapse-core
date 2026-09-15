@@ -13,7 +13,7 @@
  *
  * THE HONESTY LAW (FE-HONEST-1 §10-H/§10-I) at the validator seam: ABSENT and
  * NULL are two different facts; a PRESENT key must be TYPED (the
- * `noCommandsIssued` idiom, shapes.ts) — "optional" is never a licence for a
+ * `noCommandsIssued` idiom, shapes.ts) — "optional" is never a license for a
  * wrong type to pass. The H8 false-type class is closed at the MOCK too: a mock
  * that always populates a nullable key hides the null — so the default mock is
  * pinned to carry ≥1 null per new key and ONE dangling ref (the LOUD exhibit).
@@ -400,6 +400,8 @@ describe('the TypeScript mirror declares the four chain keys required-nullable (
     c.actions[0]!.targetRef = null;
     c.cascade = { parentRunId: null, depth: 1 };
     expect(c.trigger.subjectRef).toBeNull();
-    expect(CONTRACT_VERSION).toBe('v1.1.3-2026-09-06');
+    // FE-114 D0: the third home of the version pin (the hub's census named two). Moved with them:
+    // 'v1.1.3-2026-09-06' → 'v1.1.4-2026-09-13'. FE-NULL-1's fact stands: ITS rows carried no bump.
+    expect(CONTRACT_VERSION).toBe('v1.1.4-2026-09-13');
   });
 });
