@@ -129,19 +129,29 @@ public record RunExplanation(
      * {@code automation_condition_evaluated} event is only emitted for an evaluated
      * condition; short-circuited conditions emit none). {@code expression} is a human
      * rendering derived from the event's {@code conditionType} (the YAML expression text is
-     * not carried on the event).
+     * not carried on the event). {@code definition} is, since v1.1.5 (EXPLAIN-114c), the
+     * condition as STRUCTURED data, rendered from the registry definition the run ran under:
+     * present exactly when the registry still holds that definition (the run's stamped
+     * {@code definitionHash} equals {@code DefinitionHashes} over the current definition) and
+     * the event's {@code conditionIndex} addresses one of its conditions; {@code null} when the
+     * definition changed, the automation is gone, or the index is out of range — never a guess.
      *
      * @param expression    a human rendering of the condition, never {@code null}
      * @param evaluated     always {@code true} by construction
      * @param result        whether the condition held
      * @param observedState the entity state observed during evaluation; never {@code null}
      *                      (may be empty)
+     * @param definition    the structured definition the registry vouches for, or {@code null}.
+     *                      Additive v1.1.5 component (EXPLAIN-114c); nullable by contract, NOT
+     *                      null-checked
      */
     public record ConditionView(String expression, boolean evaluated, boolean result,
-                                List<ObservedStateEntry> observedState) {
+                                List<ObservedStateEntry> observedState,
+                                ConditionDefinitionView definition) {
 
         /**
-         * Defensively copies {@code observedState}.
+         * Defensively copies {@code observedState}. {@code definition} is nullable by contract
+         * (the additive-nullable idiom) and is NOT null-checked.
          *
          * @throws NullPointerException if {@code expression} or {@code observedState} is
          *                              {@code null}
@@ -150,6 +160,61 @@ public record RunExplanation(
             Objects.requireNonNull(expression, "expression must not be null");
             Objects.requireNonNull(observedState, "observedState must not be null");
             observedState = List.copyOf(observedState);
+        }
+
+        /**
+         * Convenience constructor for the pre-v1.1.5 four-component form (test-convenience;
+         * production constructs the canonical form): delegates to the canonical constructor
+         * with {@code definition = null} (validation lives ONLY in the canonical constructor).
+         */
+        public ConditionView(String expression, boolean evaluated, boolean result,
+                             List<ObservedStateEntry> observedState) {
+            this(expression, evaluated, result, observedState, null);
+        }
+    }
+
+    /**
+     * The structured rendering of one {@code ConditionDefinition} (v1.1.5, EXPLAIN-114c) — the
+     * operands a consumer can render from its own catalog instead of a sentence Core wrote. One
+     * flat shape covers the seven permits: the components a permit does not carry are
+     * {@code null}, and {@code children} is empty (never {@code null}) for every leaf. Rendered
+     * by {@code ConditionDefinitionRenderer}, exhaustively over the sealed hierarchies.
+     *
+     * @param type      the definition's simple class name ({@code "StateCondition"} …
+     *                  {@code "ZoneCondition"}) — the vocabulary {@link ConditionView#expression}
+     *                  already carries; never {@code null}
+     * @param selector  the selector rendered to ONE string — a {@code DirectRefSelector}'s entity
+     *                  ULID text; a {@code SlugSelector}'s slug; the group permits as
+     *                  {@code <kind>:<value>/<roles>} with {@code kind} in
+     *                  {@code area|label|type|tag} (a {@code SemanticTagSelector} as
+     *                  {@code tag:<namespace>/<value>/<matchMode>/<roles>}; the roles sorted by
+     *                  name, joined by {@code ,}); a {@code CompoundSelector}'s parts joined by
+     *                  {@code +} — or {@code null} for a permit with no selector
+     * @param attribute a {@code StateCondition} / {@code NumericCondition}'s attribute, or {@code null}
+     * @param value     a {@code StateCondition}'s expected value, or {@code null}
+     * @param above     a {@code NumericCondition}'s lower bound, or {@code null}
+     * @param below     a {@code NumericCondition}'s upper bound, or {@code null}
+     * @param after     a {@code TimeCondition}'s {@code after}, or {@code null}
+     * @param before    a {@code TimeCondition}'s {@code before}, or {@code null}
+     * @param children  the rendered operands of an {@code AndCondition} / {@code OrCondition} in
+     *                  definition order, the one operand of a {@code NotCondition}, or empty;
+     *                  never {@code null}
+     */
+    public record ConditionDefinitionView(String type, String selector, String attribute,
+                                          String value, Double above, Double below,
+                                          String after, String before,
+                                          List<ConditionDefinitionView> children) {
+
+        /**
+         * Validates {@code type} and defensively copies {@code children}; every other component
+         * is nullable by contract.
+         *
+         * @throws NullPointerException if {@code type} or {@code children} is {@code null}
+         */
+        public ConditionDefinitionView {
+            Objects.requireNonNull(type, "type must not be null");
+            Objects.requireNonNull(children, "children must not be null");
+            children = List.copyOf(children);
         }
     }
 

@@ -52,6 +52,14 @@ import java.util.function.LongSupplier;
  * {@code definitionKey} (the run's stamped definition hash, or JSON null), appended after
  * {@code cascade}. {@code trigger.firingValue} keeps its key and position; since v1.1.4 the
  * projection populates it when the log carries the value.</p>
+ *
+ * <p>v1.1.5 amendment (additive-only, EXPLAIN-114c): each condition map additionally carries
+ * {@code definition}, appended after {@code observedState} — the condition as structured data
+ * from the registry definition the run ran under, a nested object in the order {@code type},
+ * {@code selector}, {@code attribute}, {@code value}, {@code above}, {@code below},
+ * {@code after}, {@code before}, {@code children} (recursive, {@code []} for a leaf) — or JSON
+ * null when the projection has nothing it can vouch for (the definition changed, the automation
+ * is gone, or the index is out of range). PRESENT in every v1.1.5 payload.</p>
  */
 final class GetRunCausalChainEndpoint implements Handler {
 
@@ -141,7 +149,7 @@ final class GetRunCausalChainEndpoint implements Handler {
             List<RunExplanation.ConditionView> conditions) {
         List<Map<String, Object>> list = new ArrayList<>(conditions.size());
         for (RunExplanation.ConditionView c : conditions) {
-            Map<String, Object> map = new LinkedHashMap<>(4);
+            Map<String, Object> map = new LinkedHashMap<>(5);
             map.put("expression", c.expression());
             map.put("evaluated", c.evaluated());
             map.put("result", c.result());
@@ -154,9 +162,38 @@ final class GetRunCausalChainEndpoint implements Handler {
                 observed.add(entry);
             }
             map.put("observedState", observed);
+            // v1.1.5 (EXPLAIN-114c): appended LAST — the LinkedHashMap order is the wire order.
+            map.put("definition", definitionMap(c.definition()));
             list.add(map);
         }
         return list;
+    }
+
+    /**
+     * The v1.1.5 structured condition definition, nested recursively in the frozen key order
+     * (SD-2), or JSON null when the projection vouches for none. {@code children} is always a
+     * list — {@code []} for a leaf — so a consumer's tri-state read (absent / null / value)
+     * sees a value.
+     */
+    private static Map<String, Object> definitionMap(RunExplanation.ConditionDefinitionView d) {
+        if (d == null) {
+            return null;
+        }
+        Map<String, Object> map = new LinkedHashMap<>(9);
+        map.put("type", d.type());
+        map.put("selector", d.selector());
+        map.put("attribute", d.attribute());
+        map.put("value", d.value());
+        map.put("above", d.above());
+        map.put("below", d.below());
+        map.put("after", d.after());
+        map.put("before", d.before());
+        List<Map<String, Object>> children = new ArrayList<>(d.children().size());
+        for (RunExplanation.ConditionDefinitionView child : d.children()) {
+            children.add(definitionMap(child));
+        }
+        map.put("children", children);
+        return map;
     }
 
     private static List<Map<String, Object>> actionsList(List<RunExplanation.ActionView> actions) {

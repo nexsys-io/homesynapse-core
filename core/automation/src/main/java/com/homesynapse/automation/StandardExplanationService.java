@@ -4,6 +4,7 @@
  */
 package com.homesynapse.automation;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -81,18 +82,30 @@ import com.homesynapse.platform.identity.Ulid;
  *       {@code automation_disabled}, else the literal {@code "configuration"}) and the
  *       registry definition's {@code definitionKey} via {@link DefinitionHashes} — the same
  *       function the engine stamps, so the key agrees across the three reads.</li>
+ *   <li>Since v1.1.5 (EXPLAIN-114c) each condition additionally carries its {@code definition}:
+ *       the registry definition's condition at the event's {@code conditionIndex}, rendered as
+ *       structured data by {@link ConditionDefinitionRenderer} — exactly when the run's stamped
+ *       {@code definitionHash} equals {@link DefinitionHashes#forDefinition} over the registry's
+ *       CURRENT definition (the registry still holds what the run ran under) and the index is in
+ *       range; {@code null} otherwise, never a guess. And {@code FIRED_CONFIRMED} is reported
+ *       only on confirmation evidence (DP-B2): at least one {@code CONFIRMED} action and none
+ *       {@code UNCONFIRMED}, {@code FAILED} or {@code DISPATCHED}.</li>
  * </ul>
  *
  * <h2>Ordering and cost</h2>
  * The {@link EventStore} pages forward (ascending {@code globalPosition}) only, and every walk of
  * a type index in this class goes through ONE paging helper, {@link #scanType}: {@code SCAN_BATCH}
- * envelopes per page from position 0, a visitor per caller that either runs to the end of the
- * index or stops early (EXPLAIN-114b — one loop, five visitors). {@code listRuns} keeps the
- * newest page of the type-indexed {@code automation_completed} stream in an {@code O(limit)}
- * sliding window, reversing for newest-first; {@code explainRun} locates the run's
- * {@code automation_triggered} by a bounded type scan that stops at the first match, then reads
- * the bounded correlation. Cost is {@code O(retained-runs-of-that-type)} (the type index, not the
- * whole log); a future backward-read store primitive would make it strictly {@code O(page)}.
+ * envelopes per page from position 0, a {@link Visitor} per caller whose typed {@link Verdict}
+ * either runs the walk to the end of the index or stops it early (EXPLAIN-114b — one loop, five
+ * visitors; EXPLAIN-114c — the verdict typed, IR-3). {@code listRuns} keeps the newest page of the
+ * type-indexed {@code automation_completed} stream in an {@code O(limit)} sliding window,
+ * reversing for newest-first, and stops at its cursor (positions ascend, so nothing at or past it
+ * qualifies — IR-2); {@code explainRun} locates the run's {@code automation_triggered} by the run
+ * id's own ULID timestamp — one bounded {@code readByTimeRange} window first (K2,
+ * {@link #locateTriggered}), the type scan that stops at the first match only on a miss — then
+ * reads the bounded correlation. Cost is {@code O(events in one minute)} for a located run and
+ * {@code O(retained-runs-of-that-type)} on the fallback (the type index, not the whole log); a
+ * future backward-read store primitive would make the fallback strictly {@code O(page)}.
  */
 final class StandardExplanationService implements ExplanationService {
 
@@ -100,6 +113,20 @@ final class StandardExplanationService implements ExplanationService {
 
     /** Page size for the forward type scans (kept modest to bound per-read memory). */
     private static final int SCAN_BATCH = 500;
+
+    /**
+     * The by-id hint window around a run id's ULID timestamp {@code t} (EXPLAIN-114c, SD-1):
+     * {@code [t - HINT_LEAD, t + HINT_LAG)}. The engine mints the run id and then publishes its
+     * {@code automation_triggered} on the same clock ({@code StandardRunManager.initiateRun} →
+     * {@code publishTriggered}), so a marker that inherits no {@code eventTime} sits at or just
+     * after {@code t} (its {@code ingestTime}), and a marker that inherits the triggering
+     * event's real-world instant (DP-G) sits just BEFORE {@code t}, by the pipeline's latency —
+     * the lead covers that. A miss beyond the window is served by the fallback type scan, so the
+     * window bounds cost, never correctness. A design constant: do not widen it to make a test
+     * pass.
+     */
+    private static final Duration HINT_LEAD = Duration.ofSeconds(1);
+    private static final Duration HINT_LAG = Duration.ofSeconds(60);
 
     /** {@code command_result} outcome that is a protocol ack, not a terminal failure. */
     private static final String OUTCOME_ACKNOWLEDGED = "acknowledged";
@@ -142,21 +169,22 @@ final class StandardExplanationService implements ExplanationService {
         int cap = Math.max(1, limit);
         long before = beforePosition <= 0 ? Long.MAX_VALUE : beforePosition;
 
-        // Forward scan of the type-indexed terminal markers; keep the newest (cap + 1) below
-        // the cursor in a sliding window (ascending). The extra one detects hasMore.
+        // Forward scan of the type-indexed terminal markers up to the cursor; keep the newest
+        // (cap + 1) below it in a sliding window (ascending). The extra one detects hasMore.
         Deque<EventEnvelope> window = new ArrayDeque<>(cap + 1);
         scanType(EventTypes.AUTOMATION_COMPLETED, e -> {
             if (e.globalPosition() >= before) {
-                return true;
+                // Positions ascend along the index: nothing at or past the cursor qualifies (IR-2).
+                return Verdict.STOP;
             }
             if (automationId.isPresent() && !automationOf(e).equals(automationId.get())) {
-                return true;
+                return Verdict.CONTINUE;
             }
             window.addLast(e);
             if (window.size() > cap + 1) {
                 window.removeFirst();
             }
-            return true;
+            return Verdict.CONTINUE;
         });
 
         List<EventEnvelope> ascending = new ArrayList<>(window);
@@ -210,7 +238,8 @@ final class StandardExplanationService implements ExplanationService {
         String automationName = definition.map(AutomationDefinition::name).orElse(null);
 
         RunExplanation.TriggerView trigger = buildTrigger(triggered, triggerPayload, chain, definition);
-        List<RunExplanation.ConditionView> conditions = buildConditions(chain, runId);
+        List<RunExplanation.ConditionView> conditions =
+                buildConditions(chain, runId, definition, triggerPayload.definitionHash());
         List<RunExplanation.ActionView> actions = buildActions(chain, runId);
         RunExplanation.OutcomeView outcome = new RunExplanation.OutcomeView(
                 status, firstNonBlank(completedPayload.failureReason(), completedPayload.abortReason()),
@@ -338,20 +367,28 @@ final class StandardExplanationService implements ExplanationService {
     }
 
     /**
-     * A {@code COMPLETED} run that issued <em>zero device commands</em> while defining actions
-     * ({@code commandCount == 0 && actionCount > 0} on the terminal payload) is
+     * A {@code COMPLETED} run that issued <em>zero device commands</em> ({@code commandCount == 0}
+     * on the terminal payload — with or without defined actions, since v1.1.5) is
      * {@code ACTED_BUT_UNCONFIRMED} with the v1.1.2 {@code noCommandsIssued} marker (CORE-P2):
      * the Doc 07 §3.9 per-target skip emits nothing, so the payload arithmetic is the ONLY
      * log-visible disclosure of a do-nothing run, and the clean-success sentence must be
      * unreachable for it (a do-nothing run asserting confirmation with zero confirmable commands
-     * was the defect). Otherwise a {@code COMPLETED} run is {@code ACTED_BUT_UNCONFIRMED} when any
-     * of its device actions did not confirm (outcome {@code UNCONFIRMED}/{@code FAILED}); else it
-     * is a clean confirmed success, reported since v1.1.4 (EXPLAIN-114a, the growth path
-     * <strong>DP-B2</strong> named) as {@code FIRED_CONFIRMED} with that run's
-     * {@code lastRelevantRunId} and the unchanged "last fired and confirmed at" sentence — until
-     * v1.1.3 the frozen 4-value verdict had no "fired fine" value and this case borrowed
-     * {@code NEVER_TRIGGERED} with a non-null run id. The action-outcome check reuses
-     * {@link #buildActions} (the M7.5a honest-confirmation derivation) — no duplication.
+     * was the defect; a zero-action run slipped past the v1.1.2 {@code actionCount > 0} conjunct
+     * into the clean branch — the EXPLAIN-114c correction widens the guard). Otherwise a
+     * {@code COMPLETED} run is {@code ACTED_BUT_UNCONFIRMED} when any of its device actions did
+     * not confirm — outcome {@code UNCONFIRMED}, {@code FAILED}, or (since v1.1.5, DP-B2) a
+     * still-in-flight {@code DISPATCHED} — or when no action confirmed at all; it is
+     * {@code FIRED_CONFIRMED} exactly when at least one action is {@code CONFIRMED} and every
+     * other is {@code SKIPPED}: confirmation evidence, never its absence (the verdict's own
+     * contract, "every device action confirmed"). The v1.1.4 rule (EXPLAIN-114a, the growth path
+     * <strong>DP-B2</strong> named) reported {@code FIRED_CONFIRMED} whenever nothing was
+     * UNCONFIRMED/FAILED, so an in-flight run and a zero-action run read "confirmed" at the
+     * TRIGGER instant — a v1.1.4 defect corrected here (the correction-before-freeze rule), and
+     * the sentence now names BOTH instants: the trigger instant ({@code evaluatedAt}) and the
+     * latest {@code confirmedAt} among the confirmed actions. Until v1.1.3 the frozen 4-value
+     * verdict had no "fired fine" value and this case borrowed {@code NEVER_TRIGGERED} with a
+     * non-null run id. The action-outcome check reuses {@link #buildActions} (the M7.5a
+     * honest-confirmation derivation) — no duplication.
      */
     private NonFiringExplanation completedVerdict(AutomationId automationId, String automationName,
                                                   String triggerSummary,
@@ -360,7 +397,7 @@ final class StandardExplanationService implements ExplanationService {
                                                   EventEnvelope completed, RunId runId,
                                                   Instant evaluatedAt) {
         AutomationCompletedEvent payload = (AutomationCompletedEvent) completed.payload();
-        if (payload.commandCount() == 0 && payload.actionCount() > 0) {
+        if (payload.commandCount() == 0) {
             return new NonFiringExplanation(automationId, automationName, true,
                     NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED, runId,
                     "Automation '" + automationName + "' fired, but issued no device commands — "
@@ -373,10 +410,12 @@ final class StandardExplanationService implements ExplanationService {
         List<EventEnvelope> chain =
                 eventStore.readByCorrelation(completed.causalContext().correlationId());
         List<RunExplanation.ActionView> actions = buildActions(chain, runId);
-        boolean unconfirmedOrFailed = actions.stream().anyMatch(a ->
+        boolean notConfirmed = actions.stream().anyMatch(a ->
                 a.outcome() == RunExplanation.ActionOutcome.UNCONFIRMED
-                        || a.outcome() == RunExplanation.ActionOutcome.FAILED);
-        if (unconfirmedOrFailed) {
+                        || a.outcome() == RunExplanation.ActionOutcome.FAILED
+                        || a.outcome() == RunExplanation.ActionOutcome.DISPATCHED);
+        Instant confirmedAt = latestConfirmedAt(actions);
+        if (notConfirmed || confirmedAt == null) {
             return new NonFiringExplanation(automationId, automationName, true,
                     NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED, runId,
                     "Automation '" + automationName
@@ -387,11 +426,30 @@ final class StandardExplanationService implements ExplanationService {
         }
         return new NonFiringExplanation(automationId, automationName, true,
                 NonFiringExplanation.NonFiringVerdict.FIRED_CONFIRMED, runId,
-                "Automation '" + automationName + "' last fired and confirmed at "
-                        + evaluatedAt + "; no non-firing was detected in the requested window.",
+                "Automation '" + automationName + "' last fired at " + evaluatedAt
+                        + " and its device confirmed at " + confirmedAt
+                        + "; no non-firing was detected in the requested window.",
                 triggerSummary,
                 new NonFiringExplanation.LastEvaluationView(evaluatedAt, "true"),
                 null, triggerRef, null, null, definitionKey);
+    }
+
+    /**
+     * The latest {@code confirmedAt} among the CONFIRMED actions, or {@code null} when none
+     * confirmed — the confirmation evidence DP-B2 requires. A CONFIRMED view always carries its
+     * {@code state_confirmed}'s instant ({@link #deriveOutcome}), so {@code null} here means
+     * "no confirmed action", never "a confirmed action without an instant".
+     */
+    private static Instant latestConfirmedAt(List<RunExplanation.ActionView> actions) {
+        Instant latest = null;
+        for (RunExplanation.ActionView action : actions) {
+            if (action.outcome() == RunExplanation.ActionOutcome.CONFIRMED
+                    && action.confirmedAt() != null
+                    && (latest == null || action.confirmedAt().isAfter(latest))) {
+                latest = action.confirmedAt();
+            }
+        }
+        return latest;
     }
 
     @Override
@@ -465,7 +523,7 @@ final class StandardExplanationService implements ExplanationService {
             if (e.payload() instanceof AutomationCompletedEvent p) {
                 latest.put(automationOf(e), new RunId(p.runId()));
             }
-            return true;
+            return Verdict.CONTINUE;
         });
         return latest;
     }
@@ -712,8 +770,27 @@ final class StandardExplanationService implements ExplanationService {
 
     // ---- conditions ---------------------------------------------------------
 
+    /**
+     * The run's evaluated conditions in log order. {@code expression} is rendered from the
+     * event's {@code conditionType} (the YAML text is not on the event) and {@code evaluated} is
+     * true by construction (the event exists only for an evaluated condition). Since v1.1.5
+     * (EXPLAIN-114c, K3) each view also carries the condition's {@code definition}, rendered
+     * from the registry's CURRENT definition at the event's {@code conditionIndex} — but only
+     * when that definition is the one the run ran under: the run's stamped
+     * {@code definitionHash} must equal {@link DefinitionHashes#forDefinition} over it (the same
+     * function and input the engine hashed at initiation). The hashes are compared as strings,
+     * never re-derived for the run; a registry miss, a changed definition or an index out of
+     * range yields {@code null}, never a guess. The hash is computed once per run, not per
+     * condition.
+     */
     private List<RunExplanation.ConditionView> buildConditions(List<EventEnvelope> chain,
-                                                               RunId runId) {
+                                                               RunId runId,
+                                                               Optional<AutomationDefinition> definition,
+                                                               String runDefinitionHash) {
+        List<ConditionDefinition> vouched = definition
+                .filter(d -> DefinitionHashes.forDefinition(d).equals(runDefinitionHash))
+                .map(AutomationDefinition::conditions)
+                .orElse(List.of());
         List<RunExplanation.ConditionView> conditions = new ArrayList<>();
         for (EventEnvelope e : chain) {
             if (!EventTypes.AUTOMATION_CONDITION_EVALUATED.equals(e.eventType())) {
@@ -728,10 +805,12 @@ final class StandardExplanationService implements ExplanationService {
                 observed.add(new RunExplanation.ObservedStateEntry(
                         es.entityRef().toString(), es.attribute(), es.value()));
             }
-            // expression is rendered from conditionType (the YAML text is not on the event);
-            // evaluated is true by construction (the event exists only for an evaluated condition).
+            RunExplanation.ConditionDefinitionView rendered =
+                    p.conditionIndex() >= 0 && p.conditionIndex() < vouched.size()
+                            ? ConditionDefinitionRenderer.render(vouched.get(p.conditionIndex()))
+                            : null;
             conditions.add(new RunExplanation.ConditionView(
-                    p.conditionType(), true, p.result(), observed));
+                    p.conditionType(), true, p.result(), observed, rendered));
         }
         return conditions;
     }
@@ -953,20 +1032,37 @@ final class StandardExplanationService implements ExplanationService {
     // ---- the one type-index scan (EXPLAIN-114b) -----------------------------
 
     /**
+     * A per-caller visitor over one type index (EXPLAIN-114c, IR-3): sees every retained
+     * envelope in ascending global position and says whether the walk continues. Distinct from
+     * the {@code Predicate} {@link #lastMatching} takes — that one means "matches", this one
+     * means "continue or stop"; the two meanings carry two types.
+     */
+    @FunctionalInterface
+    private interface Visitor {
+        Verdict visit(EventEnvelope envelope);
+    }
+
+    /** What a {@link Visitor} says about the walk after one envelope. */
+    private enum Verdict {
+        CONTINUE,
+        STOP
+    }
+
+    /**
      * The ONE paging walk over a type index (EXPLAIN-114b, SD-1): visits every retained envelope
      * of {@code eventType} in ascending global position, {@link #SCAN_BATCH} per page from
-     * position 0, handing each to {@code visitor}, which returns {@code true} to continue and
-     * {@code false} to stop. The walk ends at the first {@code false} or when the store reports
-     * no further page. Reads only and never catches — a malformed payload surfaces to the caller
-     * exactly as it did when each caller paged for itself. The five type-index readers of this
-     * class are visitors over this loop; this is the class's only {@code readByType} call site.
+     * position 0, handing each to {@code visitor}, whose {@link Verdict} continues or stops the
+     * walk. The walk ends at the first {@link Verdict#STOP} or when the store reports no further
+     * page. Reads only and never catches — a malformed payload surfaces to the caller exactly as
+     * it did when each caller paged for itself. The five type-index readers of this class are
+     * visitors over this loop; this is the class's only {@code readByType} call site.
      */
-    private void scanType(String eventType, Predicate<EventEnvelope> visitor) {
+    private void scanType(String eventType, Visitor visitor) {
         long after = 0;
         while (true) {
             EventPage page = eventStore.readByType(eventType, after, SCAN_BATCH);
             for (EventEnvelope e : page.events()) {
-                if (!visitor.test(e)) {
+                if (visitor.visit(e) == Verdict.STOP) {
                     return;
                 }
             }
@@ -978,18 +1074,19 @@ final class StandardExplanationService implements ExplanationService {
     }
 
     /**
-     * The newest envelope of {@code eventType} satisfying {@code match}, or {@code null}: a full
-     * {@link #scanType} walk in which the last match seen wins (ascending scan ⇒ the newest is
-     * last). The two "latest" reads, {@link #latestTerminalRun} and {@link #latestDisabled}, are
-     * this walk with their own match rule.
+     * The newest envelope of {@code eventType} satisfying {@code matches}, or {@code null}: a
+     * full {@link #scanType} walk in which the last match seen wins (ascending scan ⇒ the newest
+     * is last), so its visitor always continues. The two "latest" reads,
+     * {@link #latestTerminalRun} and {@link #latestDisabled}, are this walk with their own match
+     * rule.
      */
-    private EventEnvelope lastMatching(String eventType, Predicate<EventEnvelope> match) {
+    private EventEnvelope lastMatching(String eventType, Predicate<EventEnvelope> matches) {
         Slot newest = new Slot();
         scanType(eventType, e -> {
-            if (match.test(e)) {
+            if (matches.test(e)) {
                 newest.envelope = e;
             }
-            return true;
+            return Verdict.CONTINUE;
         });
         return newest.envelope;
     }
@@ -1004,16 +1101,66 @@ final class StandardExplanationService implements ExplanationService {
 
     // ---- lookups ------------------------------------------------------------
 
+    /**
+     * The run's {@code automation_triggered} envelope, or {@code null} (EXPLAIN-114c, K2). A
+     * {@link RunId} is a time-ordered ULID minted from the engine's clock immediately before the
+     * marker is published, so the marker's effective instant ({@code COALESCE(event_time,
+     * ingest_time)}) lies within {@link #HINT_LEAD} before / {@link #HINT_LAG} after the id's
+     * own timestamp {@code t} in the common case. The read therefore pages the window
+     * {@code [t - lead, t + lag)} FIRST — every event type in it, {@link #SCAN_BATCH} per page,
+     * matched on type + payload class + run id — and only on a miss falls back to the full
+     * ascending type scan that stops at the first match (the EXPLAIN-114b walk, verbatim). A hit
+     * costs {@code O(events in one minute)}; a miss (a marker whose inherited {@code eventTime}
+     * lies outside the window) costs the window plus the old scan and is still correct — the
+     * window bounds cost, not correctness (IR-1 measured 100 type pages at 50k retained markers
+     * for the newest run; the hint reads at most two). No store change: the window rides the
+     * store's existing {@code readByTimeRange}.
+     */
     private EventEnvelope locateTriggered(RunId runId) {
+        Instant t = runId.value().extractTimestamp();
+        EventEnvelope hinted = triggeredInWindow(runId, t.minus(HINT_LEAD), t.plus(HINT_LAG));
+        if (hinted != null) {
+            return hinted;
+        }
         Slot found = new Slot();
         scanType(EventTypes.AUTOMATION_TRIGGERED, e -> {
-            if (e.payload() instanceof AutomationTriggeredEvent p && p.runId().equals(runId.value())) {
+            if (isTriggeredOf(e, runId)) {
                 found.envelope = e;
-                return false; // the early stop: the first match is the run's one marker
+                return Verdict.STOP; // the early stop: the first match is the run's one marker
             }
-            return true;
+            return Verdict.CONTINUE;
         });
         return found.envelope;
+    }
+
+    /**
+     * The by-id hint read: pages {@code [from, to)} ascending exactly as {@link #scanType} pages
+     * a type index and returns the run's marker at the first match, or {@code null} when the
+     * window holds none. {@code from < to} by construction ({@code t - lead < t + lag}), so the
+     * store's {@code IllegalArgumentException} on an inverted range cannot occur. This is the
+     * class's only {@code readByTimeRange} call site.
+     */
+    private EventEnvelope triggeredInWindow(RunId runId, Instant from, Instant to) {
+        long after = 0;
+        while (true) {
+            EventPage page = eventStore.readByTimeRange(from, to, after, SCAN_BATCH);
+            for (EventEnvelope e : page.events()) {
+                if (isTriggeredOf(e, runId)) {
+                    return e;
+                }
+            }
+            if (!page.hasMore()) {
+                return null;
+            }
+            after = page.nextPosition();
+        }
+    }
+
+    /** Whether {@code e} is the {@code automation_triggered} marker of {@code runId} (type, payload class and run id). */
+    private static boolean isTriggeredOf(EventEnvelope e, RunId runId) {
+        return EventTypes.AUTOMATION_TRIGGERED.equals(e.eventType())
+                && e.payload() instanceof AutomationTriggeredEvent p
+                && p.runId().equals(runId.value());
     }
 
     private static EventEnvelope firstForRun(List<EventEnvelope> chain, String eventType,

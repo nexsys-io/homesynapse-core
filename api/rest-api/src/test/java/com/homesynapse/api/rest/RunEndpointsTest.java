@@ -196,7 +196,8 @@ final class RunEndpointsTest {
         assertThat(asMap(trigger.get("subjectRef"))).containsOnlyKeys("type", "id");
 
         Map<String, Object> condition = asMap(((List<?>) data.get("conditions")).get(0));
-        assertThat(condition).containsOnlyKeys("expression", "evaluated", "result", "observedState");
+        assertThat(condition).containsOnlyKeys("expression", "evaluated", "result", "observedState",
+                "definition");
         assertThat(condition).containsEntry("evaluated", true);
         assertThat(condition).containsEntry("result", true);
         Map<String, Object> observed = asMap(((List<?>) condition.get("observedState")).get(0));
@@ -291,6 +292,67 @@ final class RunEndpointsTest {
             assertThat(asMap(a)).containsEntry("settledAt", null);
             assertThat(asMap(a)).containsEntry("confirmedAt", null);
         }
+    }
+
+    @Test
+    @DisplayName("GET /runs/{id}/causal-chain appends the v1.1.5 conditions[].definition LAST — nested in the SD-2 key order, or present as JSON null (T9)")
+    void conditionDefinition_v115NestedOrderAndPresentNull() {
+        RunExplanation.ConditionDefinitionView state = new RunExplanation.ConditionDefinitionView(
+                "StateCondition", ENTITY_ULID, "motion", "active", null, null, null, null, List.of());
+        RunExplanation.ConditionDefinitionView numeric = new RunExplanation.ConditionDefinitionView(
+                "NumericCondition", "area:hall/PRIMARY", "temperature", null, 20.0, null, null, null,
+                List.of());
+        RunExplanation.ConditionDefinitionView and = new RunExplanation.ConditionDefinitionView(
+                "AndCondition", null, null, null, null, null, null, null, List.of(state, numeric));
+        RunExplanation explanation = new RunExplanation(runId(), autoId(), "My Automation",
+                new RunExplanation.TriggerView("StateTrigger",
+                        new RunExplanation.SubjectRefView("entity", ENTITY_ULID),
+                        FIXED_INSTANT, null),
+                List.of(
+                        new RunExplanation.ConditionView("AndCondition", true, true, List.of(), and),
+                        // The 4-arg convenience: no definition the service could vouch for.
+                        new RunExplanation.ConditionView("TimeCondition", true, false, List.of())),
+                List.of(),
+                new RunExplanation.OutcomeView(RunStatus.COMPLETED, null, 1234L, 0, 0),
+                new RunExplanation.CascadeView(null, 0),
+                DEFINITION_KEY);
+        GetRunCausalChainEndpoint endpoint = new GetRunCausalChainEndpoint(
+                fake().put(explanation), VIEW_POSITION, FIXED_CLOCK);
+        RecordingEndpointContext ctx = new RecordingEndpointContext().withPathParam("runId", RUN_ULID);
+
+        endpoint.apply(ctx);
+
+        List<?> conditions = (List<?>) asMap(asMap(ctx.body).get("data")).get("conditions");
+        Map<String, Object> vouched = asMap(conditions.get(0));
+        // The LinkedHashMap order IS the wire order: v1.1.5 appends definition at the END.
+        assertThat(vouched.keySet()).containsExactly("expression", "evaluated", "result",
+                "observedState", "definition");
+        Map<String, Object> definition = asMap(vouched.get("definition"));
+        assertThat(definition.keySet()).containsExactly("type", "selector", "attribute", "value",
+                "above", "below", "after", "before", "children");
+        assertThat(definition).containsEntry("type", "AndCondition");
+        assertThat(definition).containsEntry("selector", null);
+        List<?> children = (List<?>) definition.get("children");
+        assertThat(children).hasSize(2);
+        Map<String, Object> child = asMap(children.get(0));
+        assertThat(child.keySet()).containsExactly("type", "selector", "attribute", "value",
+                "above", "below", "after", "before", "children");
+        assertThat(child).containsEntry("type", "StateCondition");
+        assertThat(child).containsEntry("selector", ENTITY_ULID);
+        assertThat(child).containsEntry("attribute", "motion");
+        assertThat(child).containsEntry("value", "active");
+        assertThat(child).containsEntry("above", null);
+        assertThat((List<?>) child.get("children")).isEmpty();
+        Map<String, Object> numericChild = asMap(children.get(1));
+        assertThat(numericChild).containsEntry("selector", "area:hall/PRIMARY");
+        assertThat(numericChild).containsEntry("above", 20.0);
+        assertThat(numericChild).containsEntry("below", null);
+
+        // PRESENT in every v1.1.5 payload: JSON null when the service has nothing to vouch for.
+        Map<String, Object> unvouched = asMap(conditions.get(1));
+        assertThat(unvouched.keySet()).containsExactly("expression", "evaluated", "result",
+                "observedState", "definition");
+        assertThat(unvouched).containsEntry("definition", null);
     }
 
     @Test

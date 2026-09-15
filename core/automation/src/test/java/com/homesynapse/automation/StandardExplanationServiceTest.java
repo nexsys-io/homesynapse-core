@@ -13,6 +13,7 @@ import static com.homesynapse.automation.AutomationTestSupport.str;
 import static com.homesynapse.automation.AutomationTestSupport.ulid;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.homesynapse.device.EntityRole;
 import com.homesynapse.event.AutomationActionCompletedEvent;
 import com.homesynapse.event.AutomationActionStartedEvent;
 import com.homesynapse.event.AutomationCompletedEvent;
@@ -72,6 +73,9 @@ final class StandardExplanationServiceTest {
      * this mirror against the {@code maxCount} the service actually passes.
      */
     private static final int SCAN_BATCH = 500;
+
+    /** The random component of every {@link #ulidAt} id — a counter, so ids are unique and deterministic. */
+    private static long ulidCounter;
 
     private InMemoryEventStore store;
     private AutomationTestSupport.MapAutomationRegistry registry;
@@ -740,9 +744,13 @@ final class StandardExplanationServiceTest {
     }
 
     @Test
-    @DisplayName("explainRun stops at the first automation_triggered match: one page read of two (T3)")
+    @DisplayName("explainRun's fallback scan stops at the first automation_triggered match: one page read of two after a hint miss (T3)")
     void explainRun_stopsAtFirstTriggeredMatch() {
-        RunId runId = seedRun(automationId(), entityId(), "COMPLETED", null, ConfirmKind.CONFIRMED);
+        // Since EXPLAIN-114c the run id's own instant is read first; a run id minted an hour after
+        // its marker (a stale inherited eventTime, the class the window cannot reach) misses the
+        // hint window and takes the fallback type scan — the EXPLAIN-114b early stop, preserved.
+        RunId runId = seedRunAt(automationId(), entityId(), ulidAt(FIXED_INSTANT.plusSeconds(3600)),
+                FIXED_INSTANT);
         for (int i = 0; i < SCAN_BATCH; i++) {
             seedTriggeredMarker(automationId());
         }
@@ -753,8 +761,210 @@ final class StandardExplanationServiceTest {
 
         assertThat(paged.explainRun(runId)).isPresent();
 
+        assertThat(counting.timeRangeReads()).isEqualTo(1);
         assertThat(counting.reads(EventTypes.AUTOMATION_TRIGGERED)).isEqualTo(1);
         assertThat(counting.lastMaxCount()).isEqualTo(SCAN_BATCH);
+    }
+
+    // ---- EXPLAIN-114c: the by-id read (K2) and the cursor stop (IR-2) ----------
+
+    @Test
+    @DisplayName("explainRun finds the newest run through the by-id hint: time-window reads, zero type-index pages (T1)")
+    void locateTriggered_findsNewestRunByIdHint() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        // A ticking seed (DP-1): 2,001 markers a second apart (five type-index pages), then the
+        // newest run at the next second with its id minted at that same instant — the shape the
+        // engine produces (StandardRunManager mints the id, then publishes the marker).
+        for (int i = 0; i < 4 * SCAN_BATCH + 1; i++) {
+            seedTriggeredMarkerAt(automationId(), FIXED_INSTANT.plusSeconds(i));
+        }
+        Instant newestAt = FIXED_INSTANT.plusSeconds(4 * SCAN_BATCH + 1);
+        RunId newest = seedRunAt(autoId, target, ulidAt(newestAt), newestAt);
+        CountingEventStore counting = new CountingEventStore(store);
+        ExplanationService paged = ExplanationService.over(counting, registry);
+
+        assertThat(paged.explainRun(newest)).isPresent();
+
+        assertThat(counting.timeRangeReads()).isGreaterThanOrEqualTo(1);
+        assertThat(counting.reads(EventTypes.AUTOMATION_TRIGGERED)).isZero();
+        // The window is well-formed by construction (t − 1 s < t + 60 s): the store's
+        // IllegalArgumentException on an inverted range cannot occur (§4, asserted anyway).
+        assertThat(counting.lastTimeRangeFrom()).isBefore(counting.lastTimeRangeTo());
+        assertThat(counting.lastTimeRangeFrom()).isEqualTo(newestAt.minusSeconds(1));
+        assertThat(counting.lastTimeRangeTo()).isEqualTo(newestAt.plusSeconds(60));
+    }
+
+    @Test
+    @DisplayName("listRuns stops at the cursor: a cursor inside page 1 of a 501-marker index reads one page, not two (T3)")
+    void listRuns_stopsAtCursor() {
+        AutomationId autoId = automationId();
+        List<RunId> seeded = new ArrayList<>(SCAN_BATCH + 1);
+        for (int i = 0; i < 10; i++) {
+            seeded.add(seedCompleted(autoId, "COMPLETED", null));
+        }
+        // The 10th marker's position: as the cursor it is excluded, and so is everything after it.
+        long cursor = store.latestPosition();
+        for (int i = 10; i < SCAN_BATCH + 1; i++) {
+            seeded.add(seedCompleted(autoId, "COMPLETED", null));
+        }
+        CountingEventStore counting = new CountingEventStore(store);
+        ExplanationService paged = ExplanationService.over(counting, registry);
+
+        RunPage page = paged.listRuns(Optional.of(autoId), cursor, 5);
+
+        // Below the cursor sit markers 1–9 (positions ascend): the newest five of them, newest-first.
+        assertThat(page.runs()).extracting(RunSummary::runId).containsExactly(
+                seeded.get(8), seeded.get(7), seeded.get(6), seeded.get(5), seeded.get(4));
+        assertThat(page.hasMore()).isTrue();
+        assertThat(counting.reads(EventTypes.AUTOMATION_COMPLETED)).isEqualTo(1);
+    }
+
+    // ---- EXPLAIN-114c: conditions[].definition (K3), vouched by the run's definition hash ----
+
+    @Test
+    @DisplayName("conditions[].definition is the registry condition at the event's index when the run's hash vouches for it (T4)")
+    void buildConditions_definitionVouchedByHash() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        AutomationDefinition def = definitionWithConditions(autoId, "Vouched", target,
+                List.of(new StateCondition(new DirectRefSelector(target), "motion", "active")));
+        registry.add(def);
+        RunId runId = seedRunWithDefinition(autoId, target, DefinitionHashes.forDefinition(def), 0);
+
+        RunExplanation.ConditionView condition =
+                service.explainRun(runId).orElseThrow().conditions().get(0);
+
+        assertThat(condition.expression()).isEqualTo("StateCondition");
+        RunExplanation.ConditionDefinitionView definition = condition.definition();
+        assertThat(definition).isNotNull();
+        assertThat(definition.type()).isEqualTo("StateCondition");
+        assertThat(definition.selector()).isEqualTo(target.toString());
+        assertThat(definition.attribute()).isEqualTo("motion");
+        assertThat(definition.value()).isEqualTo("active");
+        assertThat(definition.above()).isNull();
+        assertThat(definition.below()).isNull();
+        assertThat(definition.after()).isNull();
+        assertThat(definition.before()).isNull();
+        assertThat(definition.children()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a compound condition renders its children, recursively (T4b)")
+    void buildConditions_compoundDefinitionRendersChildren() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        AutomationDefinition def = definitionWithConditions(autoId, "Compound", target,
+                List.of(new AndCondition(List.of(
+                        new StateCondition(new DirectRefSelector(target), "motion", "active"),
+                        new NotCondition(new NumericCondition(
+                                new AreaSelector("hall", Set.of(EntityRole.PRIMARY)),
+                                "temperature", 20.0, null))))));
+        registry.add(def);
+        RunId runId = seedRunWithDefinition(autoId, target, DefinitionHashes.forDefinition(def), 0);
+
+        RunExplanation.ConditionDefinitionView definition =
+                service.explainRun(runId).orElseThrow().conditions().get(0).definition();
+
+        assertThat(definition.type()).isEqualTo("AndCondition");
+        assertThat(definition.selector()).isNull();
+        assertThat(definition.children()).hasSize(2);
+        RunExplanation.ConditionDefinitionView state = definition.children().get(0);
+        assertThat(state.type()).isEqualTo("StateCondition");
+        assertThat(state.selector()).isEqualTo(target.toString());
+        RunExplanation.ConditionDefinitionView not = definition.children().get(1);
+        assertThat(not.type()).isEqualTo("NotCondition");
+        assertThat(not.selector()).isNull();
+        assertThat(not.children()).singleElement().satisfies(numeric -> {
+            assertThat(numeric.type()).isEqualTo("NumericCondition");
+            assertThat(numeric.selector()).isEqualTo("area:hall/PRIMARY");
+            assertThat(numeric.attribute()).isEqualTo("temperature");
+            assertThat(numeric.value()).isNull();
+            assertThat(numeric.above()).isEqualTo(20.0);
+            assertThat(numeric.below()).isNull();
+            assertThat(numeric.children()).isEmpty();
+        });
+    }
+
+    @Test
+    @DisplayName("definition is null when the registry's hash differs from the run's, or the automation is gone — never a guess (T4c)")
+    void buildConditions_nullWhenDefinitionChanged() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        registry.add(definitionWithConditions(autoId, "Changed", target,
+                List.of(new StateCondition(new DirectRefSelector(target), "motion", "active"))));
+        // The run ran under a definition whose hash is not the registry's current one.
+        RunId changed = seedRunWithDefinition(autoId, target, "hash", 0);
+        // No registry definition at all.
+        AutomationId gone = automationId();
+        RunId unknown = seedRunWithDefinition(gone, entityId(), "hash", 0);
+
+        RunExplanation.ConditionView changedView =
+                service.explainRun(changed).orElseThrow().conditions().get(0);
+        RunExplanation.ConditionView unknownView =
+                service.explainRun(unknown).orElseThrow().conditions().get(0);
+
+        assertThat(changedView.expression()).isEqualTo("StateCondition");
+        assertThat(changedView.definition()).isNull();
+        assertThat(unknownView.definition()).isNull();
+    }
+
+    @Test
+    @DisplayName("definition is null when the event's index lies past the definition's condition list (T4d)")
+    void buildConditions_nullWhenIndexOutOfRange() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        AutomationDefinition def = definitionWithConditions(autoId, "Short", target,
+                List.of(new StateCondition(new DirectRefSelector(target), "motion", "active")));
+        registry.add(def);
+        RunId runId = seedRunWithDefinition(autoId, target, DefinitionHashes.forDefinition(def), 5);
+
+        RunExplanation.ConditionView condition =
+                service.explainRun(runId).orElseThrow().conditions().get(0);
+
+        assertThat(condition.expression()).isEqualTo("StateCondition");
+        assertThat(condition.definition()).isNull();
+    }
+
+    @Test
+    @DisplayName("the renderer's selector forms: the ULID, the slug, kind:value/roles, the tag's four parts, compound parts joined by + (T4e)")
+    void conditionDefinitionRenderer_selectorForms() {
+        EntityId e1 = entityId();
+
+        assertThat(selectorOf(new DirectRefSelector(e1))).isEqualTo(e1.toString());
+        assertThat(selectorOf(new SlugSelector("porch-light"))).isEqualTo("porch-light");
+        assertThat(selectorOf(new AreaSelector("hall", Set.of(EntityRole.PRIMARY))))
+                .isEqualTo("area:hall/PRIMARY");
+        assertThat(selectorOf(new LabelSelector("porch",
+                Set.of(EntityRole.PRIMARY, EntityRole.DIAGNOSTIC))))
+                .isEqualTo("label:porch/DIAGNOSTIC,PRIMARY");
+        assertThat(selectorOf(new TypeSelector("LIGHT", Set.of(EntityRole.PRIMARY))))
+                .isEqualTo("type:LIGHT/PRIMARY");
+        assertThat(selectorOf(new SemanticTagSelector("room", "porch", MatchMode.EXACT,
+                Set.of(EntityRole.PRIMARY))))
+                .isEqualTo("tag:room/porch/EXACT/PRIMARY");
+        assertThat(selectorOf(new CompoundSelector(List.of(
+                new DirectRefSelector(e1), new SlugSelector("porch-light")))))
+                .isEqualTo(e1 + "+porch-light");
+
+        RunExplanation.ConditionDefinitionView time =
+                ConditionDefinitionRenderer.render(new TimeCondition("22:00", "06:00"));
+        assertThat(time.type()).isEqualTo("TimeCondition");
+        assertThat(time.selector()).isNull();
+        assertThat(time.after()).isEqualTo("22:00");
+        assertThat(time.before()).isEqualTo("06:00");
+        assertThat(time.children()).isEmpty();
+
+        RunExplanation.ConditionDefinitionView zone =
+                ConditionDefinitionRenderer.render(new ZoneCondition());
+        assertThat(zone.type()).isEqualTo("ZoneCondition");
+        assertThat(zone.selector()).isNull();
+        assertThat(zone.attribute()).isNull();
+        assertThat(zone.children()).isEmpty();
+    }
+
+    private static String selectorOf(Selector selector) {
+        return ConditionDefinitionRenderer.render(new StateCondition(selector, "a", "b")).selector();
     }
 
     // ---- INV-SA-03: pure projection -----------------------------------------
@@ -811,13 +1021,36 @@ final class StandardExplanationServiceTest {
     private RunId seedRunOnCorrelation(AutomationId autoId, EntityId target, Ulid corr, Ulid trigId,
                                        String finalStatus, String abortReason, ConfirmKind kind,
                                        EventId triggeringEventId) {
+        return seedRunOnCorrelation(autoId, target, corr, trigId, finalStatus, abortReason, kind,
+                triggeringEventId, "hash", 0);
+    }
+
+    /**
+     * Seeds a full CONFIRMED run chain on its own (root) correlation whose
+     * {@code automation_triggered} carries {@code definitionHash} and whose one
+     * {@code automation_condition_evaluated} carries {@code conditionIndex} — the two facts the
+     * K3 hash guard reads (EXPLAIN-114c).
+     */
+    private RunId seedRunWithDefinition(AutomationId autoId, EntityId target, String definitionHash,
+                                        int conditionIndex) {
+        EventEnvelope trig = publishRoot("state_changed", SubjectRef.entity(target),
+                new StateChangedEvent("motion", str("idle"), str("active"), eventId()));
+        return seedRunOnCorrelation(autoId, target, trig.causalContext().correlationId(),
+                trig.eventId().value(), "COMPLETED", null, ConfirmKind.CONFIRMED, trig.eventId(),
+                definitionHash, conditionIndex);
+    }
+
+    private RunId seedRunOnCorrelation(AutomationId autoId, EntityId target, Ulid corr, Ulid trigId,
+                                       String finalStatus, String abortReason, ConfirmKind kind,
+                                       EventId triggeringEventId, String definitionHash,
+                                       int conditionIndex) {
         RunId runId = new RunId(ulid());
         publishDerived(EventTypes.AUTOMATION_TRIGGERED, SubjectRef.automation(autoId),
                 new AutomationTriggeredEvent(runId.value(), triggeringEventId, List.of("t1"),
-                        Map.of("action:0", Set.of(target)), "hash", 0), corr, trigId);
+                        Map.of("action:0", Set.of(target)), definitionHash, 0), corr, trigId);
         publishDerived(EventTypes.AUTOMATION_CONDITION_EVALUATED, SubjectRef.automation(autoId),
-                new AutomationConditionEvaluatedEvent(runId.value(), 0, "StateCondition", true,
-                        List.of(new EvaluatedEntityState(target, "motion", "active",
+                new AutomationConditionEvaluatedEvent(runId.value(), conditionIndex, "StateCondition",
+                        true, List.of(new EvaluatedEntityState(target, "motion", "active",
                                 FIXED_INSTANT, null))), corr, trigId);
         publishDerived(EventTypes.AUTOMATION_ACTION_STARTED, SubjectRef.automation(autoId),
                 new AutomationActionStartedEvent(runId.value(), 0, "CommandAction", List.of(target)),
@@ -1039,9 +1272,61 @@ final class StandardExplanationServiceTest {
 
     /** Seeds a bare {@code automation_triggered} marker on its own root correlation (type-index filler). */
     private void seedTriggeredMarker(AutomationId autoId) {
-        publishRoot(EventTypes.AUTOMATION_TRIGGERED, SubjectRef.automation(autoId),
+        seedTriggeredMarkerAt(autoId, FIXED_INSTANT);
+    }
+
+    /** As {@link #seedTriggeredMarker} with an explicit envelope {@code eventTime} (the ticking seed). */
+    private void seedTriggeredMarkerAt(AutomationId autoId, Instant at) {
+        publishRootAt(EventTypes.AUTOMATION_TRIGGERED, SubjectRef.automation(autoId),
                 new AutomationTriggeredEvent(ulid(), eventId(), List.of("t1"),
-                        Map.of("action:0", Set.of(entityId())), "hash", 0));
+                        Map.of("action:0", Set.of(entityId())), "hash", 0), at);
+    }
+
+    /**
+     * Seeds a full CONFIRMED run chain on its own (root) correlation with an explicit run id and
+     * every envelope's {@code eventTime} at {@code at} — the {@link #seedRun} shape with the two
+     * facts the by-id read keys on made explicit (EXPLAIN-114c).
+     */
+    private RunId seedRunAt(AutomationId autoId, EntityId target, Ulid runUlid, Instant at) {
+        EventEnvelope trig = publishRootAt("state_changed", SubjectRef.entity(target),
+                new StateChangedEvent("motion", str("idle"), str("active"), eventId()), at);
+        Ulid corr = trig.causalContext().correlationId();
+        Ulid trigId = trig.eventId().value();
+        RunId runId = new RunId(runUlid);
+        publishDerivedAt(EventTypes.AUTOMATION_TRIGGERED, SubjectRef.automation(autoId),
+                new AutomationTriggeredEvent(runId.value(), trig.eventId(), List.of("t1"),
+                        Map.of("action:0", Set.of(target)), "hash", 0), corr, trigId, at);
+        publishDerivedAt(EventTypes.AUTOMATION_CONDITION_EVALUATED, SubjectRef.automation(autoId),
+                new AutomationConditionEvaluatedEvent(runId.value(), 0, "StateCondition", true,
+                        List.of(new EvaluatedEntityState(target, "motion", "active",
+                                FIXED_INSTANT, null))), corr, trigId, at);
+        publishDerivedAt(EventTypes.AUTOMATION_ACTION_STARTED, SubjectRef.automation(autoId),
+                new AutomationActionStartedEvent(runId.value(), 0, "CommandAction", List.of(target)),
+                corr, trigId, at);
+        EventEnvelope cmd = publishDerivedAt(EventTypes.COMMAND_ISSUED, SubjectRef.entity(target),
+                new CommandIssuedEvent(target.value(), "turn_on", "{\"level\":75}", 5000,
+                        CommandIdempotency.IDEMPOTENT), corr, trigId, at);
+        publishDerivedAt(EventTypes.STATE_CONFIRMED, SubjectRef.entity(target),
+                new StateConfirmedEvent(cmd.eventId(), eventId(), "on", "true", "true", "exact"),
+                corr, cmd.eventId().value(), at);
+        publishDerivedAt(EventTypes.AUTOMATION_ACTION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationActionCompletedEvent(runId.value(), 0, "success", null), corr, trigId,
+                at);
+        publishDerivedAt(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null),
+                corr, trigId, at);
+        return runId;
+    }
+
+    /**
+     * A ULID whose 48-bit timestamp is exactly {@code at} (millisecond precision) and whose
+     * random component is a per-class counter: deterministic, unique, and independent of
+     * {@code UlidFactory}'s static monotonic guard, which would otherwise carry another test
+     * class's later instant into this one and move the by-id hint window.
+     */
+    private static Ulid ulidAt(Instant at) {
+        long n = ++ulidCounter;
+        return new Ulid((at.toEpochMilli() << 16) | (n & 0xFFFFL), n);
     }
 
     private static AutomationDefinition definition(AutomationId autoId, String name, EntityId entity) {
@@ -1058,8 +1343,25 @@ final class StandardExplanationServiceTest {
                 List.of(), List.of());
     }
 
+    /** An enabled automation with a single {@code StateTrigger} on {@code entity} and the given conditions. */
+    private static AutomationDefinition definitionWithConditions(AutomationId autoId, String name,
+                                                                 EntityId entity,
+                                                                 List<ConditionDefinition> conditions) {
+        return new AutomationDefinition(autoId, "auto-slug", name, null, true,
+                ConcurrencyMode.SINGLE, 1, MaxExceededSeverity.INFO, 0,
+                List.of(new StateTrigger(new DirectRefSelector(entity), "motion", "active", null,
+                        "t1")),
+                conditions, List.of());
+    }
+
     private EventEnvelope publishRoot(String eventType, SubjectRef subject, DomainEvent payload) {
-        EventDraft draft = new EventDraft(eventType, 1, FIXED_INSTANT, subject,
+        return publishRootAt(eventType, subject, payload, FIXED_INSTANT);
+    }
+
+    /** As {@link #publishRoot} with an explicit envelope {@code eventTime}. */
+    private EventEnvelope publishRootAt(String eventType, SubjectRef subject, DomainEvent payload,
+                                        Instant eventTime) {
+        EventDraft draft = new EventDraft(eventType, 1, eventTime, subject,
                 EventPriority.NORMAL, EventOrigin.AUTOMATION, payload, null, null);
         try {
             return store.publishRoot(draft);
@@ -1087,13 +1389,17 @@ final class StandardExplanationServiceTest {
 
     /**
      * A read-through {@link EventStore} decorator that counts {@code readByType} calls per event
-     * type and records the last page size asked for: the instrument for the early stop (T3) and
-     * the two-page walks (T1/T2), and the pin that keeps {@link #SCAN_BATCH} honest. Delegates
+     * type and {@code readByTimeRange} calls (the by-id hint, EXPLAIN-114c), and records the last
+     * page size asked for: the instrument for the early stop (T3), the two-page walks (T1/T2),
+     * the hint / fallback arms, and the pin that keeps {@link #SCAN_BATCH} honest. Delegates
      * every read to the seeded store; reads no clock.
      */
     private static final class CountingEventStore implements EventStore {
         private final EventStore delegate;
         private final Map<String, Integer> readsByType = new HashMap<>();
+        private int timeRangeReads;
+        private Instant lastTimeRangeFrom;
+        private Instant lastTimeRangeTo;
         private int lastMaxCount = -1;
 
         CountingEventStore(EventStore delegate) {
@@ -1102,6 +1408,18 @@ final class StandardExplanationServiceTest {
 
         int reads(String eventType) {
             return readsByType.getOrDefault(eventType, 0);
+        }
+
+        int timeRangeReads() {
+            return timeRangeReads;
+        }
+
+        Instant lastTimeRangeFrom() {
+            return lastTimeRangeFrom;
+        }
+
+        Instant lastTimeRangeTo() {
+            return lastTimeRangeTo;
         }
 
         int lastMaxCount() {
@@ -1132,6 +1450,10 @@ final class StandardExplanationServiceTest {
 
         @Override
         public EventPage readByTimeRange(Instant from, Instant to, long afterPosition, int maxCount) {
+            timeRangeReads++;
+            lastTimeRangeFrom = from;
+            lastTimeRangeTo = to;
+            lastMaxCount = maxCount;
             return delegate.readByTimeRange(from, to, afterPosition, maxCount);
         }
 

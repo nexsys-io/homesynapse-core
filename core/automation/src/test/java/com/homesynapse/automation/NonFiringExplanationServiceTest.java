@@ -173,10 +173,11 @@ final class NonFiringExplanationServiceTest {
         NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
 
         // v1.1.4 grows the verdict enum by FIRED_CONFIRMED (appended LAST): the clean-success case
-        // no longer borrows NEVER_TRIGGERED; the run id stays non-null and the sentence unchanged.
+        // no longer borrows NEVER_TRIGGERED; the run id stays non-null. Since v1.1.5 (EXPLAIN-114c,
+        // DP-B2) the sentence names the fired instant and the confirmed instant separately.
         assertThat(result.verdict()).isEqualTo(NonFiringExplanation.NonFiringVerdict.FIRED_CONFIRMED);
         assertThat(result.lastRelevantRunId()).isEqualTo(run);
-        assertThat(result.explanation()).contains("last fired and confirmed");
+        assertThat(result.explanation()).contains("last fired at");
     }
 
     @Test
@@ -542,6 +543,63 @@ final class NonFiringExplanationServiceTest {
         assertThat(byId(summaries, a).definitionKey()).isNotEqualTo(byId(summaries, b).definitionKey());
     }
 
+    // ---- v1.1.5 (EXPLAIN-114c, DP-B2): FIRED_CONFIRMED only on confirmation evidence ----
+
+    @Test
+    @DisplayName("FIRED_CONFIRMED needs a CONFIRMED action; the sentence names the fired instant and the device's confirmed instant (T2)")
+    void completedVerdict_firedConfirmedRequiresConfirmation() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        registry.add(definition(autoId, "Welcome", true, target));
+        Instant confirmedAt = FIXED_INSTANT.plusSeconds(3);
+        RunId run = seedRunConfirmedAt(autoId, target, confirmedAt);
+
+        NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+        assertThat(result.verdict()).isEqualTo(NonFiringExplanation.NonFiringVerdict.FIRED_CONFIRMED);
+        assertThat(result.lastRelevantRunId()).isEqualTo(run);
+        assertThat(result.explanation()).isEqualTo("Automation 'Welcome' last fired at "
+                + FIXED_INSTANT + " and its device confirmed at " + confirmedAt
+                + "; no non-firing was detected in the requested window.");
+        assertThat(result.explanation()).doesNotContain("fired and confirmed at");
+        assertThat(result.lastEvaluation().at()).isEqualTo(FIXED_INSTANT);
+        assertThat(result.noCommandsIssued()).isNull();
+    }
+
+    @Test
+    @DisplayName("a DISPATCHED (in-flight, unconfirmed) action is not confirmation: ACTED_BUT_UNCONFIRMED (T2b)")
+    void completedVerdict_dispatchedIsActedButUnconfirmed() {
+        AutomationId autoId = automationId();
+        EntityId target = entityId();
+        registry.add(definition(autoId, "Porch", true, target));
+        RunId run = seedRun(autoId, target, "COMPLETED", null, ConfirmKind.DISPATCHED);
+
+        NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+        assertThat(result.verdict())
+                .isEqualTo(NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED);
+        assertThat(result.lastRelevantRunId()).isEqualTo(run);
+        assertThat(result.explanation()).contains("did not confirm");
+        assertThat(result.noCommandsIssued()).isNull();
+    }
+
+    @Test
+    @DisplayName("a COMPLETED run with zero actions and zero commands lands on the no-commands marker (T2c)")
+    void completedVerdict_zeroActionsIsNoCommands() {
+        AutomationId autoId = automationId();
+        registry.add(definition(autoId, "Empty", true, entityId()));
+        RunId run = seedCompleted(autoId, "COMPLETED", null, 1234L, 0, 0);
+
+        NonFiringExplanation result = service.explainNonFiring(autoId, 0).orElseThrow();
+
+        assertThat(result.verdict())
+                .isEqualTo(NonFiringExplanation.NonFiringVerdict.ACTED_BUT_UNCONFIRMED);
+        assertThat(result.noCommandsIssued()).isEqualTo(Boolean.TRUE);
+        assertThat(result.explanation()).contains("issued no device commands");
+        assertThat(result.explanation()).doesNotContain("confirmed at");
+        assertThat(result.lastRelevantRunId()).isEqualTo(run);
+    }
+
     // ---- INV-SA-03: pure projection -----------------------------------------
 
     @Test
@@ -697,6 +755,44 @@ final class NonFiringExplanationServiceTest {
         publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
                 new AutomationCompletedEvent(runId.value(), finalStatus, 1234L, 1, 1, null,
                         abortReason), corr, trigId);
+        return runId;
+    }
+
+    /**
+     * Seeds a full run chain whose single command is CONFIRMED by a {@code state_confirmed}
+     * carrying an explicit envelope {@code eventTime}; every other event stays at
+     * {@link #FIXED_INSTANT}, so the confirmed instant is discriminable from the trigger instant
+     * (the DP-B2 sentence names both).
+     */
+    private RunId seedRunConfirmedAt(AutomationId autoId, EntityId target, Instant confirmedAt) {
+        EventEnvelope trig = publishRoot("state_changed", SubjectRef.entity(target),
+                new StateChangedEvent("motion", str("idle"), str("active"), eventId()));
+        Ulid corr = trig.causalContext().correlationId();
+        Ulid trigId = trig.eventId().value();
+        RunId runId = new RunId(ulid());
+        publishDerived(EventTypes.AUTOMATION_TRIGGERED, SubjectRef.automation(autoId),
+                new AutomationTriggeredEvent(runId.value(), trig.eventId(), List.of("t1"),
+                        Map.of("action:0", Set.of(target)), "hash", 0), corr, trigId);
+        publishDerived(EventTypes.AUTOMATION_ACTION_STARTED, SubjectRef.automation(autoId),
+                new AutomationActionStartedEvent(runId.value(), 0, "CommandAction", List.of(target)),
+                corr, trigId);
+        EventEnvelope cmd = publishDerived(EventTypes.COMMAND_ISSUED, SubjectRef.entity(target),
+                new CommandIssuedEvent(target.value(), "turn_on", "{\"level\":75}", 5000,
+                        CommandIdempotency.IDEMPOTENT), corr, trigId);
+        EventDraft confirmed = new EventDraft(EventTypes.STATE_CONFIRMED, 1, confirmedAt,
+                SubjectRef.entity(target), EventPriority.NORMAL, EventOrigin.AUTOMATION,
+                new StateConfirmedEvent(cmd.eventId(), eventId(), "on", "true", "true", "exact"),
+                null, null);
+        try {
+            store.publish(confirmed, CausalContext.chain(corr, cmd.eventId().value()));
+        } catch (SequenceConflictException e) {
+            throw new AssertionError("seed publish failed", e);
+        }
+        publishDerived(EventTypes.AUTOMATION_ACTION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationActionCompletedEvent(runId.value(), 0, "success", null), corr, trigId);
+        publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null),
+                corr, trigId);
         return runId;
     }
 
