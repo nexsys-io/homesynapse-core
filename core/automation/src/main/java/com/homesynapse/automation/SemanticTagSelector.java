@@ -4,6 +4,8 @@
  */
 package com.homesynapse.automation;
 
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.Set;
 import java.util.Objects;
 
@@ -31,8 +33,8 @@ import com.homesynapse.device.EntityRole;
  * @param value         the tag value to match (e.g. {@code "kitchen"}); ignored for
  *                      {@link MatchMode#NAMESPACE_PREFIX} but never {@code null}
  * @param matchMode     the match strategy, never {@code null}
- * @param includedRoles the entity roles to include in resolution, unmodifiable,
- *                      never {@code null}
+ * @param includedRoles the entity roles to include in resolution, unmodifiable and
+ *                      deterministically ordered (ordinal), never {@code null}
  * @see Selector
  * @see SelectorResolver
  * @see MatchMode
@@ -45,7 +47,9 @@ public record SemanticTagSelector(
 ) implements Selector {
 
     /**
-     * Validates non-null fields and makes {@code includedRoles} unmodifiable.
+     * Validates non-null fields and stores {@code includedRoles} as an unmodifiable,
+     * deterministically ordered (ordinal) copy — {@code AutomationDefinition.toString()}
+     * renders it and {@code DefinitionHashes} hashes that rendering (HASH-1).
      *
      * @throws NullPointerException if any field is {@code null}
      */
@@ -54,6 +58,8 @@ public record SemanticTagSelector(
         Objects.requireNonNull(value, "value must not be null");
         Objects.requireNonNull(matchMode, "matchMode must not be null");
         Objects.requireNonNull(includedRoles, "includedRoles must not be null");
-        includedRoles = Set.copyOf(includedRoles);
+        Set<EntityRole> roles = Set.copyOf(includedRoles); // today's null/duplicate handling
+        includedRoles = Collections.unmodifiableSet(
+                roles.isEmpty() ? EnumSet.noneOf(EntityRole.class) : EnumSet.copyOf(roles));
     }
 }

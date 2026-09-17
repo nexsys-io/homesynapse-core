@@ -4,8 +4,10 @@
  */
 package com.homesynapse.automation;
 
+import java.util.Collections;
 import java.util.Set;
 import java.util.Objects;
+import java.util.TreeSet;
 
 /**
  * Tier 1 trigger that fires on an inbound webhook request (AMD-88 §2.3 — promoted
@@ -25,7 +27,8 @@ import java.util.Objects;
  * <p>Defined in AMD-88 §2.3; Doc 07 §3.4, §8.2.</p>
  *
  * @param webhookId      the path discriminator, never {@code null} or blank
- * @param allowedMethods the accepted HTTP method names, unmodifiable, never {@code null}
+ * @param allowedMethods the accepted HTTP method names, unmodifiable and deterministically
+ *                       ordered, never {@code null}
  * @param localOnly      whether the webhook is reachable only on the LAN
  * @param triggerId      the stable, user-facing trigger identity (AMD-88 §2.5),
  *                       never {@code null}
@@ -39,7 +42,8 @@ public record WebhookTrigger(
 ) implements TriggerDefinition {
 
     /**
-     * Validates non-null fields and makes {@code allowedMethods} unmodifiable.
+     * Validates non-null fields and stores {@code allowedMethods} as an unmodifiable,
+     * deterministically ordered copy — the rendering {@code DefinitionHashes} hashes (HASH-1).
      *
      * @throws NullPointerException     if {@code webhookId}, {@code allowedMethods},
      *                                  or {@code triggerId} is {@code null}
@@ -52,6 +56,6 @@ public record WebhookTrigger(
         }
         Objects.requireNonNull(allowedMethods, "allowedMethods must not be null");
         Objects.requireNonNull(triggerId, "triggerId must not be null");
-        allowedMethods = Set.copyOf(allowedMethods);
+        allowedMethods = Collections.unmodifiableSet(new TreeSet<>(Set.copyOf(allowedMethods)));
     }
 }

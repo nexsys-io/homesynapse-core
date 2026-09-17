@@ -4,8 +4,10 @@
  */
 package com.homesynapse.automation;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 /**
  * Fires on a specific event type, optionally filtered by payload key-value pairs.
@@ -19,7 +21,8 @@ import java.util.Objects;
  * @param eventType      the event type to match (e.g., {@code "state_changed"}),
  *                       never {@code null}
  * @param payloadFilters key-value pairs that must match in the event payload;
- *                       unmodifiable, possibly empty, never {@code null}
+ *                       unmodifiable and deterministically ordered by key, possibly empty,
+ *                       never {@code null}
  * @param triggerId      the stable, user-facing trigger identity (AMD-88 §2.5), never {@code null}
  * @see TriggerDefinition
  * @see TriggerEvaluator
@@ -31,7 +34,8 @@ public record EventTrigger(
 ) implements TriggerDefinition {
 
     /**
-     * Validates non-null fields and makes the map unmodifiable.
+     * Validates non-null fields and stores the filters as an unmodifiable, deterministically
+     * ordered (by key) copy — the rendering {@code DefinitionHashes} hashes (HASH-1).
      *
      * @throws NullPointerException if {@code eventType}, {@code payloadFilters},
      *                              or {@code triggerId} is {@code null}
@@ -40,6 +44,6 @@ public record EventTrigger(
         Objects.requireNonNull(eventType, "eventType must not be null");
         Objects.requireNonNull(payloadFilters, "payloadFilters must not be null");
         Objects.requireNonNull(triggerId, "triggerId must not be null");
-        payloadFilters = Map.copyOf(payloadFilters);
+        payloadFilters = Collections.unmodifiableMap(new TreeMap<>(Map.copyOf(payloadFilters)));
     }
 }

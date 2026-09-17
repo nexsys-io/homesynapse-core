@@ -147,8 +147,10 @@ public final class StandardTriggerEvaluator implements TriggerEvaluator, AutoClo
      * The same evaluation as {@link #evaluate(EventEnvelope)} — duration-timer cancellation,
      * timer starts, and immediate matching — but returns, per matched automation, the indices
      * of the triggers that produced an <em>immediate</em> match (a {@code for_duration} trigger
-     * starts a timer and is NOT an immediate match; it fires later via timer expiry, not run
-     * initiation). This is the single source of truth for the matched-trigger indices the M7.4b
+     * starts a timer and is NOT an immediate match on the arming event; its immediate match is
+     * the engine's own redelivered {@code trigger_duration_expired}, keyed on its automation and
+     * trigger index — DUR-1). This is the single source of truth for the matched-trigger indices
+     * the M7.4b
      * run-initiation path needs ({@link RunContext#matchedTriggers()} / {@code automation_triggered}):
      * they come straight from this loop, never from re-checking triggers (which would duplicate
      * the matching logic and risk silent divergence). {@link #evaluate(EventEnvelope)} is the
@@ -178,10 +180,26 @@ public final class StandardTriggerEvaluator implements TriggerEvaluator, AutoClo
             List<TriggerDefinition> triggers = automation.triggers();
             for (int index = 0; index < triggers.size(); index++) {
                 TriggerDefinition trigger = triggers.get(index);
+                Duration forDuration = forDurationOf(trigger);
+                if (event.payload() instanceof TriggerDurationExpiredEvent expired
+                        && !(trigger instanceof EventTrigger)) {
+                    // DUR-1: the engine's own expiry is the IMMEDIATE match of the timer it fired,
+                    // keyed positionally (automationId, triggerIndex) on the for_duration permits
+                    // only. No other permit reads an expired payload (a ManualTrigger shares its
+                    // automation subject and must not fire on it), and an expired payload never
+                    // starts a timer. An EventTrigger keeps matching by type equality as before,
+                    // so it takes the ordinary arm below.
+                    if (forDuration != null
+                            && expired.automationId().equals(automation.automationId())
+                            && expired.triggerIndex() == index) {
+                        matched.computeIfAbsent(automation.automationId(), key -> new ArrayList<>())
+                                .add(index);
+                    }
+                    continue;
+                }
                 if (!triggerMatchesEvent(trigger, event, automation.automationId())) {
                     continue;
                 }
-                Duration forDuration = forDurationOf(trigger);
                 if (forDuration != null) {
                     maybeStartDurationTimer(automation, index, trigger, forDuration, event);
                 } else {
@@ -578,7 +596,12 @@ public final class StandardTriggerEvaluator implements TriggerEvaluator, AutoClo
         return below == null || value < below;
     }
 
-    private static Duration forDurationOf(TriggerDefinition trigger) {
+    /**
+     * The {@code for_duration} a trigger carries, or {@code null} for the permits that have none.
+     * The five AMD-25 permits are listed here once; the registry's DUR-1 expiry index asks the same
+     * question, so this is package-private for that one caller.
+     */
+    static Duration forDurationOf(TriggerDefinition trigger) {
         return switch (trigger) {
             case StateChangeTrigger t -> t.forDuration();
             case StateTrigger t -> t.forDuration();

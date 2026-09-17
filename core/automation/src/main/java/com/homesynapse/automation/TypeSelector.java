@@ -4,6 +4,8 @@
  */
 package com.homesynapse.automation;
 
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.Set;
 import java.util.Objects;
 
@@ -26,8 +28,8 @@ import com.homesynapse.device.EntityRole;
  * <p>Defined in Doc 07 §3.12, §8.2; {@code includedRoles} added by AMD-89 §2.2.</p>
  *
  * @param entityType    the entity type to match, never {@code null}
- * @param includedRoles the entity roles to include in resolution, unmodifiable,
- *                      never {@code null}
+ * @param includedRoles the entity roles to include in resolution, unmodifiable and
+ *                      deterministically ordered (ordinal), never {@code null}
  * @see Selector
  * @see SelectorResolver
  */
@@ -37,7 +39,9 @@ public record TypeSelector(
 ) implements Selector {
 
     /**
-     * Validates non-null fields and makes {@code includedRoles} unmodifiable.
+     * Validates non-null fields and stores {@code includedRoles} as an unmodifiable,
+     * deterministically ordered (ordinal) copy — {@code AutomationDefinition.toString()}
+     * renders it and {@code DefinitionHashes} hashes that rendering (HASH-1).
      *
      * @throws NullPointerException if {@code entityType} or {@code includedRoles}
      *                              is {@code null}
@@ -45,6 +49,8 @@ public record TypeSelector(
     public TypeSelector {
         Objects.requireNonNull(entityType, "entityType must not be null");
         Objects.requireNonNull(includedRoles, "includedRoles must not be null");
-        includedRoles = Set.copyOf(includedRoles);
+        Set<EntityRole> roles = Set.copyOf(includedRoles); // today's null/duplicate handling
+        includedRoles = Collections.unmodifiableSet(
+                roles.isEmpty() ? EnumSet.noneOf(EntityRole.class) : EnumSet.copyOf(roles));
     }
 }

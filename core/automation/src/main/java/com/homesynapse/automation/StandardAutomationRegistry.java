@@ -77,7 +77,10 @@ public final class StandardAutomationRegistry implements AutomationRegistry {
     /**
      * Returns the automations whose triggers consume {@code eventType}, in execution
      * order (priority descending, then automationId ascending). Package-private — the
-     * {@link TriggerEvaluator} consumes this index; it is not part of the public API.
+     * {@link TriggerEvaluator} consumes this index; it is not part of the public API. A
+     * {@code for_duration} trigger is indexed under its consumed type AND under
+     * {@code trigger_duration_expired} (DUR-1), so the engine's own expiry event reaches the
+     * automation that armed the timer.
      *
      * @param eventType the incoming event's type string, never {@code null}
      * @return the matching definitions in deterministic order, never {@code null}
@@ -134,6 +137,15 @@ public final class StandardAutomationRegistry implements AutomationRegistry {
                     }
                     index.computeIfAbsent(eventType, key -> new ArrayList<>())
                             .add(definition);
+                    if (StandardTriggerEvaluator.forDurationOf(trigger) != null) {
+                        // DUR-1: a for_duration trigger fires on the engine's own expiry event —
+                        // index it under that type too, so the redelivered trigger_duration_expired
+                        // reaches the evaluator's expired-payload arm; dedup below collapses a
+                        // definition indexed twice into one bucket entry.
+                        index.computeIfAbsent(EventTypes.TRIGGER_DURATION_EXPIRED,
+                                        key -> new ArrayList<>())
+                                .add(definition);
+                    }
                 }
             }
 

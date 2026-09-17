@@ -4,8 +4,10 @@
  */
 package com.homesynapse.automation;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 /**
  * Issues a command to one or more target entities via the Command Pipeline (§3.11).
@@ -23,8 +25,8 @@ import java.util.Objects;
  * @param target        the entity selector identifying command targets, never {@code null}
  * @param commandName   the name of the command to issue (e.g., {@code "set_level"}),
  *                      never {@code null}
- * @param parameters    command parameters as key-value pairs, unmodifiable,
- *                      never {@code null} (may be empty)
+ * @param parameters    command parameters as key-value pairs, unmodifiable and
+ *                      deterministically ordered by key, never {@code null} (may be empty)
  * @param onUnavailable behavior when a target entity is offline, never {@code null}
  * @see ActionDefinition
  * @see ActionExecutor
@@ -39,7 +41,8 @@ public record CommandAction(
 ) implements ActionDefinition {
 
     /**
-     * Validates non-null fields and makes the parameters map unmodifiable.
+     * Validates non-null fields and stores the parameters as an unmodifiable, deterministically
+     * ordered (by key) copy — the rendering {@code DefinitionHashes} hashes (HASH-1).
      *
      * @throws NullPointerException if any field is {@code null}
      */
@@ -48,6 +51,6 @@ public record CommandAction(
         Objects.requireNonNull(commandName, "commandName must not be null");
         Objects.requireNonNull(parameters, "parameters must not be null");
         Objects.requireNonNull(onUnavailable, "onUnavailable must not be null");
-        parameters = Map.copyOf(parameters);
+        parameters = Collections.unmodifiableMap(new TreeMap<>(Map.copyOf(parameters)));
     }
 }

@@ -4,8 +4,10 @@
  */
 package com.homesynapse.automation;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 /**
  * Produces a custom event on the event bus.
@@ -16,8 +18,8 @@ import java.util.Objects;
  * <p>Defined in Doc 07 §3.9, §8.2.</p>
  *
  * @param eventType the event type string for the emitted event, never {@code null}
- * @param payload   the event payload as key-value pairs, unmodifiable,
- *                  never {@code null} (may be empty)
+ * @param payload   the event payload as key-value pairs, unmodifiable and deterministically
+ *                  ordered by key, never {@code null} (may be empty)
  * @see ActionDefinition
  * @see ActionExecutor
  */
@@ -27,13 +29,14 @@ public record EmitEventAction(
 ) implements ActionDefinition {
 
     /**
-     * Validates non-null fields and makes the payload map unmodifiable.
+     * Validates non-null fields and stores the payload as an unmodifiable, deterministically
+     * ordered (by key) copy — the rendering {@code DefinitionHashes} hashes (HASH-1).
      *
      * @throws NullPointerException if any field is {@code null}
      */
     public EmitEventAction {
         Objects.requireNonNull(eventType, "eventType must not be null");
         Objects.requireNonNull(payload, "payload must not be null");
-        payload = Map.copyOf(payload);
+        payload = Collections.unmodifiableMap(new TreeMap<>(Map.copyOf(payload)));
     }
 }

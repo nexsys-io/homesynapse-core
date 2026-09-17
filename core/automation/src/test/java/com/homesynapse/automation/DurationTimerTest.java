@@ -26,6 +26,7 @@ import com.homesynapse.device.EntityRole;
 import com.homesynapse.device.EntityType;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.SubjectRef;
+import com.homesynapse.event.TriggerDurationExpiredEvent;
 import com.homesynapse.event.TriggerDurationStartedEvent;
 import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.EntityId;
@@ -225,5 +226,111 @@ class DurationTimerTest {
         clock.advance(Duration.ofMinutes(30));
         evaluator.pollExpirations();
         assertThat(publisher.countOfType(EventTypes.TRIGGER_DURATION_EXPIRED)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("DUR-0: a for_duration expiry initiates exactly one run (IR-22, the measurement)")
+    void forDurationExpiry_initiatesARun() {
+        loadDurationAutomation(Duration.ofMinutes(30));
+        // The W2 shape in LIVE: the recording run manager behind the initiator is the instrument —
+        // its recorded initiateRun calls are the count this test measures.
+        var recorder = new AutomationTestSupport.RecordingRunManager();
+        AutomationEngineSubscriber subscriber = new AutomationEngineSubscriber(
+                evaluator,
+                new RunInitiator(recorder, registry, new AutomationTestSupport.FakeSelectorResolver()));
+        subscriber.setMode(com.homesynapse.event.bus.SubscriberMode.LIVE);
+
+        // The predicate-true event starts the timer and initiates nothing (preservation lines).
+        subscriber.onEvent(stateChanged(light, "on_off", str("off"), str("on")));
+        assertThat(evaluator.activeDurationTimerCount()).isEqualTo(1);
+        assertThat(publisher.countOfType(EventTypes.TRIGGER_DURATION_STARTED)).isEqualTo(1);
+        assertThat(recorder.calls()).as("runs initiated before expiry").isEmpty();
+
+        // Past expiry the poll fires the timer (preservation) ...
+        clock.advance(Duration.ofMinutes(30).plusSeconds(1));
+        evaluator.pollExpirations();
+        assertThat(publisher.countOfType(EventTypes.TRIGGER_DURATION_EXPIRED)).isEqualTo(1);
+        assertThat(evaluator.activeDurationTimerCount()).isZero();
+
+        // ... and the expired event is redelivered to the subscriber as the bus would deliver it, so
+        // both paths a run could take — inside expire(), or on the redelivered event — are covered.
+        var expired = publisher.ofType(EventTypes.TRIGGER_DURATION_EXPIRED).get(0);
+        subscriber.onEvent(expired);
+
+        // THE MEASUREMENT: exactly one run, initiated by the expiry. The description carries the
+        // triggering event type of every recorded call, so a red or a green names the envelope.
+        var calls = recorder.calls();
+        assertThat(calls)
+                .as("DUR-0: initiateRun calls after for_duration expiry; triggeringEvent types=%s",
+                        calls.stream().map(call -> call.triggeringEvent().eventType()).toList())
+                .hasSize(1);
+    }
+
+    @Test
+    @DisplayName("DUR-1: the run carries the expired envelope — its type, matchedTriggers [0], the timer's correlation; a repeat redelivery is the RunManager's to dedup")
+    void forDurationExpiry_runCarriesTheExpiredEnvelope() {
+        loadDurationAutomation(Duration.ofMinutes(30));
+        var recorder = new AutomationTestSupport.RecordingRunManager();
+        AutomationEngineSubscriber subscriber = new AutomationEngineSubscriber(
+                evaluator,
+                new RunInitiator(recorder, registry, new AutomationTestSupport.FakeSelectorResolver()));
+        subscriber.setMode(com.homesynapse.event.bus.SubscriberMode.LIVE);
+
+        var lightOn = stateChanged(light, "on_off", str("off"), str("on"));
+        subscriber.onEvent(lightOn);
+        clock.advance(Duration.ofMinutes(30).plusSeconds(1));
+        evaluator.pollExpirations();
+        var started = publisher.ofType(EventTypes.TRIGGER_DURATION_STARTED).get(0);
+        var expired = publisher.ofType(EventTypes.TRIGGER_DURATION_EXPIRED).get(0);
+        subscriber.onEvent(expired);
+
+        assertThat(recorder.calls()).hasSize(1);
+        var call = recorder.calls().get(0);
+        assertThat(call.automation().automationId()).isEqualTo(autoId);
+        assertThat(call.triggeringEvent().eventId()).isEqualTo(expired.eventId());
+        assertThat(call.triggeringEvent().eventType()).isEqualTo(EventTypes.TRIGGER_DURATION_EXPIRED);
+        assertThat(call.matchedTriggers()).containsExactly(0);
+        // One correlation from the state event through started → expired → the run (DUR-1 §4).
+        assertThat(expired.causalContext().correlationId())
+                .isEqualTo(started.causalContext().correlationId())
+                .isEqualTo(lightOn.causalContext().correlationId());
+        assertThat(expired.causalContext().causationId()).isEqualTo(lightOn.eventId().value());
+
+        // A second redelivery of the SAME envelope: the initiator initiates again — C2 dedup by
+        // (automationId, triggeringEventId) is StandardRunManager's, never the initiator's — so the
+        // recorder holds two calls carrying one triggering event id (the finding the return states).
+        subscriber.onEvent(expired);
+        assertThat(recorder.calls())
+                .as("the initiator does not dedup; the RunManager's C2 key collapses a repeat")
+                .hasSize(2)
+                .extracting(recorded -> recorded.triggeringEvent().eventId())
+                .containsOnly(expired.eventId());
+    }
+
+    @Test
+    @DisplayName("D2: in REPLAY the redelivered expiry matches its trigger but initiates no run")
+    void forDurationExpiry_inReplay_initiatesNothing() {
+        loadDurationAutomation(Duration.ofMinutes(30));
+        var recorder = new AutomationTestSupport.RecordingRunManager();
+        AutomationEngineSubscriber subscriber = new AutomationEngineSubscriber(
+                evaluator,
+                new RunInitiator(recorder, registry, new AutomationTestSupport.FakeSelectorResolver()));
+        subscriber.setMode(com.homesynapse.event.bus.SubscriberMode.REPLAY);
+
+        // The same sequence under REPLAY: the state event starts no timer (§3.10), so the expiry
+        // arrives from the log — the W2 shape, with the historical expired event instead.
+        subscriber.onEvent(stateChanged(light, "on_off", str("off"), str("on")));
+        assertThat(evaluator.activeDurationTimerCount()).isZero();
+        var expired = envelope(EventTypes.TRIGGER_DURATION_EXPIRED, SubjectRef.automation(autoId),
+                new TriggerDurationExpiredEvent(autoId, 0, "t1", eventId()));
+        subscriber.onEvent(expired);
+
+        assertThat(recorder.calls()).as("D2: no run initiation on replay").isEmpty();
+        // Not vacuous: the evaluator matches the expiry to its trigger in REPLAY too (matching has
+        // no side effect); only initiation is suppressed.
+        List<StandardTriggerEvaluator.TriggerMatch> matches = evaluator.evaluateMatches(expired);
+        assertThat(matches).hasSize(1);
+        assertThat(matches.get(0).automationId()).isEqualTo(autoId);
+        assertThat(matches.get(0).matchedTriggerIndices()).containsExactly(0);
     }
 }
