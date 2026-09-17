@@ -150,7 +150,14 @@ jobs:
           sudo --preserve-env=JAVA_HOME distribution/update/update-smoke.sh
 
       - name: Upload artifacts (image, .deb, logs)
+        # continue-on-error (CI-2, 2026-09-17): the org's artifact-storage
+        # quota was hit on 2026-09-17 — the smoke's verdict is the install /
+        # update steps above, never this upload; a missing artifact is read
+        # from the job status (architecture.md: "the verdict is the job
+        # status, never the artifact's existence"). 7 days stays: a sitting
+        # pins a run's .deb up to a week ahead and downloads it on the day.
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: distribution-artifacts-${{ matrix.arch }}

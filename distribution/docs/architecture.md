@@ -79,7 +79,7 @@ Two asserts ride each leg after "Assemble .deb", in-workflow and in-script:
   `../smoke/version-grammar-test.sh` (run in the Static-lint step) pins the function's fixtures
   and the regex literal in its three carriers.
 
-Each leg uploads one artifact, retained **7 days**:
+Each leg uploads one artifact, retained **7 days** (the upload step is `continue-on-error` since CI-2, 2026-09-17 — a storage-quota hit never reddens the smoke; `ci.yml`'s test-report artifacts are 3 days):
 
 | Artifact | Contents |
 |---|---|

@@ -42,14 +42,19 @@ jobs:
         # always() (FIX-1a): the per-test-case XML (test-results/) rides beside
         # the HTML, on green runs too — a red run's neighbours are its
         # comparison corpus, and the assertion MESSAGE lives in the XML.
+        # continue-on-error (CI-2, 2026-09-17): run #251 was RED on a green
+        # `check` because the org's artifact-storage quota was hit at THIS
+        # step — the verdict is `Run check`, never the upload; 3 days of
+        # retention (a re-run re-derives a report; the .deb is elsewhere).
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: test-reports-${{ github.run_number }}
           path: |
             **/build/reports/tests/
             **/build/test-results/
-          retention-days: 14
+          retention-days: 3
 
   # CI-1 (2026-09-12): the bus-soak amplifier OFF the gate, kept as a sample
   # source. BusSoakIT and BusPositionCensusIT carry @Tag("bus-soak"); the
@@ -82,10 +87,12 @@ jobs:
 
       - name: Upload bus-soak reports
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: bus-soak-${{ github.run_number }}
+          # CI-2: 3 days (was 14) — the sample is READ the day it lands.
           path: |
             lifecycle/lifecycle/build/test-results/
             lifecycle/lifecycle/build/reports/tests/
-          retention-days: 14
+          retention-days: 3
