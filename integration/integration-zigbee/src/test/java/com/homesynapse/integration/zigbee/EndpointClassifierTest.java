@@ -4,11 +4,16 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.homesynapse.device.CapabilityInstance;
 import com.homesynapse.device.EntityType;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Optional;
@@ -24,10 +29,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>M9.7-W2 §3: the 0x0302 arm widens (humidity + battery when their clusters
  * are present — DP-8), IAS selection is zoneType-aware (a wire-learned CONTACT
- * installs {@code contact}; unlearned/MOTION/others stay {@code motion} —
- * DP-6), and the fallback gains the battery-only remainder ({@code SENSOR} +
+ * installs {@code contact}; unlearned/MOTION stay {@code motion} — DP-6), and
+ * the fallback gains the battery-only remainder ({@code SENSOR} +
  * {@code battery} — DP-7, the R2(B) SNZB-01P ruling). Occupancy still outranks
  * IAS regardless of zone type (the measured 03P dual-path rule).
+ *
+ * <p>ENERGY-READ: a learned WATER_LEAK/SMOKE/VIBRATION installs
+ * {@code binary_state} (R1, IR-15 — the DP-6 limitation row is retired);
+ * {@code power_meter}/{@code energy_meter} attach by the CLUSTERS present
+ * (0x0B04/0x0702) on every arm, the device type a hint (R2, IR-24); one
+ * {@code zigbee.endpoint_classified} INFO per classification (R6).
  */
 @DisplayName("EndpointClassifier — identify attachment (M9.4b §3.2, SD-3) "
         + "+ the Wave-2 arms (M9.7-W2 §3)")
@@ -157,16 +168,56 @@ class EndpointClassifierTest {
     }
 
     @Test
-    @DisplayName("DP-6 limitation pin: a learned WATER_LEAK still installs motion "
-            + "this WU — no fleet device; the recorded MODULE_CONTEXT limitation")
-    void iasNonContactLearned_staysMotion() {
+    @DisplayName("T1 (IR-15): a learned WATER_LEAK / SMOKE / VIBRATION installs "
+            + "binary_state — the capability whose schema admits the 'active' key "
+            + "IasZoneHandler emits; CONTACT and MOTION are unchanged")
+    void iasWaterLeakSmokeVibration_classifyToBinaryState() {
+        // The re-pin of the retired DP-6 limitation row
+        // (iasNonContactLearned_staysMotion asserted "motion" here): adoption is
+        // a one-way door, so the classifier must install the capability the
+        // handler's key belongs to.
+        for (ZoneType zoneType : List.of(ZoneType.WATER_LEAK, ZoneType.SMOKE,
+                ZoneType.VIBRATION)) {
+            Optional<EndpointClassifier.Classification> classified =
+                    EndpointClassifier.classify(endpoint(0x0402,
+                            List.of(0x0000, 0x0001, 0x0003, 0x0020, 0x0500)),
+                            zoneType);
+
+            assertThat(classified.orElseThrow().entityType())
+                    .as("%s", zoneType).isEqualTo(EntityType.BINARY_SENSOR);
+            assertThat(capabilityIds(classified)).as("%s", zoneType)
+                    .containsExactlyInAnyOrder("binary_state", "battery",
+                            "identify");
+            CapabilityInstance binaryState = classified.orElseThrow()
+                    .capabilities().stream()
+                    .filter(c -> c.capabilityId().equals("binary_state"))
+                    .findFirst().orElseThrow();
+            assertThat(binaryState.attributes())
+                    .as("%s: the schema admits the handler's key", zoneType)
+                    .containsKey("active");
+        }
+        assertThat(capabilityIds(EndpointClassifier.classify(endpoint(0x0402,
+                List.of(0x0000, 0x0001, 0x0003, 0x0020, 0x0500)),
+                ZoneType.CONTACT)))
+                .containsExactlyInAnyOrder("contact", "battery", "identify");
+        assertThat(capabilityIds(EndpointClassifier.classify(endpoint(0x0402,
+                List.of(0x0000, 0x0001, 0x0003, 0x0020, 0x0500)),
+                ZoneType.MOTION)))
+                .containsExactlyInAnyOrder("motion", "battery", "identify");
+    }
+
+    @Test
+    @DisplayName("T1 (IR-15): the 0x0107 arm's IAS-without-occupancy path installs "
+            + "binary_state for a learned SMOKE too — both IAS call sites share "
+            + "the one selection")
+    void occupancyArmWithoutOccupancy_smokeLearned_installsBinaryState() {
         Optional<EndpointClassifier.Classification> classified =
-                EndpointClassifier.classify(endpoint(0x0402,
+                EndpointClassifier.classify(endpoint(0x0107,
                         List.of(0x0000, 0x0001, 0x0003, 0x0020, 0x0500)),
-                        ZoneType.WATER_LEAK);
+                        ZoneType.SMOKE);
 
         assertThat(capabilityIds(classified)).containsExactlyInAnyOrder(
-                "motion", "battery", "identify");
+                "binary_state", "battery", "identify");
     }
 
     @Test
@@ -247,5 +298,118 @@ class EndpointClassifierTest {
     void noRecognizedClusters_stillEmpty() {
         assertThat(EndpointClassifier.classify(
                 endpoint(0x9999, List.of(0x0000, 0x0020)))).isEmpty();
+    }
+
+    // ── ENERGY-READ R2 (IR-24) — meters attach by the CLUSTERS present ──────
+
+    /**
+     * The owned Gen4's recorded signature (PLUG-DOSSIER row 16 / DEVICE-SET
+     * §1): EP1, the eight input clusters — the device type is the parameter.
+     */
+    private static EndpointDescriptor gen4(int deviceTypeId) {
+        return endpoint(deviceTypeId, List.of(0x0000, 0x0003, 0x0004, 0x0005,
+                0x0006, 0x0702, 0x0B04, 0xFC21));
+    }
+
+    @Test
+    @DisplayName("T2 (IR-24): the Gen4 signature (device type 0x010A, NOT the "
+            + "0x0051 the plug arm keys on) classifies SWITCH {on_off, "
+            + "power_meter, energy_meter} (+ identify: the signature lists 0x0003)")
+    void gen4Signature_switchWithMeters() {
+        Optional<EndpointClassifier.Classification> classified =
+                EndpointClassifier.classify(gen4(0x010A));
+
+        assertThat(classified.orElseThrow().entityType())
+                .as("Doc 08 §3.5: a metering switch stays a switch")
+                .isEqualTo(EntityType.SWITCH);
+        assertThat(capabilityIds(classified)).containsExactlyInAnyOrder(
+                "on_off", "power_meter", "energy_meter", "identify");
+    }
+
+    @Test
+    @DisplayName("T2 (IR-24): the same clusters under device type 0x0051 classify "
+            + "IDENTICALLY — the type is a hint, never the key")
+    void gen4Signature_sameWithDeviceType0x0051() {
+        assertThat(EndpointClassifier.classify(gen4(0x0051)))
+                .isEqualTo(EndpointClassifier.classify(gen4(0x010A)));
+        assertThat(capabilityIds(EndpointClassifier.classify(gen4(0x0051))))
+                .containsExactlyInAnyOrder("on_off", "power_meter",
+                        "energy_meter", "identify");
+    }
+
+    @Test
+    @DisplayName("T2 (IR-24): an endpoint with 0x0702 ONLY classifies SENSOR "
+            + "{energy_meter} — the meter alone makes the entity, nothing else "
+            + "is invented")
+    void meteringOnlyEndpoint_sensorWithEnergyMeterOnly() {
+        Optional<EndpointClassifier.Classification> classified =
+                EndpointClassifier.classify(endpoint(0x9999,
+                        List.of(0x0000, 0x0702)));
+
+        assertThat(classified.orElseThrow().entityType())
+                .isEqualTo(EntityType.SENSOR);
+        assertThat(capabilityIds(classified))
+                .containsExactlyInAnyOrder("energy_meter");
+    }
+
+    @Test
+    @DisplayName("T2 (IR-24): an endpoint with 0x0B04 ONLY classifies SENSOR "
+            + "{power_meter}")
+    void electricalOnlyEndpoint_sensorWithPowerMeterOnly() {
+        Optional<EndpointClassifier.Classification> classified =
+                EndpointClassifier.classify(endpoint(0x9999,
+                        List.of(0x0000, 0x0B04)));
+
+        assertThat(classified.orElseThrow().entityType())
+                .isEqualTo(EntityType.SENSOR);
+        assertThat(capabilityIds(classified))
+                .containsExactlyInAnyOrder("power_meter");
+    }
+
+    @Test
+    @DisplayName("T2 (IR-24): the meters attach on EVERY arm — a metering dimmable "
+            + "light (the SP 244 shape) stays LIGHT and gains power_meter")
+    void meteringLight_staysLightAndGainsPowerMeter() {
+        Optional<EndpointClassifier.Classification> classified =
+                EndpointClassifier.classify(endpoint(0x0101,
+                        List.of(0x0000, 0x0006, 0x0008, 0x0B04)));
+
+        assertThat(classified.orElseThrow().entityType())
+                .isEqualTo(EntityType.LIGHT);
+        assertThat(capabilityIds(classified)).containsExactlyInAnyOrder(
+                "on_off", "brightness", "power_meter");
+    }
+
+    @Test
+    @DisplayName("R6: ONE zigbee.endpoint_classified INFO per classification prints "
+            + "the device type, the input clusters and the chosen entity type + "
+            + "capabilities (DEVICE-SET note 1 — the G4-3 instrument)")
+    void classification_logsOneEndpointClassifiedInfo() {
+        Logger classifierLogger =
+                (Logger) LoggerFactory.getLogger(EndpointClassifier.class);
+        ListAppender<ILoggingEvent> capture = new ListAppender<>();
+        capture.start();
+        classifierLogger.addAppender(capture);
+        try {
+            EndpointClassifier.classify(gen4(0x010A));
+            EndpointClassifier.classify(endpoint(0x9999, List.of(0x0000, 0x0020)));
+        } finally {
+            classifierLogger.detachAppender(capture);
+        }
+
+        assertThat(capture.list.stream()
+                .filter(event -> event.getLevel() == Level.INFO)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith("zigbee.endpoint_classified"))
+                .toList())
+                .containsExactly(
+                        "zigbee.endpoint_classified: endpoint=1 deviceType=0x10a "
+                                + "inputClusters=[0x0, 0x3, 0x4, 0x5, 0x6, 0x702, "
+                                + "0xb04, 0xfc21] entityType=SWITCH "
+                                + "capabilities=[on_off, power_meter, "
+                                + "energy_meter, identify]",
+                        "zigbee.endpoint_classified: endpoint=1 deviceType=0x9999 "
+                                + "inputClusters=[0x0, 0x20] entityType=none "
+                                + "capabilities=[]");
     }
 }

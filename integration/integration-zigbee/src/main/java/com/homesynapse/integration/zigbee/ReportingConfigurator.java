@@ -42,7 +42,20 @@ import java.util.Optional;
  * <p>The classifications are recorded {@link ReportingPostureFact} DEVICE FACTS
  * feeding the AMD-97 {@code confirmability} consumption at M9.4.
  *
- * <p>Thread-safe: stateless over the injected ops seam.
+ * <p><strong>Metering (ENERGY-READ R3 + R5):</strong> the two metering
+ * clusters (0x0B04, 0x0702) are NOT in the §3.7 default table — a raw change
+ * means a different wattage on every device. Each endpoint's formatting is
+ * READ from the device first (one frame per metering cluster, before any
+ * configure on it; a rejoin re-applies from the {@link FormattingStore} and
+ * reads only what it lacks), and the reportable change is the engineering
+ * threshold — 1 W on {@code ActivePower} (5–600 s), 5 Wh on
+ * {@code CurrentSummationDelivered} (5–3600 s) — scaled by what was read.
+ * Unreadable formatting (no answer, a failed or zero multiplier/divisor) or a
+ * summation not in kWh configures NOTHING on that cluster and records a
+ * NONE-class posture saying why. The formatting is never predicted and never
+ * overridden.
+ *
+ * <p>Thread-safe: stateless over the injected ops and formatting-store seams.
  */
 final class ReportingConfigurator {
 
@@ -67,22 +80,116 @@ final class ReportingConfigurator {
             Map.entry(0x0300, new DefaultRow(0x0007, 0x21, 5, 3600, 1)),
             Map.entry(0x0402, new DefaultRow(0x0000, 0x29, 10, 3600, 10)),
             Map.entry(0x0405, new DefaultRow(0x0000, 0x21, 10, 3600, 100)),
-            Map.entry(0x0001, new DefaultRow(0x0021, 0x20, 3600, 62000, 0)),
-            Map.entry(0x0B04, new DefaultRow(0x050B, 0x29, 5, 3600, 10)),
-            Map.entry(0x0702, new DefaultRow(0x0000, 0x25, 5, 3600, 5)));
+            Map.entry(0x0001, new DefaultRow(0x0021, 0x20, 3600, 62000, 0)));
+
+    /**
+     * One metering row (ENERGY-READ R5): the reported attribute, its ZCL data
+     * type and the interval pair. It carries NO change on purpose — a metering
+     * cluster's reportable change exists only as an ENGINEERING threshold
+     * scaled by the formatting the device declared; a raw number here is how a
+     * divisor-1,000,000 meter floods the network at the 5-s floor.
+     */
+    private record MeteringRow(int attributeId, int dataType, int minInterval,
+            int maxInterval) {
+    }
+
+    /**
+     * The two metering rows — NOT in {@link #DEFAULTS}: {@code ActivePower}
+     * 5–600 s, {@code CurrentSummationDelivered} 5–3600 s. The 5-s minimum is
+     * the floor HEAD already held; the 600-s maximum on {@code ActivePower}
+     * is the heartbeat that proves a quiet load is a live meter.
+     */
+    private static final Map<Integer, MeteringRow> METERING_ROWS = Map.of(
+            ElectricalMeasurementHandler.CLUSTER_ID, new MeteringRow(
+                    ElectricalMeasurementHandler.ATTRIBUTE_ACTIVE_POWER,
+                    ElectricalMeasurementHandler.DATA_TYPE_ACTIVE_POWER, 5, 600),
+            MeteringHandler.CLUSTER_ID, new MeteringRow(
+                    MeteringHandler.ATTRIBUTE_CURRENT_SUMMATION_DELIVERED,
+                    MeteringHandler.DATA_TYPE_CURRENT_SUMMATION, 5, 3600));
+
+    /** R5: the {@code ActivePower} reportable change, in watts. */
+    static final double ACTIVE_POWER_CHANGE_WATTS = 1.0;
+    /** R5: the {@code CurrentSummationDelivered} reportable change, in watt-hours. */
+    static final double SUMMATION_CHANGE_WATT_HOURS = 5.0;
+    /** The summation's kWh base: Wh per unit of a kWh-declared meter. */
+    private static final double WATT_HOURS_PER_KILOWATT_HOUR = 1000.0;
+    /** The largest change an int16 attribute's reportable-change field holds. */
+    private static final long INT16_CHANGE_MAX = 0x7FFF;
+
+    /** The posture note of a metering cluster the device would not describe. */
+    static final String NOTE_FORMATTING_UNREADABLE =
+            "formatting unreadable; reporting not configured";
 
     private static final Logger log =
             LoggerFactory.getLogger(ReportingConfigurator.class);
 
+    /**
+     * The learned-formatting seam (ENERGY-READ R3): the persisted view the
+     * rejoin arm consults, and the sink every formatting read writes through.
+     * The configurator stays stateless — the knowledge lives in the device
+     * cache, behind this seam.
+     */
+    interface FormattingStore {
+
+        /**
+         * The formatting already learned for an endpoint.
+         *
+         * @param device the device, never {@code null}
+         * @param endpoint the endpoint
+         * @return the learned formatting, or empty when none was recorded
+         */
+        Optional<MeteringFormatting> cached(IEEEAddress device, int endpoint);
+
+        /**
+         * Records a formatting that a read produced — state mutation only,
+         * never I/O (the caller is the ingestion thread).
+         *
+         * @param device the device, never {@code null}
+         * @param endpoint the endpoint
+         * @param formatting what the device declared, never {@code null}
+         */
+        void learned(IEEEAddress device, int endpoint,
+                MeteringFormatting formatting);
+    }
+
+    /** The store of a configurator that persists nothing (the pre-ENERGY-READ shape). */
+    private static final FormattingStore NO_STORE = new FormattingStore() {
+        @Override
+        public Optional<MeteringFormatting> cached(IEEEAddress device,
+                int endpoint) {
+            return Optional.empty();
+        }
+
+        @Override
+        public void learned(IEEEAddress device, int endpoint,
+                MeteringFormatting formatting) {
+            // Nothing persists: every drive reads what it needs.
+        }
+    };
+
     private final ReportingOps ops;
+    private final FormattingStore formattingStore;
 
     /**
-     * Creates the configurator.
+     * Creates a configurator that persists no formatting: every drive reads
+     * what it needs and nothing is handed back.
      *
      * @param ops the ZCL/ZDO operation seam, never {@code null}
      */
     ReportingConfigurator(ReportingOps ops) {
+        this(ops, NO_STORE);
+    }
+
+    /**
+     * Creates the configurator over a learned-formatting store.
+     *
+     * @param ops the ZCL/ZDO operation seam, never {@code null}
+     * @param formattingStore the learned-formatting seam, never {@code null}
+     */
+    ReportingConfigurator(ReportingOps ops, FormattingStore formattingStore) {
         this.ops = Objects.requireNonNull(ops, "ops");
+        this.formattingStore =
+                Objects.requireNonNull(formattingStore, "formattingStore");
     }
 
     /**
@@ -96,6 +203,18 @@ final class ReportingConfigurator {
      */
     List<ReportingPostureFact> configureDevice(IEEEAddress device,
             List<EndpointDescriptor> endpoints, DeviceProfile profile) {
+        return drive(device, endpoints, profile, false);
+    }
+
+    /**
+     * The one drive both arms share. {@code rejoin} selects where a metering
+     * endpoint's formatting comes from (ENERGY-READ R3): a fresh adoption
+     * ALWAYS asks the device; a rejoin uses what the store already holds and
+     * asks only for the cluster it lacks.
+     */
+    private List<ReportingPostureFact> drive(IEEEAddress device,
+            List<EndpointDescriptor> endpoints, DeviceProfile profile,
+            boolean rejoin) {
         Objects.requireNonNull(device, "device");
         Objects.requireNonNull(endpoints, "endpoints");
         List<ReportingPostureFact> facts = new ArrayList<>();
@@ -103,13 +222,20 @@ final class ReportingConfigurator {
                 && profile.interviewSkips() != null
                 && profile.interviewSkips().contains(SKIP_CONFIGURE_REPORTING);
         for (EndpointDescriptor endpoint : endpoints) {
+            // R3: what the endpoint's metering clusters declare about their
+            // own scale is asked FIRST — before any configure on them. A
+            // skip-profile device receives NO commands, the read included.
+            MeteringFormatting formatting = skipConfiguration
+                    ? MeteringFormatting.unknown()
+                    : meteringFormatting(device, endpoint, rejoin);
             for (int clusterId : endpoint.inputClusters()) {
                 if (clusterId == IasZoneHandler.CLUSTER_ID) {
                     facts.add(enrollIasZone(device, endpoint.endpointId()));
                     continue;
                 }
                 DefaultRow row = DEFAULTS.get(clusterId);
-                if (row == null) {
+                MeteringRow meteringRow = METERING_ROWS.get(clusterId);
+                if (row == null && meteringRow == null) {
                     continue;
                 }
                 if (skipConfiguration) {
@@ -117,11 +243,18 @@ final class ReportingConfigurator {
                     // firmware schedule; configuration attempts are rejected or
                     // cause disconnects (§3.7 exclusions).
                     facts.add(new ReportingPostureFact(device,
-                            endpoint.endpointId(), clusterId, row.attributeId(),
+                            endpoint.endpointId(), clusterId,
+                            row != null ? row.attributeId()
+                                    : meteringRow.attributeId(),
                             ReportsAuthoritative.VERIFIED_REPORTS,
                             ReportingPosture.PERIODIC,
                             "profile skips configure_reporting; device reports "
                                     + "on its own schedule"));
+                    continue;
+                }
+                if (meteringRow != null) {
+                    facts.add(configureMetering(device, endpoint.endpointId(),
+                            clusterId, meteringRow, formatting, profile));
                     continue;
                 }
                 facts.add(configureCluster(device, endpoint.endpointId(),
@@ -129,6 +262,136 @@ final class ReportingConfigurator {
             }
         }
         return facts;
+    }
+
+    /**
+     * R3 — the formatting of one endpoint's metering clusters: ONE Read
+     * Attributes frame per metering cluster the endpoint lists (none for an
+     * endpoint that lists neither), synchronously on the calling (ingestion)
+     * thread, exactly as the configures run. What a read produced is handed to
+     * the store; a read that produced nothing hands nothing, so the next
+     * rejoin asks again. Every cluster prints its outcome: the read values at
+     * INFO (the journal's instrument), an unreadable cluster at WARN.
+     */
+    private MeteringFormatting meteringFormatting(IEEEAddress device,
+            EndpointDescriptor endpoint, boolean rejoin) {
+        boolean electrical = endpoint.inputClusters()
+                .contains(ElectricalMeasurementHandler.CLUSTER_ID);
+        boolean metering = endpoint.inputClusters()
+                .contains(MeteringHandler.CLUSTER_ID);
+        if (!electrical && !metering) {
+            return MeteringFormatting.unknown();
+        }
+        int endpointId = endpoint.endpointId();
+        MeteringFormatting cached = rejoin
+                ? formattingStore.cached(device, endpointId)
+                        .orElse(MeteringFormatting.unknown())
+                : MeteringFormatting.unknown();
+        boolean readElectrical = electrical && !cached.hasElectrical();
+        boolean readMetering = metering && !cached.hasMetering();
+        MeteringFormatting read = MeteringFormatting.ofReads(
+                readElectrical ? ops.readAttributes(device, endpointId,
+                        ElectricalMeasurementHandler.CLUSTER_ID,
+                        ElectricalMeasurementHandler.formattingAttributes())
+                        .orElse(null) : null,
+                readMetering ? ops.readAttributes(device, endpointId,
+                        MeteringHandler.CLUSTER_ID,
+                        MeteringHandler.formattingAttributes())
+                        .orElse(null) : null);
+        MeteringFormatting formatting = cached.filledFrom(read);
+        if (electrical) {
+            logFormatting(device, endpointId,
+                    ElectricalMeasurementHandler.CLUSTER_ID,
+                    formatting.hasElectrical(), readElectrical,
+                    formatting.electricalNote());
+        }
+        if (metering) {
+            logFormatting(device, endpointId, MeteringHandler.CLUSTER_ID,
+                    formatting.hasMetering(), readMetering,
+                    formatting.summationNote());
+        }
+        if (read.hasElectrical() || read.hasMetering()) {
+            formattingStore.learned(device, endpointId, formatting);
+        }
+        return formatting;
+    }
+
+    private static void logFormatting(IEEEAddress device, int endpoint,
+            int clusterId, boolean readable, boolean askedDevice, String note) {
+        if (readable) {
+            log.info("zigbee.metering_formatting_read: device={} endpoint={} "
+                            + "cluster=0x{} source={} {}", device, endpoint,
+                    Integer.toHexString(clusterId),
+                    askedDevice ? "device" : "cache", note);
+        } else {
+            log.warn("zigbee.metering_formatting_unreadable: device={} "
+                            + "endpoint={} cluster=0x{}; reporting not "
+                            + "configured, reports stay unscaled", device,
+                    endpoint, Integer.toHexString(clusterId));
+        }
+    }
+
+    /**
+     * R5 — one metering cluster's configure: the reportable change is the
+     * ENGINEERING threshold (1 W; 5 Wh) scaled by the formatting the device
+     * declared — {@code round(engineering × divisor / multiplier)}, never
+     * below 1 — so the threshold means the same watts on every divisor. A
+     * cluster whose formatting is unreadable, or whose summation is not in
+     * kWh, is NOT configured: no bind, no configure, a NONE-class posture
+     * saying why — never a raw threshold sent on a guess. A profile override
+     * moves the INTERVALS only; the change is always the scaled value.
+     */
+    private ReportingPostureFact configureMetering(IEEEAddress device,
+            int endpoint, int clusterId, MeteringRow meteringRow,
+            MeteringFormatting formatting, DeviceProfile profile) {
+        boolean electrical =
+                clusterId == ElectricalMeasurementHandler.CLUSTER_ID;
+        if (!(electrical ? formatting.hasElectrical()
+                : formatting.hasMetering())) {
+            return new ReportingPostureFact(device, endpoint, clusterId,
+                    meteringRow.attributeId(), ReportsAuthoritative.NONE,
+                    ReportingPosture.NONE, NOTE_FORMATTING_UNREADABLE);
+        }
+        String formattingNote = "formatting read: " + (electrical
+                ? formatting.powerNote() : formatting.summationNote());
+        if (!electrical && !formatting.kilowattHours()) {
+            log.warn("zigbee.metering_unit_unsupported: device={} endpoint={} "
+                            + "unit={}; reporting not configured (only kWh 0x0 "
+                            + "is scaled)", device, endpoint,
+                    formatting.unitOfMeasure() == null ? "unread" : "0x"
+                            + Integer.toHexString(formatting.unitOfMeasure()));
+            return new ReportingPostureFact(device, endpoint, clusterId,
+                    meteringRow.attributeId(), ReportsAuthoritative.NONE,
+                    ReportingPosture.NONE, formattingNote
+                            + "; unit is not kWh; reporting not configured");
+        }
+        long scaled = electrical
+                ? Math.min(INT16_CHANGE_MAX, Math.round(ACTIVE_POWER_CHANGE_WATTS
+                        * formatting.powerDivisor()
+                        / formatting.powerMultiplier()))
+                : Math.round(SUMMATION_CHANGE_WATT_HOURS
+                        * formatting.summationDivisor()
+                        / (WATT_HOURS_PER_KILOWATT_HOUR
+                                * formatting.summationMultiplier()));
+        int change = (int) Math.max(1, Math.min(Integer.MAX_VALUE, scaled));
+        ReportingOverride override = profile == null
+                || profile.reportingOverrides() == null ? null
+                : profile.reportingOverrides().get(clusterId);
+        ReportingPostureFact fact = configureCluster(device, endpoint, clusterId,
+                new DefaultRow(meteringRow.attributeId(), meteringRow.dataType(),
+                        override == null ? meteringRow.minInterval()
+                                : override.minInterval(),
+                        override == null ? meteringRow.maxInterval()
+                                : override.maxInterval(),
+                        change));
+        // The strict VERIFIED rung stays unremarkable (note == null — what
+        // ConfirmationOverrideInstaller.verifiedFact counts): a healthy meter
+        // must never render as degraded. Every rung that already carries a
+        // note names the read values in front of it.
+        return fact.note() == null ? fact : new ReportingPostureFact(device,
+                endpoint, clusterId, fact.attributeId(),
+                fact.reportsAuthoritative(), fact.reportingPosture(),
+                formattingNote + "; " + fact.note());
     }
 
     /**
@@ -146,7 +409,7 @@ final class ReportingConfigurator {
             List<EndpointDescriptor> endpoints, DeviceProfile profile) {
         log.info("zigbee.reporting_reapply: device={} — rejoin re-applies and "
                 + "re-verifies reporting configuration", device);
-        return configureDevice(device, endpoints, profile);
+        return drive(device, endpoints, profile, true);
     }
 
     private ReportingPostureFact configureCluster(IEEEAddress device,

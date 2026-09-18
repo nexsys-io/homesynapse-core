@@ -13,6 +13,7 @@ import com.homesynapse.device.CapabilityInstance;
 import com.homesynapse.device.ConfirmationMode;
 import com.homesynapse.device.Device;
 import com.homesynapse.device.Entity;
+import com.homesynapse.device.EntityType;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
 import com.homesynapse.device.RegistryEventMapper;
@@ -20,6 +21,7 @@ import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.event.EntityRegisteredEvent;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
+import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
 import com.homesynapse.platform.identity.DeviceId;
@@ -37,6 +39,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayDeque;
@@ -76,6 +79,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * the reporting drive. Wire payloads are byte-asserted against the production
  * BENCH-VERIFY constants; log assertions bind to the production message
  * formats verbatim.
+ *
+ * <p>ENERGY-READ T4: the same chain with the joiner re-scripted to the owned
+ * Gen4's recorded signature — the two formatting reads precede every
+ * configure, the change fields are byte-asserted at their full wire width
+ * (the uint48 field is SIX bytes; the harness's device-side store is
+ * long-typed so a mis-encoded field can never read back as correct), a
+ * re-link re-applies from the cache with ZERO read frames, and the read
+ * formatting scales the very next report.
  */
 @DisplayName("ZigbeeIntegrationAdapter — reporting drive + posture routing (M9.4-RPT)")
 class ZigbeeReportingDriveTest {
@@ -125,7 +136,20 @@ class ZigbeeReportingDriveTest {
     /** Clusters whose read-back reports {@code maxInterval 0xFFFF} (ACK-lies). */
     private final Set<Integer> readbackReportingOff = new HashSet<>();
     /** The device-side reporting store: (cluster,attr) → {type,min,max,change}. */
-    private final Map<Long, int[]> reportingStore = new HashMap<>();
+    private final Map<Long, long[]> reportingStore = new HashMap<>();
+
+    // ── ENERGY-READ: the scripted joiner's signature + its formatting answers ─
+    /** The joiner's device type — the dimmable light unless a test re-scripts it. */
+    private int scriptedDeviceType = 0x0101;
+    /** The joiner's input clusters — the light's unless a test re-scripts them. */
+    private int[] scriptedInClusters = {0x0000, 0x0003, 0x0006, 0x0008};
+    /**
+     * Formatting answers by cluster: attribute id → value. An attribute absent
+     * from a scripted cluster answers 0x86 UNSUPPORTED_ATTRIBUTE; an unscripted
+     * cluster never answers (the read times out).
+     */
+    private final Map<Integer, Map<Integer, Long>> formattingByCluster =
+            new HashMap<>();
 
     @BeforeEach
     void setUp() {
@@ -443,6 +467,265 @@ class ZigbeeReportingDriveTest {
                 .hasSize(2);
     }
 
+    // ── ENERGY-READ T4: the formatting read rides the adoption drive ────────
+
+    private static final int CLUSTER_METERING = 0x0702;
+    private static final int CLUSTER_ELECTRICAL = 0x0B04;
+
+    /**
+     * Re-scripts the joiner with the owned Gen4's RECORDED signature
+     * (PLUG-DOSSIER row 16 / DEVICE-SET §1: EP1, device type 0x010A, the eight
+     * input clusters). The formatting values a test scripts beside it are
+     * FIXTURE values — the owned unit's divisors are UNREAD (the measurement
+     * record's G4-1/G4-2 rows), and nothing here predicts them.
+     */
+    private void scriptGen4Signature() {
+        scriptedDeviceType = 0x010A;
+        scriptedInClusters = new int[] {0x0000, 0x0003, 0x0004, 0x0005, 0x0006,
+            CLUSTER_METERING, CLUSTER_ELECTRICAL, 0xFC21};
+    }
+
+    /** The fixture formatting: ACPower 1/100 (+V 1/10, I 1/1000); summation 1/1e6 kWh. */
+    private void scriptFixtureFormatting() {
+        Map<Integer, Long> electrical = new HashMap<>();
+        electrical.put(0x0604, 1L);
+        electrical.put(0x0605, 100L);
+        electrical.put(0x0600, 1L);
+        electrical.put(0x0601, 10L);
+        electrical.put(0x0602, 1L);
+        electrical.put(0x0603, 1000L);
+        formattingByCluster.put(CLUSTER_ELECTRICAL, electrical);
+        Map<Integer, Long> metering = new HashMap<>();
+        metering.put(0x0300, 0x00L);
+        metering.put(0x0301, 1L);
+        metering.put(0x0302, 1_000_000L);
+        metering.put(0x0303, 0x00L);
+        formattingByCluster.put(CLUSTER_METERING, metering);
+    }
+
+    @Test
+    @DisplayName("T4 (P4): a fresh adoption READS each metering cluster's "
+            + "formatting — ONE ReadAttributes per cluster — BEFORE any Configure "
+            + "Reporting on it, and the configure's change field is the "
+            + "engineering threshold scaled by the read: 100 (1 W ÷100) and 5,000 "
+            + "(5 Wh at 1e6/kWh), little-endian at the field's full width")
+    void freshAdoption_readsFormattingBeforeConfigure() throws Exception {
+        scriptGen4Signature();
+        scriptFixtureFormatting();
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::reportingHandler);
+        ZigbeeIntegrationAdapter adapter =
+                bootProduction(ncp, List.<Object>of(LIGHT_LISTED));
+
+        announce(adapter, LIGHT_IEEE, LIGHT_NWK);
+
+        assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).count()).isEqualTo(1);
+        Entity entity = adoptedEntity();
+        assertThat(entity.entityType())
+                .isEqualTo(EntityType.SWITCH);
+        assertThat(entity.capabilities()).extracting(CapabilityInstance::capabilityId)
+                .containsExactlyInAnyOrder("on_off", "power_meter",
+                        "energy_meter", "identify");
+
+        // ONE read frame per metering cluster, the attribute ids LE in the
+        // production order (the power pair first).
+        List<byte[]> electricalReads = zclGlobalMessages(ncp, CLUSTER_ELECTRICAL,
+                ZclCodec.COMMAND_READ_ATTRIBUTES);
+        assertThat(electricalReads).hasSize(1);
+        assertThat(zclPayload(electricalReads.get(0))).containsExactly(
+                0x04, 0x06, 0x05, 0x06, 0x00, 0x06, 0x01, 0x06, 0x02, 0x06,
+                0x03, 0x06);
+        List<byte[]> meteringReads = zclGlobalMessages(ncp, CLUSTER_METERING,
+                ZclCodec.COMMAND_READ_ATTRIBUTES);
+        assertThat(meteringReads).hasSize(1);
+        assertThat(zclPayload(meteringReads.get(0))).containsExactly(
+                0x00, 0x03, 0x01, 0x03, 0x02, 0x03, 0x03, 0x03);
+
+        // Frame ORDER: both reads precede every configure (and the device's
+        // other clusters configure as ever, in descriptor order).
+        assertThat(globalSendOrder(ncp)).containsExactly(
+                "b04:0", "702:0",
+                "6:6", "6:8", "702:6", "702:8", "b04:6", "b04:8");
+
+        // ActivePower 0x050B int16(0x29) 5/600 s, change 100 = 64 00.
+        List<byte[]> electricalConfigure = zclGlobalMessages(ncp,
+                CLUSTER_ELECTRICAL, EzspReportingOps.COMMAND_CONFIGURE_REPORTING);
+        assertThat(electricalConfigure).hasSize(1);
+        assertThat(zclPayload(electricalConfigure.get(0))).containsExactly(
+                0x00, 0x0B, 0x05, 0x29, 0x05, 0x00, 0x58, 0x02, 0x64, 0x00);
+        // CurrentSummationDelivered 0x0000 uint48(0x25) 5/3600 s, change 5,000
+        // = 88 13 00 00 00 00 — SIX bytes, the upper four ZERO.
+        List<byte[]> meteringConfigure = zclGlobalMessages(ncp, CLUSTER_METERING,
+                EzspReportingOps.COMMAND_CONFIGURE_REPORTING);
+        assertThat(meteringConfigure).hasSize(1);
+        assertThat(zclPayload(meteringConfigure.get(0))).containsExactly(
+                0x00, 0x00, 0x00, 0x25, 0x05, 0x00, 0x10, 0x0E,
+                0x88, 0x13, 0x00, 0x00, 0x00, 0x00);
+
+        assertThat(adapterMessages(Level.INFO, "zigbee.reporting_configured"))
+                .as("a healthy meter counts VERIFIED — never a false degraded")
+                .containsExactly("zigbee.reporting_configured: device="
+                        + LIGHT_HEX + " clusters=3 verified=3 degraded=0");
+        assertThat(configuratorMessages(Level.INFO,
+                "zigbee.metering_formatting_read")).containsExactly(
+                "zigbee.metering_formatting_read: device=" + LIGHT_HEX
+                        + " endpoint=1 cluster=0xb04 source=device mult=1 "
+                        + "div=100 voltage=1/10 current=1/1000",
+                "zigbee.metering_formatting_read: device=" + LIGHT_HEX
+                        + " endpoint=1 cluster=0x702 source=device mult=1 "
+                        + "div=1000000 unit=0x0");
+        assertThat(configuratorMessages(Level.WARN, "zigbee.")).isEmpty();
+        assertThat(adapterMessages(Level.INFO,
+                "zigbee.learned_metering_formatting_rehydrated"))
+                .as("the boot glance-point: nothing persisted before the first read")
+                .containsExactly(
+                        "zigbee.learned_metering_formatting_rehydrated: count=0");
+    }
+
+    @Test
+    @DisplayName("T4 (P7): a re-link does NOT re-read — ZERO read frames on the "
+            + "rejoin arm; onRejoin re-applies the SAME scaled configure from the "
+            + "cached formatting")
+    void relink_usesCachedFormatting_noRead() throws Exception {
+        scriptGen4Signature();
+        scriptFixtureFormatting();
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::reportingHandler);
+        ZigbeeIntegrationAdapter adapter =
+                bootProduction(ncp, List.<Object>of(LIGHT_LISTED));
+
+        announce(adapter, LIGHT_IEEE, LIGHT_NWK);   // adoption: reads + configures
+        announce(adapter, LIGHT_IEEE, LIGHT_NWK);   // power-cycle: re-link
+
+        assertThat(configuratorMessages(Level.INFO, "zigbee.reporting_reapply"))
+                .hasSize(1);
+        assertThat(zclGlobalMessages(ncp, CLUSTER_ELECTRICAL,
+                ZclCodec.COMMAND_READ_ATTRIBUTES))
+                .as("the adoption's one read — the rejoin adds none").hasSize(1);
+        assertThat(zclGlobalMessages(ncp, CLUSTER_METERING,
+                ZclCodec.COMMAND_READ_ATTRIBUTES)).hasSize(1);
+        List<byte[]> electricalConfigure = zclGlobalMessages(ncp,
+                CLUSTER_ELECTRICAL, EzspReportingOps.COMMAND_CONFIGURE_REPORTING);
+        assertThat(electricalConfigure).as("both drives configure").hasSize(2);
+        assertThat(zclPayload(electricalConfigure.get(1)))
+                .containsExactly(zclPayload(electricalConfigure.get(0)));
+        List<byte[]> meteringConfigure = zclGlobalMessages(ncp, CLUSTER_METERING,
+                EzspReportingOps.COMMAND_CONFIGURE_REPORTING);
+        assertThat(meteringConfigure).hasSize(2);
+        assertThat(zclPayload(meteringConfigure.get(1))).containsExactly(
+                0x00, 0x00, 0x00, 0x25, 0x05, 0x00, 0x10, 0x0E,
+                0x88, 0x13, 0x00, 0x00, 0x00, 0x00);
+        assertThat(configuratorMessages(Level.INFO,
+                "zigbee.metering_formatting_read"))
+                .as("the rejoin names its source: the cache")
+                .hasSize(4)
+                .last().asString().contains("cluster=0x702 source=cache");
+        assertThat(adapterMessages(Level.INFO, "zigbee.reporting_configured"))
+                .containsExactly(
+                        "zigbee.reporting_configured: device=" + LIGHT_HEX
+                                + " clusters=3 verified=3 degraded=0",
+                        "zigbee.reporting_configured: device=" + LIGHT_HEX
+                                + " clusters=3 verified=3 degraded=0");
+    }
+
+    @Test
+    @DisplayName("T4 (R3→R4, the vertical): the formatting the adoption drive read "
+            + "is in the handler table for the very next frame — an ActivePower "
+            + "report publishes state_reported power_w scaled, raw beside it")
+    void freshAdoption_thenActivePowerReport_publishesScaledPowerW()
+            throws Exception {
+        scriptGen4Signature();
+        scriptFixtureFormatting();
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::reportingHandler);
+        ZigbeeIntegrationAdapter adapter =
+                bootProduction(ncp, List.<Object>of(LIGHT_LISTED));
+        announce(adapter, LIGHT_IEEE, LIGHT_NWK);
+
+        riders.add(incomingMessage(EzspCoordinatorProtocol.HA_PROFILE_ID,
+                CLUSTER_ELECTRICAL, LIGHT_ENDPOINT, new byte[] {
+                    0x18, 0x51, 0x0A, 0x0B, 0x05, 0x29, 0x40, 0x1F}));   // 8000 raw
+        adapter.coordinatorProtocol().ping();
+        adapter.runCycleOnce();
+
+        List<StateReportedEvent> reported =
+                publisher.ofType(EventTypes.STATE_REPORTED)
+                        .map(envelope ->
+                                (StateReportedEvent) envelope.payload())
+                        .toList();
+        assertThat(reported).hasSize(1);
+        assertThat(reported.get(0).attributeKey()).isEqualTo("power_w");
+        assertThat(reported.get(0).value()).isEqualTo("80.0");
+        assertThat(reported.get(0).rawProtocolValue()).isEqualTo("8000");
+        assertThat(reported.get(0).rawProtocolUnit()).isEqualTo("mult=1 div=100");
+    }
+
+    @Test
+    @DisplayName("T4/T7 (P5, the vertical): formatting the device never answers "
+            + "configures NOTHING on the metering clusters (no bind, no configure "
+            + "— no raw-threshold flood) and emits NOTHING; adoption is unaffected "
+            + "and the INFO counts them degraded")
+    void unreadableFormatting_configuresNothing_emitsNothing() throws Exception {
+        scriptGen4Signature();                       // no formatting scripted
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::reportingHandler);
+        ZigbeeIntegrationAdapter adapter =
+                bootProduction(ncp, List.<Object>of(LIGHT_LISTED));
+
+        announce(adapter, LIGHT_IEEE, LIGHT_NWK);
+
+        assertThat(publisher.ofType(EventTypes.DEVICE_ADOPTED).count())
+                .as("reporting outcomes never gate the adopt").isEqualTo(1);
+        assertThat(globalSendOrder(ncp)).containsExactly(
+                "b04:0", "702:0", "6:6", "6:8");
+        assertThat(zdoMessages(ncp, EzspReportingOps.ZDO_CLUSTER_BIND_REQ))
+                .as("only the OnOff row binds").hasSize(1);
+        assertThat(configuratorMessages(Level.WARN,
+                "zigbee.metering_formatting_unreadable")).hasSize(2);
+        assertThat(adapterMessages(Level.INFO, "zigbee.reporting_configured"))
+                .containsExactly("zigbee.reporting_configured: device="
+                        + LIGHT_HEX + " clusters=3 verified=1 degraded=2");
+
+        riders.add(incomingMessage(EzspCoordinatorProtocol.HA_PROFILE_ID,
+                CLUSTER_ELECTRICAL, LIGHT_ENDPOINT, new byte[] {
+                    0x18, 0x51, 0x0A, 0x0B, 0x05, 0x29, 0x40, 0x1F}));
+        adapter.coordinatorProtocol().ping();
+        adapter.runCycleOnce();
+
+        assertThat(publisher.ofType(EventTypes.STATE_REPORTED).count())
+                .as("an unknown scale emits nothing").isZero();
+    }
+
+    /**
+     * Every ZCL GLOBAL unicast the NCP received outside the Basic cluster, in
+     * send order, as {@code cluster:command} hex — the drive's frame order
+     * (the interview's Basic read and any availability ping are 0x0000 and
+     * stay out of scope).
+     */
+    private static List<String> globalSendOrder(FakeNcp ncp) {
+        List<String> order = new ArrayList<>();
+        for (byte[] command : ncp.receivedEzspCommands()) {
+            if (command.length < 5 || isLegacyVersion(command)
+                    || frameIdOf(command) != FRAME_SEND_UNICAST) {
+                continue;
+            }
+            byte[] parameters = extendedParameters(command);
+            int profile = (parameters[3] & 0xFF) | ((parameters[4] & 0xFF) << 8);
+            int cluster = (parameters[5] & 0xFF) | ((parameters[6] & 0xFF) << 8);
+            if (profile != EzspCoordinatorProtocol.HA_PROFILE_ID
+                    || cluster == 0x0000) {
+                continue;
+            }
+            int messageOffset = 16;
+            if ((parameters[messageOffset] & 0x03) != 0x00) {
+                continue;
+            }
+            order.add(Integer.toHexString(cluster) + ":"
+                    + Integer.toHexString(parameters[messageOffset + 2] & 0xFF));
+        }
+        return order;
+    }
+
     // ── harness (the ZigbeeConfigAcceptedAdoptionTest production-ladder idiom) ─
 
     private static PortCandidate coordinatorCandidate() {
@@ -631,6 +914,10 @@ class ZigbeeReportingDriveTest {
                     0x0000, LIGHT_ENDPOINT, basicReply(tsn)));
             return frames;
         }
+        if (commandId == ZclCodec.COMMAND_READ_ATTRIBUTES) {
+            respondToFormattingRead(frames, cluster, tsn, message);
+            return frames;
+        }
         if (commandId == EzspReportingOps.COMMAND_CONFIGURE_REPORTING) {
             respondToConfigure(frames, cluster, tsn, message);
             return frames;
@@ -642,6 +929,59 @@ class ZigbeeReportingDriveTest {
         return frames;
     }
 
+    /**
+     * Answers a metering cluster's formatting read (ENERGY-READ R3) from the
+     * per-scenario script: a Read Attributes Response carrying one record per
+     * requested id — SUCCESS + the ZCL-typed value, or 0x86 when the scripted
+     * cluster lacks the attribute. An unscripted cluster never answers.
+     */
+    private void respondToFormattingRead(List<byte[]> frames, int cluster,
+            int tsn, byte[] message) {
+        Map<Integer, Long> scripted = formattingByCluster.get(cluster);
+        if (scripted == null) {
+            return;   // the read times out: formatting unreadable
+        }
+        ByteArrayOutputStream response = new ByteArrayOutputStream();
+        response.write(0x18);                           // global, server-to-client
+        response.write(tsn);
+        response.write(ZclCodec.COMMAND_READ_ATTRIBUTES_RESPONSE);
+        for (int i = 3; i + 1 < message.length; i += 2) {
+            int attribute = (message[i] & 0xFF) | ((message[i + 1] & 0xFF) << 8);
+            response.write(message[i]);
+            response.write(message[i + 1]);
+            Long value = scripted.get(attribute);
+            if (value == null) {
+                response.write(EzspReportingOps.ZCL_STATUS_UNSUPPORTED_ATTRIBUTE);
+                continue;
+            }
+            response.write(0x00);                       // record status SUCCESS
+            int dataType = formattingDataType(cluster, attribute);
+            response.write(dataType);
+            int width = switch (dataType) {
+                case 0x18, 0x30 -> 1;                   // map8, enum8
+                case 0x21 -> 2;                         // uint16
+                default -> 3;                           // uint24
+            };
+            for (int b = 0; b < width; b++) {
+                response.write((int) ((value >> (8 * b)) & 0xFF));
+            }
+        }
+        frames.add(incomingMessage(EzspCoordinatorProtocol.HA_PROFILE_ID, cluster,
+                LIGHT_ENDPOINT, response.toByteArray()));
+    }
+
+    /** The ZCL wire type of a formatting attribute (the spec's, per cluster). */
+    private static int formattingDataType(int cluster, int attribute) {
+        if (cluster == 0x0B04) {
+            return 0x21;                                // the six AC pairs: uint16
+        }
+        return switch (attribute) {
+            case 0x0300 -> 0x30;                        // UnitOfMeasure: enum8
+            case 0x0303 -> 0x18;                        // SummationFormatting: map8
+            default -> 0x22;                            // Multiplier/Divisor: uint24
+        };
+    }
+
     /** Parses one Configure Reporting record, stores it, answers per the mode. */
     private void respondToConfigure(List<byte[]> frames, int cluster, int tsn,
             byte[] message) {
@@ -649,12 +989,15 @@ class ZigbeeReportingDriveTest {
         int dataType = message[6] & 0xFF;
         int minInterval = (message[7] & 0xFF) | ((message[8] & 0xFF) << 8);
         int maxInterval = (message[9] & 0xFF) | ((message[10] & 0xFF) << 8);
-        int change = 0;
+        // Long arithmetic: the uint48 change field is SIX bytes, and an int
+        // shift distance wraps at 32 (JLS §15.19) — bytes 4–5 would fold onto
+        // bytes 0–1 and a mis-encoded field would read back as correct.
+        long change = 0;
         for (int i = 11; i < message.length; i++) {
-            change |= (message[i] & 0xFF) << (8 * (i - 11));
+            change |= (long) (message[i] & 0xFF) << (8 * (i - 11));
         }
         reportingStore.put(storeKey(cluster, attribute),
-                new int[] {dataType, minInterval, maxInterval, change});
+                new long[] {dataType, minInterval, maxInterval, change});
         if (configureSilent.contains(cluster)) {
             return;   // the sleepy write timeout
         }
@@ -675,10 +1018,11 @@ class ZigbeeReportingDriveTest {
     private void respondToReadback(List<byte[]> frames, int cluster, int tsn,
             byte[] message) {
         int attribute = (message[4] & 0xFF) | ((message[5] & 0xFF) << 8);
-        int[] stored = reportingStore.getOrDefault(storeKey(cluster, attribute),
-                new int[] {0x10, 0, 0, 0});
-        int maxInterval = readbackReportingOff.contains(cluster) ? 0xFFFF : stored[2];
-        int changeWidth = switch (stored[0]) {
+        long[] stored = reportingStore.getOrDefault(storeKey(cluster, attribute),
+                new long[] {0x10, 0, 0, 0});
+        int maxInterval = readbackReportingOff.contains(cluster)
+                ? 0xFFFF : (int) stored[2];
+        int changeWidth = switch ((int) stored[0]) {
             case 0x20 -> 1;
             case 0x21, 0x29 -> 2;
             case 0x25 -> 6;
@@ -699,6 +1043,7 @@ class ZigbeeReportingDriveTest {
         response[10] = (byte) (maxInterval & 0xFF);
         response[11] = (byte) ((maxInterval >> 8) & 0xFF);
         for (int i = 0; i < changeWidth; i++) {
+            // stored[3] is a long: the shift distance does not wrap at 32.
             response[12 + i] = (byte) ((stored[3] >> (8 * i)) & 0xFF);
         }
         frames.add(incomingMessage(EzspCoordinatorProtocol.HA_PROFILE_ID, cluster,
@@ -709,7 +1054,7 @@ class ZigbeeReportingDriveTest {
         return ((long) cluster << 16) | attribute;
     }
 
-    private static byte[] zdoReply(int cluster, int tsn) {
+    private byte[] zdoReply(int cluster, int tsn) {
         int nwkLo = LIGHT_NWK & 0xFF;
         int nwkHi = (LIGHT_NWK >> 8) & 0xFF;
         return switch (cluster) {
@@ -726,8 +1071,8 @@ class ZigbeeReportingDriveTest {
         };
     }
 
-    private static byte[] simpleDescriptor(int tsn) {
-        int[] inClusters = {0x0000, 0x0003, 0x0006, 0x0008};
+    private byte[] simpleDescriptor(int tsn) {
+        int[] inClusters = scriptedInClusters;
         int[] outClusters = {0x0019};
         int length = 1 + 2 + 2 + 1 + 1 + inClusters.length * 2
                 + 1 + outClusters.length * 2;
@@ -741,8 +1086,8 @@ class ZigbeeReportingDriveTest {
         reply[i++] = (byte) LIGHT_ENDPOINT;
         reply[i++] = 0x04;                              // HA profile 0x0104 LE
         reply[i++] = 0x01;
-        reply[i++] = 0x01;                              // dimmable light 0x0101 LE
-        reply[i++] = 0x01;
+        reply[i++] = (byte) (scriptedDeviceType & 0xFF);  // 0x0101 unless re-scripted
+        reply[i++] = (byte) ((scriptedDeviceType >> 8) & 0xFF);
         reply[i++] = 0x01;                              // application version
         reply[i++] = (byte) inClusters.length;
         for (int clusterId : inClusters) {

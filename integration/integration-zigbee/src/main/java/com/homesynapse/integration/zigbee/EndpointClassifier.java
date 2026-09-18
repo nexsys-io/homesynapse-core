@@ -8,10 +8,13 @@ import com.homesynapse.device.Capability;
 import com.homesynapse.device.CapabilityInstance;
 import com.homesynapse.device.EntityType;
 import com.homesynapse.device.StandardCapabilities;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * Classifies one interviewed endpoint into a HomeSynapse entity type plus its
@@ -27,6 +30,15 @@ import java.util.Optional;
  * (DP-8), and a battery-only remainder classifies {@code SENSOR} + battery
  * (DP-7, the R2(B) ruling).
  *
+ * <p>ENERGY-READ: the IAS selection maps WATER_LEAK/SMOKE/VIBRATION to
+ * {@code binary_state} — the capability whose schema admits the {@code active}
+ * key {@link IasZoneHandler} emits for them (R1, IR-15); the meters attach by
+ * the CLUSTERS present — 0x0B04 ⇒ {@code power_meter}, 0x0702 ⇒
+ * {@code energy_meter} — on EVERY arm, the device type a hint and never the
+ * key (R2, IR-24: the owned Gen4 is 0x010A, not the 0x0051 the plug arm keys
+ * on); and every classification prints ONE {@code zigbee.endpoint_classified}
+ * INFO naming the device type, the input clusters and what was chosen (R6).
+ *
  * <p>Thread-safe: stateless utility.
  */
 final class EndpointClassifier {
@@ -39,6 +51,9 @@ final class EndpointClassifier {
     private static final int DEVICE_TYPE_OCCUPANCY_SENSOR = 0x0107;
     private static final int DEVICE_TYPE_TEMPERATURE_SENSOR = 0x0302;
     private static final int DEVICE_TYPE_SMART_PLUG = 0x0051;
+
+    private static final Logger log =
+            LoggerFactory.getLogger(EndpointClassifier.class);
 
     /**
      * One classified endpoint.
@@ -66,10 +81,9 @@ final class EndpointClassifier {
 
     /**
      * Classifies an endpoint under a wire-learned IAS zone type (M9.7-W2 §4,
-     * DP-6): CONTACT selects the {@code contact} capability on the IAS arms;
-     * {@code null}/MOTION — and, deliberately unchanged this WU,
-     * WATER_LEAK/SMOKE/VIBRATION — select {@code motion} (no such device in
-     * the fleet; the limitation is recorded in MODULE_CONTEXT).
+     * DP-6; ENERGY-READ R1): CONTACT selects {@code contact},
+     * WATER_LEAK/SMOKE/VIBRATION select {@code binary_state}, and
+     * {@code null}/MOTION select {@code motion} on the IAS arms.
      *
      * @param descriptor the endpoint's simple descriptor, never {@code null}
      * @param learnedZoneType the wire-learned IAS zone type; {@code null} when
@@ -102,17 +116,77 @@ final class EndpointClassifier {
             default -> fallback(hasOnOff, hasLevel, hasColor, hasOccupancy,
                     hasIasZone, hasBattery, learnedZoneType);
         };
+        // R2 (IR-24): the meters ride the CLUSTERS, post-processed so EVERY arm
+        // (device-type table AND fallback) gains them — the device type is a
+        // hint for the arms above and never the key to a meter.
+        classified = withMeters(classified, descriptor);
         // SD-3 (M9.4b §3.2): cluster 0x0003 present ⇒ the entity is
         // identify-issuable through the real Tier-1 validator. Post-processed so
         // EVERY classification arm (device-type table AND fallback) gains it;
         // 0x0003 alone never invents an entity (unmapped endpoints stay empty).
-        return hasIdentify ? classified.map(EndpointClassifier::withIdentify) : classified;
+        if (hasIdentify) {
+            classified = classified.map(EndpointClassifier::withIdentify);
+        }
+        logClassified(descriptor, classified);
+        return classified;
+    }
+
+    /**
+     * R6 (DEVICE-SET note 1): the one line that says what the endpoint SAID it
+     * was and what it became — the instrument the first real adoption is read
+     * from. The device is named by the adoption lines around it; this utility
+     * sees the descriptor alone.
+     */
+    private static void logClassified(EndpointDescriptor descriptor,
+            Optional<Classification> classified) {
+        if (!log.isInfoEnabled()) {
+            return;
+        }
+        log.info("zigbee.endpoint_classified: endpoint={} deviceType=0x{} "
+                        + "inputClusters=[{}] entityType={} capabilities=[{}]",
+                descriptor.endpointId(),
+                Integer.toHexString(descriptor.deviceTypeId()),
+                descriptor.inputClusters().stream()
+                        .map(cluster -> "0x" + Integer.toHexString(cluster))
+                        .collect(Collectors.joining(", ")),
+                classified.map(c -> c.entityType().name()).orElse("none"),
+                classified.map(c -> c.capabilities().stream()
+                        .map(CapabilityInstance::capabilityId)
+                        .collect(Collectors.joining(", "))).orElse(""));
     }
 
     private static Classification withIdentify(Classification classification) {
         List<CapabilityInstance> caps = new ArrayList<>(classification.capabilities());
         caps.addAll(capabilities(StandardCapabilities.identify()));
         return new Classification(classification.entityType(), caps);
+    }
+
+    /**
+     * The cluster-first metering attach (R2): 0x0B04 ⇒ {@code power_meter},
+     * 0x0702 ⇒ {@code energy_meter}, beside whatever the arm chose — the entity
+     * type is unchanged by a meter (a metering switch stays SWITCH, a metering
+     * light stays LIGHT). An endpoint that maps to nothing else but lists a
+     * metering cluster is a measurement-only endpoint: {@code SENSOR} with the
+     * meter capabilities alone. No cluster is ever inferred from a device type.
+     */
+    private static Optional<Classification> withMeters(
+            Optional<Classification> classified, EndpointDescriptor descriptor) {
+        List<Integer> in = descriptor.inputClusters();
+        List<Capability> meters = new ArrayList<>(2);
+        if (in.contains(ElectricalMeasurementHandler.CLUSTER_ID)) {
+            meters.add(StandardCapabilities.powerMeter());
+        }
+        if (in.contains(MeteringHandler.CLUSTER_ID)) {
+            meters.add(StandardCapabilities.energyMeter());
+        }
+        if (meters.isEmpty()) {
+            return classified;
+        }
+        List<CapabilityInstance> caps = new ArrayList<>(classified
+                .map(Classification::capabilities).orElse(List.of()));
+        caps.addAll(capabilities(meters.toArray(Capability[]::new)));
+        return Optional.of(new Classification(classified
+                .map(Classification::entityType).orElse(EntityType.SENSOR), caps));
     }
 
     private static Classification light(boolean hasLevel, boolean hasColor) {
@@ -165,16 +239,23 @@ final class EndpointClassifier {
     }
 
     /**
-     * The DP-6 IAS selection: only a wire-learned CONTACT re-selects (the
-     * SNZB-04P shape); {@code null}/MOTION — and, this WU, the remaining zone
-     * types (WATER_LEAK/SMOKE/VIBRATION: no fleet device; limitation recorded
-     * in MODULE_CONTEXT) — stay the motion fallback, byte-for-byte today's
-     * behavior. Adoption is a one-way door at V1, so a wrong selection here
-     * is durable — never guess beyond the wire truth.
+     * The IAS selection (DP-6; ENERGY-READ R1, IR-15): the capability installed
+     * is the one whose schema admits the key {@link IasZoneHandler} emits for
+     * the zone type — CONTACT ⇒ {@code contact} ({@code open}),
+     * WATER_LEAK/SMOKE/VIBRATION ⇒ {@code binary_state} ({@code active}),
+     * MOTION and the unlearned {@code null} ⇒ {@code motion}
+     * ({@code detected}). Adoption is a one-way door at V1, so a wrong
+     * selection here is durable — never guess beyond the wire truth.
      */
     private static Capability iasCapability(ZoneType learnedZoneType) {
-        return learnedZoneType == ZoneType.CONTACT
-                ? StandardCapabilities.contact() : StandardCapabilities.motion();
+        if (learnedZoneType == null) {
+            return StandardCapabilities.motion();
+        }
+        return switch (learnedZoneType) {
+            case CONTACT -> StandardCapabilities.contact();
+            case MOTION -> StandardCapabilities.motion();
+            case WATER_LEAK, SMOKE, VIBRATION -> StandardCapabilities.binaryState();
+        };
     }
 
     private static Optional<Classification> fallback(boolean hasOnOff,

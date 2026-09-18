@@ -18,10 +18,12 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.ObjLongConsumer;
 import java.util.function.Supplier;
 
@@ -67,9 +69,17 @@ import java.util.function.Supplier;
  * writes through the injected sink, and the persisted set seeds the map at
  * construction — silently, before any cycle can run.
  *
+ * <p>ENERGY-READ: the metering clusters (0x0B04, 0x0702) get a handler ONLY
+ * when the device's formatting for them is known — seeded from the cache at
+ * construction, handed over by the adoption drive
+ * ({@link #recordLearnedMeteringFormatting}, which drops the device's handler
+ * table so the very next frame is scaled). A metering report with no learned
+ * formatting publishes NOTHING: one {@code zigbee.metering_unscaled} DEBUG per
+ * (device, cluster) and silence — never a guessed scale.
+ *
  * <p>Thread-safe for the intended single-cycle-driver use: the per-device
- * handler table and the learned zone-type map are confined to the cycle
- * thread.
+ * handler table, the learned zone-type map and the learned metering formatting
+ * are confined to the cycle thread.
  *
  * @see ReportDeduplicator
  * @see ClusterHandlers
@@ -191,6 +201,15 @@ final class ZclIngestionUnit {
     private final Map<Long, ZoneType> learnedZoneTypes = new HashMap<>();
     // LEARN-PERSIST DP-LP-3: every successful wire learn writes through here.
     private final ObjLongConsumer<IEEEAddress> learnSink;
+    // ENERGY-READ R3/R4: what each metering endpoint DECLARED about its own
+    // scale, by IEEE then endpoint — seeded from the cache, fed by the adoption
+    // drive. The handler table is per DEVICE, so the table reads the knowledge
+    // the device's endpoints AGREE on (deviceFormatting).
+    private final Map<Long, Map<Integer, MeteringFormatting>>
+            learnedMeteringFormatting = new HashMap<>();
+    // T7: the metering clusters already named unscaled, by IEEE — the DEBUG
+    // fires once per (device, cluster), never per report.
+    private final Map<Long, Set<Integer>> unscaledNamed = new HashMap<>();
 
     /**
      * Creates the ingestion unit with no persisted seed and a no-op learn sink
@@ -247,6 +266,35 @@ final class ZclIngestionUnit {
             Clock clock, ZclFrameSender frameSender,
             Map<Long, Long> learnedZoneTypeSeed,
             ObjLongConsumer<IEEEAddress> learnSink) {
+        this(callbackDrain, resolver, listener, deduplicator, publisher, clock,
+                frameSender, learnedZoneTypeSeed, learnSink, Map.of());
+    }
+
+    /**
+     * Creates the ingestion unit with the LEARN-PERSIST pair AND a persisted
+     * metering-formatting seed (ENERGY-READ R3/R4).
+     *
+     * @param callbackDrain drains the protocol's bounded callback queue, never {@code null}
+     * @param resolver the device/entity resolution surface, never {@code null}
+     * @param listener the announce/frame signal sink, never {@code null}
+     * @param deduplicator the measured-contract deduplicator, never {@code null}
+     * @param publisher the event publisher from the integration context, never {@code null}
+     * @param clock the time source, never {@code null}
+     * @param frameSender the outbound ZCL send surface, never {@code null}
+     * @param learnedZoneTypeSeed persisted zone-type ids by IEEE value, never {@code null}
+     * @param learnSink the zone-type write-through sink, never {@code null}
+     * @param meteringFormattingSeed persisted metering formatting by IEEE
+     *        value, then by endpoint (the cache's
+     *        {@code learnedMeteringFormatting()} snapshot), never {@code null}
+     */
+    ZclIngestionUnit(Supplier<List<EzspFrame>> callbackDrain,
+            DeviceResolver resolver, IngestionListener listener,
+            ReportDeduplicator deduplicator, EventPublisher publisher,
+            Clock clock, ZclFrameSender frameSender,
+            Map<Long, Long> learnedZoneTypeSeed,
+            ObjLongConsumer<IEEEAddress> learnSink,
+            Map<Long, Map<Integer, MeteringFormatting>> meteringFormattingSeed) {
+        Objects.requireNonNull(meteringFormattingSeed, "meteringFormattingSeed");
         this.callbackDrain = Objects.requireNonNull(callbackDrain, "callbackDrain");
         this.resolver = Objects.requireNonNull(resolver, "resolver");
         this.listener = Objects.requireNonNull(listener, "listener");
@@ -272,6 +320,13 @@ final class ZclIngestionUnit {
             }
             learnedZoneTypes.put(ieee, seeded);
         });
+        // ENERGY-READ: the persisted formatting applies under the same
+        // discipline — plain puts BEFORE any cycle can run, silent (no
+        // handlers exist yet, so nothing to invalidate), so a metering plug's
+        // first report after a restart is scaled by what it declared at
+        // adoption, with no read frame.
+        meteringFormattingSeed.forEach((ieee, byEndpoint) ->
+                learnedMeteringFormatting.put(ieee, new HashMap<>(byEndpoint)));
     }
 
     /**
@@ -283,6 +338,59 @@ final class ZclIngestionUnit {
      */
     int learnedZoneTypeCount() {
         return learnedZoneTypes.size();
+    }
+
+    /**
+     * The count of (device, endpoint) metering-formatting records currently
+     * held — rehydration observability, read right after construction.
+     */
+    int learnedMeteringFormattingCount() {
+        int count = 0;
+        for (Map<Integer, MeteringFormatting> byEndpoint
+                : learnedMeteringFormatting.values()) {
+            count += byEndpoint.size();
+        }
+        return count;
+    }
+
+    /**
+     * Records the metering formatting an endpoint declared (ENERGY-READ R3) —
+     * the adoption drive's hand-off, on the cycle thread. The device's handler
+     * table is DROPPED so the next frame rebuilds it with the formatting
+     * present — whatever order the adoption listener's own invalidation and
+     * this hand-off arrive in, a table built before the read never outlives
+     * it. The once-per-(device, cluster) unscaled marker resets with it.
+     *
+     * @param device the read device, never {@code null}
+     * @param endpoint the read endpoint
+     * @param formatting what the endpoint declared, never {@code null}
+     */
+    void recordLearnedMeteringFormatting(IEEEAddress device, int endpoint,
+            MeteringFormatting formatting) {
+        Objects.requireNonNull(device, "device");
+        Objects.requireNonNull(formatting, "formatting");
+        learnedMeteringFormatting
+                .computeIfAbsent(device.value(), key -> new HashMap<>())
+                .put(endpoint, formatting);
+        unscaledNamed.remove(device.value());
+        invalidateHandlers(device);
+    }
+
+    /**
+     * The per-DEVICE formatting the handler table is built with: the
+     * knowledge the device's endpoints AGREE on. One metering endpoint (every
+     * device in the fleet) is that endpoint's formatting exactly; endpoints
+     * that hold a pair DIFFERENTLY leave that pair absent — the table has one
+     * handler per cluster per device, and a scale is never borrowed across
+     * endpoints. {@code null} when nothing was learned.
+     */
+    private MeteringFormatting deviceFormatting(IEEEAddress device) {
+        Map<Integer, MeteringFormatting> byEndpoint =
+                learnedMeteringFormatting.get(device.value());
+        if (byEndpoint == null || byEndpoint.isEmpty()) {
+            return null;
+        }
+        return MeteringFormatting.agreedAcross(byEndpoint.values());
     }
 
     /**
@@ -537,6 +645,11 @@ final class ZclIngestionUnit {
             ZigbeeClusterHandler handler =
                     handlersFor(device).get(message.clusterId());
             if (handler == null) {
+                if (message.clusterId() == ElectricalMeasurementHandler.CLUSTER_ID
+                        || message.clusterId() == MeteringHandler.CLUSTER_ID) {
+                    nameUnscaledOnce(device, message.clusterId());
+                    return;
+                }
                 log.debug("zigbee.ingestion_unhandled_cluster: device={} "
                                 + "cluster=0x{}; skipped gracefully", device,
                         Integer.toHexString(message.clusterId()));
@@ -729,7 +842,25 @@ final class ZclIngestionUnit {
     private Map<Integer, ZigbeeClusterHandler> handlersFor(IEEEAddress device) {
         return handlersByDevice.computeIfAbsent(device.value(),
                 key -> ClusterHandlers.forDevice(device, clock,
-                        effectiveZoneType(device)));
+                        effectiveZoneType(device), deviceFormatting(device)));
+    }
+
+    /**
+     * T7 — a metering report with no handler is a report whose scale this
+     * device never declared (or declared inconsistently across endpoints):
+     * NOTHING is emitted, and ONE DEBUG per (device, cluster) says so — the
+     * line replaces the generic unhandled-cluster DEBUG for these two
+     * clusters and never repeats per report (a 5-s reporter would otherwise
+     * write 720 lines an hour). Honest silence over a guessed scale.
+     */
+    private void nameUnscaledOnce(IEEEAddress device, int clusterId) {
+        if (unscaledNamed.computeIfAbsent(device.value(), key -> new HashSet<>())
+                .add(clusterId)) {
+            log.debug("zigbee.metering_unscaled: device={} cluster=0x{}; no "
+                            + "formatting learned — the report is not scaled, "
+                            + "nothing emitted", device,
+                    Integer.toHexString(clusterId));
+        }
     }
 
     /**

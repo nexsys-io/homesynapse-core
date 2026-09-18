@@ -388,13 +388,22 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
                 // cache's debounced persistence (DP-LP-3; no I/O on the
                 // cycle thread).
                 cache.learnedZoneTypeIds(),
-                cache::recordLearnedZoneType);
+                cache::recordLearnedZoneType,
+                // ENERGY-READ R3/R4: what each metering endpoint declared at
+                // adoption rehydrates under the same rule — seeded before any
+                // cycle, so a plug's first report after a restart is scaled
+                // with no read frame.
+                cache.learnedMeteringFormatting());
         // DP-LP-6: the anti-vacuous boot glance-point — an operator confirms
         // persistence worked before opening any window. Count = entries
         // APPLIED post-tolerance; unconditional (count=0 is honest evidence
         // the mechanism ran, the adoption_maps_rehydrated precedent).
         log.info("zigbee.learned_zonetypes_rehydrated: count={}",
                 ingestion.learnedZoneTypeCount());
+        // ENERGY-READ: the same glance-point for the metering formatting —
+        // count = (device, endpoint) records held; unconditional.
+        log.info("zigbee.learned_metering_formatting_rehydrated: count={}",
+                ingestion.learnedMeteringFormattingCount());
         // F-8: adoption completion invalidates the device's handler-table entry
         // (the classifier may have attached new capabilities; zone type may bind).
         // M9.6-AVAIL: it ALSO seeds the freshly adopted entities' availability —
@@ -414,8 +423,32 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         // M9.4-RPT §1/§2: the reporting configurator over its real EZSP binding
         // (cache-first address resolution — fresh from recordInterview at every
         // drive site; the protocol lookup is the fallback).
+        // ENERGY-READ R3: the formatting store — the rejoin arm reads the
+        // cache's persisted view; every formatting the drive READ lands in the
+        // cache (debounced persistence — state mutation only on this thread)
+        // AND in the ingestion unit, which drops the device's handler table.
+        // The adoption listener above invalidates that table at adopt();
+        // the drive runs after it, so the hand-off's own invalidation is what
+        // guarantees the rebuilt table carries the formatting — whatever the
+        // order, the next frame is scaled by what the device declared.
         reporting = new ReportingConfigurator(
-                new EzspReportingOps(protocol, this::cachedNetworkAddress));
+                new EzspReportingOps(protocol, this::cachedNetworkAddress),
+                new ReportingConfigurator.FormattingStore() {
+                    @Override
+                    public Optional<MeteringFormatting> cached(
+                            IEEEAddress device, int endpoint) {
+                        return cache.learnedMeteringFormatting(device, endpoint);
+                    }
+
+                    @Override
+                    public void learned(IEEEAddress device, int endpoint,
+                            MeteringFormatting formatting) {
+                        cache.recordLearnedMeteringFormatting(device, endpoint,
+                                formatting);
+                        ingestion.recordLearnedMeteringFormatting(device,
+                                endpoint, formatting);
+                    }
+                });
         if (channelOpener == null) {
             portLocator = new PortLocator(portEnumerator, pathCanonicalizer);
             watchdog = new PortWatchdog(clock, this::attemptReopen);

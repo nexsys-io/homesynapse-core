@@ -34,7 +34,8 @@ class ClusterHandlersTest {
     @BeforeEach
     void setUp() {
         clock = TestClock.createDefault();
-        handlers = ClusterHandlers.forDevice(DEVICE, clock, ZoneType.MOTION);
+        // No formatting learned — the pre-ENERGY-READ table, byte-equivalent.
+        handlers = ClusterHandlers.forDevice(DEVICE, clock, ZoneType.MOTION, null);
     }
 
     private List<NormalizedAttribute> normalize(int cluster,
@@ -206,6 +207,74 @@ class ClusterHandlersTest {
                 .isInstanceOf(TemperatureMeasurementHandler.class);
         assertThat(handlers.get(0x0405))
                 .isInstanceOf(RelativeHumidityHandler.class);
+    }
+
+    // ── ENERGY-READ P6 — the metering handlers attach only when their
+    //    formatting is KNOWN: 8 (none) / 9 (one cluster) / 10 (both) ─────────
+
+    private static final MeteringFormatting BOTH = new MeteringFormatting(
+            1, 100, 1, 10, 1, 1000, 1, 1_000_000, 0x00);
+    private static final MeteringFormatting ELECTRICAL_ONLY =
+            new MeteringFormatting(1, 100, 0, 0, 0, 0, null, null, null);
+    private static final MeteringFormatting METERING_ONLY =
+            new MeteringFormatting(0, 0, 0, 0, 0, 0, 1, 1_000, 0x00);
+
+    @Test
+    @DisplayName("P6: TEN entries with formatting for both clusters — the eight "
+            + "existing handlers unchanged beside the two metering handlers")
+    void tableCarriesTenWithFormattingForBothClusters() {
+        Map<Integer, ZigbeeClusterHandler> ten =
+                ClusterHandlers.forDevice(DEVICE, clock, ZoneType.MOTION, BOTH);
+
+        assertThat(ten).hasSize(10);
+        assertThat(ten.get(0x0B04))
+                .isInstanceOf(ElectricalMeasurementHandler.class);
+        assertThat(ten.get(0x0702)).isInstanceOf(MeteringHandler.class);
+        for (Map.Entry<Integer, ZigbeeClusterHandler> existing
+                : handlers.entrySet()) {
+            assertThat(ten.get(existing.getKey()))
+                    .as("cluster 0x%x keeps its handler class",
+                            existing.getKey())
+                    .hasSameClassAs(existing.getValue());
+        }
+    }
+
+    @Test
+    @DisplayName("P6: NINE entries with formatting for ONE cluster — the other "
+            + "metering handler is NOT in the map")
+    void tableCarriesNineWithFormattingForOneCluster() {
+        Map<Integer, ZigbeeClusterHandler> electrical = ClusterHandlers.forDevice(
+                DEVICE, clock, ZoneType.MOTION, ELECTRICAL_ONLY);
+        Map<Integer, ZigbeeClusterHandler> metering = ClusterHandlers.forDevice(
+                DEVICE, clock, ZoneType.MOTION, METERING_ONLY);
+
+        assertThat(electrical).hasSize(9);
+        assertThat(electrical).containsKey(0x0B04).doesNotContainKey(0x0702);
+        assertThat(metering).hasSize(9);
+        assertThat(metering).containsKey(0x0702).doesNotContainKey(0x0B04);
+    }
+
+    @Test
+    @DisplayName("P6: EIGHT entries with NO formatting — null and the all-absent "
+            + "formatting alike; a metering handler is never built on a guess")
+    void tableCarriesEightWithNoFormatting() {
+        assertThat(handlers).hasSize(8);
+        assertThat(handlers).doesNotContainKeys(0x0B04, 0x0702);
+        assertThat(ClusterHandlers.forDevice(DEVICE, clock, ZoneType.MOTION,
+                MeteringFormatting.unknown())).hasSize(8);
+    }
+
+    @Test
+    @DisplayName("P6: a metering report dispatches through the table — ActivePower "
+            + "8000 raw ÷ 100 → power_w 80.0")
+    void meteringDispatchesThroughTheTable() {
+        List<NormalizedAttribute> reports = ClusterHandlers
+                .forDevice(DEVICE, clock, ZoneType.MOTION, BOTH).get(0x0B04)
+                .normalize(1, 0x0B04, Map.of(0x050B, 8000L));
+
+        assertThat(reports).hasSize(1);
+        assertThat(reports.get(0).attributeKey()).isEqualTo("power_w");
+        assertThat(reports.get(0).value()).isEqualTo(80.0);
     }
 
     @Nested

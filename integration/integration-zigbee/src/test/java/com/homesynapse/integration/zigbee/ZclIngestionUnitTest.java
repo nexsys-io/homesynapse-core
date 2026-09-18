@@ -971,6 +971,166 @@ class ZclIngestionUnitTest {
                 .containsExactly(new SinkCall(SNZB, ZoneType.CONTACT.zclId()));
     }
 
+    // ── ENERGY-READ T7 / R4 — metering reports scale by LEARNED formatting
+    //    only; unknown formatting is silence plus one DEBUG ─────────────────
+
+    private static final MeteringFormatting GEN4_FIXTURE_FORMATTING =
+            new MeteringFormatting(1, 100, 1, 10, 1, 1000, 1, 1_000_000, 0x00);
+
+    /** A 0x0B04 Report Attributes frame: ActivePower (0x050B, int16 LE). */
+    private static byte[] activePowerReport(int tsn, int rawWatts) {
+        return new byte[] {0x18, (byte) tsn, 0x0A, 0x0B, 0x05, 0x29,
+            (byte) (rawWatts & 0xFF), (byte) ((rawWatts >> 8) & 0xFF)};
+    }
+
+    /** A 0x0702 Report Attributes frame: CurrentSummationDelivered (uint48 LE). */
+    private static byte[] summationReport(int tsn, long raw) {
+        byte[] frame = new byte[12];
+        frame[0] = 0x18;
+        frame[1] = (byte) tsn;
+        frame[2] = 0x0A;
+        frame[5] = 0x25;
+        for (int i = 0; i < 6; i++) {
+            frame[6 + i] = (byte) ((raw >> (8 * i)) & 0xFF);
+        }
+        return frame;
+    }
+
+    /** A unit over the setUp collaborators with a metering-formatting seed. */
+    private ZclIngestionUnit meteringUnit(
+            Map<Long, Map<Integer, MeteringFormatting>> formattingSeed) {
+        return new ZclIngestionUnit(() -> {
+            drainCalls++;
+            List<EzspFrame> drained = List.copyOf(pendingFrames);
+            pendingFrames.clear();
+            return drained;
+        }, resolver, listener, dedup, publisher, clock, (frame, networkAddress) -> {
+            sentFrames.add(frame);
+            sentTargets.add(networkAddress);
+            return sendAccepted;
+        }, Map.of(), (device, zclId) -> { }, formattingSeed);
+    }
+
+    @Test
+    @DisplayName("T7: a metering report for a device with NO learned formatting "
+            + "publishes NOTHING — one DEBUG zigbee.metering_unscaled per "
+            + "(device, cluster) and nothing else (honest silence over a guessed "
+            + "scale)")
+    void meteringReportWithoutFormatting_isSilent() {
+        Level previous = ingestionLogger().getLevel();
+        ingestionLogger().setLevel(Level.DEBUG);
+        try {
+            enqueueReport(SNZB_NWK, 1, 0x0B04, activePowerReport(0x2A, 8000));
+            enqueueReport(SNZB_NWK, 1, 0x0B04, activePowerReport(0x2C, 8010));
+            enqueueReport(SNZB_NWK, 1, 0x0702, summationReport(0x2E, 12_345L));
+            ingestion.processCycle();
+        } finally {
+            ingestionLogger().setLevel(previous);
+        }
+
+        assertThat(publisher.published())
+                .as("no state_reported — a value with an unknown scale is never "
+                        + "presented").isEmpty();
+        assertThat(ingestionMessages(Level.DEBUG, "zigbee.metering_unscaled"))
+                .containsExactly(
+                        "zigbee.metering_unscaled: device=0x00124B0012345678 "
+                                + "cluster=0xb04; no formatting learned — the "
+                                + "report is not scaled, nothing emitted",
+                        "zigbee.metering_unscaled: device=0x00124B0012345678 "
+                                + "cluster=0x702; no formatting learned — the "
+                                + "report is not scaled, nothing emitted");
+        assertThat(ingestionMessages(Level.DEBUG,
+                "zigbee.ingestion_unhandled_cluster"))
+                .as("the metering line REPLACES the generic one").isEmpty();
+    }
+
+    @Test
+    @DisplayName("T7/R4: WITH learned formatting the same report publishes "
+            + "state_reported power_w — scaled, the raw value and the formatting "
+            + "beside it")
+    void meteringReportWithFormatting_publishesScaledPowerW() {
+        ZclIngestionUnit metering = meteringUnit(
+                Map.of(SNZB.value(), Map.of(1, GEN4_FIXTURE_FORMATTING)));
+        enqueueReport(SNZB_NWK, 1, 0x0B04, activePowerReport(0x2A, 8000));
+        enqueueReport(SNZB_NWK, 1, 0x0702, summationReport(0x2B, 12_345_678L));
+
+        metering.processCycle();
+
+        assertThat(metering.learnedMeteringFormattingCount()).isEqualTo(1);
+        List<EventEnvelope> published = publisher.published();
+        assertThat(published).hasSize(2);
+        assertThat(published.get(0).eventType())
+                .isEqualTo(EventTypes.STATE_REPORTED);
+        assertThat(published.get(0).origin()).isEqualTo(EventOrigin.PHYSICAL);
+        StateReportedEvent power = (StateReportedEvent) published.get(0).payload();
+        assertThat(power.attributeKey()).isEqualTo("power_w");
+        assertThat(power.value()).isEqualTo("80.0");
+        assertThat(power.unit()).isEqualTo("W");
+        assertThat(power.rawProtocolValue()).isEqualTo("8000");
+        assertThat(power.rawProtocolUnit()).isEqualTo("mult=1 div=100");
+        StateReportedEvent energy =
+                (StateReportedEvent) published.get(1).payload();
+        assertThat(energy.attributeKey()).isEqualTo("energy_wh");
+        assertThat(energy.value()).isEqualTo("12345.678");
+        assertThat(energy.unit()).isEqualTo("Wh");
+        assertThat(energy.rawProtocolValue()).isEqualTo("12345678");
+    }
+
+    @Test
+    @DisplayName("R3/R4: recording a formatting AFTER the handler table was built "
+            + "rebuilds it — the adoption drive's hand-off takes effect on the "
+            + "very next frame")
+    void recordLearnedMeteringFormatting_rebuildsTheHandlerTable() {
+        enqueueReport(SNZB_NWK, 1, 0x0B04, activePowerReport(0x2A, 8000));
+        ingestion.processCycle();
+        assertThat(publisher.published()).isEmpty();
+
+        ingestion.recordLearnedMeteringFormatting(SNZB, 1,
+                GEN4_FIXTURE_FORMATTING);
+        enqueueReport(SNZB_NWK, 1, 0x0B04, activePowerReport(0x2C, 8010));
+        ingestion.processCycle();
+
+        assertThat(publisher.published()).hasSize(1);
+        assertThat(((StateReportedEvent) publisher.published().get(0).payload())
+                .value()).isEqualTo("80.1");
+    }
+
+    @Test
+    @DisplayName("R4: endpoints that DISAGREE on a cluster's formatting leave that "
+            + "cluster unscaled (the handler table is per device — a scale is "
+            + "never borrowed across endpoints); a cluster they agree on scales")
+    void endpointsDisagreeingOnFormatting_stayUnscaled() {
+        MeteringFormatting other = new MeteringFormatting(1, 10, 1, 10, 1, 1000,
+                1, 1_000_000, 0x00);
+        ZclIngestionUnit metering = meteringUnit(Map.of(SNZB.value(),
+                Map.of(1, GEN4_FIXTURE_FORMATTING, 2, other)));
+        enqueueReport(SNZB_NWK, 1, 0x0B04, activePowerReport(0x2A, 8000));
+        enqueueReport(SNZB_NWK, 1, 0x0702, summationReport(0x2B, 5_000L));
+
+        metering.processCycle();
+
+        assertThat(publisher.published()).hasSize(1);
+        assertThat(((StateReportedEvent) publisher.published().get(0).payload())
+                .attributeKey()).isEqualTo("energy_wh");
+    }
+
+    @Test
+    @DisplayName("R4: the agreement is judged across ALL endpoints at once — a "
+            + "third endpoint never re-fills a pair two others hold differently")
+    void thirdEndpointNeverRefillsADisputedPair() {
+        MeteringFormatting dissent = new MeteringFormatting(1, 10, 1, 10, 1, 1000,
+                1, 1_000_000, 0x00);
+        ZclIngestionUnit metering = meteringUnit(Map.of(SNZB.value(), Map.of(
+                1, GEN4_FIXTURE_FORMATTING, 2, dissent,
+                3, GEN4_FIXTURE_FORMATTING)));
+        enqueueReport(SNZB_NWK, 1, 0x0B04, activePowerReport(0x2A, 8000));
+
+        metering.processCycle();
+
+        assertThat(metering.learnedMeteringFormattingCount()).isEqualTo(3);
+        assertThat(publisher.published()).isEmpty();
+    }
+
     private String lastReportedKey() {
         List<EventEnvelope> published = publisher.published();
         return ((StateReportedEvent) published.get(published.size() - 1)

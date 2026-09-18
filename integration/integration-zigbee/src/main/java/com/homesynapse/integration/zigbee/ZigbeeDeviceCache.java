@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -50,7 +51,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * zone-type ids keyed by IEEE hex, top-level rather than per-record so a learn
  * for a device with no record node still persists and the frozen record shape
  * is provably untouched. Absence and malformed content both degrade to
- * unlearned (skip + one WARN), never a load failure.
+ * unlearned (skip + one WARN), never a load failure. A second TOP-LEVEL
+ * section, {@code learnedMeteringFormatting} (ENERGY-READ R3), carries what
+ * each metering endpoint DECLARED about its own scale — IEEE hex → endpoint →
+ * the multiplier/divisor pairs and the unit as read at adoption — under the
+ * same additive tolerance: an old cache loads clean, malformed content
+ * degrades to unread formatting.
  *
  * <p>Thread-safe ({@link ReentrantLock} only, LTD-11). Writes snapshot the
  * serializable state under the lock and perform the file I/O outside it, so
@@ -82,6 +88,9 @@ final class ZigbeeDeviceCache {
     private final Map<Long, Boolean> lastKnownAvailability = new HashMap<>();
     private final Map<Long, Instant> lastEvidenceAt = new HashMap<>();
     private final Map<Long, Long> learnedZoneTypes = new HashMap<>();
+    // ENERGY-READ R3: per IEEE → per endpoint → what the endpoint declared.
+    private final Map<Long, Map<Integer, MeteringFormatting>>
+            learnedMeteringFormatting = new HashMap<>();
     private final Map<Integer, Long> ieeeByNetworkAddress = new HashMap<>();
 
     private boolean dirty;
@@ -315,6 +324,75 @@ final class ZigbeeDeviceCache {
     }
 
     /**
+     * Persists the metering formatting an endpoint declared (ENERGY-READ R3):
+     * state mutation under the lock ONLY — no I/O on the calling (ingestion
+     * cycle) thread; the debounced {@link #maybeFlush()} and the shutdown
+     * {@link #flush()} carry the file I/O, exactly as they do for learned zone
+     * types.
+     *
+     * @param ieee the read device, never {@code null}
+     * @param endpoint the read endpoint
+     * @param formatting what the endpoint declared, never {@code null}
+     */
+    void recordLearnedMeteringFormatting(IEEEAddress ieee, int endpoint,
+            MeteringFormatting formatting) {
+        Objects.requireNonNull(ieee, "ieee");
+        Objects.requireNonNull(formatting, "formatting");
+        lock.lock();
+        try {
+            learnedMeteringFormatting
+                    .computeIfAbsent(ieee.value(), key -> new TreeMap<>())
+                    .put(endpoint, formatting);
+            dirty = true;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Returns the persisted metering formatting by IEEE value, then by
+     * endpoint — the ingestion's rehydration seed (a deep immutable snapshot;
+     * the records themselves are immutable).
+     */
+    Map<Long, Map<Integer, MeteringFormatting>> learnedMeteringFormatting() {
+        lock.lock();
+        try {
+            return formattingSnapshotLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Returns the formatting persisted for one endpoint — the rejoin arm's
+     * cached view.
+     *
+     * @param ieee the device, never {@code null}
+     * @param endpoint the endpoint
+     * @return the persisted formatting, or empty when none was recorded
+     */
+    Optional<MeteringFormatting> learnedMeteringFormatting(IEEEAddress ieee,
+            int endpoint) {
+        Objects.requireNonNull(ieee, "ieee");
+        lock.lock();
+        try {
+            Map<Integer, MeteringFormatting> byEndpoint =
+                    learnedMeteringFormatting.get(ieee.value());
+            return byEndpoint == null ? Optional.empty()
+                    : Optional.ofNullable(byEndpoint.get(endpoint));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private Map<Long, Map<Integer, MeteringFormatting>> formattingSnapshotLocked() {
+        Map<Long, Map<Integer, MeteringFormatting>> snapshot = new HashMap<>();
+        learnedMeteringFormatting.forEach((ieee, byEndpoint) ->
+                snapshot.put(ieee, Map.copyOf(byEndpoint)));
+        return Map.copyOf(snapshot);
+    }
+
+    /**
      * Returns a device's record.
      *
      * @param ieee the device, never {@code null}
@@ -450,7 +528,8 @@ final class ZigbeeDeviceCache {
     private record WriteSnapshot(List<ZigbeeDeviceRecord> devices,
             Map<Long, Boolean> availability,
             Map<Long, Instant> evidence,
-            Map<Long, Long> learnedZoneTypes) { }
+            Map<Long, Long> learnedZoneTypes,
+            Map<Long, Map<Integer, MeteringFormatting>> learnedMeteringFormatting) { }
 
     private WriteSnapshot snapshotLocked(Instant now) {
         // F-14: dirty clears at snapshot time — a mutation racing the file
@@ -460,7 +539,8 @@ final class ZigbeeDeviceCache {
         return new WriteSnapshot(List.copyOf(devices.values()),
                 Map.copyOf(lastKnownAvailability),
                 Map.copyOf(lastEvidenceAt),
-                Map.copyOf(learnedZoneTypes));
+                Map.copyOf(learnedZoneTypes),
+                formattingSnapshotLocked());
     }
 
     private void write(WriteSnapshot snapshot) {
@@ -573,7 +653,51 @@ final class ZigbeeDeviceCache {
                         snapshot.learnedZoneTypes().get(ieee).longValue());
             }
         }
+        if (!snapshot.learnedMeteringFormatting().isEmpty()) {
+            // ENERGY-READ R3: TOP-LEVEL like the zone types (a read for a
+            // device with no record node still persists; the frozen record
+            // shape is untouched) — IEEE hex → endpoint → the declared
+            // formatting. IEEE keys sorted unsigned, endpoints ascending, so
+            // identical state serializes to identical bytes. An absent pair
+            // writes nothing: absence in the file IS absence in the record.
+            ObjectNode formattingNode =
+                    root.putObject("learnedMeteringFormatting");
+            List<Long> ieees = new ArrayList<>(
+                    snapshot.learnedMeteringFormatting().keySet());
+            ieees.sort(Long::compareUnsigned);
+            for (Long ieee : ieees) {
+                ObjectNode deviceNode = formattingNode.putObject(
+                        new IEEEAddress(ieee).toHexString());
+                new TreeMap<>(snapshot.learnedMeteringFormatting().get(ieee))
+                        .forEach((endpoint, formatting) -> writeFormatting(
+                                deviceNode.putObject(String.valueOf(endpoint)),
+                                formatting));
+            }
+        }
         return MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+    }
+
+    private static void writeFormatting(ObjectNode node,
+            MeteringFormatting formatting) {
+        if (formatting.hasElectrical()) {
+            node.put("powerMultiplier", formatting.powerMultiplier());
+            node.put("powerDivisor", formatting.powerDivisor());
+        }
+        if (formatting.hasVoltage()) {
+            node.put("voltageMultiplier", formatting.voltageMultiplier());
+            node.put("voltageDivisor", formatting.voltageDivisor());
+        }
+        if (formatting.hasCurrent()) {
+            node.put("currentMultiplier", formatting.currentMultiplier());
+            node.put("currentDivisor", formatting.currentDivisor());
+        }
+        if (formatting.hasMetering()) {
+            node.put("summationMultiplier", formatting.summationMultiplier());
+            node.put("summationDivisor", formatting.summationDivisor());
+        }
+        if (formatting.unitOfMeasure() != null) {
+            node.put("unitOfMeasure", formatting.unitOfMeasure());
+        }
     }
 
     private void load() {
@@ -649,6 +773,7 @@ final class ZigbeeDeviceCache {
                 }
             }
             loadLearnedZoneTypes(root);
+            loadLearnedMeteringFormatting(root);
             if (malformedEvidence > 0) {
                 log.warn("zigbee.evidence_recency_malformed: {} unparseable "
                         + "lastEvidenceAt values in {} skipped; those devices "
@@ -666,6 +791,84 @@ final class ZigbeeDeviceCache {
             lastKnownAvailability.clear();
             lastEvidenceAt.clear();
             learnedZoneTypes.clear();
+            learnedMeteringFormatting.clear();
+        }
+    }
+
+    /**
+     * Loads the top-level {@code learnedMeteringFormatting} section
+     * (ENERGY-READ R3) under the LEARN-PERSIST tolerance: absent ⇒ empty,
+     * silently (an old cache loads clean — the upgrade path); malformed
+     * content — a non-object section, an unparseable IEEE or endpoint key, a
+     * non-object device or record node — is skipped with ONE WARN and the
+     * parseable siblings still apply. Fail-safe is always UNREAD formatting,
+     * which configures nothing and scales nothing until the next rejoin reads
+     * again. A missing or non-integral field reads as absent through the
+     * record's own per-pair normalization — one tolerance code path.
+     */
+    private void loadLearnedMeteringFormatting(JsonNode root) {
+        JsonNode section = root.path("learnedMeteringFormatting");
+        if (section.isMissingNode()) {
+            return;
+        }
+        if (!section.isObject()) {
+            log.warn("zigbee.learned_metering_formatting_malformed: section in "
+                    + "{} is not an object; ignored", file);
+            return;
+        }
+        int skipped = 0;
+        Iterator<Map.Entry<String, JsonNode>> devices = section.fields();
+        while (devices.hasNext()) {
+            Map.Entry<String, JsonNode> device = devices.next();
+            long ieee;
+            try {
+                ieee = IEEEAddress.fromHexString(device.getKey()).value();
+            } catch (RuntimeException e) {
+                skipped++;
+                continue;
+            }
+            if (!device.getValue().isObject()) {
+                skipped++;
+                continue;
+            }
+            Iterator<Map.Entry<String, JsonNode>> endpoints =
+                    device.getValue().fields();
+            while (endpoints.hasNext()) {
+                Map.Entry<String, JsonNode> endpoint = endpoints.next();
+                int endpointId;
+                try {
+                    endpointId = Integer.parseInt(endpoint.getKey());
+                } catch (NumberFormatException e) {
+                    skipped++;
+                    continue;
+                }
+                JsonNode node = endpoint.getValue();
+                if (!node.isObject()) {
+                    skipped++;
+                    continue;
+                }
+                learnedMeteringFormatting
+                        .computeIfAbsent(ieee, key -> new TreeMap<>())
+                        .put(endpointId, new MeteringFormatting(
+                                node.path("powerMultiplier").asInt(0),
+                                node.path("powerDivisor").asInt(0),
+                                node.path("voltageMultiplier").asInt(0),
+                                node.path("voltageDivisor").asInt(0),
+                                node.path("currentMultiplier").asInt(0),
+                                node.path("currentDivisor").asInt(0),
+                                node.path("summationMultiplier").asInt(0),
+                                node.path("summationDivisor").asInt(0),
+                                node.hasNonNull("unitOfMeasure")
+                                        && node.get("unitOfMeasure")
+                                                .isIntegralNumber()
+                                        ? node.get("unitOfMeasure").asInt()
+                                        : null));
+            }
+        }
+        if (skipped > 0) {
+            log.warn("zigbee.learned_metering_formatting_malformed: {} "
+                    + "unparseable entries in {} skipped; the parseable "
+                    + "entries apply", skipped, file);
         }
     }
 

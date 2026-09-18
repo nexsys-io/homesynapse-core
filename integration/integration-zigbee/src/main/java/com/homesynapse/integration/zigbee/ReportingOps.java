@@ -4,6 +4,7 @@
  */
 package com.homesynapse.integration.zigbee;
 
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -92,4 +93,22 @@ interface ReportingOps {
      * @return {@code true} if the write succeeded
      */
     boolean writeCieAddress(IEEEAddress device, int endpoint);
+
+    /**
+     * Reads attributes (ZCL global 0x00) in ONE frame — the ENERGY-READ
+     * formatting read: what a metering cluster declares about its own scale,
+     * asked of the device at adoption and never predicted.
+     *
+     * @param device the target device
+     * @param endpoint the target endpoint
+     * @param clusterId the cluster
+     * @param attributeIds the attributes to read, in wire order
+     * @return the decoded attributes keyed by attribute id — a record the
+     *         device answered with a failure status (0x86
+     *         {@code UNSUPPORTED_ATTRIBUTE}) is ABSENT from the map, so a
+     *         present-but-empty map is an answer; empty when the device did
+     *         not answer at all (a timeout is a result, never a throw)
+     */
+    Optional<Map<Integer, Object>> readAttributes(IEEEAddress device,
+            int endpoint, int clusterId, int[] attributeIds);
 }

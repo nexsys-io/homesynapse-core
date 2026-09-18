@@ -32,7 +32,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * persisted availability sidecar (§8.1 M-1 restart-init input) and the
  * LEARN-PERSIST {@code learnedZoneTypes} top-level section (DP-LP-1: the FILE
  * carries the learns, keyed by IEEE hex, tolerated-additively — absence and
- * malformed content both degrade to unlearned, never a load failure). F-14
+ * malformed content both degrade to unlearned, never a load failure) and the
+ * ENERGY-READ {@code learnedMeteringFormatting} section (per IEEE, per
+ * endpoint; the same additive tolerance — an old cache loads clean). F-14
  * pins the write-failure backoff: a failed write arms a 60 s suppression,
  * reads stay live through it, and shutdown {@code flush()} still attempts.
  * F-3 (S-5c) pins the atomic sidecar write: the bytes land at a {@code .tmp}
@@ -310,6 +312,150 @@ class ZigbeeDeviceCacheTest {
                         + "healthy siblings")
                 .containsOnly(Map.entry(0x00124B00AA0004B4L, 21L));
         assertThat(malformedWarnings(capture)).hasSize(1);
+    }
+
+    // ── ENERGY-READ P7 — the learnedMeteringFormatting top-level section ────
+
+    private static final MeteringFormatting GEN4_FIXTURE_FORMATTING =
+            new MeteringFormatting(1, 100, 1, 10, 1, 1000, 1, 1_000_000, 0x00);
+
+    @Test
+    @DisplayName("P7: learned metering formatting round-trips through "
+            + "zigbee-devices.json — per IEEE, per endpoint, a partial record and "
+            + "a recordless device included")
+    void learnedMeteringFormattingRoundTripsThroughFile() {
+        IEEEAddress recordless = new IEEEAddress(0x00124B00AA0004B4L);
+        MeteringFormatting electricalOnly = new MeteringFormatting(1, 10, 0, 0,
+                0, 0, null, null, null);
+        cache.recordAnnounce(SNZB, 0x6B9A);
+        cache.recordLearnedMeteringFormatting(SNZB, 1, GEN4_FIXTURE_FORMATTING);
+        cache.recordLearnedMeteringFormatting(SNZB, 2, electricalOnly);
+        cache.recordLearnedMeteringFormatting(recordless, 1,
+                new MeteringFormatting(0, 0, 0, 0, 0, 0, 1, 3_600_000, 0x00));
+        cache.flush();
+
+        ZigbeeDeviceCache reloaded = new ZigbeeDeviceCache(file, clock);
+
+        assertThat(reloaded.learnedMeteringFormatting()).containsOnlyKeys(
+                SNZB.value(), recordless.value());
+        assertThat(reloaded.learnedMeteringFormatting().get(SNZB.value()))
+                .containsOnly(Map.entry(1, GEN4_FIXTURE_FORMATTING),
+                        Map.entry(2, electricalOnly));
+        assertThat(reloaded.learnedMeteringFormatting(recordless, 1))
+                .contains(new MeteringFormatting(0, 0, 0, 0, 0, 0, 1, 3_600_000,
+                        0x00));
+        assertThat(reloaded.learnedMeteringFormatting(recordless, 2)).isEmpty();
+        assertThat(reloaded.device(recordless))
+                .as("no device record was invented for the recordless read")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("P7: recording marks the cache dirty — the debounced flush "
+            + "carries the write, and identical state serializes to identical "
+            + "bytes")
+    void learnedMeteringFormattingWritesThroughTheDebounce() throws IOException {
+        cache.recordLearnedMeteringFormatting(SNZB, 1, GEN4_FIXTURE_FORMATTING);
+        cache.maybeFlush();
+        String first = Files.readString(file, StandardCharsets.UTF_8);
+
+        assertThat(first).contains("\"learnedMeteringFormatting\"")
+                .contains("\"powerDivisor\" : 100")
+                .contains("\"summationDivisor\" : 1000000");
+
+        ZigbeeDeviceCache reloaded = new ZigbeeDeviceCache(file, clock);
+        reloaded.flush();
+        assertThat(Files.readString(file, StandardCharsets.UTF_8))
+                .isEqualTo(first);
+    }
+
+    @Test
+    @DisplayName("P7: an old cache WITHOUT the learnedMeteringFormatting section "
+            + "loads clean — empty formatting, devices and learned zone types "
+            + "intact (the upgrade path)")
+    void learnedMeteringFormattingAbsentSectionLoadsClean() throws IOException {
+        Files.writeString(file, """
+                {
+                  "version" : 1,
+                  "devices" : [ {
+                    "ieee" : "0x00124B0012345678",
+                    "networkAddress" : 27546,
+                    "powerSource" : 3,
+                    "lastSeen" : "2026-01-01T00:00:00Z",
+                    "interviewStatus" : "COMPLETE"
+                  } ],
+                  "learnedZoneTypes" : {
+                    "0x00124B0012345678" : 21
+                  }
+                }
+                """, StandardCharsets.UTF_8);
+
+        ZigbeeDeviceCache reloaded = new ZigbeeDeviceCache(file, clock);
+
+        assertThat(reloaded.device(SNZB)).isPresent();
+        assertThat(reloaded.learnedZoneTypeIds())
+                .containsOnly(Map.entry(SNZB.value(), 21L));
+        assertThat(reloaded.learnedMeteringFormatting()).isEmpty();
+        assertThat(reloaded.learnedMeteringFormatting(SNZB, 1)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("P7: a non-object section and malformed entries (bad IEEE key, "
+            + "bad endpoint key, a non-object record) are skipped with ONE WARN "
+            + "— the parseable sibling applies, the devices load")
+    void learnedMeteringFormattingMalformedContentSkippedWithOneWarn()
+            throws IOException {
+        Files.writeString(file, """
+                {
+                  "version" : 1,
+                  "devices" : [ ],
+                  "learnedMeteringFormatting" : {
+                    "not-a-hex-key" : { "1" : { "powerMultiplier" : 1, "powerDivisor" : 10 } },
+                    "0x00124B0012345678" : {
+                      "one" : { "powerMultiplier" : 1, "powerDivisor" : 10 },
+                      "2" : "ten",
+                      "3" : { "powerMultiplier" : 1, "powerDivisor" : 100 }
+                    }
+                  }
+                }
+                """, StandardCharsets.UTF_8);
+        ListAppender<ILoggingEvent> capture = attachCacheCapture();
+        ZigbeeDeviceCache reloaded;
+        try {
+            reloaded = new ZigbeeDeviceCache(file, clock);
+        } finally {
+            cacheLogger().detachAppender(capture);
+        }
+
+        assertThat(reloaded.learnedMeteringFormatting())
+                .containsOnlyKeys(SNZB.value());
+        assertThat(reloaded.learnedMeteringFormatting().get(SNZB.value()))
+                .containsOnly(Map.entry(3, new MeteringFormatting(1, 100, 0, 0,
+                        0, 0, null, null, null)));
+        assertThat(meteringMalformedWarnings(capture)).hasSize(1);
+
+        Files.writeString(file, """
+                { "version" : 1, "devices" : [ ],
+                  "learnedMeteringFormatting" : [ 1, 100 ] }
+                """, StandardCharsets.UTF_8);
+        ListAppender<ILoggingEvent> second = attachCacheCapture();
+        try {
+            reloaded = new ZigbeeDeviceCache(file, clock);
+        } finally {
+            cacheLogger().detachAppender(second);
+        }
+        assertThat(reloaded.learnedMeteringFormatting()).isEmpty();
+        assertThat(meteringMalformedWarnings(second)).hasSize(1);
+    }
+
+    private static List<String> meteringMalformedWarnings(
+            ListAppender<ILoggingEvent> capture) {
+        return capture.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith(
+                        "zigbee.learned_metering_formatting_malformed"))
+                .toList();
     }
 
     private static Logger cacheLogger() {

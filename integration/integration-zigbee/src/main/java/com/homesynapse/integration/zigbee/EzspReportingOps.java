@@ -7,6 +7,7 @@ package com.homesynapse.integration.zigbee;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -93,6 +94,20 @@ final class EzspReportingOps implements ReportingOps {
      */
     static final long REPORTING_EXCHANGE_TIMEOUT_MILLIS = 5_000;
 
+    /**
+     * The formatting read's deadline (ENERGY-READ R3) — the drive's own
+     * per-exchange width, by name: the read is one more exchange of the same
+     * drive, in the same post-announce awake window, against the same device
+     * class the 5 s was silicon-measured on (iterations 5a/5b). A metering
+     * plug is mains-powered and answers in milliseconds; a device that does
+     * not answer costs the adoption at most this much per metering cluster
+     * and leaves that cluster's formatting honestly unread. NOT yet
+     * silicon-verified for a Read Attributes on 0x0B04/0x0702 — the first
+     * metering adoption measures it.
+     */
+    static final long READ_ATTRIBUTES_TIMEOUT_MILLIS =
+            REPORTING_EXCHANGE_TIMEOUT_MILLIS;
+
     private static final Logger log =
             LoggerFactory.getLogger(EzspReportingOps.class);
 
@@ -158,8 +173,14 @@ final class EzspReportingOps implements ReportingOps {
         payload[5] = (byte) ((minInterval >> 8) & 0xFF);
         payload[6] = (byte) (maxInterval & 0xFF);
         payload[7] = (byte) ((maxInterval >> 8) & 0xFF);
+        // Widened to long BEFORE the shift: an int shift distance is taken
+        // mod 32 (JLS §15.19), so on the six-byte uint48 field bytes 4–5 would
+        // repeat bytes 0–1 — a change of 5,000 went out as 88 13 00 00 88 13
+        // (ENERGY-READ, measured at the wire in ZigbeeReportingDriveTest).
+        // The field is little-endian at its full width, upper bytes zero.
+        long change = reportableChange;
         for (int i = 0; i < changeWidth; i++) {
-            payload[8 + i] = (byte) ((reportableChange >> (8 * i)) & 0xFF);
+            payload[8 + i] = (byte) ((change >> (8 * i)) & 0xFF);
         }
         Optional<byte[]> response;
         try {
@@ -264,6 +285,40 @@ final class EzspReportingOps implements ReportingOps {
         }
     }
 
+    @Override
+    public Optional<Map<Integer, Object>> readAttributes(IEEEAddress device,
+            int endpoint, int clusterId, int[] attributeIds) {
+        OptionalInt networkAddress = resolveNetworkAddress(device);
+        if (networkAddress.isEmpty()) {
+            return Optional.empty();
+        }
+        // The Read Attributes payload is the attribute ids, LE, in the order
+        // asked (ZclCodec.encodeReadAttributes minus the header the exchange
+        // seam writes) — ONE frame, whatever the count.
+        byte[] payload = new byte[attributeIds.length * 2];
+        for (int i = 0; i < attributeIds.length; i++) {
+            payload[i * 2] = (byte) (attributeIds[i] & 0xFF);
+            payload[i * 2 + 1] = (byte) ((attributeIds[i] >> 8) & 0xFF);
+        }
+        Optional<byte[]> response;
+        try {
+            response = protocol.zclGlobalExchange(networkAddress.getAsInt(),
+                    endpoint, clusterId, ZclCodec.COMMAND_READ_ATTRIBUTES, payload,
+                    ZclCodec.COMMAND_READ_ATTRIBUTES_RESPONSE,
+                    READ_ATTRIBUTES_TIMEOUT_MILLIS);
+        } catch (EzspCommandTimeoutException | EzspFormatException e) {
+            log.debug("zigbee.reporting_exchange_failed: op=read_attributes "
+                    + "device={} cluster=0x{}: {}", device,
+                    Integer.toHexString(clusterId), e.getMessage());
+            return Optional.empty();
+        }
+        // A failed record (0x86 UNSUPPORTED_ATTRIBUTE) is ABSENT from the
+        // decoded map — the codec's discipline; the caller reads absence.
+        return response.flatMap(message -> ZclCodec.parseHeader(message)
+                .map(header -> ZclCodec.parseReadAttributesResponse(message,
+                        header.payloadOffset())));
+    }
+
     /**
      * Resolves the current 16-bit network address: the injected cache view
      * first (fresh from {@code recordInterview} at the drive site), then the
@@ -339,12 +394,17 @@ final class EzspReportingOps implements ReportingOps {
         if (message.length < offset + 9 + changeWidth) {
             return Optional.empty();
         }
-        int reportableChange = 0;
+        // Accumulated in long for the same reason the encode widens: an int
+        // shift would fold bytes 4–5 of a uint48 field onto bytes 0–1, and a
+        // mis-encoded threshold would read back as the value we asked for. A
+        // read-back beyond the int range saturates — it can never equal a
+        // configured change, so it surfaces as the honest read-back-differs.
+        long reportableChange = 0;
         for (int i = 0; i < changeWidth; i++) {
-            reportableChange |= (message[offset + 9 + i] & 0xFF) << (8 * i);
+            reportableChange |= (long) (message[offset + 9 + i] & 0xFF) << (8 * i);
         }
         return Optional.of(new ReportingConfigRecord(minInterval, maxInterval,
-                reportableChange));
+                (int) Math.min(reportableChange, Integer.MAX_VALUE)));
     }
 
     /** The first ZCL payload byte after the global header, when present. */
@@ -362,8 +422,14 @@ final class EzspReportingOps implements ReportingOps {
      * vocabulary — uint8 0x20, uint16 0x21, int16 0x29, uint48 0x25; the
      * discrete types (bool 0x10, map8 0x18) carry NO change field. This
      * vocabulary is silicon-verified (iteration 4: the Hue's clusters
-     * configured {@code verified=3}). Unknown types conservatively omit the
-     * field — a NEW row's width must be silicon-verified before it is trusted.
+     * configured {@code verified=3}) for the widths a fleet device has
+     * exercised — 0x20, 0x21 and 0x29. The SIX-byte uint48 width has NOT met
+     * silicon: no adopted device carried 0x0702 before ENERGY-READ, which is
+     * how the int-shift fold on bytes 4–5 survived until a byte assertion
+     * read the field (fixed in {@link #configureReporting}; the first
+     * metering adoption is its silicon leg). Unknown types conservatively
+     * omit the field — a NEW row's width must be silicon-verified before it
+     * is trusted.
      */
     private static int analogChangeWidth(int dataType) {
         return switch (dataType) {
