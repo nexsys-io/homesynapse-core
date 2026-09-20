@@ -15,8 +15,8 @@ import com.homesynapse.automation.AutomationEngineAssembly;
 import com.homesynapse.automation.AutomationSchema;
 import com.homesynapse.automation.CommandDispatchAssembly;
 import com.homesynapse.automation.CommandDispatchService;
+import com.homesynapse.automation.CompanionAutomationIdentityStore;
 import com.homesynapse.automation.ExplanationService;
-import com.homesynapse.automation.InMemoryAutomationIdentityStore;
 import com.homesynapse.automation.LoadFailure;
 import com.homesynapse.automation.LoadResult;
 import com.homesynapse.automation.PendingCommandLedger;
@@ -674,10 +674,15 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         // validated during config.load().
         Instant automationStart = clock.instant();
         initializing = "automation";
-        InMemoryAutomationIdentityStore identityStore =
-                new InMemoryAutomationIdentityStore(clock);
+        CompanionAutomationIdentityStore identityStore = new CompanionAutomationIdentityStore(
+                new FileAutomationIdentityCompanion(configDir.resolve("automations.ids.yaml")),
+                clock);
         AutomationDefinitionLoader loader = new AutomationDefinitionLoader(
                 identityStore, entityRegistry, areaRegistry);
+        // FATAL on failure — Automation is a FATAL subsystem (Doc 12 §4): an identity
+        // companion that exists and cannot be read fails the boot closed; ids are never
+        // re-minted over it (AUTO-ID-1; Doc 07 §4.1).
+        identityStore.beginLoad();
         // The loader reads top-level "automations"/"schema_version", but those
         // live UNDER the "automation" config section (AutomationSchema.SCHEMA_SECTION)
         // and rawMap() is the whole document keyed by section — so the loader must
@@ -693,6 +698,10 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         // §4 "Automation = FATAL" governs subsystem INIT failure, not a per-entry
         // config error (the AutomationDefinitionLoader's ratified contract).
         surfaceAutomationLoadFailures(loadResult);
+        // Persists what the load minted or retired — once, only if the document changed.
+        // A write failure is ERROR-logged inside (automation.identity_write_failed) and
+        // never fails the boot.
+        identityStore.endLoad();
         this.automationRegistry = new StandardAutomationRegistry();
         this.automationRegistry.load(loadResult.loaded());
         StandardSelectorResolver selectorResolver = new StandardSelectorResolver(

@@ -23,6 +23,9 @@ dependencies {
     implementation(project(":core:automation"))
     implementation(project(":platform:platform-systemd"))
 
+    // AUTO-ID-1: FileAutomationIdentityCompanion reads/writes the automations.ids.yaml companion (Doc 07 §4.1).
+    implementation(libs.snakeyaml.engine)
+
     // M3.6d-a: composition-root prerequisites. `api` scope matches the
     // `requires transitive` directives in module-info.java — these modules'
     // public types appear in the lifecycle module's public API surface

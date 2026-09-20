@@ -12,6 +12,7 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 
+import com.homesynapse.automation.CompanionAutomationIdentityStore;
 import com.homesynapse.config.ConfigurationLoadException;
 import com.homesynapse.integration.DataPath;
 import com.homesynapse.integration.HealthParameters;
@@ -67,6 +68,13 @@ final class HomeSynapseCoreStartupFailureTest {
 
     private static final String LIFECYCLE_LOGGER = HomeSynapseCore.class.getName();
     private static final String STARTUP_FAILED_PREFIX = "lifecycle.startup_failed: ";
+
+    /** AUTO-ID-1: the engine-managed identity companion beside {@code homesynapse.yaml}. */
+    private static final String COMPANION_FILE = "automations.ids.yaml";
+    private static final String IDENTITY_STORE_LOGGER =
+            CompanionAutomationIdentityStore.class.getName();
+    private static final String IDENTITY_WRITE_FAILED_PREFIX =
+            "automation.identity_write_failed: ";
 
     /** The C12-04 recommendations — the contract text, pinned verbatim. */
     private static final String CONFIGURATION_RECOMMENDATION =
@@ -203,6 +211,74 @@ final class HomeSynapseCoreStartupFailureTest {
     }
 
     // ════════════════════════════════════════════════════════════════════════
+    // T8/T9 — AUTO-ID-1: the identity companion at the root. One that exists and cannot
+    // be read is FATAL (fail closed — ids are never re-minted over it); one that cannot
+    // be WRITTEN is not (R3 — ERROR-logged, the boot continues)
+    // ════════════════════════════════════════════════════════════════════════
+
+    @Test
+    @DisplayName("T8: a malformed automations.ids.yaml fails start() with the companion's "
+            + "IllegalStateException UNWRAPPED and naming the path, reports (CORE_DOMAIN, "
+            + "automation), logs one lifecycle.startup_failed line, and leaves the file's "
+            + "bytes untouched")
+    void malformedIdentityCompanionReportsAutomation(@TempDir Path tempDir) throws Exception {
+        String malformed = "automations: [\n  unterminated\n";
+        Path companion = writeCompanion(tempDir, malformed);
+        core = newCore(tempDir);
+
+        Throwable fatal = catchThrowable(core::start);
+
+        assertThat(fatal)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(companion.toString());
+        assertThat(core.currentPhase()).isEqualTo(LifecyclePhase.STOPPED);
+        assertThat(core.lastStartupFailure()).hasValueSatisfying(report -> {
+            assertThat(report.phase()).isEqualTo(LifecyclePhase.CORE_DOMAIN);
+            assertThat(report.subsystem()).isEqualTo("automation");
+        });
+        assertThat(startupFailedLines()).singleElement().asString().startsWith(
+                "lifecycle.startup_failed: phase=CORE_DOMAIN subsystem=automation ");
+        assertThat(Files.readString(companion)).isEqualTo(malformed);
+    }
+
+    @Test
+    @DisplayName("T9: a companion that cannot be WRITTEN never fails the boot — start() "
+            + "reaches RUNNING with an EMPTY report, the automation is loaded, and ONE "
+            + "automation.identity_write_failed ERROR names the path")
+    void unwritableIdentityCompanionIsNotFatal(@TempDir Path tempDir) throws Exception {
+        writeRoot(tempDir, BusPositionCensusIT.heroMotionConfigYaml());
+        Path companion = tempDir.resolve("config").resolve(COMPANION_FILE);
+        // A non-empty DIRECTORY squatting on the temp sibling: the write fails before the
+        // atomic move on every platform, without POSIX permission bits.
+        Path squatter = Files.createDirectories(
+                companion.resolveSibling(COMPANION_FILE + ".tmp"));
+        Files.writeString(squatter.resolve("occupant"), "x");
+        ListAppender<ILoggingEvent> storeLog = new ListAppender<>();
+        storeLog.start();
+        logger(IDENTITY_STORE_LOGGER).addAppender(storeLog);
+        try {
+            core = newCore(tempDir);
+
+            core.start();
+
+            assertThat(core.currentPhase()).isEqualTo(LifecyclePhase.RUNNING);
+            assertThat(core.lastStartupFailure()).isEmpty();
+            assertThat(startupFailedLines()).isEmpty();
+            assertThat(core.automationRegistry().getBySlug("hero-motion")).isPresent();
+            assertThat(storeLog.list.stream()
+                    .filter(event -> event.getLevel() == Level.ERROR)
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .filter(message -> message.startsWith(IDENTITY_WRITE_FAILED_PREFIX)))
+                    .singleElement().asString()
+                    .contains("path=" + companion);
+            assertThat(companion).doesNotExist();
+        } finally {
+            logger(IDENTITY_STORE_LOGGER).detachAppender(storeLog);
+            storeLog.stop();
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
     // Harness
     // ════════════════════════════════════════════════════════════════════════
 
@@ -240,6 +316,13 @@ final class HomeSynapseCoreStartupFailureTest {
         Path configDir = tempDir.resolve("config");
         Files.createDirectories(configDir);
         Files.writeString(configDir.resolve("homesynapse.yaml"), yaml);
+    }
+
+    /** Writes {@code automations.ids.yaml} into the config dir; returns its path. */
+    private static Path writeCompanion(Path tempDir, String yaml) throws Exception {
+        Path configDir = tempDir.resolve("config");
+        Files.createDirectories(configDir);
+        return Files.writeString(configDir.resolve(COMPANION_FILE), yaml);
     }
 
     /** The C12-04 lines of the composition root, in emission order. */

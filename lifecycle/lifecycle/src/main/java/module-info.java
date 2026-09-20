@@ -69,6 +69,13 @@ module com.homesynapse.lifecycle {
     requires transitive com.homesynapse.device;
     requires com.homesynapse.automation;
 
+    // AUTO-ID-1: FileAutomationIdentityCompanion reads and writes the engine-managed
+    // automations.ids.yaml (Doc 07 §4.1) — the bytes behind core/automation's
+    // AutomationIdentityCompanion seam, which keeps that module filesystem-free and
+    // YAML-library-free. Non-transitive: no snakeyaml type reaches the exported API
+    // (the class is package-private). config exports no YAML load/dump facade.
+    requires org.snakeyaml.engine.v2;
+
     // AB-3: HomeSynapseCore selects the platform HealthReporter implementation
     // (SystemdHealthReporter when $NOTIFY_SOCKET is set, else NoOpHealthReporter).
     // The HealthReporter interface is in platform-api (already required transitive);

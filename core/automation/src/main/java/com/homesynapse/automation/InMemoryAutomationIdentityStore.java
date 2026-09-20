@@ -14,8 +14,11 @@ import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.UlidFactory;
 
 /**
- * In-memory {@link AutomationIdentityStore} — the M7.1 identity seam pending the
- * {@code automations.ids.yaml} file-backed store (AMD-93 §2.3, app-bootstrap).
+ * In-memory {@link AutomationIdentityStore} — the M7.1 identity seam, and since AUTO-ID-1
+ * the TEST DOUBLE: the composition root wires the durable
+ * {@link CompanionAutomationIdentityStore} over {@code automations.ids.yaml}
+ * (AMD-93 §2.3). Wired at a root, this class re-mints every identity per boot and
+ * orphans the run history on record (MEASURE-2b F-1).
  *
  * <p>Assignments survive for the life of the process and are stable across
  * {@link AutomationRegistry#reload(java.util.List)} calls, which is the behavioral

@@ -13,10 +13,12 @@ import com.homesynapse.platform.identity.AutomationId;
  * is assigned a stable ULID keyed by {@code (automationSlug, triggerIndex)}.
  *
  * <p>The durable backing for these assignments is the {@code automations.ids.yaml}
- * companion file (AMD-93 §2.3). At this baseline the on-disk machinery is not yet wired
- * (it rides app-bootstrap with the configuration substrate); the in-memory
- * implementation provides the stability contract for the trigger/condition path and is
- * the seam the file-backed store will replace.</p>
+ * companion file (AMD-93 §2.3): {@link CompanionAutomationIdentityStore} is the
+ * implementation the composition root wires (AUTO-ID-1) — identity survives a restart —
+ * over an {@link AutomationIdentityCompanion} whose file-backed form rides the
+ * composition root with the configuration substrate.
+ * {@link InMemoryAutomationIdentityStore} keeps the stability contract for one process
+ * and is the test double.</p>
  *
  * <p>Thread-safe.</p>
  */
