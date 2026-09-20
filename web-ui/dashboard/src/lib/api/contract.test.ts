@@ -35,7 +35,7 @@ describe('frozen read-API contract', () => {
     // 13th): seven additive keys + FIRED_CONFIRMED (FE-114 D0 — the first named flip:
     // 'v1.1.3-2026-09-06' → 'v1.1.4-2026-09-13'). This pin, scripts/contract-check.mjs and
     // v113-additive.test.ts's pin move together.
-    expect(CONTRACT_VERSION).toBe('v1.1.4-2026-09-13');
+    expect(CONTRACT_VERSION).toBe('v1.1.5-2026-09-19');
   });
 
   it('has a validator for every canonical endpoint', () => {

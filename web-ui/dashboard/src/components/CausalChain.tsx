@@ -23,8 +23,10 @@ import {
   commandVerbs,
   danglingTargetLine,
   danglingTriggerLine,
+  definitionSentence,
   EMPTY_CHAIN_NOTE,
   heroCopy,
+  labelFor,
   noReadingLine,
   NOT_RECORDED,
   NULL_NAME_NOTE,
@@ -41,7 +43,7 @@ import {
   UNRESOLVED_REF_PILL,
   type Tone,
 } from '../lib/format';
-import { UNVERIFIED_RESOLVER, type RefResolver } from '../lib/registry';
+import { isUlid, UNVERIFIED_RESOLVER, type RefResolver } from '../lib/registry';
 import { actionVerdict, isDoNothingRun, type ActionMode } from '../lib/verdicts';
 import styles from './CausalChain.module.css';
 import { t, type MessageKey } from '../lib/i18n';
@@ -155,6 +157,12 @@ export function CausalChain({
             const tone: Tone = !c.evaluated ? 'unknown' : c.result ? 'ok' : 'warn';
             const verdict = !c.evaluated ? 'was not checked' : c.result ? 'was true' : 'was false';
             const observed = c.observedState ?? [];
+            /* FE-115 D1 (EXPLAIN-4 landed): the v1.1.5 `definition` renders as ONE sentence under the observed
+               state — THE TRI-STATE on screen: key ABSENT (a pre-v1.1.5 hub) → nothing added, HEAD's bytes;
+               PRESENT-null → the not-recorded sentence (the projection could not vouch — no reason guessed);
+               PRESENT-object → format.definitionSentence, the only place a definition becomes words. The L1
+               line keeps the wire's `expression` (still the type) — nothing the wire did not carry is shown. */
+            const definitionLine = 'definition' in c ? definitionSentence(c.definition ?? null, (s) => selectorLabel(s, resolveRef)) : null;
             steps.push({
               kind: 'condition',
               tone,
@@ -162,7 +170,9 @@ export function CausalChain({
               label: verdict,
               line: heroCopy('explain.condition.line', { condition: c.expression ?? NOT_RECORDED, verdict }),
               children:
-                observed.length > 0 ? (
+                observed.length > 0 || definitionLine !== null ? (
+                  <>
+                    {observed.length > 0 ? (
                   <Detail label={t('explain.condition.atTheTime')}>
                     {observed
                       .map((o) => {
@@ -176,6 +186,9 @@ export function CausalChain({
                       })
                       .join('; ')}
                   </Detail>
+                    ) : null}
+                    {definitionLine !== null ? <p class={styles.hint}>{definitionLine}</p> : null}
+                  </>
                 ) : null,
             });
           }
@@ -364,18 +377,32 @@ function Detail({ label, children }: { label: string; children: ComponentChildre
  * (OBSERVED NULL on the live wire in all eras); the former local duplicate of
  * that logic was the second `.toLowerCase()` crash site and is removed. */
 function actionPhrase(command: string | null | undefined): string {
+  // FE-115 D4: the three verbs are §7 rows (`explain.action.phrase.*`), byte-identical — the widened lint
+  // (`ReturnStatement > Literal`) reached the two-word ones; "Dimmed" is keyed with them.
   switch (command) {
     case 'turn_on':
-      return 'Turned on';
+      return t('explain.action.phrase.turnedOn');
     case 'turn_off':
-      return 'Turned off';
+      return t('explain.action.phrase.turnedOff');
     case 'dim':
-      return 'Dimmed';
+      return t('explain.action.phrase.dimmed');
     default:
       // Present-but-null guard: never "Ran null on" — say what is known. FE-114 D4: both arms are §7 rows
       // (`explain.action.ran.on` / `.ran.unrecorded.on`), byte-identical to the former template and literal.
       return command ? heroCopy('explain.action.ran.on', { command }) : t('explain.action.ran.unrecorded.on');
   }
+}
+/* FE-115 D1: the `{entity}` slot of a definition sentence — the selector as the wire renders it
+ * (ConditionDefinitionRenderer.selector): a single-entity selector (a ULID, a slug, a mock id) goes through the
+ * registry census like every other ref on this surface — the registry name when resolved, LOUD (the named ULID
+ * + the registry phrase, the observed-state rule) when a ULID is dangling on a complete census; a slug the census
+ * does not hold is NOT accused (it is not an id) and renders humanized; a group / compound selector
+ * (`area:kitchen/PRIMARY`, `a+b`) renders AS RECORDED — no name is invented for a group. */
+function selectorLabel(selector: string, resolveRef: RefResolver): string {
+  if (/[:+]/.test(selector)) return selector;
+  const res = resolveRef(selector);
+  if (res.kind === 'dangling') return isUlid(selector) ? `${selector} (${UNRESOLVED_REF_PHRASE})` : labelFor(selector);
+  return refLabel(selector, res);
 }
 /* HERO-1c C1 (SPEC §5/§7; the HERO-1b audit's D6): the action step LINE per confirmation
  * mode — each `explain.mode.<key>.line` filled at the resolved label (never lower-cased:

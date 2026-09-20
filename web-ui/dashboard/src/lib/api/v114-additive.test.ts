@@ -29,7 +29,12 @@
 import { describe, it, expect } from 'vitest';
 import { validateAgainstContract, ContractError, CONTRACT_VERSION } from './shapes';
 import type { AutomationSummary, CausalAction, CausalChain, NonFiringExplanation } from './contract';
-import { causalChains, nonFiring, automations } from './mock/mockData';
+// FE-115 D2 (2026-09-19): the default mock became a v1.1.5 hub (the keys PRESENT — v115-additive.test.ts pins it), so
+// the pre-v1.1.4 dataset these absence rows describe is now the `legacy-hub` scenario — the ONE scenario that keeps the
+// absent arm reachable. The assertions below are unchanged; only their dataset moved (the import), so "a pre-v1.1.4
+// hub omits the key" is still asserted against a dataset that IS one.
+import { resolveScenario } from './mock/scenarios';
+const { causalChains, nonFiring, automations } = resolveScenario('legacy-hub');
 import { WIRE_20260816_NONFIRING_BENCH_HERO as AUG16 } from './fixtures/wire-2026-08-16-nonfiring';
 import { WIRE_20260820_NEVER_TRIGGERED_BENCH_HERO as AUG20 } from './fixtures/wire-2026-08-20-never-triggered';
 
@@ -70,7 +75,7 @@ describe('B3 causal-chain: actions[].settledAt / confirmedAt tri-state (v1.1.4)'
     c.actions[0]!.confirmedAt = null;
     expect(() => validateAgainstContract('B3:causalChain', chainBody(c))).not.toThrow();
   });
-  it('ABSENT passes — a pre-v1.1.4 hub omits both keys (the default mock still does; disclosed)', () => {
+  it('ABSENT passes — a pre-v1.1.4 hub omits both keys (the `legacy-hub` scenario does; the default mock is a v1.1.5 hub since FE-115)', () => {
     const c = chainBase();
     expect('settledAt' in c.actions[0]!).toBe(false);
     expect('confirmedAt' in c.actions[0]!).toBe(false);
@@ -189,7 +194,7 @@ describe('B3 automations: data[].definitionKey tri-state (v1.1.4)', () => {
   it('PRESENT-null passes (a fixture arm the table allows)', () => {
     expect(() => validateAgainstContract('B3:automations', autos({ definitionKey: null }))).not.toThrow();
   });
-  it('ABSENT passes (a pre-v1.1.4 payload — the default mock; disclosed)', () => {
+  it('ABSENT passes (a pre-v1.1.4 payload — the `legacy-hub` scenario)', () => {
     expect(() => validateAgainstContract('B3:automations', autos({}))).not.toThrow();
     for (const a of automations) expect('definitionKey' in a).toBe(false);
   });
@@ -208,7 +213,7 @@ describe('the recorded v1.1.2 fixtures validate unchanged under the v1.1.4 valid
     for (const k of ['disabledAt', 'disabledReason', 'definitionKey']) expect(k in AUG20.data, k).toBe(false);
     expect(() => validateAgainstContract('B3:nonFiring', AUG20)).not.toThrow();
   });
-  it('the default mock is still a pre-v1.1.4 hub on the non-firing read (absence, not null — the next mock touch carries the keys; disclosed)', () => {
+  it('the `legacy-hub` scenario is a pre-v1.1.4 hub on the non-firing read (absence, not null — the default mock carries the keys since FE-115)', () => {
     for (const n of Object.values(nonFiring)) {
       expect('disabledAt' in n).toBe(false);
       expect(() => validateAgainstContract('B3:nonFiring', { data: n, meta: META })).not.toThrow();
@@ -232,6 +237,6 @@ describe('the TypeScript mirror declares the seven keys optional-nullable and th
     expect([settled, nulls, pre, keyed, keyedNull, fired, disabled, auto, autoNull].length).toBe(9);
     // D0: the three pins move together (contract.ts · contract.test.ts · scripts/contract-check.mjs) — plus the
     // v113-additive.test.ts pin the FE-NULL-1 lane added (four homes, one value).
-    expect(CONTRACT_VERSION).toBe('v1.1.4-2026-09-13');
+    expect(CONTRACT_VERSION).toBe('v1.1.5-2026-09-19');
   });
 });

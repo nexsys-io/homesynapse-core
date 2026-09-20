@@ -25,7 +25,8 @@ describe('brand token', () => {
  * 13 keys; the one hero key, `hero.permanence`, carries the product name).
  */
 import { t, type MessageKey } from './i18n';
-/** The 140 §7 keys, verbatim from SPEC.md:136–:275 (extracted by script, not typed). */
+/** The 140 §7 keys, verbatim from SPEC.md:136–:275 (extracted by script, not typed) — minus the six FE-115 D3 retired
+ *  (the list is now 134; the retired six are named in the §FE-115 D3 block at the end of this file). */
 const SPEC7_KEYS = [
   "explain.headline.completed.confirmed",
   "explain.headline.completed.dispatched",
@@ -60,15 +61,10 @@ const SPEC7_KEYS = [
   "explain.slot.verbPast.null",
   "explain.slot.time.unparseable",
   "explain.slot.triggerVerb.null",
-  "whyNot.neverTriggered.title",
   "whyNot.neverTriggered.body",
   "explain.chain.noDetail.title",
   "explain.chain.noDetail.body",
   "explain.trigger.readingNotRecorded",
-  "explain.action.unconfirmed.title",
-  "explain.action.unconfirmed.body",
-  "explain.action.pending.title",
-  "explain.action.pending.body",
   "explain.action.pending.color",
   "explain.mode.confirmed.label",
   "explain.mode.confirmed.line",
@@ -140,7 +136,6 @@ const SPEC7_KEYS = [
   "explain.hub.not.text",
   "explain.hub.not.go",
   "explain.hub.autos.noRuns",
-  "explain.hub.autos.noRunsSinceLoad",
   "explain.permanence",
   "explain.nullName.note",
   "explain.cascade.parentUnrecorded",
@@ -170,8 +165,10 @@ const SPEC7_KEYS = [
 ] as const;
 
 describe('HERO-1b B2 — the §7 copy table is the catalog', () => {
-  it('carries all 140 §7 keys, each resolving to a string', () => {
-    expect(SPEC7_KEYS.length).toBe(140);
+  // FE-115 D3 (2026-09-19): 140 → 134 — six of the HERO-1b rows retired on the hub's rulings (the NAMED flip of D3;
+  // the retired keys are listed in the §FE-115 D3 block below); `boot.startingBody` was never a §7 row.
+  it('carries all 134 §7 keys (140 HERO-1b rows − the 6 FE-115 D3 retired), each resolving to a string', () => {
+    expect(SPEC7_KEYS.length).toBe(134);
     for (const k of SPEC7_KEYS) {
       expect(typeof t(k as MessageKey), k).toBe('string');
     }
@@ -367,6 +364,121 @@ describe('FE-114 — the amendment rows are in the catalog, verbatim (170 + 13 =
     for (const [k, s] of Object.entries(SPEC7_FE114_KEYS)) {
       expect(s, k).not.toContain(BRAND.productName);
       expect(s, k).not.toContain('{{NAME}}');
+      expect(s, k).not.toMatch(/\bwe\b/i);
+    }
+  });
+});
+
+/*
+ * FE-115 D1 (2026-09-19) — the v1.1.5 `conditions[].definition` sentences, as SPEC §7 amendment rows tagged
+ * FE-115: the frame, one clause per emitter permit (ConditionDefinitionRenderer's seven `type` strings —
+ * StateCondition · NumericCondition · TimeCondition · AndCondition · OrCondition · NotCondition · ZoneCondition),
+ * the keyed connectives, the empty-group and unknown-type arms, and the null (not-recorded) sentence. Every word
+ * `definitionSentence` (format.ts) can produce is one of these rows. RED at HEAD: none of the keys exists.
+ */
+const SPEC7_FE115_D1_KEYS = {
+  'explain.condition.def.frame': 'It checks that {clause}.',
+  'explain.condition.def.notRecorded': "What this rule checked isn't on record for this run.",
+  'explain.condition.def.StateCondition': '{entity} {attribute} is "{value}"',
+  'explain.condition.def.StateCondition.noValue': "{entity} {attribute} matches a value that isn't recorded",
+  'explain.condition.def.NumericCondition.between': '{entity} {attribute} is above {above} and below {below}',
+  'explain.condition.def.NumericCondition.above': '{entity} {attribute} is above {above}',
+  'explain.condition.def.NumericCondition.below': '{entity} {attribute} is below {below}',
+  'explain.condition.def.NumericCondition.unbounded': '{entity} {attribute} has no bounds recorded',
+  'explain.condition.def.TimeCondition.between': 'the time is after {after} and before {before}',
+  'explain.condition.def.TimeCondition.after': 'the time is after {after}',
+  'explain.condition.def.TimeCondition.before': 'the time is before {before}',
+  'explain.condition.def.TimeCondition.unbounded': "the time window isn't recorded",
+  'explain.condition.def.AndCondition.join': ' and ',
+  'explain.condition.def.OrCondition.join': ' or ',
+  'explain.condition.def.NotCondition': 'it is not true that {clause}',
+  'explain.condition.def.list.join': ', ',
+  'explain.condition.def.group': '({clause})',
+  'explain.condition.def.emptyGroup': 'an empty group of rules',
+  'explain.condition.def.emptyGroup.sentence': 'This rule is an empty group — it has nothing to check.',
+  'explain.condition.def.ZoneCondition': "This is a zone rule — this hub doesn't record its details yet.",
+  'explain.condition.def.ZoneCondition.clause': 'a zone rule (details not recorded)',
+  'explain.condition.def.unknown': 'This is a rule of kind "{type}" — this dashboard can\'t describe it yet.',
+  'explain.condition.def.unknown.clause': 'a rule of kind "{type}" (not described yet)',
+  'explain.condition.def.entity.unnamed': 'an unnamed device',
+} as const;
+
+describe('FE-115 D1 — the definition-sentence rows are in the catalog, verbatim (183 − 6 retired + 24 = 201 §7-tagged rows)', () => {
+  it('carries the twenty-four keys with their strings, character for character', () => {
+    expect(Object.keys(SPEC7_FE115_D1_KEYS).length).toBe(24);
+    for (const [k, s] of Object.entries(SPEC7_FE115_D1_KEYS)) {
+      expect(t(k as MessageKey), k).toBe(s);
+    }
+  });
+
+  it('Register C holds on the twenty-four: no product name, no token, no "we"', () => {
+    for (const [k, s] of Object.entries(SPEC7_FE115_D1_KEYS)) {
+      expect(s, k).not.toContain(BRAND.productName);
+      expect(s, k).not.toContain('{{NAME}}');
+      expect(s, k).not.toMatch(/\bwe\b/i);
+    }
+  });
+
+  it('one clause key per emitter permit — the seven `type` strings of ConditionDefinitionRenderer each resolve', () => {
+    for (const ty of ['StateCondition', 'NumericCondition.between', 'TimeCondition.between', 'AndCondition.join', 'OrCondition.join', 'NotCondition', 'ZoneCondition']) {
+      expect(typeof t(`explain.condition.def.${ty}` as MessageKey), ty).toBe('string');
+    }
+  });
+});
+
+/*
+ * FE-115 D3 (2026-09-19) — the dead keys, retired on the hub's rulings (the v75-b3 audit §3, reversible by REVERT):
+ * `whyNot.neverTriggered.title` (a twin of the consumed headline), `explain.action.unconfirmed.title` / `.body` and
+ * `explain.action.pending.title` / `.body` (superseded by HERO-1c's mode keys), `boot.startingBody` (the banner
+ * carries its own literal), `explain.hub.autos.noRunsSinceLoad` ("since it was loaded" is not something the wire
+ * can vouch for). Each was grep-proven UNCONSUMED outside the catalog and this file before removal (the counts in
+ * the FE-115 return §0). KEPT: `explain.headline.completed.notRecorded` (ruling-gated) and `whyNot.neverTriggered.body`
+ * (consumed by WhyNotView). RED at HEAD: every one of the seven still resolves. The §7 count pin above moves
+ * 140 → 134 — the NAMED flip of this row.
+ */
+const RETIRED_FE115 = [
+  'whyNot.neverTriggered.title',
+  'explain.action.unconfirmed.title',
+  'explain.action.unconfirmed.body',
+  'explain.action.pending.title',
+  'explain.action.pending.body',
+  'boot.startingBody',
+  'explain.hub.autos.noRunsSinceLoad',
+] as const;
+
+describe('FE-115 D3 — the seven dead keys are GONE from the catalog; the kept twins remain', () => {
+  it('none of the seven resolves any more', () => {
+    for (const k of RETIRED_FE115) expect(t(k as unknown as MessageKey), k).toBeUndefined();
+  });
+  it('the kept keys still resolve: explain.headline.completed.notRecorded (ruling-gated) · whyNot.neverTriggered.body (consumed) · explain.action.pending.color (consumed by format.pendingHint)', () => {
+    expect(t('explain.headline.completed.notRecorded')).toBe("{Target} was asked to {verb} because {because}; what happened isn't recorded.");
+    expect(typeof t('whyNot.neverTriggered.body')).toBe('string');
+    expect(typeof t('explain.action.pending.color')).toBe('string');
+  });
+});
+
+/*
+ * FE-115 D4 (2026-09-19) — the lint's reach closed: `ReturnStatement > Literal` and `ConditionalExpression > Literal`
+ * join the six-file rule; the literals it (and its one-word / out-of-scope blind spots) still hid are §7 rows,
+ * byte-identical — `actionPhrase`'s three verbs (CausalChain.tsx; the widened rule reached "Turned on" / "Turned off";
+ * "Dimmed" is one word and outside the pattern, keyed anyway) and format.ts `EMPTY_CHAIN_NOTE` (a const outside the
+ * six files by the scope law, keyed anyway — the FE-114 D8 twin-fold pattern). RED at HEAD: none of the four exists.
+ */
+const SPEC7_FE115_D4_KEYS = {
+  'explain.action.phrase.turnedOn': 'Turned on',
+  'explain.action.phrase.turnedOff': 'Turned off',
+  'explain.action.phrase.dimmed': 'Dimmed',
+  'explain.chain.empty': 'This run finished without recording any steps — no conditions were checked and no commands were sent.',
+} as const;
+
+describe('FE-115 D4 — the four lint-reach rows are in the catalog, verbatim', () => {
+  it('carries the four keys with their strings, character for character', () => {
+    expect(Object.keys(SPEC7_FE115_D4_KEYS).length).toBe(4);
+    for (const [k, s] of Object.entries(SPEC7_FE115_D4_KEYS)) expect(t(k as MessageKey), k).toBe(s);
+  });
+  it('Register C holds on the four', () => {
+    for (const [k, s] of Object.entries(SPEC7_FE115_D4_KEYS)) {
+      expect(s, k).not.toContain(BRAND.productName);
       expect(s, k).not.toMatch(/\bwe\b/i);
     }
   });

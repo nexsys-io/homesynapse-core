@@ -23,7 +23,7 @@ export const locale = 'en' as const;
 
 const en = {
   'auth.tokenHelp': `Paste the pairing token from your ${BRAND.productName} device. You’ll find it in`,
-  'boot.startingBody': `${BRAND.productName} is catching up to live — this takes a moment after a restart.`,
+  // FE-115 D3: `boot.startingBody` RETIRED (the hub's ruling, v75-b3 §3 — the boot banner carries its own literal; unconsumed).
   'devices.lede': `Everything ${BRAND.productName} can see in your home.`,
   'health.live': `${BRAND.productName} is up to date and processing events in real time.`,
   'overview.live': `${BRAND.productName} is live and watching your home in real time.`,
@@ -96,12 +96,13 @@ const en = {
   "explain.slot.verbPast.null": "acted",
   "explain.slot.time.unparseable": "an unrecorded time",
   "explain.slot.triggerVerb.null": "changed",
-  // whyNot.neverTriggered.*
-  "whyNot.neverTriggered.title": "It hasn't run yet.",
+  // whyNot.neverTriggered.* — FE-115 D3: `.title` RETIRED (a twin of the consumed `whyNot.headline.neverTriggered`; the hub's ruling).
   "whyNot.neverTriggered.body": "Nothing has set it off since this automation was loaded. It runs on {triggerSummary}. Nothing is wrong — it's waiting.",
   // explain.chain.*
   "explain.chain.noDetail.title": "This run is on record, but its steps aren't.",
   "explain.chain.noDetail.body": "It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed.",
+  // FE-115 D4: the genuinely-empty chain's note (format.ts EMPTY_CHAIN_NOTE reads this row — the FE-114 D8 twin-fold), byte-identical.
+  "explain.chain.empty": "This run finished without recording any steps — no conditions were checked and no commands were sent.",
   // explain.step.* — HERO-1d D2 (2026-09-13): the do-nothing step (the silent-skip run class), keyed
   // byte-identically from CausalChain.tsx; the hint is the paragraph whole.
   "explain.step.nothing.one": "Nothing was changed: the planned step ended without sending a command.",
@@ -109,11 +110,8 @@ const en = {
   "explain.step.nothing.hint": "This usually means the devices this automation targets were unavailable, so each was skipped by design. The step-by-step record of these skips is not kept yet.",
   // explain.trigger.*
   "explain.trigger.readingNotRecorded": "{Trigger} set it off at {time} — the reading wasn't recorded.",
-  // explain.action.*
-  "explain.action.unconfirmed.title": "Sent — the device never confirmed.",
-  "explain.action.unconfirmed.body": "The command was sent; no confirmation came back{reasonClause}. It may have worked — the record can't say.",
-  "explain.action.pending.title": "Sent — waiting for the device to confirm.",
-  "explain.action.pending.body": "Most devices confirm within a second or two. This updates when the device reports.",
+  // explain.action.* — FE-115 D3: `.unconfirmed.title` / `.body` and `.pending.title` / `.body` RETIRED (superseded by
+  // HERO-1c's `explain.mode.*` label / line / help keys; the hub's ruling). `.pending.color` stays (format.pendingHint).
   "explain.action.pending.color": "Color changes confirm slowly on some bulbs — this can take several seconds.",
   // explain.mode.*
   "explain.mode.confirmed.label": "Confirmed",
@@ -163,8 +161,9 @@ const en = {
   // HERO-1d D1 (2026-09-13): the terminalLine arms that had no row — HEAD's literals, byte for byte.
   // `{notRecorded}` is format.ts NOT_RECORDED (the constant stays a constant; the sentence is keyed);
   // the `.noTime` arms are the HERO-1b honesty row (a missing duration is omitted, never "0.0s");
-  // `.status` is HEAD's tail for INTERRUPTED and any status this build does not know — the recorded
-  // label's own sentence (`explain.terminal.interrupted` stays unconsumed: a text change is not this lane's).
+  // `.status` is the tail for any status this build does not know — the recorded label's own sentence
+  // (FE-114 D7 consumed `explain.terminal.interrupted` for INTERRUPTED and `explain.terminal.noSteps` for a
+  // completed run with no steps; `.status` no longer renders INTERRUPTED).
   "explain.terminal.unrecorded": "Outcome {notRecorded}.",
   "explain.terminal.completed.noTime": "Done.",
   "explain.terminal.completed.nothing.noTime": "Finished, but nothing was changed.",
@@ -178,6 +177,11 @@ const en = {
   "explain.terminal.completed.nothing.pill": "Completed, nothing changed",
   "explain.action.ran.on": "Ran {command} on",
   "explain.action.ran.unrecorded.on": "Ran an unrecorded command on",
+  // FE-115 D4 (2026-09-19): actionPhrase's three verbs — the bare return Literals the widened lint now reaches
+  // ("Dimmed" is one word, outside the pattern; keyed with its siblings) — byte-identical to the literals.
+  "explain.action.phrase.turnedOn": "Turned on",
+  "explain.action.phrase.turnedOff": "Turned off",
+  "explain.action.phrase.dimmed": "Dimmed",
   // explain.run.back — FE-114 D4: the run page's back link (a two-word JSX text node; HERO-1d D4's row
   // pattern, beside `explain.whyNot.back`).
   "explain.run.back": "← All runs",
@@ -241,7 +245,8 @@ const en = {
   "explain.hub.not.text": "Expected a light to come on and it didn't? Find out whether a condition was false, nothing set it off, or the device never confirmed.",
   "explain.hub.not.go": "Diagnose an automation →",
   "explain.hub.autos.noRuns": "No runs yet",
-  "explain.hub.autos.noRunsSinceLoad": "Hasn't run since it was loaded",
+  // FE-115 D3: `explain.hub.autos.noRunsSinceLoad` RETIRED — "since it was loaded" is not something the wire can vouch
+  // for (`lastRunId` null is "no runs on record", which is what renders; the hub's ruling).
   // HERO-1d D3 (2026-09-13): the subhead and the two per-automation links HERO-1c filed (the link's
   // `&rsquo;` is this ’, asserted on the rendered text).
   "explain.hub.autos.title": "Your automations",
@@ -272,6 +277,37 @@ const en = {
   "explain.condition.line": "The rule \"{condition}\" {verdict}.",
   "explain.condition.atTheTime": "At the time",
   "explain.condition.noReading": "{entity} {attr} had no reading yet.",
+  // explain.condition.def.* — FE-115 D1 (2026-09-19, EXPLAIN-4 landed): the v1.1.5 `conditions[].definition`
+  // rendered as ONE sentence under the condition row by format.definitionSentence — the frame, one clause per
+  // emitter permit (ConditionDefinitionRenderer's `type` strings, the key's suffix), the keyed connectives, the
+  // empty-group / unknown-type arms and the null (not-recorded) sentence. Slots are filled AS RECORDED: `{above}`
+  // / `{below}` are the wire's numbers (no unit is invented), `{after}` / `{before}` its "HH:MM" strings, `{value}`
+  // its string (never coerced); `{entity}` is the selector — a single-entity one through the registry census,
+  // a group selector as recorded. `.join` rows are connectives, `.group` wraps a compound operand.
+  "explain.condition.def.frame": "It checks that {clause}.",
+  "explain.condition.def.notRecorded": "What this rule checked isn't on record for this run.",
+  "explain.condition.def.StateCondition": "{entity} {attribute} is \"{value}\"",
+  "explain.condition.def.StateCondition.noValue": "{entity} {attribute} matches a value that isn't recorded",
+  "explain.condition.def.NumericCondition.between": "{entity} {attribute} is above {above} and below {below}",
+  "explain.condition.def.NumericCondition.above": "{entity} {attribute} is above {above}",
+  "explain.condition.def.NumericCondition.below": "{entity} {attribute} is below {below}",
+  "explain.condition.def.NumericCondition.unbounded": "{entity} {attribute} has no bounds recorded",
+  "explain.condition.def.TimeCondition.between": "the time is after {after} and before {before}",
+  "explain.condition.def.TimeCondition.after": "the time is after {after}",
+  "explain.condition.def.TimeCondition.before": "the time is before {before}",
+  "explain.condition.def.TimeCondition.unbounded": "the time window isn't recorded",
+  "explain.condition.def.AndCondition.join": " and ",
+  "explain.condition.def.OrCondition.join": " or ",
+  "explain.condition.def.NotCondition": "it is not true that {clause}",
+  "explain.condition.def.list.join": ", ",
+  "explain.condition.def.group": "({clause})",
+  "explain.condition.def.emptyGroup": "an empty group of rules",
+  "explain.condition.def.emptyGroup.sentence": "This rule is an empty group — it has nothing to check.",
+  "explain.condition.def.ZoneCondition": "This is a zone rule — this hub doesn't record its details yet.",
+  "explain.condition.def.ZoneCondition.clause": "a zone rule (details not recorded)",
+  "explain.condition.def.unknown": "This is a rule of kind \"{type}\" — this dashboard can't describe it yet.",
+  "explain.condition.def.unknown.clause": "a rule of kind \"{type}\" (not described yet)",
+  "explain.condition.def.entity.unnamed": "an unnamed device",
   // explain.action.*
   "explain.action.detail.command": "Command",
   "explain.action.detail.reason": "Recorded reason",

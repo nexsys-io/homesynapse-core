@@ -9,6 +9,7 @@
 import type {
   Availability,
   CausalChain,
+  ConditionDefinition,
   IntegrationHealth,
   NonFiringVerdict,
   Origin,
@@ -53,9 +54,9 @@ export const UNNAMED_TARGET = t('explain.slot.target.unnamed');
 export const CASCADE_PARENT_UNRECORDED = t('explain.cascade.parentUnrecorded');
 
 /** The genuinely-empty chain (a real, successful response with nothing planned):
- *  an explicit, calm statement — nothing failed, and nothing is hidden. */
-export const EMPTY_CHAIN_NOTE =
-  'This run finished without recording any steps — no conditions were checked and no commands were sent.';
+ *  an explicit, calm statement — nothing failed, and nothing is hidden.
+ *  FE-115 D4: the §7 row `explain.chain.empty` is the one home (the FE-114 D8 twin-fold; byte-identical). */
+export const EMPTY_CHAIN_NOTE = t('explain.chain.empty');
 
 /* ---- Names. The v1.1 contract carries an OPTIONAL entity display `name` (additive
    C8, 2026-06-26): prefer it when present; fall back to humanizing the entityId.
@@ -483,6 +484,87 @@ export function commandVerbs(command: string | null | undefined): { verb: string
   }
   if (command == null || command === '') return { verb: hs('explain.slot.verb.null'), verbPast: hs('explain.slot.verbPast.null') };
   return { verb: fill(hs('explain.slot.verb.unknown'), { command }), verbPast: fill(hs('explain.slot.verbPast.unknown'), { command }) };
+}
+
+/* ---- FE-115 D1 (2026-09-19) — the v1.1.5 `conditions[].definition` in words (EXPLAIN-4 landed).
+ * `definitionSentence` is the ONLY place a condition definition becomes a sentence; every word is a §7 row
+ * (`explain.condition.def.*`); the function is PURE (no time, no state, no registry — the caller passes a
+ * label function for the selector) and TOTAL (every input returns a string: null → the not-recorded row, a
+ * `type` this build does not know → the unknown row with the raw type shown as recorded, never a throw).
+ * The emitter's permits (ConditionDefinitionRenderer.render): StateCondition · NumericCondition ·
+ * TimeCondition · AndCondition · OrCondition · NotCondition · ZoneCondition. Slots are filled AS RECORDED —
+ * `above` / `below` are the wire's numbers (no unit invented), `after` / `before` its "HH:MM" strings, `value`
+ * its string (never coerced). The arity is the wire's: a compound with one operand renders that operand; with
+ * none, the empty-group row; a NotCondition with several operands renders them as a plain list under the
+ * negation (no and/or is asserted). An and/or operand inside and/or is grouped in parentheses. ---- */
+
+/** The whole sentence for a definition (or its null). `label` names a single-entity selector. */
+export function definitionSentence(def: ConditionDefinition | null, label: (selector: string) => string = (s) => s): string {
+  if (def === null) return hs('explain.condition.def.notRecorded');
+  switch (def.type) {
+    case 'ZoneCondition':
+      return hs('explain.condition.def.ZoneCondition');
+    case 'AndCondition':
+    case 'OrCondition':
+    case 'NotCondition':
+      if (def.children.length === 0) return hs('explain.condition.def.emptyGroup.sentence');
+      break;
+    case 'StateCondition':
+    case 'NumericCondition':
+    case 'TimeCondition':
+      break;
+    default:
+      return fill(hs('explain.condition.def.unknown'), { type: def.type });
+  }
+  return fill(hs('explain.condition.def.frame'), { clause: definitionClause(def, label) });
+}
+
+/** One operand as a clause (no frame, no final period) — recursive through `children`. */
+function definitionClause(def: ConditionDefinition, label: (selector: string) => string): string {
+  const entity = def.selector === null ? hs('explain.condition.def.entity.unnamed') : label(def.selector);
+  const attribute = def.attribute ?? NOT_RECORDED;
+  switch (def.type) {
+    case 'StateCondition':
+      return def.value === null
+        ? fill(hs('explain.condition.def.StateCondition.noValue'), { entity, attribute })
+        : fill(hs('explain.condition.def.StateCondition'), { entity, attribute, value: def.value });
+    case 'NumericCondition': {
+      const above = def.above === null ? null : String(def.above);
+      const below = def.below === null ? null : String(def.below);
+      if (above !== null && below !== null) return fill(hs('explain.condition.def.NumericCondition.between'), { entity, attribute, above, below });
+      if (above !== null) return fill(hs('explain.condition.def.NumericCondition.above'), { entity, attribute, above });
+      if (below !== null) return fill(hs('explain.condition.def.NumericCondition.below'), { entity, attribute, below });
+      return fill(hs('explain.condition.def.NumericCondition.unbounded'), { entity, attribute });
+    }
+    case 'TimeCondition':
+      if (def.after !== null && def.before !== null) return fill(hs('explain.condition.def.TimeCondition.between'), { after: def.after, before: def.before });
+      if (def.after !== null) return fill(hs('explain.condition.def.TimeCondition.after'), { after: def.after });
+      if (def.before !== null) return fill(hs('explain.condition.def.TimeCondition.before'), { before: def.before });
+      return hs('explain.condition.def.TimeCondition.unbounded');
+    case 'AndCondition':
+    case 'OrCondition': {
+      if (def.children.length === 0) return hs('explain.condition.def.emptyGroup');
+      const join = hs(def.type === 'AndCondition' ? 'explain.condition.def.AndCondition.join' : 'explain.condition.def.OrCondition.join');
+      return def.children.map((c) => groupedClause(c, label)).join(join);
+    }
+    case 'NotCondition': {
+      if (def.children.length === 0) return hs('explain.condition.def.emptyGroup');
+      const inner = def.children.map((c) => groupedClause(c, label)).join(hs('explain.condition.def.list.join'));
+      return fill(hs('explain.condition.def.NotCondition'), { clause: inner });
+    }
+    case 'ZoneCondition':
+      return hs('explain.condition.def.ZoneCondition.clause');
+    default:
+      return fill(hs('explain.condition.def.unknown.clause'), { type: def.type });
+  }
+}
+
+/** An and/or operand inside a compound is parenthesized so the connectives stay unambiguous; a leaf or a
+ *  negation is not (it carries no connective of its own). */
+function groupedClause(def: ConditionDefinition, label: (selector: string) => string): string {
+  const clause = definitionClause(def, label);
+  const needsGroup = (def.type === 'AndCondition' || def.type === 'OrCondition') && def.children.length > 1;
+  return needsGroup ? fill(hs('explain.condition.def.group'), { clause }) : clause;
 }
 
 /** The `{time}` slot: date-qualified clock time, or the honest unparseable arm. */

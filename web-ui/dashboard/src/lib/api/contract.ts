@@ -11,7 +11,26 @@
  *   B-class = FROZEN-UNBUILT (mock to these shapes; Core implements TO them).
  */
 
-export const CONTRACT_VERSION = 'v1.1.4-2026-09-13' as const;
+export const CONTRACT_VERSION = 'v1.1.5-2026-09-19' as const;
+/* v1.1.5 (Nick's `EXPLAIN: three`, the THIRD bump; landed core-side 2026-09-14 EXPLAIN-114c at e56f555; the
+ * freeze doc's stamp is v1.1.5; the FE mirror is FE-115, 2026-09-19 — the pin's date is the mirror's). The same
+ * four-constraint law. ONE ADDITIVE key on ONE read, zero changes to any existing field/casing/nesting/order:
+ *   - causal-chain `conditions[].definition: ConditionDefinition | null` (5th, after observedState) — the
+ *     condition as STRUCTURED DATA from the registry definition the run ran under, a nested object in EXACTLY
+ *     the order type · selector · attribute · value · above · below · after · before · children (recursive;
+ *     `children` is ALWAYS an array, `[]` for a leaf, never null — GetRunCausalChainEndpoint.definitionMap
+ *     :178–:195, RunExplanation.ConditionDefinitionView :203–:206). PRESENT in every v1.1.5 payload; JSON null
+ *     when the projection cannot VOUCH for it (the registry no longer holds the run's definition by hash, the
+ *     automation is gone, or conditionIndex is out of range — StandardExplanationService.buildConditions).
+ *   - `type` is the definition's simple class name — `ConditionDefinitionRenderer.render` (the sealed permits:
+ *     StateCondition · NumericCondition · TimeCondition · AndCondition · OrCondition · NotCondition ·
+ *     ZoneCondition); an OPEN vocabulary to this mirror — a name it does not know renders as recorded.
+ *   - `above` / `below` are NUMBERS on the wire (Double); `after` / `before` are "HH:MM" strings; `value` is a
+ *     string as recorded (it may look numeric — never coerced); `selector` is ONE string.
+ * A pre-v1.1.5 hub omits the key (lawful): the mirror marks it OPTIONAL and the validators enforce the TRI-STATE
+ * (absent passes · null passes · a present key must be the typed object). NO LIVE v1.1.5 CAUSAL-CHAIN CAPTURE
+ * exists in the corpus — the H8-a bodies (2026-09-19) are entities / automations / non-firing only — so this key
+ * is MIRRORED, not VERIFIED (H8): the live-wire bar for it is owed to the next sitting. */
 /* v1.1.4 (HERO-0 §3 / Nick's `EXPLAIN: three`; landed core-side 2026-09-12 EXPLAIN-114a at
  * 5f918c7 with its R3 correction, 2026-09-13 EXPLAIN-114b at fed99e8 wire byte-identical; the
  * freeze doc's amendment date is the 13th; the FE mirror is FE-114). The same four-constraint
@@ -40,7 +59,7 @@ export const CONTRACT_VERSION = 'v1.1.4-2026-09-13' as const;
  * (lawful): the mirror marks them OPTIONAL and the validators enforce the TRI-STATE (absent
  * passes · null passes · a present key must be typed). NO LIVE v1.1.4 CAPTURE exists in the
  * corpus yet — the mirror is MIRRORED, not VERIFIED, until H8's real-wire read (charter §4).
- * v1.1.5 (`conditions[].definition`, EXPLAIN-114c) is NOT read by this mirror — FE-115. */
+ * v1.1.5 (`conditions[].definition`, EXPLAIN-114c) is read since FE-115 — the paragraph above. */
 /* v1.1.3 (docket Row 14 RULED (a) 2026-09-03; landed core-side 2026-09-06, CG-123 at
  * f25291b, the SKIP-VIS shape; the FE mirror is FE-113). The same four-constraint law.
  * FOUR ADDITIVE keys across THREE reads, zero changes to any existing field/casing/
@@ -358,6 +377,29 @@ export interface CausalTrigger {
   firingValue: string | null;
 }
 
+/** v1.1.5 ADDITIVE (EXPLAIN-114c; FE-115): one condition definition as the emitter renders it —
+ *  `RunExplanation.ConditionDefinitionView` through `GetRunCausalChainEndpoint.definitionMap` (:178–:195),
+ *  a flat nine-key shape that covers every permit of the sealed `ConditionDefinition` hierarchy: the
+ *  components a permit does not carry are null; `children` is ALWAYS an array (`[]` for a leaf, never
+ *  null) and recursive for AndCondition / OrCondition (≥ 2 operands in practice) and NotCondition (one).
+ *  `type` is the definition's simple class name (`ConditionDefinitionRenderer.render`: StateCondition ·
+ *  NumericCondition · TimeCondition · AndCondition · OrCondition · NotCondition · ZoneCondition) — an OPEN
+ *  vocabulary to this mirror. `selector` is ONE string (an entity ULID, a slug, `<kind>:<value>/<roles>`
+ *  for area / label / type / tag, compound parts joined by `+`). `above` / `below` are numbers (Double);
+ *  `after` / `before` are "HH:MM" strings; `value` is the recorded string, never coerced. Readonly and
+ *  recursive: the mirror never mutates what the wire carried. */
+export interface ConditionDefinition {
+  readonly type: string;
+  readonly selector: string | null;
+  readonly attribute: string | null;
+  readonly value: string | null;
+  readonly above: number | null;
+  readonly below: number | null;
+  readonly after: string | null;
+  readonly before: string | null;
+  readonly children: readonly ConditionDefinition[];
+}
+
 export interface CausalCondition {
   expression: string;
   evaluated: boolean;
@@ -365,6 +407,13 @@ export interface CausalCondition {
   /** `value` REQUIRED-NULLABLE (FE-NULL-1, HERO-0 F2 2026-09-06): null when the entity had no
    *  value for the attribute at evaluation — RunExplanation.java:137 ("or null if unreported"). */
   observedState: { entityId: string; attribute: string; value: string | null }[];
+  /** v1.1.5 ADDITIVE (EXPLAIN-114c; 5th, after observedState): the condition as structured data from the
+   *  registry definition the run ran under, or JSON null when the projection cannot VOUCH for it (the
+   *  registry's definition no longer hashes to the run's stamped `definitionHash`, the automation is gone,
+   *  or `conditionIndex` is out of range — StandardExplanationService.buildConditions; never a guess).
+   *  PRESENT in every v1.1.5 payload; OPTIONAL = absent on a pre-v1.1.5 hub (the tri-state). Rendered by
+   *  format.definitionSentence under the condition row (FE-115 D1); absent renders nothing. */
+  definition?: ConditionDefinition | null;
 }
 
 export interface CausalAction {

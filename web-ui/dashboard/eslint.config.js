@@ -57,6 +57,13 @@ export default tseslint.config(
           message: HERO_LINT_MESSAGE,
         },
         { selector: `Property > Literal[value=/${HERO_SENTENCE}/]`, message: HERO_LINT_MESSAGE },
+        /* FE-115 D4 (2026-09-19): the reach closed on the two blind spots FE-114 named — a bare Literal returned from a
+         * function (actionPhrase's verbs) or sitting in a conditional. Baseline at HEAD d1c2cbc with these two: 2 hits
+         * (CausalChain.tsx :369 "Turned on" · :371 "Turned off"; "Dimmed" is one word and outside the pattern, keyed
+         * anyway); the returned tree: 0. The scope stays the six files by law (format.ts's EMPTY_CHAIN_NOTE was keyed
+         * by the twin-fold, not by this rule). Counts: nexsys-hivemind/context/audits/<CT-date>_FE-115_return.md §0. */
+        { selector: `ReturnStatement > Literal[value=/${HERO_SENTENCE}/]`, message: HERO_LINT_MESSAGE },
+        { selector: `ConditionalExpression > Literal[value=/${HERO_SENTENCE}/]`, message: HERO_LINT_MESSAGE },
       ],
     },
   },

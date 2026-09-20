@@ -20,6 +20,10 @@
 import { describe, it, expect } from 'vitest';
 import { WIRE_20260816_NONFIRING_BENCH_HERO as AUG16 } from './wire-2026-08-16-nonfiring';
 import { WIRE_20260820_NEVER_TRIGGERED_BENCH_HERO as AUG20 } from './wire-2026-08-20-never-triggered';
+import { WIRE_20260919_H8A_ENTITIES as SEP19_ENTITIES } from './wire-2026-09-19-h8a-entities';
+import { WIRE_20260919_H8A_AUTOMATIONS as SEP19_AUTOMATIONS } from './wire-2026-09-19-h8a-automations';
+import { WIRE_20260919_H8A_NONFIRING_BENCH_HERO as SEP19 } from './wire-2026-09-19-h8a-nonfiring';
+import { createHash } from 'node:crypto';
 import { validateAgainstContract } from '../shapes';
 
 /* ---- The detector (pure; exported for nothing — fixtures only) ---- */
@@ -209,5 +213,107 @@ describe('the drift detector has teeth (red proof by mutation — the false-verd
   it('a "cleaned up" fixture changes the byte count (the size pin is itself a detector)', () => {
     const mutated = { ...AUG20, data: { ...AUG20.data, extra: 1 } };
     expect(wireBytes(mutated)).not.toBe(396);
+  });
+});
+
+/* ---- FE-115 D2 (2026-09-19) — THE H8-a REAL-WIRE BODIES (P4, the live-wire bar, made permanent) ----
+ * The three bodies the H8-a operator record captured from the SHIPPED artifact 6bd8508 (install-smoke #56;
+ * B2-1 at 2026-09-19T17:30:54Z; hashed at B2-3) are filed verbatim as real-payload fixtures. Each parses
+ * through the validators with ZERO ContractError — at HEAD's validators (d1c2cbc) BEFORE any FE-115 edit,
+ * run as P4 and reported in the FE-115 return §0, and here for good. Their bytes and sha256s are the
+ * record's (§0 (C)); a "cleaned up" fixture changes both. RED at HEAD: the three fixture modules do not
+ * exist (the imports fail). The non-firing capture extends the drift detector by one import: the key set
+ * GROWS by exactly the additive keys and nothing older moves. ---- */
+const sha256 = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
+
+describe('FE-115 D2 — the H8-a real bodies (6bd8508) validate, byte-complete and hash-identical to the record', () => {
+  it('entities.json → A1: 759 B · sha256 29e04def… · Bearer 0 · zero ContractError', () => {
+    expect(() => validateAgainstContract('A1:entities', SEP19_ENTITIES)).not.toThrow();
+    expect(wireBytes(SEP19_ENTITIES)).toBe(759);
+    expect(sha256(SEP19_ENTITIES)).toBe('29e04def1dd6cb3c317a665829284d61bb9700dd543dd80145193344ec005afe');
+    expect(JSON.stringify(SEP19_ENTITIES)).not.toContain('Bearer');
+  });
+  it('automations.json → B3:automations: 629 B · sha256 6fc36639… · Bearer 0 · zero ContractError', () => {
+    expect(() => validateAgainstContract('B3:automations', SEP19_AUTOMATIONS)).not.toThrow();
+    expect(wireBytes(SEP19_AUTOMATIONS)).toBe(629);
+    expect(sha256(SEP19_AUTOMATIONS)).toBe('6fc36639059337f5303ad478cc597405c2388f81f7b713178098f193d3ff22c4');
+    expect(JSON.stringify(SEP19_AUTOMATIONS)).not.toContain('Bearer');
+  });
+  it('nonfiring.json → B3:nonFiring: 581 B · sha256 01bf6f29… · Bearer 0 · zero ContractError', () => {
+    expect(() => validateAgainstContract('B3:nonFiring', SEP19)).not.toThrow();
+    expect(wireBytes(SEP19)).toBe(581);
+    expect(sha256(SEP19)).toBe('01bf6f29112eebb836a7031457bdea677ff21ab43085d0c549422c1a22efa46b');
+    expect(JSON.stringify(SEP19)).not.toContain('Bearer');
+  });
+
+  it('the v1.1.3 keys are on the real wire in BOTH arms: every entity row carries deviceId + lastReported as values (the null arm is NOT on this wire — R-4c D-9); components[].ref is an object twice and null once; triggerRef an object', () => {
+    for (const e of SEP19_ENTITIES.data) {
+      expect(typeof e.deviceId).toBe('string');
+      expect(e.deviceId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+      expect(e.lastReported).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/);
+    }
+    const refs = SEP19_AUTOMATIONS.data[0]!.components.map((c) => c.ref);
+    expect(refs.filter((r) => r === null).length).toBe(1);
+    expect(refs.filter((r) => r && r.type === 'entity' && /^[0-9A-HJKMNP-TV-Z]{26}$/.test(r.id)).length).toBe(2);
+    expect(SEP19.data.triggerRef).toEqual({ type: 'entity', id: '01M1PRQN03X8H4MNEZQ62F76F1' });
+  });
+
+  it('the v1.1.4 keys are on the real wire: definitionKey (64 hex) on the automation AND the non-firing read, EQUAL for the same definition (DP-5); disabledAt / disabledReason present-null on a non-DISABLED verdict; NO v1.1.5 key (6bd8508 predates 114c)', () => {
+    const key = SEP19_AUTOMATIONS.data[0]!.definitionKey;
+    expect(key).toMatch(/^[0-9a-f]{64}$/);
+    expect(SEP19.data.definitionKey).toBe(key);
+    expect(SEP19.data.disabledAt).toBeNull();
+    expect(SEP19.data.disabledReason).toBeNull();
+    expect(Object.keys(SEP19.data)).toEqual([
+      'automationId', 'automationName', 'enabled', 'verdict', 'lastRelevantRunId', 'explanation', 'triggerSummary',
+      'lastEvaluation', 'noCommandsIssued', 'triggerRef', 'disabledAt', 'disabledReason', 'definitionKey',
+    ]);
+    expect(Object.keys(SEP19_AUTOMATIONS.data[0]!)).toEqual(['automationId', 'name', 'enabled', 'components', 'lastRunId', 'definitionKey']);
+  });
+
+  it('the envelope dialect as observed: the entities list carries NO pagination key; the automations list does (recorded, not corrected)', () => {
+    expect('pagination' in SEP19_ENTITIES).toBe(false);
+    expect(SEP19_AUTOMATIONS.pagination).toEqual({ nextCursor: null, hasMore: false, limit: 50 });
+    expect(SEP19_ENTITIES.meta.viewPosition).toBe(411);
+    expect(SEP19_AUTOMATIONS.meta.viewPosition).toBe(411);
+    expect(SEP19.meta.viewPosition).toBe(411);
+  });
+});
+
+describe('the non-firing wire is dialect-stable across THREE deployments (2026-08-20 → 2026-09-19, a v1.1.4 emitter): the key set grows ADDITIVELY and nothing older moves', () => {
+  /** The additive keys between the two captures — v1.1.3 triggerRef (an object, so its two leaves walk too) + the v1.1.4 trio. */
+  const ADDED = ['data.definitionKey', 'data.disabledAt', 'data.disabledReason', 'data.triggerRef', 'data.triggerRef.id', 'data.triggerRef.type'];
+
+  it('the key-set difference is EXACTLY the additive keys — every key of 08-20 is present in 09-19', () => {
+    const v = compareCaptures(AUG20, SEP19);
+    expect(v.keySetDiff).toEqual(ADDED);
+    for (const p of paths(AUG20).keys()) expect(paths(SEP19).has(p), p).toBe(true);
+  });
+  it('IDENTICAL null-ness on every common key (lastEvaluation · noCommandsIssued · lastRelevantRunId still null on a v1.1.4 wire)', () => {
+    expect(compareCaptures(AUG20, SEP19).nullnessDiff).toEqual([]);
+    for (const p of ['data.lastEvaluation', 'data.noCommandsIssued', 'data.lastRelevantRunId']) expect(paths(SEP19).get(p)?.kind).toBe('null');
+  });
+  it('the differing VALUES on the common keys are EXACTLY the lawful set {automationId, viewPosition, timestamp}', () => {
+    expect(compareCaptures(AUG20, SEP19).valueDiff).toEqual(LAWFUL_VALUE_DIFF);
+  });
+  it('the common keys keep their ORDER — the additive keys are APPENDED (the freeze law), never interleaved', () => {
+    const old = Object.keys(AUG20.data);
+    expect(Object.keys(SEP19.data).slice(0, old.length)).toEqual(old);
+    expect(compareCaptures(AUG20, SEP19).orderDiff).toEqual(['data']); // the data object's key list grew — the one lawful order difference
+    expect(Object.keys(SEP19.meta)).toEqual(Object.keys(AUG20.meta));
+  });
+  it('the automation identity re-minted a third time; the name and the hub\'s explanation sentence did not', () => {
+    expect(SEP19.data.automationId).not.toBe(AUG20.data.automationId);
+    expect(SEP19.data.automationName).toBe(AUG20.data.automationName);
+    expect(SEP19.data.explanation).toBe(AUG20.data.explanation);
+    expect(SEP19.data.triggerSummary).toBe(AUG20.data.triggerSummary);
+  });
+  it('and the detector still has teeth on the new pair: an older key moved or dropped fails the named arm', () => {
+    const { enabled: _e, ...rest } = SEP19.data;
+    void _e;
+    const dropped = { ...SEP19, data: rest };
+    expect(compareCaptures(AUG20, dropped).keySetDiff).toContain('data.enabled');
+    const flipped = { ...SEP19, data: { ...SEP19.data, noCommandsIssued: true } };
+    expect(compareCaptures(AUG20, flipped).nullnessDiff).toEqual(['data.noCommandsIssued']);
   });
 });

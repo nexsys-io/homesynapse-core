@@ -402,6 +402,6 @@ describe('the TypeScript mirror declares the four chain keys required-nullable (
     expect(c.trigger.subjectRef).toBeNull();
     // FE-114 D0: the third home of the version pin (the hub's census named two). Moved with them:
     // 'v1.1.3-2026-09-06' → 'v1.1.4-2026-09-13'. FE-NULL-1's fact stands: ITS rows carried no bump.
-    expect(CONTRACT_VERSION).toBe('v1.1.4-2026-09-13');
+    expect(CONTRACT_VERSION).toBe('v1.1.5-2026-09-19');
   });
 });

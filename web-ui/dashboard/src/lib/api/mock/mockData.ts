@@ -26,6 +26,15 @@ import { BRAND } from '../../i18n';
 
 const T0 = Date.now();
 const iso = (minAgo: number) => new Date(T0 - minAgo * 60_000).toISOString();
+/** An instant `plusMs` after `iso(minAgo)` — a v1.1.4 settledAt / confirmedAt beside its trigger's matchedAt. */
+const isoPlus = (minAgo: number, plusMs: number) => new Date(T0 - minAgo * 60_000 + plusMs).toISOString();
+/* FE-115 D2 — the default mock is a v1.1.5 hub: every v1.1.4 / v1.1.5 key PRESENT on the four hero reads, a value
+ * where the story has one and JSON null elsewhere (never absent; ≥ 1 null per key — H8). The definition keys are
+ * mock values in the DefinitionHashes SHAPE (64 hex), one per automation and EQUAL across the automations /
+ * non-firing / causal-chain reads for the same definition (DP-5) — never a hash of anything real. */
+export const DEFINITION_KEY_EVENING_HALLWAY = '3f1c9a0e7b2d4c6581a3e5f7092b4d6c8e0f1a2b3c4d5e6f708192a3b4c5d6e7';
+export const DEFINITION_KEY_FRONTDOOR_WELCOME = 'a7e2c4d19b0f38657d2e4c6a8f0b1d3e5c7a9f1b2d4e6c8a0b2d4f6e8a1c3e5b';
+export const DEFINITION_KEY_BEDROOM_NIGHTLIGHT = 'c94b1e6d2a7f0538e1c3b5d7f9a2c4e6081b3d5f7a9c1e3b5d7f9a1c3e5b7d9f';
 let vp = 48217;
 const nextVp = () => ++vp;
 
@@ -162,6 +171,7 @@ export const automations: AutomationSummary[] = [
       { type: 'action', summary: 'Turn on Hallway Light', ref: { type: 'entity', id: 'ent_hallway_light' } },
     ],
     lastRunId: 'run_eh_001',
+    definitionKey: DEFINITION_KEY_EVENING_HALLWAY,
   },
   {
     automationId: 'auto_frontdoor_welcome',
@@ -173,6 +183,7 @@ export const automations: AutomationSummary[] = [
       { type: 'action', summary: 'Turn on Living Room Lamp', ref: { type: 'entity', id: 'ent_livingroom_lamp' } },
     ],
     lastRunId: 'run_fd_001',
+    definitionKey: DEFINITION_KEY_FRONTDOOR_WELCOME,
   },
   {
     automationId: 'auto_bedroom_nightlight',
@@ -183,6 +194,7 @@ export const automations: AutomationSummary[] = [
       { type: 'action', summary: 'Dim Bedroom Lamp to 10%', ref: { type: 'entity', id: DANGLING_LAMP_ULID } },
     ],
     lastRunId: null,
+    definitionKey: DEFINITION_KEY_BEDROOM_NIGHTLIGHT,
   },
 ];
 
@@ -242,7 +254,16 @@ export const runs: RunSummary[] = [
  *   run_eh_001 / run_eh_002 are untouched (the happy path + the honest-unconfirmed path).
  * HERO-1b B7 (2026-09-12): the CONFIRMED actions carry `resultOutcome: null` — the live truth
  * (F-R4b-H: command_result is published only on failure); 'acknowledged' beside CONFIRMED was
- * the docketed H8 false value. The hero-states scenario lives in scenarios.ts. */
+ * the docketed H8 false value. The hero-states scenario lives in scenarios.ts.
+ * FE-115 D2 (2026-09-19): the v1.1.4 / v1.1.5 keys PRESENT, in the wire order —
+ *   - actions[]: `settledAt` (the classifying instant) · `confirmedAt` (the state_confirmed instant): the
+ *     CONFIRMED actions carry both; UNCONFIRMED carries settledAt (the timeout) beside confirmedAt null (the
+ *     lawful pair); the SKIPPED command-less action carries settledAt (its completion) beside null;
+ *   - conditions[].definition: the structured rule ("time is after sunset" is the sun's elevation below 0 —
+ *     a NumericCondition on sys_sun) on the three current-instance runs, an AndCondition on run_fd_001, and
+ *     JSON null on run_eh_003 (the OLDEST run: its stamped hash is not on the log, so the projection vouches
+ *     for nothing — `definitionKey` null too);
+ *   - data.definitionKey: the automation's key (equal to the automations / non-firing reads' — DP-5) or null. */
 export const causalChains: Record<string, CausalChain> = {
   // The happy path: motion -> light, CONFIRMED.
   run_eh_001: {
@@ -261,6 +282,7 @@ export const causalChains: Record<string, CausalChain> = {
         evaluated: true,
         result: true,
         observedState: [{ entityId: 'sys_sun', attribute: 'elevation', value: '-6.2°' }],
+        definition: { type: 'NumericCondition', selector: 'sys_sun', attribute: 'elevation', value: null, above: null, below: 0, after: null, before: null, children: [] },
       },
     ],
     actions: [
@@ -273,10 +295,13 @@ export const causalChains: Record<string, CausalChain> = {
         reason: null,
         resultOutcome: null, // HERO-1b B7: confirmed by the device's own report — no verdict row (F-R4b-H; the 'acknowledged' value was the H8 false value)
         settled: true,
+        settledAt: isoPlus(3, 380),
+        confirmedAt: isoPlus(3, 380),
       },
     ],
     outcome: { status: 'COMPLETED', reason: null, durationMs: 412, actionCount: 1, commandCount: 1 },
     cascade: { parentRunId: null, depth: 0 },
+    definitionKey: DEFINITION_KEY_EVENING_HALLWAY,
   },
   // The honest path: sent, but the device never confirmed.
   run_eh_002: {
@@ -295,6 +320,7 @@ export const causalChains: Record<string, CausalChain> = {
         evaluated: true,
         result: true,
         observedState: [{ entityId: 'sys_sun', attribute: 'elevation', value: '-9.1°' }],
+        definition: { type: 'NumericCondition', selector: 'sys_sun', attribute: 'elevation', value: null, above: null, below: 0, after: null, before: null, children: [] },
       },
     ],
     actions: [
@@ -307,6 +333,8 @@ export const causalChains: Record<string, CausalChain> = {
         reason: 'No state_confirmed within 5s timeout',
         resultOutcome: null,
         settled: true,
+        settledAt: isoPlus(46, 5021), // the timeout's instant
+        confirmedAt: null, // settled: true beside confirmedAt: null — the lawful pair
       },
     ],
     outcome: {
@@ -317,6 +345,7 @@ export const causalChains: Record<string, CausalChain> = {
       commandCount: 1,
     },
     cascade: { parentRunId: null, depth: 0 },
+    definitionKey: DEFINITION_KEY_EVENING_HALLWAY,
   },
   // Skipped: condition false (it was daytime). FE-NULL-1: the triggering event is outside
   // this run's correlation (subjectRef null) and the skipped action never issued a command.
@@ -336,6 +365,7 @@ export const causalChains: Record<string, CausalChain> = {
         evaluated: true,
         result: false,
         observedState: [{ entityId: 'sys_sun', attribute: 'elevation', value: '+24.7°' }],
+        definition: null, // FE-115: the projection vouches for nothing on this prior-instance run (its stamped hash is not on the log)
       },
     ],
     actions: [
@@ -348,10 +378,13 @@ export const causalChains: Record<string, CausalChain> = {
         reason: 'Condition not met',
         resultOutcome: null,
         settled: true,
+        settledAt: isoPlus(610, 38), // a command-less action settles at its completion envelope
+        confirmedAt: null,
       },
     ],
     outcome: { status: 'SKIPPED', reason: 'Condition not met: before sunset', durationMs: 38, actionCount: 1, commandCount: 0 },
     cascade: { parentRunId: null, depth: 0 },
+    definitionKey: null, // the log carries no definition hash for this run
   },
   run_fd_001: {
     runId: 'run_fd_001',
@@ -372,6 +405,20 @@ export const causalChains: Record<string, CausalChain> = {
           { entityId: 'sys_sun', attribute: 'elevation', value: '-12.0°' },
           { entityId: 'ent_livingroom_lamp', attribute: 'brightness', value: null },
         ],
+        definition: {
+          type: 'AndCondition',
+          selector: null,
+          attribute: null,
+          value: null,
+          above: null,
+          below: null,
+          after: null,
+          before: null,
+          children: [
+            { type: 'NumericCondition', selector: 'sys_sun', attribute: 'elevation', value: null, above: null, below: 0, after: null, before: null, children: [] },
+            { type: 'NumericCondition', selector: 'ent_livingroom_lamp', attribute: 'brightness', value: null, above: null, below: 20, after: null, before: null, children: [] },
+          ],
+        },
       },
     ],
     actions: [
@@ -384,10 +431,13 @@ export const causalChains: Record<string, CausalChain> = {
         reason: null,
         resultOutcome: null, // HERO-1b B7: confirmed by the device's own report — no verdict row (F-R4b-H; the 'acknowledged' value was the H8 false value)
         settled: true,
+        settledAt: isoPlus(82, 360),
+        confirmedAt: isoPlus(82, 360),
       },
     ],
     outcome: { status: 'COMPLETED', reason: null, durationMs: 389, actionCount: 1, commandCount: 1 },
     cascade: { parentRunId: null, depth: 1 },
+    definitionKey: DEFINITION_KEY_FRONTDOOR_WELCOME,
   },
 };
 
@@ -415,6 +465,10 @@ export const nonFiring: Record<string, NonFiringExplanation> = {
     lastEvaluation: null,
     noCommandsIssued: null,
     triggerRef: null,
+    // v1.1.4 (FE-115 D2): a non-DISABLED verdict — both null; the key never null (the registry answered).
+    disabledAt: null,
+    disabledReason: null,
+    definitionKey: DEFINITION_KEY_EVENING_HALLWAY,
   },
   auto_frontdoor_welcome: {
     automationId: 'auto_frontdoor_welcome',
@@ -427,6 +481,9 @@ export const nonFiring: Record<string, NonFiringExplanation> = {
     lastEvaluation: { at: iso(240), conditionsResult: 'after sunset = false' },
     noCommandsIssued: null,
     triggerRef: { type: 'entity', id: 'ent_frontdoor_contact' },
+    disabledAt: null,
+    disabledReason: null,
+    definitionKey: DEFINITION_KEY_FRONTDOOR_WELCOME,
   },
   auto_bedroom_nightlight: {
     automationId: 'auto_bedroom_nightlight',
@@ -439,6 +496,11 @@ export const nonFiring: Record<string, NonFiringExplanation> = {
     lastEvaluation: { at: null, conditionsResult: null },
     noCommandsIssued: null,
     triggerRef: { type: 'entity', id: 'ent_bedroom_motion' },
+    // v1.1.4 (FE-115 D2): the DISABLED verdict with the auto-disable marker on the log — its instant and reason
+    // (EXPLAIN-8 renders `whyNot.body.disabled.at`: "Turned off 3 hr ago — repeated_failure. …").
+    disabledAt: iso(180),
+    disabledReason: 'repeated_failure',
+    definitionKey: DEFINITION_KEY_BEDROOM_NIGHTLIGHT,
   },
 };
 

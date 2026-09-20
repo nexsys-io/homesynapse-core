@@ -537,3 +537,114 @@ describe('HERO-1d D2 — the condition line, the cascade link, the do-nothing st
     expect(body).toBe(`rejected${key('explain.action.detail.outcome.recovered')}`);
   });
 });
+
+/* ---- FE-115 D1 (2026-09-19) — the v1.1.5 `conditions[].definition` renders as a sentence UNDER the observed
+ * state (a hint line after the "At the time" detail), through the ONE pure function `definitionSentence`; the L1
+ * condition line is byte-identical to HEAD (the wire's `expression` is still the type). THE TRI-STATE on screen:
+ * key ABSENT (a pre-v1.1.5 hub) → nothing added, HEAD's bytes; PRESENT-null → the not-recorded sentence;
+ * PRESENT-object → the sentence. RED at HEAD: no sentence exists for any arm. ---- */
+describe('FE-115 D1 — the condition row shows the definition sentence under the observed state (tri-state)', () => {
+  const lineOf = (li: Element | null) => li?.querySelector('div > div > span')?.textContent ?? '';
+  const hintsOf = (li: Element | null) => Array.from(li?.querySelectorAll(':scope > div > div > p') ?? []).map((p) => p.textContent ?? '');
+  const cond = (over: Partial<Chain['conditions'][number]> = {}): Chain['conditions'][number] => ({
+    expression: 'StateCondition',
+    evaluated: true,
+    result: true,
+    observedState: [{ entityId: 'ent_hallway_light', attribute: 'power', value: 'on' }],
+    ...over,
+  });
+  const def = {
+    type: 'StateCondition',
+    selector: 'ent_hallway_light',
+    attribute: 'power',
+    value: 'on',
+    above: null,
+    below: null,
+    after: null,
+    before: null,
+    children: [] as never[],
+  };
+  const chainWith = (c: Chain['conditions'][number]) => liveNullChain({ automationName: 'Named', conditions: [c] });
+
+  it('PRESENT-object → the sentence, after the "At the time" detail; the L1 line unchanged', () => {
+    const { container } = render(<CausalChain chain={chainWith(cond({ definition: def }))} />);
+    const li = container.querySelector('li[data-kind="condition"]')!;
+    expect(lineOf(li)).toBe('The rule "StateCondition" was true.');
+    expect(hintsOf(li)).toEqual(['It checks that Hallway Light power is "on".']);
+    // order: the detail first, the sentence under it
+    const kids = Array.from(li.querySelector(':scope > div > div:nth-child(2)')!.children).map((e) => e.tagName.toLowerCase());
+    expect(kids).toEqual(['details', 'p']);
+  });
+  it('PRESENT-null → the keyed not-recorded sentence (the projection could not vouch; nothing invented)', () => {
+    const { container } = render(<CausalChain chain={chainWith(cond({ definition: null }))} />);
+    const li = container.querySelector('li[data-kind="condition"]')!;
+    expect(hintsOf(li)).toEqual([t('explain.condition.def.notRecorded' as MessageKey)]);
+    expect(hintsOf(li)).toEqual(["What this rule checked isn't on record for this run."]);
+  });
+  it('ABSENT (a pre-v1.1.5 hub) → no sentence at all: the row is HEAD\'s bytes [the honesty law: absent ≠ null]', () => {
+    const c = cond();
+    expect('definition' in c).toBe(false);
+    const { container } = render(<CausalChain chain={chainWith(c)} />);
+    const li = container.querySelector('li[data-kind="condition"]')!;
+    expect(hintsOf(li)).toEqual([]);
+    expect(li.textContent).not.toContain('It checks that');
+    expect(li.textContent).not.toContain("isn't on record for this run");
+  });
+  it('an UNKNOWN type renders the raw type as recorded — never a throw', () => {
+    const { container } = render(<CausalChain chain={chainWith(cond({ definition: { ...def, type: 'PresenceCondition' } }))} />);
+    const li = container.querySelector('li[data-kind="condition"]')!;
+    expect(hintsOf(li)).toEqual(['This is a rule of kind "PresenceCondition" — this dashboard can\'t describe it yet.']);
+  });
+  it('a compound renders recursively; the sentence sits under the row even when there is no observed state (no detail → the sentence alone)', () => {
+    const time = { ...def, type: 'TimeCondition', selector: null, attribute: null, value: null, after: '18:00', before: null };
+    const { container } = render(<CausalChain chain={chainWith(cond({ observedState: [], definition: { ...def, type: 'AndCondition', selector: null, attribute: null, value: null, children: [def, time] as never[] } }))} />);
+    const li = container.querySelector('li[data-kind="condition"]')!;
+    expect(li.querySelector('details')).toBeNull();
+    expect(hintsOf(li)).toEqual(['It checks that Hallway Light power is "on" and the time is after 18:00.']);
+  });
+  it('a ULID selector goes through the registry census: named when resolved, LOUD when dangling (the observed-state rule), as recorded for a group selector', () => {
+    const ulid = '01KX1PB9AAB4VB3E10BD477TVX';
+    const resolve = makeRefResolver([{ entityId: 'ent_hallway_light', name: 'Hall Light', availability: 'AVAILABLE', stale: false }], true);
+    const named = render(<CausalChain chain={chainWith(cond({ definition: def }))} resolveRef={resolve} />);
+    expect(hintsOf(named.container.querySelector('li[data-kind="condition"]'))).toEqual(['It checks that Hall Light power is "on".']);
+    cleanup();
+    const loud = render(<CausalChain chain={chainWith(cond({ definition: { ...def, selector: ulid } }))} resolveRef={resolve} />);
+    expect(hintsOf(loud.container.querySelector('li[data-kind="condition"]'))).toEqual([`It checks that ${ulid} (not in this hub’s registry) power is "on".`]);
+    cleanup();
+    const group = render(<CausalChain chain={chainWith(cond({ definition: { ...def, selector: 'area:kitchen/PRIMARY' } }))} resolveRef={resolve} />);
+    expect(hintsOf(group.container.querySelector('li[data-kind="condition"]'))).toEqual(['It checks that area:kitchen/PRIMARY power is "on".']);
+  });
+  it('the v115-keys scenario renders every chain without throwing (the fixture-blindness sweep, extended)', () => {
+    const d = SCENARIOS.find((s) => s.id === 'v115-keys')!.build();
+    for (const chain of Object.values(d.causalChains)) {
+      expect(() => render(<CausalChain chain={chain} />)).not.toThrow();
+      cleanup();
+    }
+  });
+});
+
+/* ---- FE-115 D4 (2026-09-19) — actionPhrase's three verbs are §7 rows (`explain.action.phrase.*`), byte-identical:
+ * the unnamed-target line and the loud dangling-target line read them. GREEN at HEAD on the bytes (preservation,
+ * disclosed); RED at HEAD on the key half (no such key). ---- */
+describe('FE-115 D4 — the action phrase verbs read the catalog; the lines are HEAD\'s bytes', () => {
+  const lineOf = (li: Element | null) => li?.querySelector('div > div > span')?.textContent ?? '';
+  const unnamed = (command: string) =>
+    liveNullChain({ automationName: 'Named', actions: [liveNullAction({ command, targetRef: null, outcome: 'UNCONFIRMED', settled: true })] });
+  it.each([
+    ['turn_on', 'explain.action.phrase.turnedOn', 'Turned on'],
+    ['turn_off', 'explain.action.phrase.turnedOff', 'Turned off'],
+    ['dim', 'explain.action.phrase.dimmed', 'Dimmed'],
+  ])('%s → the unnamed-target line starts with the keyed verb (%s = "%s")', (command, key, literal) => {
+    const { container } = render(<CausalChain chain={unnamed(command)} />);
+    const line = lineOf(container.querySelector('li[data-kind="action"]'));
+    expect(line).toBe(`${literal} ${UNNAMED_TARGET}.`);
+    expect(line).toBe(`${t(key as MessageKey)} ${UNNAMED_TARGET}.`);
+  });
+  it('the loud dangling-target line keeps its bytes with the keyed verb', () => {
+    const ulid = '01KX1PB9AAB4VB3E10BD477TVX';
+    const resolve = makeRefResolver([{ entityId: 'ent_hallway_light', availability: 'AVAILABLE', stale: false }], true);
+    const chain = liveNullChain({ automationName: 'Named', actions: [liveNullAction({ command: 'turn_off', targetRef: { type: 'ENTITY', id: ulid } })] });
+    const { container } = render(<CausalChain chain={chain} resolveRef={resolve} />);
+    expect(lineOf(container.querySelector('li[data-kind="action"]'))).toBe(`Turned off entity ${ulid} — not in this hub’s registry.`);
+  });
+});

@@ -12,6 +12,7 @@ import {
   causalSentence,
   danglingTargetLine,
   danglingTriggerLine,
+  EMPTY_CHAIN_NOTE,
   heroCopy,
   labelFor,
   lastReportedCell,
@@ -30,7 +31,9 @@ import {
   UNRESOLVED_REF_PHRASE,
   UNRESOLVED_REF_PILL,
   verdictMeta,
+  definitionSentence,
 } from './format';
+import type { ConditionDefinition } from './api/contract';
 import { causalChains } from './api/mock/mockData';
 import { BRAND, t } from './i18n';
 
@@ -466,5 +469,113 @@ describe('FE-114 D8 — the twins read the catalog', () => {
     expect(runName(null)).toBe('An earlier automation');
     expect(noReadingLine('Sun', 'elevation')).toBe(`Sun elevation ${NO_READING_YET}`);
     expect(noReadingLine('Sun', 'elevation')).toBe('Sun elevation had no reading yet.');
+  });
+});
+
+/* ---- FE-115 D1 (2026-09-19) — `definitionSentence`: the ONE place a v1.1.5 `conditions[].definition` becomes
+ * words. Pure (no time, no state) and TOTAL (every input returns a string); every word is a §7 row
+ * (`explain.condition.def.*`); the emitter's `type` strings are ConditionDefinitionRenderer's seven permits and
+ * anything else renders AS RECORDED, never a throw. RED at HEAD: the function does not exist
+ * (`grep -rn definitionSentence src` = 0). ---- */
+describe('FE-115 D1 — definitionSentence renders the v1.1.5 condition definition from the catalog', () => {
+  const leaf = (over: Partial<ConditionDefinition> = {}): ConditionDefinition => ({
+    type: 'StateCondition',
+    selector: 'ent_hallway_light',
+    attribute: 'power',
+    value: 'on',
+    above: null,
+    below: null,
+    after: null,
+    before: null,
+    children: [],
+    ...over,
+  });
+  const numeric = (over: Partial<ConditionDefinition> = {}) => leaf({ type: 'NumericCondition', attribute: 'brightness', value: null, above: 10, below: 80.5, ...over });
+  const time = (over: Partial<ConditionDefinition> = {}) => leaf({ type: 'TimeCondition', selector: null, attribute: null, value: null, after: '18:00', before: '23:30', ...over });
+  const group = (type: string, children: ConditionDefinition[]) => leaf({ type, selector: null, attribute: null, value: null, children });
+  const say = (d: ConditionDefinition | null) => definitionSentence(d, labelFor);
+  const row = (k: string, slots: Record<string, string> = {}) => heroCopy(k as Parameters<typeof heroCopy>[0], slots);
+
+  it('null → the keyed not-recorded sentence (the projection could not vouch; no reason is guessed)', () => {
+    expect(say(null)).toBe("What this rule checked isn't on record for this run.");
+    expect(say(null)).toBe(row('explain.condition.def.notRecorded'));
+  });
+  it('StateCondition → {entity} {attribute} is "{value}", inside the frame; the selector goes through the label function', () => {
+    expect(say(leaf())).toBe('It checks that Hallway Light power is "on".');
+    expect(definitionSentence(leaf())).toBe('It checks that ent_hallway_light power is "on".'); // the default label is the selector as recorded
+  });
+  it('a value that LOOKS numeric is rendered as recorded, never coerced', () => {
+    expect(say(leaf({ attribute: 'brightness', value: '082' }))).toBe('It checks that Hallway Light brightness is "082".');
+  });
+  it('NumericCondition → above and below (numbers as recorded, no unit invented); one bound; no bound', () => {
+    expect(say(numeric())).toBe('It checks that Hallway Light brightness is above 10 and below 80.5.');
+    expect(say(numeric({ below: null }))).toBe('It checks that Hallway Light brightness is above 10.');
+    expect(say(numeric({ above: null }))).toBe('It checks that Hallway Light brightness is below 80.5.');
+    expect(say(numeric({ above: null, below: null }))).toBe('It checks that Hallway Light brightness has no bounds recorded.');
+  });
+  it('TimeCondition → after and before (HH:MM as recorded, no locale conversion); one edge; none', () => {
+    expect(say(time())).toBe('It checks that the time is after 18:00 and before 23:30.');
+    expect(say(time({ before: null }))).toBe('It checks that the time is after 18:00.');
+    expect(say(time({ after: null }))).toBe('It checks that the time is before 23:30.');
+    expect(say(time({ after: null, before: null }))).toBe("It checks that the time window isn't recorded.");
+  });
+  it('AndCondition / OrCondition → the children joined by the keyed connective, in definition order', () => {
+    expect(say(group('AndCondition', [leaf(), time()]))).toBe('It checks that Hallway Light power is "on" and the time is after 18:00 and before 23:30.');
+    expect(say(group('OrCondition', [leaf(), numeric({ below: null }), time({ before: null })]))).toBe(
+      'It checks that Hallway Light power is "on" or Hallway Light brightness is above 10 or the time is after 18:00.',
+    );
+  });
+  it('NotCondition → "it is not true that {clause}"; a compound operand is grouped in parentheses', () => {
+    expect(say(group('NotCondition', [leaf()]))).toBe('It checks that it is not true that Hallway Light power is "on".');
+    expect(say(group('NotCondition', [group('AndCondition', [leaf(), time({ before: null })])]))).toBe(
+      'It checks that it is not true that (Hallway Light power is "on" and the time is after 18:00).',
+    );
+  });
+  it('nesting: an and/or operand inside and/or is grouped; a not operand is not (no ambiguity to resolve)', () => {
+    expect(say(group('AndCondition', [group('OrCondition', [leaf(), leaf({ value: 'off' })]), group('NotCondition', [time({ before: null })])]))).toBe(
+      'It checks that (Hallway Light power is "on" or Hallway Light power is "off") and it is not true that the time is after 18:00.',
+    );
+  });
+  it('the arity is the wire\'s: a compound with ONE child renders that child; with ZERO children the empty-group sentence (top level) or clause (nested)', () => {
+    expect(say(group('AndCondition', [time({ before: null })]))).toBe('It checks that the time is after 18:00.');
+    expect(say(group('OrCondition', []))).toBe('This rule is an empty group — it has nothing to check.');
+    expect(say(group('OrCondition', []))).toBe(row('explain.condition.def.emptyGroup.sentence'));
+    expect(say(group('AndCondition', [leaf(), group('OrCondition', [])]))).toBe('It checks that Hallway Light power is "on" and an empty group of rules.');
+    // a NotCondition the wire gave two operands: rendered as a plain list under the negation — no and/or is asserted
+    expect(say(group('NotCondition', [leaf(), time({ before: null })]))).toBe('It checks that it is not true that Hallway Light power is "on", the time is after 18:00.');
+  });
+  it('ZoneCondition (Tier 2, no operands) → its own honest sentence; as a nested clause the short form', () => {
+    expect(say(leaf({ type: 'ZoneCondition', selector: null, attribute: null, value: null }))).toBe("This is a zone rule — this hub doesn't record its details yet.");
+    expect(say(group('AndCondition', [leaf(), leaf({ type: 'ZoneCondition', selector: null, attribute: null, value: null })]))).toBe(
+      'It checks that Hallway Light power is "on" and a zone rule (details not recorded).',
+    );
+  });
+  it('an UNKNOWN type → the keyed sentence with the raw type shown as recorded — never a throw, never a bare literal', () => {
+    expect(say(leaf({ type: 'PresenceCondition' }))).toBe('This is a rule of kind "PresenceCondition" — this dashboard can\'t describe it yet.');
+    expect(say(leaf({ type: 'PresenceCondition' }))).toBe(row('explain.condition.def.unknown', { type: 'PresenceCondition' }));
+    expect(say(group('OrCondition', [leaf({ type: 'PresenceCondition' }), leaf()]))).toBe(
+      'It checks that a rule of kind "PresenceCondition" (not described yet) or Hallway Light power is "on".',
+    );
+  });
+  it('TOTAL on nulls the emitter never writes: a null selector / attribute / value still returns a sentence, in words', () => {
+    expect(say(leaf({ selector: null }))).toBe('It checks that an unnamed device power is "on".');
+    expect(say(leaf({ attribute: null }))).toBe(`It checks that Hallway Light ${NOT_RECORDED} is "on".`);
+    expect(say(leaf({ value: null }))).toBe("It checks that Hallway Light power matches a value that isn't recorded.");
+    expect(say(numeric({ selector: null, attribute: null }))).toBe(`It checks that an unnamed device ${NOT_RECORDED} is above 10 and below 80.5.`);
+  });
+  it('is pure: the same input renders the same string twice, and the input is not mutated', () => {
+    const d = group('AndCondition', [leaf(), time()]);
+    const snapshot = JSON.stringify(d);
+    expect(say(d)).toBe(say(d));
+    expect(JSON.stringify(d)).toBe(snapshot);
+  });
+});
+
+/* ---- FE-115 D4 (2026-09-19) — EMPTY_CHAIN_NOTE reads the catalog (the FE-114 D8 twin-fold pattern); the screen
+ * bytes unchanged. RED at HEAD: the key does not exist. ---- */
+describe('FE-115 D4 — EMPTY_CHAIN_NOTE is the §7 row explain.chain.empty', () => {
+  it('equals its row, and the row is HEAD\'s literal character for character', () => {
+    expect(EMPTY_CHAIN_NOTE).toBe(t('explain.chain.empty' as Parameters<typeof t>[0]));
+    expect(EMPTY_CHAIN_NOTE).toBe('This run finished without recording any steps — no conditions were checked and no commands were sent.');
   });
 });

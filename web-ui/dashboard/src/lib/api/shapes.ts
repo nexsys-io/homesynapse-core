@@ -91,6 +91,38 @@ function optStr(o: Record<string, unknown>, key: string, path: string): void {
 function isNum(v: unknown, path: string): asserts v is number {
   if (typeof v !== 'number') throw new ContractError(`${path}: expected number, got ${typeof v}`);
 }
+/** Number OR null — the v1.1.5 `above` / `below` bounds (the emitter's Double, or null for a permit
+ *  without them). A numeric STRING is drift, not a bound: the wire never quotes a Double. */
+function numOrNull(v: unknown, path: string): void {
+  if (v !== null && typeof v !== 'number') {
+    throw new ContractError(`${path}: expected number or null, got ${typeof v}`);
+  }
+}
+/** The v1.1.5 condition definition — OBJECT-or-null, the emitter's nine keys ALL PRESENT
+ *  (GetRunCausalChainEndpoint.definitionMap writes every one; a missing key is drift, never
+ *  "optional"), each typed as the emitter types it, `children` an array validated recursively.
+ *  The recursion is BOUNDED: a definition nested deeper than MAX_DEFINITION_DEPTH levels is a
+ *  ContractError (a runaway tree is not a shape this mirror renders). `type` is an OPEN string
+ *  vocabulary — the validator does not close it; the renderer shows an unknown one as recorded. */
+const MAX_DEFINITION_DEPTH = 8;
+function conditionDefinition(v: unknown, path: string, depth = 1): void {
+  if (v === null) return;
+  if (!isObj(v)) throw new ContractError(`${path}: expected condition definition object or null, got ${Array.isArray(v) ? 'array' : typeof v}`);
+  if (depth > MAX_DEFINITION_DEPTH) {
+    throw new ContractError(`${path}: definition nested past depth ${MAX_DEFINITION_DEPTH}`);
+  }
+  isStr(req(v, 'type', path), `${path}.type`);
+  strOrNull(req(v, 'selector', path), `${path}.selector`);
+  strOrNull(req(v, 'attribute', path), `${path}.attribute`);
+  strOrNull(req(v, 'value', path), `${path}.value`);
+  numOrNull(req(v, 'above', path), `${path}.above`);
+  numOrNull(req(v, 'below', path), `${path}.below`);
+  strOrNull(req(v, 'after', path), `${path}.after`);
+  strOrNull(req(v, 'before', path), `${path}.before`);
+  const children = req(v, 'children', path);
+  if (!Array.isArray(children)) throw new ContractError(`${path}.children: expected array (\`[]\` for a leaf, never null), got ${children === null ? 'null' : typeof children}`);
+  children.forEach((c, i) => conditionDefinition(c, `${path}.children[${i}]`, depth + 1));
+}
 function isBool(v: unknown, path: string): asserts v is boolean {
   if (typeof v !== 'boolean') throw new ContractError(`${path}: expected boolean, got ${typeof v}`);
 }
@@ -278,6 +310,10 @@ export const validators: Record<EndpointId, Validator> = {
         isStr(req(o, 'attribute', q), `${q}.attribute`);
         strOrNull(req(o, 'value', q), `${q}.value`);
       });
+      // v1.1.5 ADDITIVE (EXPLAIN-114c, FE-115 D1): the tri-state on the condition's `definition` — absent is
+      // lawful (a pre-v1.1.5 hub); PRESENT must be the emitter's object or null. The object's shape is the
+      // wire's (nine keys, recursive `children`, bounded depth) — see conditionDefinition().
+      if ('definition' in c) conditionDefinition(c.definition, `${p}.definition`);
     });
     const actions = req(d, 'actions', 'B3chain.data');
     if (!Array.isArray(actions)) throw new ContractError('B3chain.actions must be array');

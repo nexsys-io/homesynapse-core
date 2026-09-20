@@ -18,6 +18,7 @@ import type {
   CausalAction,
   CausalChain,
   CausalCondition,
+  ConditionDefinition,
   ConsolidatedHealth,
   DlqStatus,
   EntityDetail,
@@ -51,6 +52,41 @@ export interface MockDataset {
 
 const now = Date.now();
 const iso = (minAgo: number) => new Date(now - minAgo * 60_000).toISOString();
+/** An instant `plusMs` after an ISO instant — the v1.1.4 settledAt / confirmedAt beside a trigger's matchedAt. */
+const after = (isoAt: string, plusMs: number) => new Date(new Date(isoAt).getTime() + plusMs).toISOString();
+/* FE-115 D2: the mock hub is a v1.1.5 hub — every factory carries the v1.1.4 / v1.1.5 keys PRESENT (a value
+ * where the scenario has one, JSON null elsewhere; never absent), so the DevPanel reaches every arm FE-114 and
+ * FE-115 render. `definitionKeyFor` is a deterministic 64-hex string of the DefinitionHashes SHAPE (a mock
+ * value, not a hash of anything real — DP-5's equality between the automations / non-firing / chain reads holds
+ * because the three reads derive it from the same seed). The `legacy-hub` scenario strips the keys again. */
+function definitionKeyFor(seed: string): string {
+  let h = 0x811c9dc5;
+  let out = '';
+  for (let round = 0; round < 8; round++) {
+    for (let i = 0; i < seed.length; i++) {
+      h ^= seed.charCodeAt(i) + round;
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    out += h.toString(16).padStart(8, '0');
+  }
+  return out;
+}
+/** The v1.1.5 structured definition in the emitter's nine-key order (a leaf: children []). */
+function def(type: string, o: Partial<Omit<ConditionDefinition, 'type' | 'children'>> = {}, children: ConditionDefinition[] = []): ConditionDefinition {
+  return {
+    type,
+    selector: o.selector ?? null,
+    attribute: o.attribute ?? null,
+    value: o.value ?? null,
+    above: o.above ?? null,
+    below: o.below ?? null,
+    after: o.after ?? null,
+    before: o.before ?? null,
+    children,
+  };
+}
+/** The default condition's definition — what "time is after sunset" is on the wire: the sun's elevation below 0. */
+const AFTER_SUNSET_DEF = (): ConditionDefinition => def('NumericCondition', { selector: 'sys_sun', attribute: 'elevation', below: 0 });
 let evSeq = 90_000;
 const nextEvVp = () => ++evSeq;
 
@@ -102,13 +138,18 @@ function makeAction(outcome: ActionOutcome, over: Partial<CausalAction> = {}): C
 }
 
 function makeCondition(result: boolean, over: Partial<CausalCondition> = {}): CausalCondition {
-  return {
+  const c: CausalCondition = {
     expression: 'time is after sunset',
     evaluated: true,
     result,
     observedState: [{ entityId: 'sys_sun', attribute: 'elevation', value: result ? '-6.2°' : '+24.7°' }],
+    // v1.1.5 (FE-115 D2): PRESENT on every condition — the structured definition, or null when a scenario says so.
+    definition: AFTER_SUNSET_DEF(),
     ...over,
   };
+  // An explicit `undefined` override means "this payload predates v1.1.5" — strip the key entirely.
+  if (c.definition === undefined) delete c.definition;
+  return c;
 }
 
 interface ChainOpts {
@@ -128,35 +169,65 @@ interface ChainOpts {
   matchedAtIso?: string;
   /** Full actions override (e.g. the E5 multi-action / live-flip chains). */
   actions?: CausalAction[];
+  /** A chain from a hub that predates v1.1.4 / v1.1.5 (the verdict-vocabulary scenario): no definitionKey, no
+   *  condition definition, no settledAt / confirmedAt. Default false — the mock hub is a v1.1.5 hub. */
+  legacy?: boolean;
+  /** The chain's v1.1.4 definitionKey; `null` = the log carries none (the prior-instance class). */
+  definitionKey?: string | null;
 }
 
 function makeChain(runId: string, o: ChainOpts = {}): CausalChain {
   const status = o.status ?? 'COMPLETED';
   const outcome = o.outcome ?? (status === 'SKIPPED' ? 'SKIPPED' : 'CONFIRMED');
   const condResult = o.conditionResult ?? status !== 'SKIPPED';
-  const actions =
-    o.actions ?? [makeAction(outcome, { targetRef: { type: 'ENTITY', id: o.targetId ?? 'ent_hallway_light' } })];
-  return {
+  const matchedAt = o.matchedAtIso ?? iso(o.minAgo ?? 2);
+  const durationMs = o.durationMs ?? 412;
+  const actions = (o.actions ?? [makeAction(outcome, { targetRef: { type: 'ENTITY', id: o.targetId ?? 'ent_hallway_light' } })]).map((a) =>
+    o.legacy ? a : withV114Instants(a, matchedAt, durationMs),
+  );
+  const automationId = o.automationId ?? 'auto_demo';
+  const chain: CausalChain = {
     runId,
-    automationId: o.automationId ?? 'auto_demo',
+    automationId,
     automationName: o.automationName ?? 'Demo automation',
     trigger: {
       type: 'state_changed',
       subjectRef: { type: 'ENTITY', id: o.triggerId ?? 'ent_hallway_motion' },
-      matchedAt: o.matchedAtIso ?? iso(o.minAgo ?? 2),
+      matchedAt,
       firingValue: 'motion = detected',
     },
-    conditions: [makeCondition(condResult)],
+    conditions: [makeCondition(condResult, o.legacy ? { definition: undefined } : {})],
     actions,
     outcome: {
       status,
       reason: o.terminalReason ?? null,
-      durationMs: o.durationMs ?? 412,
+      durationMs,
       actionCount: actions.length,
       commandCount: actions.filter((a) => a.outcome !== 'SKIPPED').length,
     },
     cascade: { parentRunId: o.parentRunId ?? null, depth: o.depth ?? 0 },
   };
+  // v1.1.4 (FE-115 D2): definitionKey PRESENT (appended after cascade — the wire order), the same seed the
+  // automations / non-firing reads use for this automation (DP-5); null when a scenario says the log carries none.
+  if (!o.legacy) chain.definitionKey = o.definitionKey === undefined ? definitionKeyFor(automationId) : o.definitionKey;
+  return chain;
+}
+
+/** v1.1.4 (FE-115 D2): settledAt / confirmedAt PRESENT on a v1.1.2-shaped action that does not already carry
+ *  them, derived from the mode the emitter would have classified: a bare DISPATCHED (unsettled) → both null; a
+ *  CONFIRMED → both the confirmation instant; any other settled outcome → settledAt the classifying instant,
+ *  confirmedAt null (`settled: true` beside `confirmedAt: null` — the lawful pair). A pre-v1.1.2 action (no
+ *  resultOutcome key) is left as it is — a hub that old carries no v1.1.4 key either. */
+function withV114Instants(a: CausalAction, matchedAt: string, durationMs: number): CausalAction {
+  if (!('resultOutcome' in a)) return a;
+  if ('settledAt' in a && 'confirmedAt' in a) return a;
+  const settled = a.settled !== false;
+  const classifyingAt = after(matchedAt, Math.max(50, Math.min(durationMs, 60_000) - 30));
+  // Added IN PLACE (never spread): a scenario's live-flipping action defines its fields as getters
+  // (e5-confirmation), and a copy would freeze them at build time.
+  if (!('settledAt' in a)) a.settledAt = settled ? classifyingAt : null;
+  if (!('confirmedAt' in a)) a.confirmedAt = a.outcome === 'CONFIRMED' ? classifyingAt : null;
+  return a;
 }
 
 function makeRun(runId: string, o: Partial<RunSummary> & { minAgo?: number } = {}): RunSummary {
@@ -228,9 +299,18 @@ function makeNonFiring(
     // v1.1.2 (SKIP-VIS DP-2): null on every non-silent-skip construction
     // (never false); the silent-skip case overrides with true.
     noCommandsIssued: null,
+    // v1.1.4 (FE-115 D2): PRESENT in the wire order after triggerRef — the auto-disable marker's instant and
+    // reason on the DISABLED verdict ("configuration" = DISABLED with no marker on the log, DP-6 — the default
+    // here carries the marker), null on every other verdict; definitionKey never null (the registry answered).
+    disabledAt: verdict === 'DISABLED' ? iso(180) : null,
+    disabledReason: verdict === 'DISABLED' ? 'repeated_failure' : null,
+    definitionKey: definitionKeyFor(automationId),
     ...over,
   };
   if (nf.noCommandsIssued === undefined) delete nf.noCommandsIssued;
+  if (nf.disabledAt === undefined) delete nf.disabledAt;
+  if (nf.disabledReason === undefined) delete nf.disabledReason;
+  if (nf.definitionKey === undefined) delete nf.definitionKey;
   return nf;
 }
 
@@ -245,6 +325,8 @@ function makeAutomation(automationId: string, name: string, over: Partial<Automa
       { type: 'action', summary: 'Turn on Hallway Light' },
     ],
     lastRunId: null,
+    // v1.1.4 (FE-115 D2): PRESENT after lastRunId; the same seed as the chain / non-firing reads (DP-5).
+    definitionKey: definitionKeyFor(automationId),
     ...over,
   };
 }
@@ -419,6 +501,14 @@ function buildE5Confirmation(): MockDataset {
     get settled(): boolean {
       return confirmed();
     },
+    // v1.1.4 (FE-115 D2): the instants flip WITH the outcome — null while a bare DISPATCHED (no classifying
+    // event yet), the confirmation instant once the device reports (EXPLAIN-9's sentence appears live).
+    get settledAt(): string | null {
+      return confirmed() ? new Date(t0 + CT_CONFIRM_MS).toISOString() : null;
+    },
+    get confirmedAt(): string | null {
+      return confirmed() ? new Date(t0 + CT_CONFIRM_MS).toISOString() : null;
+    },
   };
 
   const chains: Record<string, CausalChain> = {
@@ -544,6 +634,7 @@ function buildVerdictVocabulary(): MockDataset {
   runs.push(makeRun('run_vv_confirmed', { ...A, minAgo: 2 }));
   causalChains['run_vv_confirmed'] = makeChain('run_vv_confirmed', {
     ...A,
+    legacy: true, // FE-115 D2: a pre-v1.1.2 wire carries no v1.1.4 / v1.1.5 key either
     minAgo: 2,
     actions: [makeAction('CONFIRMED', { ...PRE_V112 })],
   });
@@ -551,6 +642,7 @@ function buildVerdictVocabulary(): MockDataset {
     runs.push(makeRun(f.id, { ...A, status: 'COMPLETED', minAgo: f.min }));
     causalChains[f.id] = makeChain(f.id, {
       ...A,
+      legacy: true,
       status: 'COMPLETED',
       minAgo: f.min,
       actions: [makeAction('FAILED', { reason: f.reason, ...PRE_V112 })],
@@ -989,6 +1081,96 @@ function buildHeroStates(): MockDataset {
 }
 
 /* ---- The registry ---- */
+/* FE-115 D2 — `legacy-hub`: the default home as a pre-v1.1.4 hub serves it. The ONE scenario that keeps the
+ * ABSENT arm of every v1.1.4 / v1.1.5 key reachable (the tri-state's third state; the two recorded 2026-08
+ * fixtures are this era on the non-firing read). The keys are STRIPPED (never nulled) from a deep copy of the
+ * default dataset; the v1.1.2 / v1.1.3 keys stay — a v1.1.3 hub, not a v1.1 one. */
+function buildLegacyHub(): MockDataset {
+  const d = structuredClone(defaultDataset);
+  for (const c of Object.values(d.causalChains)) {
+    delete c.definitionKey;
+    for (const cond of c.conditions) delete cond.definition;
+    for (const a of c.actions) {
+      delete a.settledAt;
+      delete a.confirmedAt;
+    }
+  }
+  for (const n of Object.values(d.nonFiring)) {
+    delete n.disabledAt;
+    delete n.disabledReason;
+    delete n.definitionKey;
+  }
+  for (const a of d.automations) delete a.definitionKey;
+  return d;
+}
+
+/* FE-115 D2 — `v115-keys`: one DevPanel scenario per key STATE, so every sentence FE-114 (EXPLAIN-6 · 8 · 9) and
+ * FE-115 (EXPLAIN-4) render is reachable by hand: one run per condition-definition permit the emitter can produce
+ * (ConditionDefinitionRenderer: state · numeric · time · and · or · not · zone), a run whose definition is null
+ * (the projection could not vouch — its definitionKey null too), a run whose definition `type` this build does
+ * not know (the open vocabulary), a confirmed step WITH its confirmedAt and a held DISPATCHED step without
+ * (settledAt / confirmedAt both null), a DISABLED automation with its disabledAt / disabledReason, and a
+ * FIRED_CONFIRMED verdict with its run id. */
+function buildV115Keys(): MockDataset {
+  const A = { automationId: 'auto_v115', automationName: 'Evening scene rules' };
+  const motion = { type: 'ENTITY', id: 'ent_hallway_motion' };
+  const lamp = { type: 'ENTITY', id: 'ent_livingroom_lamp' };
+  const state = def('StateCondition', { selector: 'ent_hallway_motion', attribute: 'occupancy', value: 'detected' });
+  const numeric = def('NumericCondition', { selector: 'ent_livingroom_lamp', attribute: 'brightness', above: 10, below: 200 });
+  const time = def('TimeCondition', { after: '18:00', before: '23:30' });
+  const rows: { id: string; min: number; definition: ConditionDefinition | null; expression: string; result?: boolean; definitionKey?: null; actions?: CausalAction[] }[] = [
+    { id: 'run_v115_state', min: 2, definition: state, expression: 'StateCondition' },
+    { id: 'run_v115_numeric', min: 7, definition: numeric, expression: 'NumericCondition' },
+    { id: 'run_v115_time', min: 12, definition: time, expression: 'TimeCondition' },
+    { id: 'run_v115_and', min: 18, definition: def('AndCondition', {}, [state, time]), expression: 'AndCondition' },
+    { id: 'run_v115_or', min: 25, definition: def('OrCondition', {}, [numeric, def('TimeCondition', { after: '06:30' })]), expression: 'OrCondition' },
+    { id: 'run_v115_not', min: 33, definition: def('NotCondition', {}, [state]), expression: 'NotCondition', result: false },
+    { id: 'run_v115_zone', min: 41, definition: def('ZoneCondition'), expression: 'ZoneCondition' },
+    { id: 'run_v115_nested', min: 48, definition: def('AndCondition', {}, [def('OrCondition', {}, [state, numeric]), def('NotCondition', {}, [time])]), expression: 'AndCondition' },
+    { id: 'run_v115_null', min: 95, definition: null, expression: 'StateCondition', definitionKey: null },
+    { id: 'run_v115_unknown', min: 130, definition: def('PresenceCondition', { selector: 'area:hallway/PRIMARY' }), expression: 'PresenceCondition' },
+    {
+      id: 'run_v115_held',
+      min: 1,
+      definition: AFTER_SUNSET_DEF(),
+      expression: 'NumericCondition',
+      actions: [makeAction('DISPATCHED', { targetRef: lamp, settled: false, reason: null })],
+    },
+  ];
+  const runs: RunSummary[] = [];
+  const causalChains: Record<string, CausalChain> = {};
+  for (const r of rows) {
+    const status: RunStatus = r.result === false ? 'SKIPPED' : 'COMPLETED';
+    runs.push(makeRun(r.id, { ...A, status, minAgo: r.min }));
+    const c = makeChain(r.id, {
+      ...A,
+      status,
+      minAgo: r.min,
+      triggerId: motion.id,
+      targetId: lamp.id,
+      ...(r.definitionKey === null ? { definitionKey: null } : {}),
+      ...(r.actions ? { actions: r.actions } : {}),
+    });
+    c.conditions = [makeCondition(r.result ?? true, { expression: r.expression, definition: r.definition })];
+    causalChains[r.id] = c;
+  }
+  return {
+    ...defaultDataset,
+    automations: [
+      makeAutomation('auto_v115', 'Evening scene rules', { lastRunId: 'run_v115_state' }),
+      makeAutomation('auto_v115_disabled', 'Porch light (turned off)', { enabled: false, lastRunId: null }),
+      makeAutomation('auto_v115_fired', 'Bedtime lamp', { lastRunId: 'run_v115_state' }),
+    ],
+    runs,
+    causalChains,
+    nonFiring: {
+      auto_v115: makeNonFiring('auto_v115', 'CONDITION_NOT_MET', { automationName: 'Evening scene rules', lastRelevantRunId: 'run_v115_not' }),
+      auto_v115_disabled: makeNonFiring('auto_v115_disabled', 'DISABLED', { automationName: 'Porch light (turned off)' }),
+      auto_v115_fired: makeNonFiring('auto_v115_fired', 'FIRED_CONFIRMED', { automationName: 'Bedtime lamp', lastRelevantRunId: 'run_v115_state' }),
+    },
+  };
+}
+
 export interface Scenario {
   id: string;
   label: string;
@@ -1009,6 +1191,8 @@ export const SCENARIOS: Scenario[] = [
   { id: 'live-nulls', label: 'Live wire: present-but-null', group: 'Story', blurb: 'The tri-state seam as the live wire serves it — every nullable key present-but-null, a genuinely empty chain, and a run whose chain read 404s.', build: buildLiveNulls },
   { id: 'hero-states', label: 'The hero, every state', group: 'Story', blurb: 'SPEC §3 on today’s wire: one run per headline row the emitter can produce — each outcome, the silent skip, the era skeleton, a skipped / failed / cancelled / interrupted run, a replaced command — with the wire’s nulls as they are (no firing value; no verdict row beside Confirmed).', build: buildHeroStates },
   { id: 'dangling-ref', label: 'Dangling ref (loud)', group: 'Story', blurb: 'The R-4 custody-clone class: a run whose entity refs are not in this hub’s registry — rendered loud on the chain, never paraphrased away.', build: buildDanglingRef },
+  { id: 'v115-keys', label: 'v1.1.4 / v1.1.5 keys', group: 'Story', blurb: 'One run per condition-definition kind (state · numeric · time · and · or · not · zone, a nested one), a null definition and an unknown kind; a confirmed step with its confirmedAt and a held one without; a DISABLED with its disabledAt and a FIRED_CONFIRMED — every FE-114 / FE-115 sentence one click away.', build: buildV115Keys },
+  { id: 'legacy-hub', label: 'Legacy hub (pre-v1.1.4)', group: 'Story', blurb: 'The default home as a v1.1.3 hub serves it — no definitionKey, no condition definition, no settledAt / confirmedAt, no disabledAt: the ABSENT arm of every v1.1.4 / v1.1.5 key stays reachable.', build: buildLegacyHub },
   { id: 'live-fleet', label: 'Live fleet mirror', group: 'Story', blurb: 'One entity per deployed device class with canonical attribute keys — including brightness level 0–254 plus the hub-derived percent.', build: buildLiveFleet },
   { id: 'all-origins', label: 'All event origins', group: 'Story', blurb: 'Automation, device, you, external, and the honest UNKNOWN.', build: buildAllOrigins },
   { id: 'large', label: 'Large (300 runs · 500 events)', group: 'Scale', blurb: 'Forces list virtualization + a render budget.', build: buildLarge },

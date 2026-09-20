@@ -15,7 +15,11 @@ const SHAPES = 'src/lib/api/shapes.ts';
 // entities[].lastReported, nonFiring triggerRef, automations components[].ref); v1.1.2 = three
 // (actions[].resultOutcome, actions[].settled, nonFiring noCommandsIssued); the v1.1 base stays
 // byte-stable. This pin, contract.test.ts's and v113-additive.test.ts's move together (FE-114 D0).
-const EXPECTED_VERSION = 'v1.1.4-2026-09-13';
+// v1.1.5 (Nick's `EXPLAIN: three`; landed core-side 2026-09-14 EXPLAIN-114c e56f555; the FE mirror is FE-115,
+// 2026-09-19): ONE ADDITIVE key on ONE read — causal-chain conditions[].definition (object-or-null, recursive
+// through children). The pin has FIVE homes now (contract.ts · contract.test.ts · v113-additive.test.ts ·
+// v114-additive.test.ts · this file) — they move together (FE-115 D0).
+const EXPECTED_VERSION = 'v1.1.5-2026-09-19';
 // v1.1.1: the ratified problem-type URI prefix (Doc 09 §3.8 / ProblemType.TYPE_URI_PREFIX).
 const EXPECTED_PROBLEM_PREFIX = 'https://homesynapse.local/problems/';
 const REQUIRED = [
