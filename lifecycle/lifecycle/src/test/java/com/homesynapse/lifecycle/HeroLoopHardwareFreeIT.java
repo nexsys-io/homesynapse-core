@@ -8,7 +8,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import com.homesynapse.device.Entity;
 import com.homesynapse.event.AutomationTriggeredEvent;
 import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.CommandResultEvent;
@@ -22,13 +21,9 @@ import com.homesynapse.event.StateConfirmedEvent;
 import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.bus.InProcessEventBus;
-import com.homesynapse.event.bus.SubscriberMode;
-import com.homesynapse.event.bus.SubscriberSnapshot;
 import com.homesynapse.integration.zigbee.ZigbeeHardwareFreeRig;
-import com.homesynapse.integration.zigbee.ZigbeeIntegrationFactory;
 import com.homesynapse.platform.identity.AutomationId;
 import com.homesynapse.platform.identity.EntityId;
-import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.test.TestClock;
 
@@ -38,7 +33,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.LoggerFactory;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -58,21 +52,19 @@ import java.util.function.Predicate;
  * verdict (AMD-97-INV-01), and the timeout-honesty leg. A mismatch anywhere is a
  * failing assertion, not a bench mystery.
  *
- * <p>Harness: the {@link RunPipelineReplaySafetyTest} composition-root pattern over
- * the {@link ZigbeeHardwareFreeRig} (zigbee testFixtures — the REAL adapter code
- * over a scripted NCP). Time is an injected {@link TestClock} shared by the core
- * and the rig (§4c); await loops are real-time polls (clock-independent).</p>
+ * <p>Harness: {@link RealCoreFixture} (MEASURE-2b — this class's boot shape,
+ * extracted: the {@link RunPipelineReplaySafetyTest} composition-root pattern over
+ * the {@link ZigbeeHardwareFreeRig}, zigbee testFixtures — the REAL adapter code
+ * over a scripted NCP — with the boot-smoke assertions it carried here). Time is an
+ * injected {@link TestClock} shared by the core and the rig (§4c); await loops are
+ * real-time polls (clock-independent).</p>
  */
 @DisplayName("HeroLoopHardwareFreeIT — motion → occupancy.occupied → trigger → dispatch → FakeNcp → honest CONFIRMED (M9.4a §5.1)")
 final class HeroLoopHardwareFreeIT {
 
-    private static final HomeId TEST_HOME_ID =
-            HomeId.of(Ulid.parse("01JAAAAAAAAAAAAAAAAAAAAAAB"));
-
-    private TestClock clock;
+    private RealCoreFixture fixture;
     private ZigbeeHardwareFreeRig rig;
     private HomeSynapseCore core;
-    private EntityId snzbEntity;
     private EntityId hueEntity;
     /** FIX-2b-i: the test's temp dir, held so a timeout's thread dump has a home. */
     private Path tempDir;
@@ -89,8 +81,8 @@ final class HeroLoopHardwareFreeIT {
 
     @AfterEach
     void tearDown() {
-        if (core != null) {
-            core.stop();
+        if (fixture != null) {
+            fixture.close();
         }
         if (lineCapture != null) {
             homesynapseLogger().detachAppender(lineCapture);
@@ -108,7 +100,7 @@ final class HeroLoopHardwareFreeIT {
             + "chain intact")
     void heroLoop_motionToHonestConfirmed(@TempDir Path tempDir) throws Exception {
         lineCapture = attachLineCapture();      // before boot: a boot-time anomaly counts too
-        bootAndAdopt(tempDir);
+        boot(tempDir);
 
         // Step 2 — the motion edge (false → true so the projection publishes a real
         // state_changed edge): the capability-key binding is occupancy.occupied,
@@ -208,7 +200,7 @@ final class HeroLoopHardwareFreeIT {
             + "superseded while 4525 K confirms from ONE 221-mired report")
     void colorTemperature_derivationTunedWindow_andSupersessionPair(@TempDir Path tempDir)
             throws Exception {
-        bootAndAdopt(tempDir);
+        boot(tempDir);
 
         fireManual("ct-4550");
         EventEnvelope first = awaitEnvelope(EventTypes.COMMAND_ISSUED,
@@ -266,7 +258,7 @@ final class HeroLoopHardwareFreeIT {
             + "handler → byte-asserted Identify frame → immediate honest unconfirmed — "
             + "and NEVER a state_confirmed (AMD-97-INV-01)")
     void unconfirmableIdentify_immediateHonestVerdict(@TempDir Path tempDir) throws Exception {
-        bootAndAdopt(tempDir);
+        boot(tempDir);
 
         // M9.4b §3 (the M9.4a interim retired): the §3.1 Identify capability makes
         // identify issuable through the REAL Tier-1 validator — the engine's own
@@ -312,7 +304,7 @@ final class HeroLoopHardwareFreeIT {
             + "state_confirmed → the query shows brightness=127 AND brightness_percent=50")
     void brightness_percentCommandLevelDomain_honestConfirm(@TempDir Path tempDir)
             throws Exception {
-        bootAndAdopt(tempDir);
+        boot(tempDir);
 
         fireManual("hero-brightness");
         EventEnvelope issued = awaitEnvelope(EventTypes.COMMAND_ISSUED,
@@ -360,7 +352,7 @@ final class HeroLoopHardwareFreeIT {
     @DisplayName("a turn_on whose report never arrives times out honestly — "
             + "command_confirmation_timed_out, never state_confirmed")
     void timeoutHonesty_noReportNeverConfirms(@TempDir Path tempDir) throws Exception {
-        bootAndAdopt(tempDir);
+        boot(tempDir);
 
         fireManual("hero-turn-on");
         EventEnvelope issued = awaitEnvelope(EventTypes.COMMAND_ISSUED,
@@ -377,69 +369,20 @@ final class HeroLoopHardwareFreeIT {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // Harness — boot the REAL root over the rig, adopt both devices (step 1)
+    // Harness — the shared fixture boots the REAL root and adopts both devices (step 1)
     // ════════════════════════════════════════════════════════════════════════
 
-    private void bootAndAdopt(Path tempDir) throws Exception {
+    /** Boots {@link RealCoreFixture} on this class's config and binds the test's handles. */
+    private void boot(Path tempDir) throws Exception {
         this.tempDir = tempDir;
-        clock = TestClock.createDefault();
-        writeConfig(tempDir);
-        rig = new ZigbeeHardwareFreeRig(clock, () -> core.deviceRegistry(),
-                () -> core.registryProjection(),
-                tempDir.resolve("zigbee"));
-        core = new HomeSynapseCore(
-                tempDir.resolve("homesynapse-events.db"),
-                tempDir.resolve("config"),
-                HomeSynapseConfig.testing(),
-                clock,
-                TEST_HOME_ID,
-                null,
-                List.of(rig.factory()));
-        core.start();
-
-        // §4.2 boot smoke: the supervisor created + started the adapter green over
-        // the scripted NCP, and the W10 schema registration is visible.
-        core.registerIntegrationSchema(ZigbeeIntegrationFactory.INTEGRATION_TYPE,
-                ZigbeeIntegrationFactory.configSchemaJson());
-        assertThat(core.schemaRegistry().getComposedSchema()).contains("zigbee");
-        awaitRuntimeSubscribersLive();
-        awaitTrue(rig::sessionStarted, "the EZSP session over the scripted NCP");
-
-        // Step 1 — REAL interview/adoption over scripted ZDO/ZCL exchanges.
-        rig.announce(ZigbeeHardwareFreeRig.SNZB_IEEE);
-        rig.announce(ZigbeeHardwareFreeRig.HUE_IEEE);
-        rig.deliverAndCycle();
-        snzbEntity = rig.adopt(ZigbeeHardwareFreeRig.SNZB_IEEE)
-                .get(ZigbeeHardwareFreeRig.SNZB_ENDPOINT);
-        hueEntity = rig.adopt(ZigbeeHardwareFreeRig.HUE_IEEE)
-                .get(ZigbeeHardwareFreeRig.HUE_ENDPOINT);
-        awaitRegistryProjectionCaughtUp();
-        label(snzbEntity, "motion");
-        label(hueEntity, "hero-light");
-
-        // The §2 overrides are INSTALLED: the Hue CT capability carries the measured
-        // 15 s window on BOTH the policy and the CommandDefinition (P17 precedence).
-        Entity hue = core.entityRegistry().getEntity(hueEntity);
-        var colorTemperature = hue.capabilities().stream()
-                .filter(capability -> capability.capabilityId().equals("color_temperature"))
-                .findFirst().orElseThrow();
-        assertThat(colorTemperature.confirmation().defaultTimeoutMs()).isEqualTo(15000L);
-        assertThat(colorTemperature.commands().get("set_color_temperature")
-                .defaultTimeout().toMillis()).isEqualTo(15000L);
+        fixture = RealCoreFixture.boot(tempDir, heroConfigYaml());
+        rig = fixture.rig();
+        core = fixture.core();
+        hueEntity = fixture.hueEntity();
     }
 
-    /** Re-registers an adopted entity with a selector label (the trigger/action join). */
-    private void label(EntityId entityId, String labelValue) {
-        Entity entity = core.entityRegistry().getEntity(entityId);
-        core.entityRegistry().updateEntity(new Entity(entity.entityId(),
-                entity.entitySlug(), entity.entityType(), entity.displayName(),
-                entity.deviceId(), entity.endpointIndex(), entity.areaId(),
-                entity.enabled(), List.of(labelValue), entity.capabilities(),
-                entity.entityRole(), entity.createdAt()));
-    }
-
-    private void writeConfig(Path tempDir) throws Exception {
-        String yaml = """
+    private static String heroConfigYaml() {
+        return """
                 automation:
                   automations:
                     - name: "hero motion lights"
@@ -506,9 +449,6 @@ final class HeroLoopHardwareFreeIT {
                           parameters:
                             level: 50
                 """;
-        Path configDir = tempDir.resolve("config");
-        Files.createDirectories(configDir);
-        Files.writeString(configDir.resolve("homesynapse.yaml"), yaml);
     }
 
     private void fireManual(String slug) throws Exception {
@@ -522,68 +462,6 @@ final class HeroLoopHardwareFreeIT {
     }
 
     // ── awaits + store reads (real-time polls; clock-independent) ───────────
-
-    private void awaitRuntimeSubscribersLive() {
-        for (int poll = 0; poll < 250; poll++) {
-            if (subscriberMode("automation_engine") == SubscriberMode.LIVE
-                    && subscriberMode("command_dispatch_service") == SubscriberMode.LIVE
-                    && subscriberMode("pending_command_ledger") == SubscriberMode.LIVE
-                    && subscriberMode("integration_supervisor") == SubscriberMode.LIVE
-                    && subscriberMode("state_projection") == SubscriberMode.LIVE) {
-                return;
-            }
-            sleepBriefly();
-        }
-        throw new AssertionError("runtime subscribers did not reach LIVE within ~5s");
-    }
-
-    private SubscriberMode subscriberMode(String subscriberId) {
-        return core.eventBus().subscribers().stream()
-                .filter(snapshot -> subscriberId.equals(snapshot.subscriberId()))
-                .map(SubscriberSnapshot::mode)
-                .findFirst()
-                .orElse(SubscriberMode.COLD);
-    }
-
-    /**
-     * M9.5-DURc — the registry-projection checkpoint barrier. {@code adopt()}
-     * applies the registration facts synchronously AND publishes them; the
-     * {@code registry_projection} subscriber re-applies each self-delivery on
-     * its own virtual thread (idempotent only when state is EQUAL — different
-     * state ⇒ replace). {@code label()} mutates the registry directly
-     * (log-invisible), so a self-delivery landing after it lawfully replaces
-     * the labeled entity with its as-adopted state and the label-targeted
-     * automation resolves zero entities. Awaiting the subscriber's checkpoint
-     * reaching the LAST registration fact closes the window.
-     *
-     * <p>The await target is the max {@code globalPosition} over the
-     * {@code device_registered}/{@code entity_registered} envelopes — NOT
-     * {@code EventStore.latestPosition()}: the subscriber is type-filtered
-     * ({@link RegistryProjectionSubscriber#subscriptionFilter()}) and the bus
-     * advances a subscriber checkpoint only on MATCHING deliveries, while
-     * {@code adopt()} publishes the non-matching {@code device_adopted} LAST
-     * — a store-head target is unreachable by construction.</p>
-     */
-    private void awaitRegistryProjectionCaughtUp() {
-        long lastRegistrationFact = events().stream()
-                .filter(event -> event.eventType().equals(EventTypes.DEVICE_REGISTERED)
-                        || event.eventType().equals(EventTypes.ENTITY_REGISTERED))
-                .mapToLong(EventEnvelope::globalPosition)
-                .max()
-                .orElseThrow(() -> new AssertionError(
-                        "no registration facts in the log after adopt()"));
-        awaitTrue(() -> registryProjectionCheckpoint() >= lastRegistrationFact,
-                "the registry projection consuming the adoption events");
-    }
-
-    private long registryProjectionCheckpoint() {
-        return core.eventBus().subscribers().stream()
-                .filter(snapshot -> RegistryProjectionSubscriber.SUBSCRIBER_ID
-                        .equals(snapshot.subscriberId()))
-                .mapToLong(SubscriberSnapshot::checkpoint)
-                .findFirst()
-                .orElse(0L);
-    }
 
     private List<EventEnvelope> events() {
         return core.eventStore().readFrom(0L, 2000).events();

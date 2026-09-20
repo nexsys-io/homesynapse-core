@@ -383,6 +383,14 @@ final class ZigbeeAdoptionSlice {
                         Integer.toHexString(endpoint.deviceTypeId()));
                 continue;
             }
+            // ENERGY-READ-b row 1 (the b5 audit R-1): the classification named
+            // with its DEVICE — the classifier's own line sees the descriptor
+            // alone. device= renders as zigbee.device_proposed renders it.
+            log.info("zigbee.endpoint_classified: device={} endpoint={} "
+                            + "entityType={} capabilities={}", ieee,
+                    endpoint.endpointId(), classification.get().entityType(),
+                    classification.get().capabilities().stream()
+                            .map(CapabilityInstance::capabilityId).toList());
             EntityId entityId = EntityId.of(UlidFactory.generate(clock));
             // DP-a (§2.2): the per-device confirmation tuning installs HERE, between
             // classification and registration — the only write; every downstream read

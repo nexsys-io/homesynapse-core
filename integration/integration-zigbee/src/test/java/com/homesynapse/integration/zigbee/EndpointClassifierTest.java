@@ -39,6 +39,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code power_meter}/{@code energy_meter} attach by the CLUSTERS present
  * (0x0B04/0x0702) on every arm, the device type a hint (R2, IR-24); one
  * {@code zigbee.endpoint_classified} INFO per classification (R6).
+ *
+ * <p>ENERGY-READ-b row 2 (the b5 ruling R-5): an endpoint NO arm classified that
+ * lists 0x0702 is an {@code ENERGY_METER}; 0x0B04 alone stays {@code SENSOR}
+ * (the metering-only pin is re-pinned from {@code SENSOR}).
  */
 @DisplayName("EndpointClassifier — identify attachment (M9.4b §3.2, SD-3) "
         + "+ the Wave-2 arms (M9.7-W2 §3)")
@@ -338,23 +342,55 @@ class EndpointClassifierTest {
     }
 
     @Test
-    @DisplayName("T2 (IR-24): an endpoint with 0x0702 ONLY classifies SENSOR "
-            + "{energy_meter} — the meter alone makes the entity, nothing else "
-            + "is invented")
-    void meteringOnlyEndpoint_sensorWithEnergyMeterOnly() {
+    @DisplayName("ENERGY-READ-b row 2 (the b5 ruling R-5; re-pinned from SENSOR): an "
+            + "endpoint no other arm classified that lists 0x0702 classifies "
+            + "ENERGY_METER {energy_meter} — the meter alone makes the entity, "
+            + "nothing else is invented")
+    void meteringOnlyEndpoint_energyMeterWithEnergyMeterOnly() {
         Optional<EndpointClassifier.Classification> classified =
                 EndpointClassifier.classify(endpoint(0x9999,
                         List.of(0x0000, 0x0702)));
 
         assertThat(classified.orElseThrow().entityType())
-                .isEqualTo(EntityType.SENSOR);
+                .isEqualTo(EntityType.ENERGY_METER);
         assertThat(capabilityIds(classified))
                 .containsExactlyInAnyOrder("energy_meter");
     }
 
     @Test
-    @DisplayName("T2 (IR-24): an endpoint with 0x0B04 ONLY classifies SENSOR "
-            + "{power_meter}")
+    @DisplayName("ENERGY-READ-b row 2 boundary: 0x0702 beside 0x0B04 and nothing else "
+            + "is still ENERGY_METER {power_meter, energy_meter} — the energy "
+            + "register decides, the power measurement is the type's optional half")
+    void bothMetersOnlyEndpoint_energyMeterWithBothMeters() {
+        Optional<EndpointClassifier.Classification> classified =
+                EndpointClassifier.classify(endpoint(0x9999,
+                        List.of(0x0000, 0x0702, 0x0B04)));
+
+        assertThat(classified.orElseThrow().entityType())
+                .isEqualTo(EntityType.ENERGY_METER);
+        assertThat(capabilityIds(classified))
+                .containsExactlyInAnyOrder("power_meter", "energy_meter");
+    }
+
+    @Test
+    @DisplayName("ENERGY-READ-b row 2 boundary: a battery-only remainder that lists "
+            + "0x0702 was classified by the DP-7 arm — it stays SENSOR {battery, "
+            + "energy_meter}; ENERGY_METER is for the endpoint NO arm classified")
+    void batteryRemainderWithMetering_staysSensor() {
+        Optional<EndpointClassifier.Classification> classified =
+                EndpointClassifier.classify(endpoint(0x9999,
+                        List.of(0x0000, 0x0001, 0x0702)));
+
+        assertThat(classified.orElseThrow().entityType())
+                .isEqualTo(EntityType.SENSOR);
+        assertThat(capabilityIds(classified))
+                .containsExactlyInAnyOrder("battery", "energy_meter");
+    }
+
+    @Test
+    @DisplayName("T2 (IR-24) / ENERGY-READ-b row 2 (R-5): an endpoint with 0x0B04 "
+            + "ONLY classifies SENSOR {power_meter} — a power measurement "
+            + "without an energy register is not an ENERGY_METER")
     void electricalOnlyEndpoint_sensorWithPowerMeterOnly() {
         Optional<EndpointClassifier.Classification> classified =
                 EndpointClassifier.classify(endpoint(0x9999,

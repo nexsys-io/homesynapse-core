@@ -22,19 +22,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import com.homesynapse.device.Entity;
 import com.homesynapse.event.EventEnvelope;
-import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.bus.InProcessEventBus;
-import com.homesynapse.event.bus.SubscriberMode;
-import com.homesynapse.event.bus.SubscriberSnapshot;
 import com.homesynapse.integration.zigbee.ZigbeeHardwareFreeRig;
-import com.homesynapse.integration.zigbee.ZigbeeIntegrationFactory;
 import com.homesynapse.lifecycle.BusPositionCensusIT.SettledCensus;
 import com.homesynapse.lifecycle.BusPositionCensusIT.SubscriberCensus;
-import com.homesynapse.platform.identity.EntityId;
-import com.homesynapse.platform.identity.HomeId;
-import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.test.TestClock;
 
 import org.junit.jupiter.api.AfterEach;
@@ -43,7 +35,6 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -95,9 +86,9 @@ import java.util.function.LongSupplier;
  * settles, when no subscriber thread is appending. On a timeout the same capture
  * feeds the {@code automation.handoff_census:} line of the diagnostic.</p>
  *
- * <p>Harness: the {@link HeroLoopHardwareFreeIT} boot shape over the
- * {@link ZigbeeHardwareFreeRig}, copied; the census and the store reads are
- * {@link BusPositionCensusIT}'s package-private statics. The rig's
+ * <p>Harness: {@link RealCoreFixture} — the boot shape the three ITs share
+ * (MEASURE-2b), over the {@link ZigbeeHardwareFreeRig}; the census and the store
+ * reads are {@link BusPositionCensusIT}'s package-private statics. The rig's
  * {@code sentZclFrames()} accumulates across loops, so frames are COUNTED, never
  * {@code isPresent()}.</p>
  */
@@ -109,14 +100,9 @@ final class BusSoakIT {
     static final String LOOPS_ENV = "HOMESYNAPSE_SOAK_LOOPS";
     static final int DEFAULT_LOOPS = 20;
 
-    private static final HomeId TEST_HOME_ID =
-            HomeId.of(Ulid.parse("01JAAAAAAAAAAAAAAAAAAAAAAB"));
-
-    private TestClock clock;
+    private RealCoreFixture fixture;
     private ZigbeeHardwareFreeRig rig;
     private HomeSynapseCore core;
-    private EntityId snzbEntity;
-    private EntityId hueEntity;
     private ListAppender<ILoggingEvent> anomalyCapture;
     /** FIX-2b-i: the test's temp dir, held so a timeout's thread dump has a home. */
     private Path tempDir;
@@ -127,8 +113,8 @@ final class BusSoakIT {
 
     @AfterEach
     void tearDown() {
-        if (core != null) {
-            core.stop();
+        if (fixture != null) {
+            fixture.close();
         }
         if (anomalyCapture != null) {
             homesynapseLogger().detachAppender(anomalyCapture);
@@ -141,7 +127,10 @@ final class BusSoakIT {
     void soak_kHeroLoops_reportsLatencyAndAnomalies(@TempDir Path tempDir) throws Exception {
         int loops = configuredLoops();
         anomalyCapture = attachLineCapture();      // before boot: a boot-time drop counts too
-        bootAndAdopt(tempDir);
+        this.tempDir = tempDir;
+        fixture = RealCoreFixture.boot(tempDir, heroMotionConfigYaml());
+        rig = fixture.rig();
+        core = fixture.core();
 
         // The baseline: occupied=false, so the first true is a real edge.
         rig.reportOccupied(false);
@@ -302,99 +291,7 @@ final class BusSoakIT {
                 .count();
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // Harness — the HeroLoopHardwareFreeIT boot shape, copied
-    // ════════════════════════════════════════════════════════════════════════
-
-    private void bootAndAdopt(Path tempDir) throws Exception {
-        this.tempDir = tempDir;
-        clock = TestClock.createDefault();
-        Path configDir = tempDir.resolve("config");
-        Files.createDirectories(configDir);
-        Files.writeString(configDir.resolve("homesynapse.yaml"), heroMotionConfigYaml());
-        rig = new ZigbeeHardwareFreeRig(clock, () -> core.deviceRegistry(),
-                () -> core.registryProjection(),
-                tempDir.resolve("zigbee"));
-        core = new HomeSynapseCore(
-                tempDir.resolve("homesynapse-events.db"),
-                configDir,
-                HomeSynapseConfig.testing(),
-                clock,
-                TEST_HOME_ID,
-                null,
-                List.of(rig.factory()));
-        core.start();
-        core.registerIntegrationSchema(ZigbeeIntegrationFactory.INTEGRATION_TYPE,
-                ZigbeeIntegrationFactory.configSchemaJson());
-        awaitRuntimeSubscribersLive();
-        awaitTrue(rig::sessionStarted, "the EZSP session over the scripted NCP");
-
-        rig.announce(ZigbeeHardwareFreeRig.SNZB_IEEE);
-        rig.announce(ZigbeeHardwareFreeRig.HUE_IEEE);
-        rig.deliverAndCycle();
-        snzbEntity = rig.adopt(ZigbeeHardwareFreeRig.SNZB_IEEE)
-                .get(ZigbeeHardwareFreeRig.SNZB_ENDPOINT);
-        hueEntity = rig.adopt(ZigbeeHardwareFreeRig.HUE_IEEE)
-                .get(ZigbeeHardwareFreeRig.HUE_ENDPOINT);
-        awaitRegistryProjectionCaughtUp();
-        label(snzbEntity, "motion");
-        label(hueEntity, "hero-light");
-    }
-
-    /** Re-registers an adopted entity with a selector label (the trigger/action join). */
-    private void label(EntityId entityId, String labelValue) {
-        Entity entity = core.entityRegistry().getEntity(entityId);
-        core.entityRegistry().updateEntity(new Entity(entity.entityId(),
-                entity.entitySlug(), entity.entityType(), entity.displayName(),
-                entity.deviceId(), entity.endpointIndex(), entity.areaId(),
-                entity.enabled(), List.of(labelValue), entity.capabilities(),
-                entity.entityRole(), entity.createdAt()));
-    }
-
-    private void awaitRuntimeSubscribersLive() {
-        for (int poll = 0; poll < 250; poll++) {
-            if (subscriberMode("automation_engine") == SubscriberMode.LIVE
-                    && subscriberMode("command_dispatch_service") == SubscriberMode.LIVE
-                    && subscriberMode("pending_command_ledger") == SubscriberMode.LIVE
-                    && subscriberMode("integration_supervisor") == SubscriberMode.LIVE
-                    && subscriberMode("state_projection") == SubscriberMode.LIVE) {
-                return;
-            }
-            sleepBriefly();
-        }
-        throw new AssertionError("runtime subscribers did not reach LIVE within ~5s");
-    }
-
-    private SubscriberMode subscriberMode(String subscriberId) {
-        return core.eventBus().subscribers().stream()
-                .filter(snapshot -> subscriberId.equals(snapshot.subscriberId()))
-                .map(SubscriberSnapshot::mode)
-                .findFirst()
-                .orElse(SubscriberMode.COLD);
-    }
-
-    /** The M9.5-DURc registry-projection checkpoint barrier (see the hero IT's javadoc). */
-    private void awaitRegistryProjectionCaughtUp() {
-        long lastRegistrationFact = events().stream()
-                .filter(event -> event.eventType().equals(EventTypes.DEVICE_REGISTERED)
-                        || event.eventType().equals(EventTypes.ENTITY_REGISTERED))
-                .mapToLong(EventEnvelope::globalPosition)
-                .max()
-                .orElseThrow(() -> new AssertionError(
-                        "no registration facts in the log after adopt()"));
-        awaitTrue(() -> registryProjectionCheckpoint() >= lastRegistrationFact,
-                "the registry projection consuming the adoption events",
-                () -> lastRegistrationFact);
-    }
-
-    private long registryProjectionCheckpoint() {
-        return core.eventBus().subscribers().stream()
-                .filter(snapshot -> RegistryProjectionSubscriber.SUBSCRIBER_ID
-                        .equals(snapshot.subscriberId()))
-                .mapToLong(SubscriberSnapshot::checkpoint)
-                .findFirst()
-                .orElse(0L);
-    }
+    // ── store reads + awaits (the boot shape lives in RealCoreFixture) ──────
 
     private List<EventEnvelope> events() {
         return allEvents(core.eventStore());

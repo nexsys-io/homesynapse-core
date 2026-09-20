@@ -38,6 +38,8 @@ import java.util.stream.Collectors;
  * key (R2, IR-24: the owned Gen4 is 0x010A, not the 0x0051 the plug arm keys
  * on); and every classification prints ONE {@code zigbee.endpoint_classified}
  * INFO naming the device type, the input clusters and what was chosen (R6).
+ * ENERGY-READ-b: an endpoint no arm classified that lists 0x0702 is an
+ * {@code ENERGY_METER}, one listing 0x0B04 only a {@code SENSOR} (R-5).
  *
  * <p>Thread-safe: stateless utility.
  */
@@ -134,8 +136,11 @@ final class EndpointClassifier {
     /**
      * R6 (DEVICE-SET note 1): the one line that says what the endpoint SAID it
      * was and what it became — the instrument the first real adoption is read
-     * from. The device is named by the adoption lines around it; this utility
-     * sees the descriptor alone.
+     * from. This utility sees the descriptor alone; the device is named by the
+     * slice's call-site line of the same token, printed beside this one for
+     * every classified endpoint (ENERGY-READ-b row 1). This line is KEPT at
+     * INFO: it is the only one carrying {@code deviceType=} and
+     * {@code inputClusters=}.
      */
     private static void logClassified(EndpointDescriptor descriptor,
             Optional<Classification> classified) {
@@ -165,9 +170,12 @@ final class EndpointClassifier {
      * The cluster-first metering attach (R2): 0x0B04 ⇒ {@code power_meter},
      * 0x0702 ⇒ {@code energy_meter}, beside whatever the arm chose — the entity
      * type is unchanged by a meter (a metering switch stays SWITCH, a metering
-     * light stays LIGHT). An endpoint that maps to nothing else but lists a
-     * metering cluster is a measurement-only endpoint: {@code SENSOR} with the
-     * meter capabilities alone. No cluster is ever inferred from a device type.
+     * light stays LIGHT). An endpoint NO arm classified that lists a metering
+     * cluster is a measurement-only endpoint carrying the meter capabilities
+     * alone: {@code ENERGY_METER} when it lists 0x0702, {@code SENSOR} when it
+     * lists 0x0B04 only — a power measurement without an energy register
+     * (ENERGY-READ-b row 2, the b5 ruling R-5). No cluster is ever inferred
+     * from a device type.
      */
     private static Optional<Classification> withMeters(
             Optional<Classification> classified, EndpointDescriptor descriptor) {
@@ -185,8 +193,13 @@ final class EndpointClassifier {
         List<CapabilityInstance> caps = new ArrayList<>(classified
                 .map(Classification::capabilities).orElse(List.of()));
         caps.addAll(capabilities(meters.toArray(Capability[]::new)));
+        // ENERGY-READ-b row 2 (the b5 ruling R-5): the measurement-only endpoint
+        // is an ENERGY_METER when it lists 0x0702 (the type's required energy
+        // register), a SENSOR when it lists 0x0B04 only.
+        EntityType measurementOnly = in.contains(MeteringHandler.CLUSTER_ID)
+                ? EntityType.ENERGY_METER : EntityType.SENSOR;
         return Optional.of(new Classification(classified
-                .map(Classification::entityType).orElse(EntityType.SENSOR), caps));
+                .map(Classification::entityType).orElse(measurementOnly), caps));
     }
 
     private static Classification light(boolean hasLevel, boolean hasColor) {

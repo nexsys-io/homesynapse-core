@@ -628,4 +628,57 @@ class ZigbeeAdoptionSliceTest {
                 .as("no second proposal — the healthy re-link is unchanged")
                 .hasSize(1);
     }
+
+    // ── ENERGY-READ-b row 1 — the classify call site names the device ───────
+
+    @Test
+    @DisplayName("ENERGY-READ-b row 1: adopt() prints ONE zigbee.endpoint_classified "
+            + "INFO per classified endpoint FROM THE SLICE, carrying device= in the "
+            + "zigbee.device_proposed rendering")
+    void adoptLogsEndpointClassifiedWithDevice() {
+        slice.onDeviceDiscovered(snzbInterview(),
+                MeasuredCorpusValues.SNZB_PROFILE_ID);
+
+        slice.adopt(SNZB);
+
+        assertThat(sliceMessages(Level.INFO, "zigbee.endpoint_classified: "))
+                .containsExactly("zigbee.endpoint_classified: "
+                        + "device=0x00124B0012345678 endpoint=1 "
+                        + "entityType=BINARY_SENSOR "
+                        + "capabilities=[occupancy, battery, identify]");
+        assertThat(sliceMessages(Level.INFO, "zigbee.device_proposed: "))
+                .as("device= renders as the adjacent proposal line renders it")
+                .singleElement().asString()
+                .startsWith("zigbee.device_proposed: device=0x00124B0012345678 ");
+    }
+
+    @Test
+    @DisplayName("ENERGY-READ-b row 1 boundary: an endpoint that classifies to nothing "
+            + "prints NO endpoint_classified line from the slice — the "
+            + "endpoint_unclassified WARN stays its one line")
+    void unclassifiedEndpoint_printsNoClassifiedLine() {
+        InterviewResult twoEndpoints = new InterviewResult(HUE, 0x260F,
+                new NodeDescriptor(1, 0x100B, 82, 142),
+                List.of(new EndpointDescriptor(11, 0x0104, 0x010D,
+                                List.of(0x0000, 0x0003, 0x0004, 0x0005, 0x0006,
+                                        0x0008, 0x0300),
+                                List.of(0x0019)),
+                        // none of the recognized clusters — the classifier's
+                        // noRecognizedClusters_stillEmpty shape
+                        new EndpointDescriptor(2, 0x0104, 0x9999,
+                                List.of(0x0000, 0x0020), List.of())),
+                "Signify Netherlands B.V.", "LCA017", 1,
+                InterviewStatus.COMPLETE);
+        slice.onDeviceDiscovered(twoEndpoints, MeasuredCorpusValues.HUE_PROFILE_ID);
+
+        slice.adopt(HUE);
+
+        assertThat(sliceMessages(Level.INFO, "zigbee.endpoint_classified: "))
+                .containsExactly("zigbee.endpoint_classified: "
+                        + "device=0x0017880109AB12CD endpoint=11 entityType=LIGHT "
+                        + "capabilities=[on_off, brightness, color_temperature, "
+                        + "identify]");
+        assertThat(sliceMessages(Level.WARN, "zigbee.endpoint_unclassified: "))
+                .hasSize(1);
+    }
 }
