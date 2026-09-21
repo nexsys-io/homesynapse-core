@@ -39,6 +39,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.function.Function;
@@ -176,6 +177,13 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
      */
     static final long AVAILABILITY_PING_TIMEOUT_MILLIS = 5_000;
 
+    /**
+     * LINK-READ: what {@code last_lqi=}, {@code last_rssi_dbm=} and
+     * {@code last_link_at=} print for a device with no link reading this
+     * process (a seeded device that has not spoken) — never a default number.
+     */
+    static final String NO_LINK_READING = "-";
+
     /** Opens a byte channel over a located candidate (the §5.1 production seam). */
     interface PortChannelOpener {
         SerialByteChannel open(PortCandidate candidate);
@@ -247,6 +255,13 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
      * bound, same clearing, same confinement as the note above.
      */
     private final Set<Integer> rejoinLookupAttempted = new HashSet<>();
+    /**
+     * LINK-READ: the instant of the last {@code zigbee.link_summary} emission
+     * — {@link #initialize()}'s instant until the first one. Run-thread
+     * confined like the two sets above: written and read by
+     * {@link #runCycleOnce()} only, always from the injected clock.
+     */
+    private Instant lastLinkSummaryAt;
 
     /**
      * The canonical constructor (M9.6-RO shape). Exactly one transport source is
@@ -404,6 +419,8 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         // count = (device, endpoint) records held; unconditional.
         log.info("zigbee.learned_metering_formatting_rehydrated: count={}",
                 ingestion.learnedMeteringFormattingCount());
+        // LINK-READ: the first link-summary period counts from here.
+        lastLinkSummaryAt = clock.instant();
         // F-8: adoption completion invalidates the device's handler-table entry
         // (the classifier may have attached new capabilities; zone type may bind).
         // M9.6-AVAIL: it ALSO seeds the freshly adopted entities' availability —
@@ -549,7 +566,8 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     /**
      * One §G pass: drain → route → interviews due/expire → availability
      * timeouts (M9.6-AVAIL DP-4 — after the drain, so this cycle's RX evidence
-     * counts before silence is judged) → cache flush check.
+     * counts before silence is judged) → the ten-minute link summary when due
+     * (LINK-READ) → cache flush check.
      */
     void runCycleOnce() {
         ingestion.processCycle();
@@ -558,8 +576,71 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         }
         interviewQueue.expireStale();
         evaluateAvailabilityTimeouts();
+        logLinkSummaryIfDue();
         cache.maybeFlush();
     }
+
+    /**
+     * LINK-READ — the ten-minute link summary
+     * ({@link StandardAvailabilityTracker#LINK_SUMMARY_PERIOD}, where the
+     * sampling rule and its basis live): once per period on the injected
+     * clock, ONE INFO line per device — the Home Automation frames counted
+     * since the previous summary (the ingestion unit's counters, drained and
+     * reset here) and the last link reading the tracker keeps. The gate is
+     * TIME, not cycles: one cycle emits at most one summary however many
+     * periods elapsed, and the next period counts from this emission. The
+     * first period counts from {@link #initialize()}.
+     *
+     * <p>"Per device" is every device the cache knows plus any the counters
+     * hold, in unsigned IEEE order: a device silent for the whole period
+     * prints {@code frames=0} (a silent period is a count, never an absence),
+     * and one that has not spoken this process prints the {@code -}
+     * placeholders — never a default number. Runs after the availability
+     * evaluation, so a silence verdict reached in the same cycle still reads
+     * the undrained count on its {@code zigbee.availability_link} line.
+     */
+    private void logLinkSummaryIfDue() {
+        Instant now = clock.instant();
+        if (Duration.between(lastLinkSummaryAt, now)
+                .compareTo(StandardAvailabilityTracker.LINK_SUMMARY_PERIOD) < 0) {
+            return;
+        }
+        lastLinkSummaryAt = now;
+        Map<Long, Long> frames = ingestion.drainFrameCounts();
+        Set<Long> devices = new TreeSet<>(Long::compareUnsigned);
+        devices.addAll(frames.keySet());
+        for (ZigbeeDeviceRecord record : cache.all()) {
+            devices.add(record.ieeeAddress().value());
+        }
+        for (Long ieee : devices) {
+            IEEEAddress device = new IEEEAddress(ieee);
+            LinkFields link = linkFields(device);
+            log.info("zigbee.link_summary: device={} frames={} last_lqi={} "
+                            + "last_rssi_dbm={} last_link_at={}",
+                    device, frames.getOrDefault(ieee, 0L), link.lqi(),
+                    link.rssiDbm(), link.at());
+        }
+    }
+
+    /**
+     * A device's kept link reading as the three log fields the two LINK-READ
+     * lines share ({@code last_lqi= last_rssi_dbm= last_link_at=}); the instant
+     * is ISO-8601 UTC. With no reading this process every field is the
+     * {@link #NO_LINK_READING} placeholder — never a default number.
+     */
+    private LinkFields linkFields(IEEEAddress device) {
+        Optional<LinkReading> link = availabilityTracker.lastLink(device);
+        return new LinkFields(
+                link.map(reading -> Integer.toString(reading.lqi()))
+                        .orElse(NO_LINK_READING),
+                link.map(reading -> Integer.toString(reading.rssiDbm()))
+                        .orElse(NO_LINK_READING),
+                availabilityTracker.lastLinkAt(device).map(Instant::toString)
+                        .orElse(NO_LINK_READING));
+    }
+
+    /** The rendered fields of {@link #linkFields(IEEEAddress)}. */
+    private record LinkFields(String lqi, String rssiDbm, String at) { }
 
     /**
      * The M9.6-AVAIL DP-4 absence evaluation: battery devices past their 25 h
@@ -1231,17 +1312,19 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         }
 
         @Override
-        public void onFrame(IEEEAddress device) {
+        public void onFrame(IEEEAddress device, Optional<LinkReading> link) {
             cache.recordFrame(device);   // the cache's last-seen — a DIFFERENT
             interviewQueue.onFrameReceived(device);   // class than the tracker's
             // M9.6-AVAIL DP-3: every device-originated RX is liveness — this
             // seam is the documented availability feed, pre-dedup by design
             // (a duplicate frame is still the device talking). WU-AVAIL-SEED
             // DP-4: the SAME instant rides the sidecar's evidence recency, so
-            // tracker and persisted clock can never disagree.
+            // tracker and persisted clock can never disagree. LINK-READ: the
+            // frame's last-hop reading rides the same call — kept in memory
+            // by the tracker, never persisted; an empty one is still liveness.
             Instant now = clock.instant();
             cache.recordEvidence(device, now);
-            availabilityTracker.recordFrame(device, now);
+            availabilityTracker.recordFrame(device, now, link);
         }
 
         /**
@@ -1398,6 +1481,23 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
 
         @Override
         public void onTransition(IEEEAddress device, boolean available) {
+            // LINK-READ: the SIBLING of the tracker's frozen DP-8 line
+            // (zigbee.availability_changed — byte-frozen, out of bounds), logged
+            // right after it: every transition names its reason, the last link
+            // reading with the instant of the frame that delivered it, and the
+            // HA frames counted since the last ten-minute summary. The tracker
+            // keeps the reading BEFORE it fires this sink, so an online edge
+            // carries the reading of the very frame that produced it; a device
+            // with no reading this process prints the placeholders. The count
+            // lives in the ingestion unit — this adapter holds both, so the
+            // two instrument lines share one home.
+            LinkFields link = linkFields(device);
+            log.info("zigbee.availability_link: device={} available={} reason={} "
+                            + "last_lqi={} last_rssi_dbm={} last_link_at={} "
+                            + "frames_since_summary={}",
+                    device, available, availabilityTracker.lastReason(device),
+                    link.lqi(), link.rssiDbm(), link.at(),
+                    ingestion.framesSince(device));
             Boolean prior = lastPublished.put(device.value(), available);
             cache.setAvailability(device, available);
             publishForEntities(device,

@@ -54,6 +54,8 @@ class ZclIngestionUnitTest {
     private Map<Long, EntityId> entities;
     private List<ZdoCodec.DeviceAnnounce> announces;
     private List<IEEEAddress> framesSeen;
+    /** LINK-READ: the reading handed over beside each {@code onFrame}, in order. */
+    private List<Optional<LinkReading>> linksSeen;
     private List<NwkHook> nwkHooks;
     private List<IeeeHook> ieeeHooks;
     private List<ZclFrame> sentFrames;
@@ -89,6 +91,7 @@ class ZclIngestionUnitTest {
                 EntityId.of(UlidFactory.generate(clock)));
         announces = new ArrayList<>();
         framesSeen = new ArrayList<>();
+        linksSeen = new ArrayList<>();
         nwkHooks = new ArrayList<>();
         ieeeHooks = new ArrayList<>();
         sentFrames = new ArrayList<>();
@@ -126,8 +129,10 @@ class ZclIngestionUnitTest {
                     }
 
                     @Override
-                    public void onFrame(IEEEAddress device) {
+                    public void onFrame(IEEEAddress device,
+                            Optional<LinkReading> link) {
                         framesSeen.add(device);
+                        linksSeen.add(link);
                     }
 
                     @Override
@@ -1131,6 +1136,122 @@ class ZclIngestionUnitTest {
         assertThat(publisher.published()).isEmpty();
     }
 
+    // ── LINK-READ: the per-device frame counter + the reading on the seam ───
+
+    @Test
+    @DisplayName("LINK-READ T4: three HA frames from a resolved sender count 3 — "
+            + "PRE-dedup (the measured ×2 twin is still the device talking); "
+            + "drainFrameCounts() hands the count over and resets it to 0; an "
+            + "unknown sender's frame counts nothing")
+    void frameCounter_countsResolvedHaFramesPreDedup_andDrains() {
+        enqueueReport(SNZB_NWK, 1, 0x0406,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x18, 0x01});
+        // The measured twin: same payload, the next TSN — the dedup drops it.
+        enqueueReport(SNZB_NWK, 1, 0x0406,
+                new byte[] {0x18, 0x2B, 0x0A, 0x00, 0x00, 0x18, 0x01});
+        enqueueReport(SNZB_NWK, 1, 0x0001,
+                new byte[] {0x18, 0x30, 0x0A, 0x21, 0x00, 0x20, (byte) 0xC8});
+        enqueueReport(0x9999, 1, 0x0406,
+                new byte[] {0x18, 0x2C, 0x0A, 0x00, 0x00, 0x18, 0x01});
+
+        ingestion.processCycle();
+
+        assertThat(publisher.published())
+                .as("the twin was deduplicated — and is still counted below")
+                .hasSize(2);
+        assertThat(ingestion.framesSince(SNZB)).isEqualTo(3L);
+        assertThat(ingestion.drainFrameCounts())
+                .as("one row per device that has spoken — the unknown sender "
+                        + "(nwk 0x9999) has no device and no row")
+                .containsOnly(Map.entry(SNZB.value(), 3L));
+        assertThat(ingestion.framesSince(SNZB))
+                .as("the drain reset the device's count")
+                .isZero();
+        assertThat(ingestion.drainFrameCounts())
+                .as("a drained device keeps its row at 0 — a silent period is "
+                        + "a count, never an absence")
+                .containsOnly(Map.entry(SNZB.value(), 0L));
+    }
+
+    @Test
+    @DisplayName("LINK-READ T5: the listener receives the reading as delivered "
+            + "(lastHopLqi, lastHopRssi) on BOTH paths — the HA frame and the "
+            + "Device_annce, which carries its reading and counts nothing")
+    void listenerReceivesTheReadingAsDelivered_onBothPaths() {
+        enqueueReport(SNZB_NWK, 1, 0x0406,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x18, 0x01});
+        pendingFrames.add(incomingFrame(0x0104, 0x0001, 1, SNZB_NWK, 255, -100,
+                new byte[] {0x18, 0x30, 0x0A, 0x21, 0x00, 0x20, (byte) 0xC8}));
+        pendingFrames.add(announceFrame());
+
+        ingestion.processCycle();
+
+        assertThat(framesSeen).containsExactly(SNZB, SNZB, SNZB);
+        assertThat(linksSeen).containsExactly(
+                Optional.of(new LinkReading(164, -59)),
+                Optional.of(new LinkReading(255, -100)),
+                Optional.of(new LinkReading(164, -59)));
+        assertThat(ingestion.framesSince(SNZB))
+                .as("the counter is the HA frames of a resolved sender — the "
+                        + "ZDO announce is a reading, never a count")
+                .isEqualTo(2L);
+        assertThat(ingestionMessages(Level.WARN, "zigbee.link_reading_suspect"))
+                .as("an ordinary negative-dBm reading is never flagged")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("LINK-READ T8: a raw pair OUTSIDE the wire domain through route() — "
+            + "no throw: the frame counts, onFrame fires with an EMPTY reading, the "
+            + "frame is still ingested, and exactly ONE link_reading_suspect WARN "
+            + "names it (a second such frame logs nothing more)")
+    void outOfWireDomainPair_isTotal_countsAndFiresEmpty_oneWarnPerDevice() {
+        // parse() cannot produce this pair at HEAD (lqi & 0xFF; rssi a
+        // sign-extended byte) — it is exactly what an UNSIGNED misdecode of
+        // the wire byte 0xC4 would hand to route(): 196, never −60.
+        ingestion.route(new EzspIncomingMessage(0x0104, 0x0406, 1, 1, 164, 196,
+                SNZB_NWK, new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x18, 0x01}));
+        ingestion.route(new EzspIncomingMessage(0x0104, 0x0406, 1, 1, 300, 196,
+                SNZB_NWK, new byte[] {0x18, 0x2C, 0x0A, 0x00, 0x00, 0x18, 0x00}));
+
+        assertThat(framesSeen)
+                .as("DP-3: every device-originated RX is liveness — the reading "
+                        + "never gates the call")
+                .containsExactly(SNZB, SNZB);
+        assertThat(linksSeen).containsExactly(Optional.empty(), Optional.empty());
+        assertThat(ingestion.framesSince(SNZB)).isEqualTo(2L);
+        assertThat(publisher.published())
+                .as("the frames themselves are ingested exactly as before")
+                .hasSize(2);
+        assertThat(ingestionMessages(Level.WARN, "zigbee.link_reading_suspect"))
+                .as("once per device per process — raw values, never a default")
+                .containsExactly("zigbee.link_reading_suspect: "
+                        + "device=0x00124B0012345678 lqi_raw=164 rssi_raw=196 "
+                        + "reason=out_of_wire_domain");
+    }
+
+    @Test
+    @DisplayName("LINK-READ T9: rssi_raw=5 — a legal s8, implausible from an NCP: the "
+            + "reading is DELIVERED as (lqi, 5) and ONE WARN flags it "
+            + "(reason=positive_rssi); a second one logs nothing more")
+    void positiveRssi_isDeliveredAndFlaggedOnce() {
+        pendingFrames.add(incomingFrame(0x0104, 0x0406, 1, SNZB_NWK, 164, 5,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x18, 0x01}));
+        pendingFrames.add(incomingFrame(0x0104, 0x0406, 1, SNZB_NWK, 164, 7,
+                new byte[] {0x18, 0x2C, 0x0A, 0x00, 0x00, 0x18, 0x00}));
+
+        ingestion.processCycle();
+
+        assertThat(linksSeen).containsExactly(
+                Optional.of(new LinkReading(164, 5)),
+                Optional.of(new LinkReading(164, 7)));
+        assertThat(ingestion.framesSince(SNZB)).isEqualTo(2L);
+        assertThat(ingestionMessages(Level.WARN, "zigbee.link_reading_suspect"))
+                .containsExactly("zigbee.link_reading_suspect: "
+                        + "device=0x00124B0012345678 lqi_raw=164 rssi_raw=5 "
+                        + "reason=positive_rssi");
+    }
+
     private String lastReportedKey() {
         List<EventEnvelope> published = publisher.published();
         return ((StateReportedEvent) published.get(published.size() - 1)
@@ -1169,6 +1290,13 @@ class ZclIngestionUnitTest {
 
     private static EzspFrame incomingFrame(int profile, int cluster, int srcEp,
             int sender, byte[] message) {
+        // The bench-measured SNZB-03P pair (the walk-test fixture: 160–164 / −59).
+        return incomingFrame(profile, cluster, srcEp, sender, 164, -59, message);
+    }
+
+    /** LINK-READ: the same layout with the last-hop pair the test names. */
+    private static EzspFrame incomingFrame(int profile, int cluster, int srcEp,
+            int sender, int lastHopLqi, int lastHopRssi, byte[] message) {
         byte[] parameters = new byte[19 + message.length];
         parameters[0] = 0x00;
         parameters[1] = (byte) (profile & 0xFF);
@@ -1177,8 +1305,8 @@ class ZclIngestionUnitTest {
         parameters[4] = (byte) ((cluster >> 8) & 0xFF);
         parameters[5] = (byte) srcEp;
         parameters[6] = 0x01;
-        parameters[12] = (byte) 164;
-        parameters[13] = (byte) -59;
+        parameters[12] = (byte) lastHopLqi;
+        parameters[13] = (byte) lastHopRssi;
         parameters[14] = (byte) (sender & 0xFF);
         parameters[15] = (byte) ((sender >> 8) & 0xFF);
         parameters[16] = (byte) 0xFF;

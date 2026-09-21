@@ -108,7 +108,7 @@ class FixtureReplayTest {
             }
 
             @Override
-            public void onFrame(IEEEAddress device) {
+            public void onFrame(IEEEAddress device, Optional<LinkReading> link) {
             }
 
             @Override

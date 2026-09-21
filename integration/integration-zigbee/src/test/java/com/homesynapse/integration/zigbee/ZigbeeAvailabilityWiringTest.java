@@ -875,6 +875,106 @@ class ZigbeeAvailabilityWiringTest {
                                 + " available=false");
     }
 
+    // ── LINK-READ: the sibling line zigbee.availability_link ────────────────
+    // The DP-8 token above is FROZEN and out of bounds; every transition's
+    // reason, last link reading and frame count ride the ADAPTER's own line,
+    // logged from the transition sink right after the frozen one.
+
+    @Test
+    @DisplayName("LINK-READ T1': a frame with reading (200, −45), then battery silence — "
+            + "the sibling line carries reason=SILENCE_TIMEOUT and the LAST reading "
+            + "with its frame's instant")
+    void silenceCarriesTheLastReading_onTheSiblingLine() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, reporterInterview());
+        captureAdapterLog(Level.INFO);
+
+        Instant frameAt = clock.instant();
+        deliverReport(adapter, REPORTER_NWK, 1, 0x0406, 200, -45,
+                occupancyReport(1, 1));
+        clock.advance(Duration.ofHours(25).plusMinutes(1));
+        adapter.runCycleOnce();
+
+        List<String> link = adapterMessages("zigbee.availability_link");
+        assertThat(link).hasSize(2);
+        assertThat(link.get(1))
+                .as("the silence line is the run's instrument: reason + the last "
+                        + "reading + the instant of the frame that delivered it")
+                .isEqualTo("zigbee.availability_link: device="
+                        + new IEEEAddress(REPORTER_IEEE) + " available=false "
+                        + "reason=SILENCE_TIMEOUT last_lqi=200 last_rssi_dbm=-45 "
+                        + "last_link_at=" + frameAt + " frames_since_summary=1");
+    }
+
+    @Test
+    @DisplayName("LINK-READ T3': a seeded device that never spoke this process times "
+            + "out — the sibling line prints last_lqi=- last_rssi_dbm=- "
+            + "last_link_at=-, never a default number")
+    void seededSilentDevice_printsPlaceholders_neverADefaultNumber() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, reporterInterview());
+        deliverReport(adapter, REPORTER_NWK, 1, 0x0406, occupancyReport(1, 1));
+        adapter.close();
+
+        clock.advance(Duration.ofHours(26));   // downtime > the 25 h window
+        publisher = new RecordingEventPublisher(clock);
+        Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
+        FakeNcp restartNcp = new FakeNcp();
+        restartNcp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter restarted = bootProduction(restartNcp, null);
+        captureAdapterLog(Level.INFO);
+
+        restarted.runCycleOnce();   // the FIRST evaluation — no frame this process
+
+        assertThat(adapterMessages("zigbee.availability_link"))
+                .as("the reading died with the previous process — a persisted "
+                        + "seed is never this-process evidence (DP-1)")
+                .containsExactly("zigbee.availability_link: device="
+                        + new IEEEAddress(REPORTER_IEEE) + " available=false "
+                        + "reason=SILENCE_TIMEOUT last_lqi=- last_rssi_dbm=- "
+                        + "last_link_at=- frames_since_summary=0");
+    }
+
+    @Test
+    @DisplayName("LINK-READ: the sibling token zigbee.availability_link — verbatim, "
+            + "both directions (DP-8's form); the frozen tracker line beside it is "
+            + "byte-identical")
+    void linkToken_verbatimBothDirections() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, reporterInterview());
+        captureAdapterLog(Level.INFO);
+
+        Instant frameAt = clock.instant();
+        deliverReport(adapter, REPORTER_NWK, 1, 0x0406, occupancyReport(1, 1));
+        clock.advance(Duration.ofHours(25).plusMinutes(1));
+        adapter.runCycleOnce();
+
+        IEEEAddress reporter = new IEEEAddress(REPORTER_IEEE);
+        assertThat(adapterMessages("zigbee.availability_link"))
+                .containsExactly(
+                        "zigbee.availability_link: device=" + reporter
+                                + " available=true reason=FIRST_CONTACT "
+                                + "last_lqi=176 last_rssi_dbm=-56 last_link_at="
+                                + frameAt + " frames_since_summary=1",
+                        "zigbee.availability_link: device=" + reporter
+                                + " available=false reason=SILENCE_TIMEOUT "
+                                + "last_lqi=176 last_rssi_dbm=-56 last_link_at="
+                                + frameAt + " frames_since_summary=1");
+        assertThat(trackerMessages())
+                .as("the frozen DP-8 line fires beside the sibling, unchanged")
+                .containsExactly(
+                        "zigbee.availability_changed: device=" + reporter
+                                + " available=true",
+                        "zigbee.availability_changed: device=" + reporter
+                                + " available=false");
+    }
+
     // ── fixtures: interviews (recordInterview + slice adoption inputs) ──────
 
     private static InterviewResult reporterInterview() {
@@ -950,6 +1050,23 @@ class ZigbeeAvailabilityWiringTest {
             int sourceEndpoint, int clusterId, byte[] zcl) {
         riders.add(incomingMessage(EzspCoordinatorProtocol.HA_PROFILE_ID,
                 clusterId, sourceEndpoint, senderNwk, zcl));
+        adapter.coordinatorProtocol().ping();
+        adapter.runCycleOnce();
+    }
+
+    /**
+     * LINK-READ: {@link #deliverReport} with the last-hop pair the test names —
+     * the callback frame's 5-byte EZSP header precedes the parameters, whose
+     * offsets 12 / 13 are {@code lastHopLqi} / {@code lastHopRssi}.
+     */
+    private void deliverReport(ZigbeeIntegrationAdapter adapter, int senderNwk,
+            int sourceEndpoint, int clusterId, int lastHopLqi, int lastHopRssi,
+            byte[] zcl) {
+        byte[] frame = incomingMessage(EzspCoordinatorProtocol.HA_PROFILE_ID,
+                clusterId, sourceEndpoint, senderNwk, zcl);
+        frame[5 + 12] = (byte) lastHopLqi;
+        frame[5 + 13] = (byte) lastHopRssi;
+        riders.add(frame);
         adapter.coordinatorProtocol().ping();
         adapter.runCycleOnce();
     }

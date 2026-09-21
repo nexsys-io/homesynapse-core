@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -40,6 +41,12 @@ class StandardAvailabilityTrackerTest {
             new IEEEAddress(0x00124B00AA55AA55L);
     private static final IEEEAddress UNKNOWN_DEVICE =
             new IEEEAddress(0x8CF681FFFE12AB34L);
+    /**
+     * The reading the availability tests do not care about (LINK-READ): the
+     * bench-measured SNZB-03P pair (the walk-test fixture's 160–164 / −59 dBm).
+     */
+    private static final Optional<LinkReading> ANY_LINK =
+            Optional.of(new LinkReading(164, -59));
 
     private TestClock clock;
     private Map<Long, Integer> powerSources;
@@ -79,7 +86,7 @@ class StandardAvailabilityTrackerTest {
     void firstContactTransitions() {
         createTracker(Map.of());
 
-        tracker.recordFrame(BATTERY_DEVICE, clock.instant());
+        tracker.recordFrame(BATTERY_DEVICE, clock.instant(), ANY_LINK);
 
         assertThat(tracker.isAvailable(BATTERY_DEVICE)).isTrue();
         assertThat(tracker.lastReason(BATTERY_DEVICE))
@@ -98,7 +105,7 @@ class StandardAvailabilityTrackerTest {
                         + "unavailable→available cascade")
                 .isEmpty();
 
-        tracker.recordFrame(BATTERY_DEVICE, clock.instant());
+        tracker.recordFrame(BATTERY_DEVICE, clock.instant(), ANY_LINK);
 
         assertThat(transitions)
                 .as("the first post-restart frame confirms, never transitions")
@@ -112,7 +119,7 @@ class StandardAvailabilityTrackerTest {
 
         assertThat(tracker.isAvailable(BATTERY_DEVICE)).isFalse();
 
-        tracker.recordFrame(BATTERY_DEVICE, clock.instant());
+        tracker.recordFrame(BATTERY_DEVICE, clock.instant(), ANY_LINK);
 
         assertThat(tracker.isAvailable(BATTERY_DEVICE)).isTrue();
         assertThat(transitions).hasSize(1);
@@ -124,7 +131,7 @@ class StandardAvailabilityTrackerTest {
     @DisplayName("battery devices go unavailable after 25 h of silence")
     void batterySilenceTimeout() {
         createTracker(Map.of());
-        tracker.recordFrame(BATTERY_DEVICE, clock.instant());
+        tracker.recordFrame(BATTERY_DEVICE, clock.instant(), ANY_LINK);
         transitions.clear();
 
         clock.advance(Duration.ofHours(24));
@@ -149,7 +156,7 @@ class StandardAvailabilityTrackerTest {
     @DisplayName("mains devices become ping candidates after 10 min — not yet unavailable")
     void mainsSilenceYieldsPingCandidate() {
         createTracker(Map.of());
-        tracker.recordFrame(MAINS_DEVICE, clock.instant());
+        tracker.recordFrame(MAINS_DEVICE, clock.instant(), ANY_LINK);
         transitions.clear();
 
         clock.advance(Duration.ofMinutes(11));
@@ -166,7 +173,7 @@ class StandardAvailabilityTrackerTest {
     @DisplayName("N-5: mains 3-phase (0x02) gets the mains ping posture")
     void threePhaseMainsYieldsPingCandidate() {
         createTracker(Map.of());
-        tracker.recordFrame(THREE_PHASE_DEVICE, clock.instant());
+        tracker.recordFrame(THREE_PHASE_DEVICE, clock.instant(), ANY_LINK);
         transitions.clear();
 
         clock.advance(Duration.ofMinutes(11));
@@ -180,7 +187,7 @@ class StandardAvailabilityTrackerTest {
     @DisplayName("N-5: UNKNOWN power source (0x00) gets the 25 h battery-conservative window")
     void unknownPowerSourceIsBatteryConservative() {
         createTracker(Map.of());
-        tracker.recordFrame(UNKNOWN_DEVICE, clock.instant());
+        tracker.recordFrame(UNKNOWN_DEVICE, clock.instant(), ANY_LINK);
         transitions.clear();
 
         clock.advance(Duration.ofMinutes(11));
@@ -204,7 +211,7 @@ class StandardAvailabilityTrackerTest {
     @DisplayName("N-5: an exotic power source (0x04 DC) falls to battery-conservative")
     void dcPowerSourceIsBatteryConservative() {
         createTracker(Map.of());
-        tracker.recordFrame(DC_DEVICE, clock.instant());
+        tracker.recordFrame(DC_DEVICE, clock.instant(), ANY_LINK);
         transitions.clear();
 
         clock.advance(Duration.ofMinutes(11));
@@ -225,7 +232,7 @@ class StandardAvailabilityTrackerTest {
     @DisplayName("a failed command result after repeated failures marks unavailable via PING_TIMEOUT")
     void failedPingMarksUnavailable() {
         createTracker(Map.of());
-        tracker.recordFrame(MAINS_DEVICE, clock.instant());
+        tracker.recordFrame(MAINS_DEVICE, clock.instant(), ANY_LINK);
         transitions.clear();
 
         tracker.recordCommandResult(MAINS_DEVICE, false, clock.instant());
@@ -347,7 +354,7 @@ class StandardAvailabilityTrackerTest {
     void seededUnknownAvailability_firstEvidenceEdgesOnline() {
         createTracker(Map.of(UNKNOWN_DEVICE.value(), seed(null, null)));
 
-        tracker.recordFrame(UNKNOWN_DEVICE, clock.instant());
+        tracker.recordFrame(UNKNOWN_DEVICE, clock.instant(), ANY_LINK);
 
         assertThat(tracker.isAvailable(UNKNOWN_DEVICE)).isTrue();
         assertThat(tracker.lastReason(UNKNOWN_DEVICE))
@@ -407,7 +414,7 @@ class StandardAvailabilityTrackerTest {
                 .as("a persisted value is not this-process evidence")
                 .isFalse();
 
-        tracker.recordFrame(BATTERY_DEVICE, clock.instant());
+        tracker.recordFrame(BATTERY_DEVICE, clock.instant(), ANY_LINK);
         assertThat(tracker.isEvidencedAvailable(BATTERY_DEVICE))
                 .as("a frame is evidence even without a transition")
                 .isTrue();
@@ -417,5 +424,97 @@ class StandardAvailabilityTrackerTest {
         assertThat(tracker.isEvidencedAvailable(MAINS_DEVICE))
                 .as("a ping reply is evidence")
                 .isTrue();
+    }
+
+    // ── LINK-READ: the last link reading is kept per device ─────────────────
+    // The STATE only (AUDIT CORRECTION 1): the tracker's log output stays
+    // exactly what DP-8 froze — the reading reaches the journal on the
+    // adapter's sibling line, pinned in ZigbeeAvailabilityWiringTest.
+
+    @Test
+    @DisplayName("LINK-READ T1: a frame's reading survives the silence timeout — the "
+            + "device goes unavailable and still answers with its last frame's "
+            + "reading and that frame's instant")
+    void lastLink_survivesTheSilenceTimeout() {
+        createTracker(Map.of());
+        Instant frameAt = clock.instant();
+        tracker.recordFrame(BATTERY_DEVICE, frameAt,
+                Optional.of(new LinkReading(200, -45)));
+
+        clock.advance(Duration.ofHours(26));
+        tracker.evaluateTimeouts();
+
+        assertThat(tracker.isAvailable(BATTERY_DEVICE)).isFalse();
+        assertThat(tracker.lastReason(BATTERY_DEVICE))
+                .isEqualTo(AvailabilityReason.SILENCE_TIMEOUT);
+        assertThat(tracker.lastLink(BATTERY_DEVICE))
+                .as("the silence carries the last reading — it is never cleared "
+                        + "by a transition")
+                .contains(new LinkReading(200, -45));
+        assertThat(tracker.lastLinkAt(BATTERY_DEVICE))
+                .as("the reading's instant is the FRAME's, not the timeout's")
+                .contains(frameAt);
+    }
+
+    @Test
+    @DisplayName("LINK-READ T2: two frames — the second reading wins and the instant "
+            + "is the second frame's")
+    void lastLink_secondReadingWins() {
+        createTracker(Map.of());
+        tracker.recordFrame(BATTERY_DEVICE, clock.instant(),
+                Optional.of(new LinkReading(200, -45)));
+
+        clock.advance(Duration.ofMinutes(3));
+        Instant secondAt = clock.instant();
+        tracker.recordFrame(BATTERY_DEVICE, secondAt,
+                Optional.of(new LinkReading(120, -78)));
+
+        assertThat(tracker.lastLink(BATTERY_DEVICE))
+                .contains(new LinkReading(120, -78));
+        assertThat(tracker.lastLinkAt(BATTERY_DEVICE)).contains(secondAt);
+    }
+
+    @Test
+    @DisplayName("LINK-READ T2-b: an EMPTY reading is still liveness — last-seen moves "
+            + "(the silence window restarts) and the prior reading and its instant "
+            + "are kept")
+    void emptyReading_isStillLiveness_andKeepsThePriorReading() {
+        createTracker(Map.of());
+        Instant firstAt = clock.instant();
+        tracker.recordFrame(BATTERY_DEVICE, firstAt,
+                Optional.of(new LinkReading(200, -45)));
+
+        clock.advance(Duration.ofHours(24));
+        tracker.recordFrame(BATTERY_DEVICE, clock.instant(), Optional.empty());
+        clock.advance(Duration.ofHours(24));
+        tracker.evaluateTimeouts();
+
+        assertThat(tracker.isAvailable(BATTERY_DEVICE))
+                .as("48 h after the first frame, 24 h after the second: the "
+                        + "reading-less frame restarted the 25 h window")
+                .isTrue();
+        assertThat(tracker.lastLink(BATTERY_DEVICE))
+                .as("an empty reading never overwrites a kept one")
+                .contains(new LinkReading(200, -45));
+        assertThat(tracker.lastLinkAt(BATTERY_DEVICE)).contains(firstAt);
+    }
+
+    @Test
+    @DisplayName("LINK-READ T3: a seeded (persisted) device with no this-process frame "
+            + "times out with NO reading — none is invented for it (DP-1)")
+    void seededDevice_timesOutWithNoReading() {
+        createTracker(Map.of(BATTERY_DEVICE.value(),
+                seed(true, clock.instant().minus(Duration.ofHours(26)))));
+
+        tracker.evaluateTimeouts();
+
+        assertThat(tracker.isAvailable(BATTERY_DEVICE)).isFalse();
+        assertThat(tracker.lastReason(BATTERY_DEVICE))
+                .isEqualTo(AvailabilityReason.SILENCE_TIMEOUT);
+        assertThat(tracker.lastLink(BATTERY_DEVICE)).isEmpty();
+        assertThat(tracker.lastLinkAt(BATTERY_DEVICE)).isEmpty();
+        assertThat(tracker.lastLink(MAINS_DEVICE))
+                .as("a device the tracker has never heard of has no reading either")
+                .isEmpty();
     }
 }

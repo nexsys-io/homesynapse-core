@@ -15,6 +15,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.ToIntFunction;
 
@@ -52,6 +53,30 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
     static final Duration MAINS_PING_SILENCE = Duration.ofMinutes(10);
     /** Battery-powered passive offline timeout (Doc 08 §9). */
     static final Duration BATTERY_OFFLINE_SILENCE = Duration.ofHours(25);
+    /**
+     * LINK-READ — the sampling rule for the link reading and the frame count.
+     * <strong>Kept on every frame, written on two occasions only:</strong> the
+     * reading (two {@code int}s and an {@link Instant} per device) and the
+     * per-device frame count live in memory; they reach the journal when a
+     * device's availability TRANSITIONS (the adapter's
+     * {@code zigbee.availability_link} line) and once per this period, one
+     * {@code zigbee.link_summary} line per device. Never a line per frame, and
+     * never a store write: no event carries the reading in this unit.
+     *
+     * <p><strong>The basis.</strong> A per-frame line scales with traffic (a
+     * 5 s metering reporter alone is 720 lines an hour); a per-period line
+     * scales with the fleet: one line per device per ten minutes is 6 an hour
+     * — at most 60 lines per device per ten hours, 600 for the ≤ ten-device
+     * run fleet — and still places every silence inside a ten-minute window
+     * with the last reading beside it. Before this rule a device's frame count
+     * was not observable on a shipped artifact at all (IR-20: the store's rows
+     * by subject bound it only from below).
+     *
+     * <p>A constant by design: the run's fleet is fixed. The gate is a
+     * comparison on the injected {@link Clock} inside the adapter's cycle —
+     * time, not cycles, and no scheduler.
+     */
+    static final Duration LINK_SUMMARY_PERIOD = Duration.ofMinutes(10);
     /** ZCL Basic PowerSource table: mains (single phase). */
     private static final int POWER_SOURCE_MAINS_SINGLE_PHASE = 0x01;
     /** ZCL Basic PowerSource table: mains (3 phase). */
@@ -98,6 +123,15 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
          * liveness (the adoption-time view seed) cannot ride the seed.
          */
         boolean evidenced;
+        /**
+         * LINK-READ: the last-hop reading of the last frame that delivered
+         * one to THIS process, and that frame's instant — written together,
+         * {@code null} together. A seeded entry starts without them (DP-1: no
+         * reading is ever invented), and they outlive every transition: a
+         * silence still answers with the reading of its last frame.
+         */
+        LinkReading lastLink;
+        Instant lastLinkAt;
     }
 
     private final Clock clock;
@@ -147,10 +181,38 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
     }
 
     @Override
-    public void recordFrame(IEEEAddress device, Instant timestamp) {
+    public void recordFrame(IEEEAddress device, Instant timestamp,
+            Optional<LinkReading> link) {
         Objects.requireNonNull(device, "device");
         Objects.requireNonNull(timestamp, "timestamp");
-        transition(device, timestamp, true, null);
+        Objects.requireNonNull(link, "link");
+        transition(device, timestamp, true, null, link.orElse(null));
+    }
+
+    @Override
+    public Optional<LinkReading> lastLink(IEEEAddress device) {
+        Objects.requireNonNull(device, "device");
+        lock.lock();
+        try {
+            DeviceState state = states.get(device.value());
+            return state == null ? Optional.empty()
+                    : Optional.ofNullable(state.lastLink);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public Optional<Instant> lastLinkAt(IEEEAddress device) {
+        Objects.requireNonNull(device, "device");
+        lock.lock();
+        try {
+            DeviceState state = states.get(device.value());
+            return state == null ? Optional.empty()
+                    : Optional.ofNullable(state.lastLinkAt);
+        } finally {
+            lock.unlock();
+        }
     }
 
     @Override
@@ -158,10 +220,14 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
             Instant timestamp) {
         Objects.requireNonNull(device, "device");
         Objects.requireNonNull(timestamp, "timestamp");
+        // A ping reply is consumed by its exchange and never reaches the
+        // ingestion seam — it is evidence without a link reading.
         if (success) {
-            transition(device, timestamp, true, AvailabilityReason.PING_SUCCESS);
+            transition(device, timestamp, true, AvailabilityReason.PING_SUCCESS,
+                    null);
         } else {
-            transition(device, timestamp, false, AvailabilityReason.PING_TIMEOUT);
+            transition(device, timestamp, false, AvailabilityReason.PING_TIMEOUT,
+                    null);
         }
     }
 
@@ -258,7 +324,7 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
         }
         for (IEEEAddress device : timedOut) {
             transition(device, clock.instant(), false,
-                    AvailabilityReason.SILENCE_TIMEOUT);
+                    AvailabilityReason.SILENCE_TIMEOUT, null);
         }
         return pingCandidates;
     }
@@ -279,13 +345,27 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
                 || powerSource == POWER_SOURCE_MAINS_THREE_PHASE;
     }
 
+    /**
+     * The single state-mutation path. {@code link} is the frame's last-hop
+     * reading, or {@code null} when the evidence carries none (a ping result,
+     * a timeout verdict, a frame whose pair could not be constructed): it is
+     * kept INSIDE the lock, with the frame's instant, BEFORE the listener
+     * fires — so a transition sink that reads {@link #lastLink} sees the
+     * reading of the very frame that edged the device. A {@code null} never
+     * overwrites a kept reading, and no transition ever clears one.
+     */
     private void transition(IEEEAddress device, Instant timestamp,
-            boolean available, AvailabilityReason explicitReason) {
+            boolean available, AvailabilityReason explicitReason,
+            LinkReading link) {
         boolean changed;
         lock.lock();
         try {
             DeviceState state = states.computeIfAbsent(device.value(),
                     key -> new DeviceState());
+            if (link != null) {
+                state.lastLink = link;
+                state.lastLinkAt = timestamp;
+            }
             State target = available ? State.AVAILABLE : State.UNAVAILABLE;
             changed = state.state != target && state.state != State.UNKNOWN
                     || state.state == State.UNKNOWN;

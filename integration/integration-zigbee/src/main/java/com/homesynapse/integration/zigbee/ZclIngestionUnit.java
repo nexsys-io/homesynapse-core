@@ -24,6 +24,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.ObjLongConsumer;
 import java.util.function.Supplier;
 
@@ -77,9 +80,19 @@ import java.util.function.Supplier;
  * formatting publishes NOTHING: one {@code zigbee.metering_unscaled} DEBUG per
  * (device, cluster) and silence — never a guessed scale.
  *
+ * <p>LINK-READ: every Home Automation frame of a resolved sender increments a
+ * per-IEEE counter and hands its last-hop reading ({@link LinkReading}) to
+ * {@link IngestionListener#onFrame}; a Device_annce hands its reading and
+ * counts nothing. The frame path is TOTAL — the reading is built through
+ * {@link LinkReading#fromWire}, so no delivered byte pair can throw here — and
+ * SILENT: the count and the reading reach the journal on the adapter's
+ * ten-minute {@code zigbee.link_summary} line and its per-transition
+ * {@code zigbee.availability_link} line, never per frame.
+ *
  * <p>Thread-safe for the intended single-cycle-driver use: the per-device
- * handler table, the learned zone-type map and the learned metering formatting
- * are confined to the cycle thread.
+ * handler table, the learned zone-type map, the learned metering formatting
+ * and the suspect-reading set are confined to the cycle thread; the frame
+ * counters alone are concurrent (read off the frame path).
  *
  * @see ReportDeduplicator
  * @see ClusterHandlers
@@ -131,11 +144,20 @@ final class ZclIngestionUnit {
         void onDeviceAnnounce(ZdoCodec.DeviceAnnounce announce);
 
         /**
-         * ANY frame arrived from a known device (availability + wake signal).
+         * ANY frame arrived from a known device (availability + wake signal),
+         * with the last-hop link reading the NCP delivered beside it.
+         *
+         * <p>LINK-READ: the seam is TOTAL — liveness never depends on the
+         * reading. {@code link} is empty when the delivered pair is outside
+         * the wire domain ({@link LinkReading#fromWire}); the call is made
+         * regardless (M9.6-AVAIL DP-3: every device-originated RX is
+         * liveness).
          *
          * @param device the sending device
+         * @param link the frame's last-hop reading, empty when the delivered
+         *        pair could not be constructed; never {@code null}
          */
-        void onFrame(IEEEAddress device);
+        void onFrame(IEEEAddress device, Optional<LinkReading> link);
 
         /**
          * F-R4-1 (R-10 Row 10 (a)) — interview-on-rejoin, hook H-ii, the
@@ -210,6 +232,14 @@ final class ZclIngestionUnit {
     // T7: the metering clusters already named unscaled, by IEEE — the DEBUG
     // fires once per (device, cluster), never per report.
     private final Map<Long, Set<Integer>> unscaledNamed = new HashMap<>();
+    // LINK-READ: Home Automation frames per IEEE since the last summary drain.
+    // The hot path is one LongAdder.increment(); concurrent types because the
+    // count is READ off the frame path (framesSince / drainFrameCounts).
+    private final ConcurrentHashMap<Long, LongAdder> frameCounts =
+            new ConcurrentHashMap<>();
+    // LINK-READ: the devices whose suspect last-hop pair was already named —
+    // zigbee.link_reading_suspect fires once per device per process.
+    private final Set<Long> linkSuspectNamed = new HashSet<>();
 
     /**
      * Creates the ingestion unit with no persisted seed and a no-op learn sink
@@ -541,11 +571,24 @@ final class ZclIngestionUnit {
                 key.partner(), key.statusName());
     }
 
-    private void route(EzspIncomingMessage message) {
+    /**
+     * Routes one parsed {@code incomingMessageHandler} callback: the ZDO
+     * announce, the non-HA drop, the unknown-sender skip, or the resolved
+     * sender's count → liveness (+ link reading) → ZCL dispatch.
+     *
+     * <p>Package-private for LINK-READ T8 only: {@link EzspIncomingMessage#parse}
+     * cannot produce a last-hop pair outside the wire domain, so the total
+     * path for one is reachable in a test only by handing a constructed
+     * message here. Production reaches this method through
+     * {@link #processCycle()} alone.
+     *
+     * @param message the parsed callback, never {@code null}
+     */
+    void route(EzspIncomingMessage message) {
         if (message.profileId() == EzspCoordinatorProtocol.ZDO_PROFILE_ID) {
             if (message.clusterId() == ZdoCodec.CLUSTER_DEVICE_ANNOUNCE) {
                 ZdoCodec.parseDeviceAnnounce(message.message())
-                        .ifPresent(this::handleAnnounce);
+                        .ifPresent(announce -> handleAnnounce(announce, message));
             }
             return;
         }
@@ -575,18 +618,97 @@ final class ZclIngestionUnit {
                     Integer.toHexString(message.clusterId()));
             return;
         }
-        listener.onFrame(device.get());
-        handleZcl(device.get(), message);
+        IEEEAddress sender = device.get();
+        // LINK-READ: the per-device frame counter — one increment per Home
+        // Automation frame of a RESOLVED sender, PRE-dedup by the DP-3 rule
+        // the liveness feed below follows (the measured ×2 twin is still the
+        // device talking). Never a log line per frame: the count reaches the
+        // journal on the adapter's ten-minute summary line.
+        frameCounts.computeIfAbsent(sender.value(), key -> new LongAdder())
+                .increment();
+        listener.onFrame(sender, linkReadingOf(sender, message));
+        handleZcl(sender, message);
     }
 
-    private void handleAnnounce(ZdoCodec.DeviceAnnounce announce) {
+    /**
+     * The frame's last-hop reading through the TOTAL factory (LINK-READ): no
+     * raw pair reaches a throw on the frame path, and liveness never depends
+     * on the reading — an empty result still rides {@code onFrame}.
+     *
+     * <p>The instrument, ONE WARN per device per process (the
+     * {@link #nameUnscaledOnce} shape; a second suspect frame from the same
+     * device logs nothing more): {@code reason=out_of_wire_domain} — the pair
+     * cannot be constructed and the reading is DROPPED (unreachable through
+     * {@link EzspIncomingMessage#parse} while its decode stays u8 / s8; it is
+     * what an unsigned misdecode would hand over); {@code reason=positive_rssi}
+     * — a legal s8 in 1..127, implausible from an NCP, the reading KEPT and the
+     * line flags it. Raw values, never a default number.
+     */
+    private Optional<LinkReading> linkReadingOf(IEEEAddress device,
+            EzspIncomingMessage message) {
+        Optional<LinkReading> link = LinkReading.fromWire(message.lastHopLqi(),
+                message.lastHopRssi());
+        if (link.isEmpty()) {
+            nameLinkSuspectOnce(device, message, "out_of_wire_domain");
+        } else if (link.get().rssiDbm() > 0) {
+            nameLinkSuspectOnce(device, message, "positive_rssi");
+        }
+        return link;
+    }
+
+    private void nameLinkSuspectOnce(IEEEAddress device,
+            EzspIncomingMessage message, String reason) {
+        if (linkSuspectNamed.add(device.value())) {
+            log.warn("zigbee.link_reading_suspect: device={} lqi_raw={} "
+                            + "rssi_raw={} reason={}", device,
+                    message.lastHopLqi(), message.lastHopRssi(), reason);
+        }
+    }
+
+    /**
+     * The Home Automation frames counted for a device since the last
+     * {@link #drainFrameCounts()} (LINK-READ) — a non-draining read, for the
+     * adapter's {@code zigbee.availability_link} line.
+     *
+     * @param device the device, never {@code null}
+     * @return the count, {@code 0} for a device that has not spoken
+     */
+    long framesSince(IEEEAddress device) {
+        Objects.requireNonNull(device, "device");
+        LongAdder count = frameCounts.get(device.value());
+        return count == null ? 0L : count.sum();
+    }
+
+    /**
+     * Hands over every device's frame count and resets it (LINK-READ) — the
+     * ten-minute summary's read. One row per device that has spoken this
+     * process, in unsigned IEEE order; a device silent since the previous
+     * drain keeps its row at {@code 0} (a silent period is a count, never an
+     * absence). Exact when the caller is the cycle thread that increments —
+     * the production shape; a concurrent increment could fall on either side
+     * of the reset ({@link LongAdder#sumThenReset()}).
+     *
+     * @return the per-IEEE counts since the previous drain, never {@code null}
+     */
+    Map<Long, Long> drainFrameCounts() {
+        Map<Long, Long> drained = new TreeMap<>(Long::compareUnsigned);
+        frameCounts.forEach((ieee, count) ->
+                drained.put(ieee, count.sumThenReset()));
+        return drained;
+    }
+
+    private void handleAnnounce(ZdoCodec.DeviceAnnounce announce,
+            EzspIncomingMessage message) {
         // TSN state from before the power-cycle is stale truth (the measured
         // reset-on-rejoin rule).
         deduplicator.clearDevice(announce.ieeeAddress());
         // F-8: the handler table is stale for the same reason the dedup scope
         // is — a rejoin can follow a re-pair that changed the zone-type truth.
         invalidateHandlers(announce.ieeeAddress());
-        listener.onFrame(announce.ieeeAddress());
+        // LINK-READ: the announce carries its reading and counts nothing — the
+        // frame counter is the HA frames of a resolved sender (route()).
+        listener.onFrame(announce.ieeeAddress(),
+                linkReadingOf(announce.ieeeAddress(), message));
         listener.onDeviceAnnounce(announce);
         log.info("zigbee.device_announce: device={} nwk=0x{}",
                 announce.ieeeAddress(),
