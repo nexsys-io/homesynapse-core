@@ -1643,6 +1643,14 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                     + " restore from the pre-upgrade snapshot if corrupt";
             case "event-bus" -> "report: the in-process bus failed to initialize — a defect, not an"
                     + " operator condition";
+            // IR-44: the FATAL identity companion (AUTO-ID-1; Doc 07 §4.1) — the file is
+            // engine-managed, so the operator's act is restore-or-delete, never an edit.
+            case "automation" -> "restore automations.ids.yaml (the engine-managed automation"
+                    + " identity companion beside homesynapse.yaml in the config directory) from"
+                    + " the newest ~/hs-backup/<stamp>/config/ copy, or delete it so the next boot"
+                    + " mints fresh ids and logs automation.identity_loaded first_boot=true (past"
+                    + " runs then no longer link to their automations); never hand-edit it — the"
+                    + " exception names the path";
             default -> "inspect the log and the JFR recording; report with the phase and subsystem"
                     + " named";
         };

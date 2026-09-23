@@ -217,9 +217,24 @@ final class SqliteEventStore implements EventPublisher, EventStore {
      * Time range is evaluated against {@code COALESCE(event_time, ingest_time)}
      * to match the {@code idx_events_event_time} index key (Doc 01 §4.2).
      * Semantics are {@code [from, to)} — inclusive start, exclusive end.
+     *
+     * <p>{@code INDEXED BY idx_events_event_time} (IR-40): left to itself the
+     * shipped planner (sqlite-jdbc 3.51.3) chose {@code SEARCH events USING
+     * INTEGER PRIMARY KEY (rowid>?)} whenever the bound {@code LIMIT} was 500 or
+     * more — a walk from {@code afterPosition} upward testing the time predicate
+     * on every row until the page fills, so a narrow window near the log's end
+     * cost the whole log (MEASURE-2b F-2: {@code explainRun}'s hint read, which
+     * binds a page of 500, grew 1.8 → 90.5 ms from 10k to 500k rows). The clause
+     * makes the plan the index range regardless of the bound page size or the
+     * table's size; the window's few rows are then sorted by position for the
+     * {@code LIMIT}. It binds to the index NAME, so a migration that drops or
+     * renames the index fails this query loudly ({@code no such index}) rather
+     * than letting the plan regress silently — the reason it is preferred over a
+     * rewrite. Package-private so the plan test reads the exact SQL.</p>
      */
-    private static final String SELECT_BY_TIME_RANGE_SQL =
+    static final String SELECT_BY_TIME_RANGE_SQL =
             SELECT_COLS
+                    + " INDEXED BY idx_events_event_time"
                     + " WHERE global_position > ? "
                     + "AND COALESCE(event_time, ingest_time) >= ? "
                     + "AND COALESCE(event_time, ingest_time) < ? "

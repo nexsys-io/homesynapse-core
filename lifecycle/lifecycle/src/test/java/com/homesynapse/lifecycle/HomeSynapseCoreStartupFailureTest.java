@@ -83,6 +83,14 @@ final class HomeSynapseCoreStartupFailureTest {
     private static final String PERSISTENCE_RECOMMENDATION =
             "verify the event store file and disk; run the integrity check; restore from the "
                     + "pre-upgrade snapshot if corrupt";
+    /** IR-44: the automation arm — the companion file and the operator's act. */
+    private static final String AUTOMATION_RECOMMENDATION =
+            "restore automations.ids.yaml (the engine-managed automation identity companion "
+                    + "beside homesynapse.yaml in the config directory) from the newest "
+                    + "~/hs-backup/<stamp>/config/ copy, or delete it so the next boot mints "
+                    + "fresh ids and logs automation.identity_loaded first_boot=true (past runs "
+                    + "then no longer link to their automations); never hand-edit it — the "
+                    + "exception names the path";
 
     private HomeSynapseCore core;
     private ListAppender<ILoggingEvent> lifecycleLog;
@@ -276,6 +284,42 @@ final class HomeSynapseCoreStartupFailureTest {
             logger(IDENTITY_STORE_LOGGER).detachAppender(storeLog);
             storeLog.stop();
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // T10 — IR-44: the FATAL companion's report carries the automation arm, not the default
+    // ════════════════════════════════════════════════════════════════════════
+
+    @Test
+    @DisplayName("T10 (IR-44 T4): a malformed automations.ids.yaml reports (CORE_DOMAIN, "
+            + "automation) with a recommendation that names the companion file and the "
+            + "operator's act — restore from ~/hs-backup or delete for a fresh mint, never "
+            + "hand-edit — the subsystem seam to the exit code unchanged")
+    void automationCompanionFatal_recommendsTheFileAndTheAct(@TempDir Path tempDir)
+            throws Exception {
+        Path companion = writeCompanion(tempDir, "automations: [\n  unterminated\n");
+        core = newCore(tempDir);
+
+        Throwable fatal = catchThrowable(core::start);
+
+        assertThat(fatal).isInstanceOf(IllegalStateException.class);
+        // The report, not the log line (§9): the exit code keys on subsystem() alone
+        // (ExitCodes.forStartupFailure — `automation` stays the unmapped 99), so the
+        // subsystem is asserted verbatim beside the new recommendation.
+        assertThat(core.lastStartupFailure()).contains(new StartupFailureReport(
+                LifecyclePhase.CORE_DOMAIN, "automation", AUTOMATION_RECOMMENDATION));
+        assertThat(core.lastStartupFailure()).hasValueSatisfying(report -> assertThat(
+                report.recommendation())
+                .as("the file and the act, in the operator's hands")
+                .contains(COMPANION_FILE)
+                .contains("~/hs-backup/")
+                .contains("delete it")
+                .contains("never hand-edit")
+                .doesNotContain("inspect the log and the JFR recording"));
+        assertThat(startupFailedLines()).singleElement().asString().startsWith(
+                "lifecycle.startup_failed: phase=CORE_DOMAIN subsystem=automation "
+                        + "recommendation=\"" + AUTOMATION_RECOMMENDATION + "\"");
+        assertThat(Files.readString(companion)).isEqualTo("automations: [\n  unterminated\n");
     }
 
     // ════════════════════════════════════════════════════════════════════════
