@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -41,6 +42,12 @@ import java.util.stream.Collectors;
  * ENERGY-READ-b: an endpoint no arm classified that lists 0x0702 is an
  * {@code ENERGY_METER}, one listing 0x0B04 only a {@code SENSOR} (R-5).
  *
+ * <p>IR-18: the measurements attach by the CLUSTERS present too — 0x0400 ⇒
+ * {@code illuminance_measurement}, 0x0402 ⇒ {@code temperature_measurement},
+ * 0x0405 ⇒ {@code humidity_measurement} — on EVERY arm, appended only where
+ * the arm did not install them (the 0x0302 arm's output is unchanged); an
+ * endpoint no arm classified that lists one is a {@code SENSOR}.
+ *
  * <p>Thread-safe: stateless utility.
  */
 final class EndpointClassifier {
@@ -53,6 +60,18 @@ final class EndpointClassifier {
     private static final int DEVICE_TYPE_OCCUPANCY_SENSOR = 0x0107;
     private static final int DEVICE_TYPE_TEMPERATURE_SENSOR = 0x0302;
     private static final int DEVICE_TYPE_SMART_PLUG = 0x0051;
+
+    /**
+     * IR-18: each measurement cluster and the capability it carries — the table
+     * {@link #withMeasurements} attaches from, on every arm.
+     */
+    private static final List<Map.Entry<Integer, Capability>> MEASUREMENTS = List.of(
+            Map.entry(IlluminanceMeasurementHandler.CLUSTER_ID,
+                    StandardCapabilities.illuminanceMeasurement()),
+            Map.entry(TemperatureMeasurementHandler.CLUSTER_ID,
+                    StandardCapabilities.temperatureMeasurement()),
+            Map.entry(RelativeHumidityHandler.CLUSTER_ID,
+                    StandardCapabilities.humidityMeasurement()));
 
     private static final Logger log =
             LoggerFactory.getLogger(EndpointClassifier.class);
@@ -122,6 +141,10 @@ final class EndpointClassifier {
         // (device-type table AND fallback) gains them — the device type is a
         // hint for the arms above and never the key to a meter.
         classified = withMeters(classified, descriptor);
+        // IR-18: the measurements ride the CLUSTERS the same way — every arm
+        // gains the ones it did not install itself, so none present at
+        // adoption is stranded behind the one-way door.
+        classified = withMeasurements(classified, descriptor);
         // SD-3 (M9.4b §3.2): cluster 0x0003 present ⇒ the entity is
         // identify-issuable through the real Tier-1 validator. Post-processed so
         // EVERY classification arm (device-type table AND fallback) gains it;
@@ -200,6 +223,40 @@ final class EndpointClassifier {
                 ? EntityType.ENERGY_METER : EntityType.SENSOR;
         return Optional.of(new Classification(classified
                 .map(Classification::entityType).orElse(measurementOnly), caps));
+    }
+
+    /**
+     * The cluster-first measurement attach (IR-18): 0x0400 ⇒
+     * {@code illuminance_measurement}, 0x0402 ⇒ {@code temperature_measurement},
+     * 0x0405 ⇒ {@code humidity_measurement}, beside whatever the arm chose —
+     * each appended only when the arm did not install it already, so the 0x0302
+     * arm's own temperature and humidity stay single and its output is
+     * unchanged. An endpoint NO arm classified that lists one of the three is a
+     * {@code SENSOR} carrying the measurements alone. Adoption is a one-way
+     * door at V1: a measurement cluster present at adoption and not attached
+     * here is stranded for the entity's life (the Hue SML003's temperature on
+     * the 0x0107 arm). No cluster is ever inferred from a device type.
+     */
+    private static Optional<Classification> withMeasurements(
+            Optional<Classification> classified, EndpointDescriptor descriptor) {
+        List<Integer> in = descriptor.inputClusters();
+        List<CapabilityInstance> present = classified
+                .map(Classification::capabilities).orElse(List.of());
+        List<Capability> measurements = new ArrayList<>(MEASUREMENTS.size());
+        for (Map.Entry<Integer, Capability> row : MEASUREMENTS) {
+            String capabilityId = row.getValue().capabilityId();
+            if (in.contains(row.getKey()) && present.stream().noneMatch(
+                    instance -> instance.capabilityId().equals(capabilityId))) {
+                measurements.add(row.getValue());
+            }
+        }
+        if (measurements.isEmpty()) {
+            return classified;
+        }
+        List<CapabilityInstance> caps = new ArrayList<>(present);
+        caps.addAll(capabilities(measurements.toArray(Capability[]::new)));
+        return Optional.of(new Classification(classified
+                .map(Classification::entityType).orElse(EntityType.SENSOR), caps));
     }
 
     private static Classification light(boolean hasLevel, boolean hasColor) {

@@ -71,7 +71,10 @@ final class ReportingConfigurator {
 
     /**
      * The §3.7 default reporting table (including the AMD-96 OccupancySensing
-     * row — the hero-trigger cluster's posture is explicit, never accidental).
+     * row — the hero-trigger cluster's posture is explicit, never accidental —
+     * and the IR-18 IlluminanceMeasurement row: uint16 on the log scale, a
+     * change of 1000 = a factor of 10^0.1 ≈ 1.26 in lux, the siblings' 10 s /
+     * 3600 s).
      */
     private static final Map<Integer, DefaultRow> DEFAULTS = Map.ofEntries(
             Map.entry(0x0006, new DefaultRow(0x0000, 0x10, 0, 3600, 0)),
@@ -80,6 +83,7 @@ final class ReportingConfigurator {
             Map.entry(0x0300, new DefaultRow(0x0007, 0x21, 5, 3600, 1)),
             Map.entry(0x0402, new DefaultRow(0x0000, 0x29, 10, 3600, 10)),
             Map.entry(0x0405, new DefaultRow(0x0000, 0x21, 10, 3600, 100)),
+            Map.entry(0x0400, new DefaultRow(0x0000, 0x21, 10, 3600, 1000)),
             Map.entry(0x0001, new DefaultRow(0x0021, 0x20, 3600, 62000, 0)));
 
     /**

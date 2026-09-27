@@ -51,6 +51,8 @@ class ReportingConfiguratorTest {
 
     private static final class FakeReportingOps implements ReportingOps {
         final List<String> calls = new ArrayList<>();
+        /** IR-18: each configure's cluster:attribute:dataType — the fields {@link #calls} omits. */
+        final List<String> configureFields = new ArrayList<>();
         final Map<Integer, ConfigureResult> configureResults = new HashMap<>();
         final Map<Integer, ReportingConfigRecord> readbacks = new HashMap<>();
         boolean bindResult = true;
@@ -68,6 +70,9 @@ class ReportingConfiguratorTest {
                 int maxInterval, int reportableChange) {
             calls.add("configure:" + Integer.toHexString(clusterId)
                     + ":" + minInterval + ":" + maxInterval + ":" + reportableChange);
+            configureFields.add(Integer.toHexString(clusterId) + ":"
+                    + Integer.toHexString(attributeId) + ":"
+                    + Integer.toHexString(dataType));
             return configureResults.getOrDefault(clusterId,
                     ConfigureResult.SUCCESS);
         }
@@ -159,6 +164,30 @@ class ReportingConfiguratorTest {
         configurator.configureDevice(DEVICE, List.of(endpoint(0x0406)), null);
 
         assertThat(ops.calls).contains("configure:406:0:3600:0");
+    }
+
+    @Test
+    @DisplayName("T10 (IR-18): the IlluminanceMeasurement row — measuredValue 0x0000, "
+            + "uint16 0x21, 10 s / 3600 s / 1000 log-units (a factor of 10^0.1 ≈ 1.26 "
+            + "in lux); a matching read-back records VERIFIED_REPORTS/ON_CHANGE")
+    void illuminanceRow() {
+        ops.readbacks.put(0x0400,
+                new ReportingOps.ReportingConfigRecord(10, 3600, 1000));
+
+        List<ReportingPostureFact> facts = configurator.configureDevice(DEVICE,
+                List.of(endpoint(0x0400)), null);
+
+        assertThat(ops.calls).containsExactly(
+                "bind:400", "configure:400:10:3600:1000", "readback:400");
+        assertThat(ops.configureFields).containsExactly("400:0:21");
+        assertThat(facts).hasSize(1);
+        assertThat(facts.get(0).clusterId()).isEqualTo(0x0400);
+        assertThat(facts.get(0).attributeId()).isEqualTo(0x0000);
+        assertThat(facts.get(0).reportsAuthoritative())
+                .isEqualTo(ReportsAuthoritative.VERIFIED_REPORTS);
+        assertThat(facts.get(0).reportingPosture())
+                .isEqualTo(ReportingPosture.ON_CHANGE);
+        assertThat(facts.get(0).note()).isNull();
     }
 
     @Test

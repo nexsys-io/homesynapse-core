@@ -89,7 +89,11 @@ public enum EntityType {
      *
      * <p>Required capabilities: at least one of {@link BinaryState},
      * {@link Contact}, {@link Motion}, {@link Occupancy}.
-     * Optional capabilities: {@link Battery}, {@link DeviceHealth}.</p>
+     * Optional capabilities: {@link Battery}, {@link DeviceHealth}, and the
+     * measurement capabilities the device also exposes —
+     * {@link IlluminanceMeasurement}, {@link TemperatureMeasurement},
+     * {@link HumidityMeasurement} (e.g., a motion sensor's light and
+     * temperature readings).</p>
      *
      * <p>Legal roles: {@link EntityRole#PRIMARY}, {@link EntityRole#DIAGNOSTIC}.</p>
      */

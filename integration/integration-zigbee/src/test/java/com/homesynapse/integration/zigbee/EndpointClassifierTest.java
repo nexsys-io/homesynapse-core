@@ -43,6 +43,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>ENERGY-READ-b row 2 (the b5 ruling R-5): an endpoint NO arm classified that
  * lists 0x0702 is an {@code ENERGY_METER}; 0x0B04 alone stays {@code SENSOR}
  * (the metering-only pin is re-pinned from {@code SENSOR}).
+ *
+ * <p>IR-18: the measurements (0x0400 illuminance, 0x0402 temperature, 0x0405
+ * humidity) ride the CLUSTERS on every arm, each appended only when the arm has
+ * not installed it; an endpoint no arm classified that lists one is a
+ * {@code SENSOR}.
  */
 @DisplayName("EndpointClassifier — identify attachment (M9.4b §3.2, SD-3) "
         + "+ the Wave-2 arms (M9.7-W2 §3)")
@@ -414,6 +419,70 @@ class EndpointClassifierTest {
                 .isEqualTo(EntityType.LIGHT);
         assertThat(capabilityIds(classified)).containsExactlyInAnyOrder(
                 "on_off", "brightness", "power_meter");
+    }
+
+    // ── IR-18 — the measurements ride the CLUSTERS on every arm ─────────────
+
+    @Test
+    @DisplayName("T8 (IR-18): the Hue SML003 shape (0x0107 + the illuminance and "
+            + "temperature clusters) classifies BINARY_SENSOR {occupancy, battery, "
+            + "illuminance_measurement, temperature_measurement, identify} — each "
+            + "exactly once, nothing stranded behind the one-way door")
+    void hueMotionShape_gainsIlluminanceAndTemperature() {
+        Optional<EndpointClassifier.Classification> classified =
+                EndpointClassifier.classify(endpoint(0x0107,
+                        List.of(0x0000, 0x0001, 0x0003, 0x0400, 0x0402, 0x0406)));
+
+        assertThat(classified.orElseThrow().entityType())
+                .isEqualTo(EntityType.BINARY_SENSOR);
+        assertThat(capabilityIds(classified)).containsExactlyInAnyOrder(
+                "occupancy", "battery", "illuminance_measurement",
+                "temperature_measurement", "identify");
+    }
+
+    @Test
+    @DisplayName("T8b (IR-18): a fallback endpoint listing the temperature cluster "
+            + "beside battery classifies SENSOR {battery, temperature_measurement} "
+            + "— no new fallback row")
+    void fallbackTemperatureShape_sensorWithBatteryAndTemperature() {
+        Optional<EndpointClassifier.Classification> classified =
+                EndpointClassifier.classify(endpoint(0x9999,
+                        List.of(0x0000, 0x0001, 0x0402)));
+
+        assertThat(classified.orElseThrow().entityType())
+                .isEqualTo(EntityType.SENSOR);
+        assertThat(capabilityIds(classified)).containsExactlyInAnyOrder(
+                "battery", "temperature_measurement");
+    }
+
+    @Test
+    @DisplayName("T9 (IR-18): a fallback endpoint listing the illuminance cluster "
+            + "beside battery classifies SENSOR {battery, illuminance_measurement}; "
+            + "the cluster alone is SENSOR {illuminance_measurement}; battery alone "
+            + "stays SENSOR {battery} (DP-7 preserved)")
+    void fallbackIlluminanceShape_sensorWithIlluminance() {
+        Optional<EndpointClassifier.Classification> withBattery =
+                EndpointClassifier.classify(endpoint(0x9999,
+                        List.of(0x0000, 0x0001, 0x0400)));
+        assertThat(withBattery.orElseThrow().entityType())
+                .isEqualTo(EntityType.SENSOR);
+        assertThat(capabilityIds(withBattery)).containsExactlyInAnyOrder(
+                "battery", "illuminance_measurement");
+
+        Optional<EndpointClassifier.Classification> alone =
+                EndpointClassifier.classify(endpoint(0x9999,
+                        List.of(0x0000, 0x0400)));
+        assertThat(alone).as("the cluster alone makes a SENSOR").isPresent();
+        assertThat(alone.orElseThrow().entityType()).isEqualTo(EntityType.SENSOR);
+        assertThat(capabilityIds(alone))
+                .containsExactlyInAnyOrder("illuminance_measurement");
+
+        Optional<EndpointClassifier.Classification> batteryOnly =
+                EndpointClassifier.classify(endpoint(0x9999,
+                        List.of(0x0000, 0x0001)));
+        assertThat(batteryOnly.orElseThrow().entityType())
+                .isEqualTo(EntityType.SENSOR);
+        assertThat(capabilityIds(batteryOnly)).containsExactlyInAnyOrder("battery");
     }
 
     @Test

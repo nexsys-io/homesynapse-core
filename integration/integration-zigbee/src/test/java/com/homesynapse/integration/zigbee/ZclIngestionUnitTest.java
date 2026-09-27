@@ -667,6 +667,29 @@ class ZclIngestionUnitTest {
         assertThat(publisher.published()).isEmpty();
     }
 
+    // ── IR-18 — the illuminance ingestion wiring ────────────────────────────
+
+    @Test
+    @DisplayName("T11 (IR-18): a 0x0400 illuminance report publishes the canonical "
+            + "illuminance_lux: wire 10001 (log scale) → 10.0 lux, the raw and its "
+            + "dialect on the wire")
+    void illuminanceReportPublishesCanonicalLux() {
+        // Report Attributes: attr 0x0000, type 0x21 (uint16), 10001 = 0x2711 LE.
+        enqueueReport(SNZB_NWK, 1, 0x0400,
+                new byte[] {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x21, 0x11, 0x27});
+
+        ingestion.processCycle();
+
+        assertThat(publisher.published()).hasSize(1);
+        StateReportedEvent payload =
+                (StateReportedEvent) publisher.published().get(0).payload();
+        assertThat(payload.attributeKey()).isEqualTo("illuminance_lux");
+        assertThat(payload.value()).isEqualTo("10.0");
+        assertThat(payload.unit()).isEqualTo("lux");
+        assertThat(payload.rawProtocolValue()).isEqualTo("10001");
+        assertThat(payload.rawProtocolUnit()).isEqualTo("log10x10000+1");
+    }
+
     // ── M9.7-W2 §4 — the learned-zoneType accessor ──────────────────────────
 
     @Test

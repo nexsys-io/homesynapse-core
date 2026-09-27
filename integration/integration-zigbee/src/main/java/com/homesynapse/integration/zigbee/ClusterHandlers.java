@@ -12,7 +12,8 @@ import java.util.Map;
  * Factory for the per-device cluster handler table (Doc 08 §3.5 — the M9.3
  * report-path set: OnOff, LevelControl, ColorControl-CT, OccupancySensing,
  * PowerConfiguration, IAS Zone tolerate-path; + the M9.7-W2 Wave-2 pair:
- * TemperatureMeasurement, RelativeHumidity; + the ENERGY-READ metering pair:
+ * TemperatureMeasurement, RelativeHumidity; + the IR-18 IlluminanceMeasurement
+ * handler; + the ENERGY-READ metering pair:
  * ElectricalMeasurement, Metering — each attached ONLY when the device's
  * formatting for that cluster is known). Clusters without a handler —
  * including the measured manufacturer-specific deltas 0xFC01/0xFC04/0xFC57,
@@ -27,9 +28,9 @@ final class ClusterHandlers {
     }
 
     /**
-     * Builds the handler table for one device: the eight report-path handlers
+     * Builds the handler table for one device: the nine report-path handlers
      * always, and a metering handler per cluster whose formatting the device
-     * declared — eight, nine or ten entries. A metering handler is never built
+     * declared — nine, ten or eleven entries. A metering handler is never built
      * on a guessed scale: no formatting, no handler.
      *
      * @param device the device the handlers serve, never {@code null}
@@ -57,6 +58,8 @@ final class ClusterHandlers {
                 new TemperatureMeasurementHandler(device, clock));
         handlers.put(RelativeHumidityHandler.CLUSTER_ID,
                 new RelativeHumidityHandler(device, clock));
+        handlers.put(IlluminanceMeasurementHandler.CLUSTER_ID,
+                new IlluminanceMeasurementHandler(device, clock));
         handlers.put(IasZoneHandler.CLUSTER_ID,
                 new IasZoneHandler(device, clock, zoneType));
         if (formatting != null && formatting.hasElectrical()) {
