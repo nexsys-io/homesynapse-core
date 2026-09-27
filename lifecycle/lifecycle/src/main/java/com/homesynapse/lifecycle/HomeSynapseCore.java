@@ -85,6 +85,8 @@ import com.homesynapse.state.DerivedPublishGate;
 import com.homesynapse.state.ProjectionAdvancer;
 import com.homesynapse.state.ProjectionId;
 import com.homesynapse.state.ReadinessSource;
+import com.homesynapse.state.RegistryStalenessResolver;
+import com.homesynapse.state.StalenessThresholdResolver;
 import com.homesynapse.state.StateProjection;
 import com.homesynapse.state.StateQueryService;
 
@@ -616,6 +618,13 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         ComparisonPolicy comparisonPolicy = ComparisonPolicy.FP_NOISE_DEFAULT;
         AttributeSchemaResolver schemaResolver =
                 AttributeSchemaResolver.of(StandardCapabilities.attributeSchemas());
+        // IR-61 (Doc 03 §3.8): staleAfter = the report's event-time + the threshold the
+        // chain resolves — override → the smallest interval the entity's capabilities
+        // declare → the global default. The §9 keys (staleness_overrides,
+        // default_staleness_threshold) are IR-61b; until they land the override map is
+        // empty and there is no global default.
+        StalenessThresholdResolver thresholds = new RegistryStalenessResolver(
+                entityRegistry, StandardCapabilities.all(), Map.of(), Optional.empty());
         this.stateProjection = StateProjection.create(
                 new ProjectionId(PROJECTION_SUBSCRIBER_ID),
                 PROJECTION_VERSION,                         // M4.0b-5 (AMD-53) projection version
@@ -628,7 +637,8 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 projectionAdvancer,
                 config.checkpointPolicy(),
                 clock,
-                publishGate);
+                publishGate,
+                thresholds);
         SubscriberInfo projectionInfo = new SubscriberInfo(
                 PROJECTION_SUBSCRIBER_ID,
                 SubscriptionFilter.all(),

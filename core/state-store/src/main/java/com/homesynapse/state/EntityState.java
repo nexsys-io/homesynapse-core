@@ -57,7 +57,10 @@ import java.util.Map;
  * considered stale (default for actuators and event-driven reporters). When non-null,
  * {@code stale} is {@code true} if {@code Instant.now().isAfter(staleAfter)}. The
  * {@code stale} field is derived at read time from {@code staleAfter} and the wall
- * clock (Doc 03 §3.8 AMD-11).</p>
+ * clock (Doc 03 §3.8 AMD-11). The projection resolves {@code staleAfter} through
+ * {@link StalenessThresholdResolver} on every {@code state_reported} — the event-time
+ * stamp plus the entity's threshold (IR-61; Doc 03 §3.8's chain) — and leaves it
+ * {@code null} where no source applies.</p>
  *
  * <p>Defined in Doc 03 §4.1.</p>
  *

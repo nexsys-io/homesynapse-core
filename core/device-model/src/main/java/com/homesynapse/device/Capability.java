@@ -4,7 +4,9 @@
  */
 package com.homesynapse.device;
 
+import java.time.Duration;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * The central abstraction for what a device can do in HomeSynapse.
@@ -77,4 +79,23 @@ public sealed interface Capability permits
      * @return the confirmation policy, never {@code null}
      */
     ConfirmationPolicy confirmationPolicy();
+
+    /**
+     * Returns the interval within which a device holding this capability is expected to
+     * report — Doc 03 §3.8's capability-based staleness default (AMD-11): source 2 of the
+     * threshold chain, outranked by a per-entity override and standing in front of the
+     * global default.
+     *
+     * <p>Empty by default: event-driven capabilities (actuators, binary sensors) report
+     * on change, never on an interval, so they declare nothing and never make an entity
+     * stale. A declaring capability overrides this with a margin over the maximum
+     * interval the core's own reporting contract configures for its governing attribute
+     * — never an observed cadence ({@link PowerMeter}, {@link EnergyMeter}; IR-61).</p>
+     *
+     * @return the declared expected report interval, or empty when this capability
+     *         declares none
+     */
+    default Optional<Duration> expectedReportInterval() {
+        return Optional.empty();
+    }
 }

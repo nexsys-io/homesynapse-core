@@ -302,8 +302,42 @@ final class MaterializedStateQueryServiceTest {
     }
 
     // ──────────────────────────────────────────────────────────────────────
+    // IR-61 — a resolved staleAfter through the unchanged read path
+    // ──────────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("T4 (IR-61): staleAfter = T + 1200 s reads fresh at T + 1199 s and stale at "
+            + "T + 1201 s — the read path unchanged, exercised with a real value")
+    void resolvedStaleAfterIsFreshBeforeAndStalePast() {
+        // T is the helper's lastReported; staleAfter = T + power_meter's declared 1200 s.
+        Instant reportedAt = CLOCK_INSTANT.minus(Duration.ofMinutes(1));
+        Instant staleAfter = reportedAt.plus(Duration.ofSeconds(1200));
+        stateStore.put(ENTITY_A, entity(ENTITY_A, 1L, staleAfter, false));
+
+        MaterializedStateQueryService before = serviceAt(reportedAt.plusSeconds(1199));
+        MaterializedStateQueryService past = serviceAt(reportedAt.plusSeconds(1201));
+
+        assertThat(before.getState(ENTITY_A).orElseThrow().stale()).isFalse();
+        assertThat(before.getSnapshot().states().get(ENTITY_A).stale()).isFalse();
+        EntityState silent = past.getSnapshot().states().get(ENTITY_A);
+        assertThat(silent.stale()).isTrue();
+        assertThat(silent.staleAfter()).isEqualTo(staleAfter);
+        assertThat(past.getState(ENTITY_A).orElseThrow().stale()).isTrue();
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
     // Helpers
     // ──────────────────────────────────────────────────────────────────────
+
+    /** {@link #setUp()}'s store and readiness, read against a clock fixed at {@code now}. */
+    private MaterializedStateQueryService serviceAt(Instant now) {
+        return new MaterializedStateQueryService(
+                stateStore,
+                () -> mode.get(),
+                () -> viewPosition.get(),
+                () -> null,
+                Clock.fixed(now, ZoneOffset.UTC));
+    }
 
     private static EntityState entity(EntityId id, long version, Instant staleAfter) {
         return entity(id, version, staleAfter, false);

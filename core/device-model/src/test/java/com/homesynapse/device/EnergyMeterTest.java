@@ -10,6 +10,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -78,6 +79,22 @@ class EnergyMeterTest {
             EnergyMeter a = sample();
             EnergyMeter b = new EnergyMeter("other", 1, "core", Map.of(), Map.of(), POLICY);
             assertThat(a).isNotEqualTo(b);
+        }
+    }
+
+    @Nested
+    @DisplayName("Expected report interval (IR-61, Doc 03 §3.8)")
+    class ExpectedReportIntervalTests {
+
+        @Test
+        @DisplayName("T5: declares 7200 s — 2 × the 3600-s CurrentSummationDelivered maximum the "
+                + "core configures")
+        void declaresTwiceTheConfiguredMaximum() {
+            assertThat(StandardCapabilities.energyMeter().expectedReportInterval())
+                    .contains(Duration.ofSeconds(7200));
+            assertThat(sample().expectedReportInterval())
+                    .as("a declaration of the capability type, whatever the instance's fields")
+                    .contains(Duration.ofSeconds(7200));
         }
     }
 }

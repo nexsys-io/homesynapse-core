@@ -9,6 +9,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 /**
  * Tests for {@link Capability} sealed interface — hierarchy structure.
  */
@@ -63,5 +65,20 @@ class CapabilityTest {
     @DisplayName("CustomCapability is NOT a record")
     void customCapabilityIsNotRecord() {
         assertThat(CustomCapability.class.isRecord()).isFalse();
+    }
+
+    @Test
+    @DisplayName("T5b (IR-61): every standard capability but power_meter and energy_meter "
+            + "declares no expected report interval — 14 of 16 empty")
+    void onlyTheMetersDeclareAnExpectedReportInterval() {
+        List<Capability> others = StandardCapabilities.all().stream()
+                .filter(cap -> !cap.capabilityId().equals("power_meter")
+                        && !cap.capabilityId().equals("energy_meter"))
+                .toList();
+
+        assertThat(others).hasSize(14);
+        assertThat(others).allSatisfy(cap -> assertThat(cap.expectedReportInterval())
+                .as(cap.capabilityId())
+                .isEmpty());
     }
 }

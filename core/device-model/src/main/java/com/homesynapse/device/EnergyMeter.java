@@ -4,7 +4,9 @@
  */
 package com.homesynapse.device;
 
+import java.time.Duration;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Standard capability for cumulative energy metering.
@@ -38,4 +40,29 @@ public record EnergyMeter(
         Map<String, AttributeSchema> attributeSchemas,
         Map<String, CommandDefinition> commandDefinitions,
         ConfirmationPolicy confirmationPolicy
-) implements Capability { }
+) implements Capability {
+
+    /**
+     * The declared expected report interval (Doc 03 §3.8's capability-based default,
+     * IR-61), by THE DERIVATION RULE: a margin of 2 × the maximum interval the core's own
+     * reporting contract configures for the governing attribute —
+     * {@code ReportingConfigurator.METERING_ROWS} configures
+     * {@code CurrentSummationDelivered} (0x0702) at 5–3600 s — so 2 × 3600 s = 7200 s.
+     * A device honoring exactly what the core asked for is silent for up to the 3600-s
+     * maximum while the register holds, so no default may be shorter than it; the margin 2
+     * is the design number, never an observed cadence. Under the resolver's smallest-
+     * interval rule it governs energy-only entities; a plug that also meters power reads
+     * {@link PowerMeter}'s 1200 s.
+     */
+    static final Duration EXPECTED_REPORT_INTERVAL = Duration.ofSeconds(7200);
+
+    /**
+     * {@inheritDoc}
+     *
+     * @return {@link #EXPECTED_REPORT_INTERVAL}, 7200 s
+     */
+    @Override
+    public Optional<Duration> expectedReportInterval() {
+        return Optional.of(EXPECTED_REPORT_INTERVAL);
+    }
+}

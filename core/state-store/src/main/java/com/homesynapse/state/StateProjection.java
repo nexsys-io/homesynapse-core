@@ -186,6 +186,7 @@ public final class StateProjection implements Subscriber {
     private final Clock clock;
     private final DerivedPublishGate publishGate;
     private final SelfProducedFilter selfFilter;
+    private final StalenessThresholdResolver thresholds;
 
     // External lifecycle updates this; the subscriber VT reads it.
     private final AtomicReference<SubscriberMode> currentMode =
@@ -260,7 +261,9 @@ public final class StateProjection implements Subscriber {
      * @param clock             injected clock; never {@code null}
      * @param publishGate       rate-limiting gate around derived publishes; never
      *                          {@code null}
-     * @return a new {@code StateProjection}
+     * @return a new {@code StateProjection} whose staleness threshold resolver is
+     *         {@link StalenessThresholdResolver#none()} ({@code staleAfter} stays
+     *         {@code null})
      */
     public static StateProjection create(
             ProjectionId projectionId,
@@ -275,17 +278,63 @@ public final class StateProjection implements Subscriber {
             CheckpointPolicy checkpointPolicy,
             Clock clock,
             DerivedPublishGate publishGate) {
+        return create(
+                projectionId, projectionVersion, checkpointStore, checkpointSource,
+                checkpointSink, stateStore, rule, publisher, advancer,
+                checkpointPolicy, clock, publishGate, StalenessThresholdResolver.none());
+    }
+
+    /**
+     * Public factory for production wiring with Doc 03 §3.8's staleness threshold
+     * chain (IR-61): the {@code thresholds} resolver is consulted on every
+     * {@code state_reported}, whose {@code staleAfter} becomes the event-time stamp
+     * plus the resolved threshold, or {@code null} where no source applies. Every
+     * other parameter is the 12-parameter factory's.
+     *
+     * @param projectionId      stable identifier for this projection; never {@code null}
+     * @param projectionVersion running code's projection version; must be ≥ 1
+     * @param checkpointStore   durable checkpoint storage; never {@code null}
+     * @param checkpointSource  source of serialized checkpoint data and the loaded
+     *                          projection version; never {@code null}
+     * @param checkpointSink    atomic subscriber+view checkpoint sink (AMD-45); never
+     *                          {@code null}
+     * @param stateStore        port for materialized state; never {@code null}
+     * @param rule              derivation strategy; never {@code null}
+     * @param publisher         event publisher for derived events; never {@code null}
+     * @param advancer          projection advancer; never {@code null}
+     * @param checkpointPolicy  cadence policy; never {@code null}
+     * @param clock             injected clock; never {@code null}
+     * @param publishGate       rate-limiting gate around derived publishes; never
+     *                          {@code null}
+     * @param thresholds        the staleness threshold resolver; never {@code null}
+     * @return a new {@code StateProjection}
+     */
+    public static StateProjection create(
+            ProjectionId projectionId,
+            int projectionVersion,
+            ViewCheckpointStore checkpointStore,
+            StateCheckpointSource checkpointSource,
+            AtomicCheckpointSink checkpointSink,
+            StateStore stateStore,
+            DerivationRule rule,
+            EventPublisher publisher,
+            ProjectionAdvancer advancer,
+            CheckpointPolicy checkpointPolicy,
+            Clock clock,
+            DerivedPublishGate publishGate,
+            StalenessThresholdResolver thresholds) {
         Objects.requireNonNull(clock, "clock must not be null");
         return new StateProjection(
                 projectionId, projectionVersion, checkpointStore, checkpointSource,
                 checkpointSink, stateStore, rule, publisher, advancer,
                 checkpointPolicy, clock, publishGate,
-                new SelfProducedFilter(clock, SelfProducedFilter.DEFAULT_TTL));
+                new SelfProducedFilter(clock, SelfProducedFilter.DEFAULT_TTL), thresholds);
     }
 
     /**
      * Package-private constructor. In-package tests use this to inject a custom
-     * {@link SelfProducedFilter} (e.g., short TTL for filter-eviction tests).
+     * {@link SelfProducedFilter} (e.g., short TTL for filter-eviction tests). The
+     * staleness threshold resolver is {@link StalenessThresholdResolver#none()}.
      */
     StateProjection(
             ProjectionId projectionId,
@@ -301,6 +350,30 @@ public final class StateProjection implements Subscriber {
             Clock clock,
             DerivedPublishGate publishGate,
             SelfProducedFilter selfFilter) {
+        this(projectionId, projectionVersion, checkpointStore, checkpointSource,
+                checkpointSink, stateStore, rule, publisher, advancer, checkpointPolicy,
+                clock, publishGate, selfFilter, StalenessThresholdResolver.none());
+    }
+
+    /**
+     * Package-private constructor with a custom {@link SelfProducedFilter} and a
+     * staleness threshold resolver (IR-61).
+     */
+    StateProjection(
+            ProjectionId projectionId,
+            int projectionVersion,
+            ViewCheckpointStore checkpointStore,
+            StateCheckpointSource checkpointSource,
+            AtomicCheckpointSink checkpointSink,
+            StateStore stateStore,
+            DerivationRule rule,
+            EventPublisher publisher,
+            ProjectionAdvancer advancer,
+            CheckpointPolicy checkpointPolicy,
+            Clock clock,
+            DerivedPublishGate publishGate,
+            SelfProducedFilter selfFilter,
+            StalenessThresholdResolver thresholds) {
         this.projectionId = Objects.requireNonNull(projectionId, "projectionId");
         if (projectionVersion < 1) {
             throw new IllegalArgumentException(
@@ -318,6 +391,7 @@ public final class StateProjection implements Subscriber {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.publishGate = Objects.requireNonNull(publishGate, "publishGate");
         this.selfFilter = Objects.requireNonNull(selfFilter, "selfFilter");
+        this.thresholds = Objects.requireNonNull(thresholds, "thresholds");
     }
 
     /**
@@ -770,7 +844,8 @@ public final class StateProjection implements Subscriber {
      * <p>Always advances {@code stateVersion} and {@code lastUpdated}. Type-specific
      * updates per the brief's step 6:
      * <ul>
-     *   <li>{@code state_reported} → update {@code lastReported}; attributes
+     *   <li>{@code state_reported} → update {@code lastReported}; recompute
+     *       {@code staleAfter} and clear {@code stale} (IR-61); attributes
      *       untouched.</li>
      *   <li>{@code state_changed} → update {@code attributes} and
      *       {@code lastChanged}.</li>
@@ -788,8 +863,12 @@ public final class StateProjection implements Subscriber {
      * function of the event log for those fields and is identical across every
      * rebuild path (extends AMD-50-INV-03 from the {@code DerivationRule} to the
      * materialization). After this change {@code applyToState} does not read
-     * {@code clock}. {@code staleAfter}/{@code stale} are untouched and stay
-     * wall-clock (the real-time freshness carve-out, AMD-53-INV-02).</p>
+     * {@code clock}. {@code staleAfter} is recomputed on {@code state_reported} from
+     * the same event-time stamp plus the threshold the {@link StalenessThresholdResolver}
+     * resolves (Doc 03 §3.8, IR-61) — {@code null} where no source applies — and
+     * {@code stale} is cleared; every other branch carries both forward. {@code stale}
+     * is derived at read time against the real clock (the freshness carve-out,
+     * AMD-53-INV-02).</p>
      */
     private void applyToState(EventEnvelope envelope, EntityId entityId) {
         // AMD-53 §2.1: the activity timestamps source from the causing envelope's
@@ -808,6 +887,12 @@ public final class StateProjection implements Subscriber {
 
         EntityState updated;
         if (envelope.payload() instanceof StateReportedEvent) {
+            // IR-61 (Doc 03 §3.8): the report recomputes staleAfter from the same
+            // event-time stamp plus the entity's resolved threshold — never from clock
+            // (AMD-53-INV-02: event-time-derived and deterministic, a target for the
+            // read path's real-time comparison) — null where no source applies, and it
+            // clears stale. REPLAY and LIVE alike.
+            Instant staleAfter = thresholds.thresholdFor(entityId).map(stamp::plus).orElse(null);
             updated = new EntityState(
                     prior.entityId(),
                     prior.attributes(),
@@ -816,8 +901,8 @@ public final class StateProjection implements Subscriber {
                     prior.lastChanged(),
                     stamp,
                     stamp,
-                    prior.staleAfter(),
-                    prior.stale());
+                    staleAfter,
+                    false);
         } else if (envelope.payload() instanceof StateChangedEvent sc) {
             if (backfillActive) {
                 // AMD-50 §2.2 supersession. During an active version-transition
