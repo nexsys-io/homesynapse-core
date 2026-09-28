@@ -49,12 +49,13 @@ import java.util.Optional;
  *
  * <h2>The replay-order property</h2>
  *
- * <p>The registry projection and the state projection are independent bus subscribers
- * that replay concurrently at boot, so a {@code state_reported} replayed BEFORE its
- * entity's registration resolves through the registry miss to the global default —
- * empty when there is none — and its {@code staleAfter} stays {@code null} until that
- * entity's NEXT report (seconds for a plug; up to an hour for a sensor). Harmless and
- * self-healing, and a pure function of the log order; it is stated here, not fixed.</p>
+ * <p>A {@code state_reported} resolved BEFORE its entity's registration is in the registry
+ * falls through the registry miss to the global default — empty when there is none — and
+ * its {@code staleAfter} stays {@code null} until that entity's NEXT report. The resolver
+ * orders nothing itself; since IR-61b the composition root does: the state projection
+ * subscribes only after the registry projection is LIVE, so at boot every replayed report
+ * finds its registration. The property is stated here for a resolver used outside that
+ * order, and pinned by {@code StateProjectionStalenessTest} T2b.</p>
  *
  * <h2>Configuration</h2>
  *

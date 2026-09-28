@@ -86,9 +86,11 @@ import com.homesynapse.state.ProjectionAdvancer;
 import com.homesynapse.state.ProjectionId;
 import com.homesynapse.state.ReadinessSource;
 import com.homesynapse.state.RegistryStalenessResolver;
+import com.homesynapse.state.StalenessConfig;
 import com.homesynapse.state.StalenessThresholdResolver;
 import com.homesynapse.state.StateProjection;
 import com.homesynapse.state.StateQueryService;
+import com.homesynapse.state.StateStoreSchema;
 
 import io.javalin.Javalin;
 import io.javalin.http.staticfiles.Location;
@@ -526,9 +528,16 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         // next reload while the boot ran on an "unknown property" WARNING.
         cfg.schemaRegistry().registerCoreSchema(
                 AutomationSchema.SCHEMA_SECTION, AutomationSchema.SCHEMA_JSON);
+        // IR-61b: the state_store section is a core schema too (Doc 03 §9's staleness block).
+        cfg.schemaRegistry().registerCoreSchema(
+                StateStoreSchema.SCHEMA_SECTION, StateStoreSchema.SCHEMA_JSON);
         installSchemaRegistry(cfg.schemaRegistry());
         // FATAL on failure — Configuration is a FATAL subsystem (Doc 12 §4).
         this.configurationService.load();
+        // IR-61b (Doc 03 §9): the staleness keys, read once at boot for Step 3.2's resolver.
+        // A malformed value throws naming its key path, under the configuration marker.
+        StalenessConfig staleness = StalenessConfig.fromStateStoreSection(
+                stateStoreSection(configurationService.getCurrentModel().rawMap()));
         recordSubsystem("configuration", LifecyclePhase.FOUNDATION, configStart);
 
         // ── Phase 2 DATA_INFRASTRUCTURE — persistence + event bus ────────────
@@ -620,11 +629,12 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 AttributeSchemaResolver.of(StandardCapabilities.attributeSchemas());
         // IR-61 (Doc 03 §3.8): staleAfter = the report's event-time + the threshold the
         // chain resolves — override → the smallest interval the entity's capabilities
-        // declare → the global default. The §9 keys (staleness_overrides,
-        // default_staleness_threshold) are IR-61b; until they land the override map is
-        // empty and there is no global default.
+        // declare → the global default. The overrides and the global default are Doc 03
+        // §9's staleness_overrides and default_staleness_threshold, read in Phase 1
+        // (IR-61b); with no staleness block both are empty (INV-CE-02).
         StalenessThresholdResolver thresholds = new RegistryStalenessResolver(
-                entityRegistry, StandardCapabilities.all(), Map.of(), Optional.empty());
+                entityRegistry, StandardCapabilities.all(), staleness.overrides(),
+                staleness.defaultThreshold());
         this.stateProjection = StateProjection.create(
                 new ProjectionId(PROJECTION_SUBSCRIBER_ID),
                 PROJECTION_VERSION,                         // M4.0b-5 (AMD-53) projection version
@@ -644,6 +654,10 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 SubscriptionFilter.all(),
                 true,   // coalesceExempt (Doc 01 §3.6)
                 true);  // atomicCheckpoint (AMD-45 §2.2)
+        // IR-61b (IR-83): the registry projection is LIVE before the state projection
+        // subscribes, so every replayed state_reported finds its entity's registration and
+        // its threshold resolves — the two replays run in series, never concurrently.
+        awaitRegistryProjectionLive();
         eventBus.subscribeRuntime(projectionInfo, stateProjection);
 
         Consumer<HealthSignal> healthSignalHandler = signal -> {
@@ -672,8 +686,9 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         // evaluate against partially-replayed state. Gate the automation_engine
         // subscribe on the state projection reaching LIVE. The registry
         // projection must ALSO be caught up to the log head before automation
-        // definitions bind entity refs (AMD-99 §5, carry-list C3) -- the ONE
-        // sanctioned composition-root addition of the DUR WU.
+        // definitions bind entity refs (AMD-99 §5, carry-list C3) -- since IR-61b
+        // it already is (Step 3.2's gate awaited it before the state projection
+        // subscribed), so the second await returns on its first poll.
         awaitProjectionLive();
         awaitRegistryProjectionLive();
 
@@ -1427,7 +1442,9 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
      * Blocks until the registry-projection subscriber reaches {@code LIVE} --
      * the {@link #awaitProjectionLive()} sibling (AMD-99 §5): the registries
      * must be caught up to the log head before integrations resume and before
-     * automation definitions bind entity refs.
+     * automation definitions bind entity refs. Since IR-61b, Step 3.2 also calls
+     * it before the state projection subscribes (IR-83), so this Step 3.3 call
+     * returns on its first poll.
      */
     private void awaitRegistryProjectionLive() {
         final int maxPolls = 1_500; // ~30s at 20ms
@@ -1502,6 +1519,13 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     @SuppressWarnings("unchecked")
     private static Map<String, Object> automationSection(Map<String, Object> rawConfig) {
         Object section = rawConfig.get(AutomationSchema.SCHEMA_SECTION);
+        return (section instanceof Map<?, ?> map) ? (Map<String, Object>) map : Map.of();
+    }
+
+    /** The {@code state_store} section of the whole document (IR-61b), empty when absent. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> stateStoreSection(Map<String, Object> rawConfig) {
+        Object section = rawConfig.get(StateStoreSchema.SCHEMA_SECTION);
         return (section instanceof Map<?, ?> map) ? (Map<String, Object>) map : Map.of();
     }
 
