@@ -46,9 +46,11 @@ public final class IntegrationEvents {
 
 	/**
 	 * Canonical, ordered list of the 10 concrete {@link IntegrationLifecycleEvent}
-	 * subtypes shipped by this module (the original five plus the five added by AMD-58).
-	 * {@link java.util.List#of(Object...)} returns an immutable list (JEP 269); the field
-	 * is intentionally exposed directly rather than through a defensive copy.
+	 * subtypes shipped by this module (the original five plus the five added by AMD-58) —
+	 * also the pairing-window events (PJ-2): the list is the seam's codec registration, not
+	 * a health-transition list. {@link java.util.List#of(Object...)} returns an immutable
+	 * list (JEP 269); the field is intentionally exposed directly rather than through a
+	 * defensive copy.
 	 */
 	public static final List<Class<? extends DomainEvent>> LIFECYCLE_EVENT_CLASSES =
 			List.of(
@@ -61,7 +63,9 @@ public final class IntegrationEvents {
 					IntegrationOptionsUpdated.class,
 					IntegrationReauthRequired.class,
 					IntegrationReauthCompleted.class,
-					IntegrationMigrationCompleted.class);
+					IntegrationMigrationCompleted.class,
+					PermitJoinOpened.class,
+					PermitJoinClosed.class);
 
 	/**
 	 * Canonical, ordered list of the 2 concrete {@link CapabilityEvent} subtypes shipped

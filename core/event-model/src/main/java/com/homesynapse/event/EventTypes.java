@@ -297,6 +297,20 @@ public final class EventTypes {
 	/** Event issued when an adapter migrates its configuration schema. */
 	public static final String INTEGRATION_MIGRATION_COMPLETED = "integration.migration.completed";
 
+	// ========== Pairing window — the declared act (IR-63; PJ-2) ==========
+
+	/**
+	 * Event issued when an integration opens its pairing window — a declared, time-boxed act
+	 * carrying the operator's reason and actor of record (IR-63; PJ-2). Published by the adapter.
+	 */
+	public static final String PERMIT_JOIN_OPENED = "permit_join_opened";
+
+	/**
+	 * Event issued when an integration's pairing window closes — exactly once per window, naming
+	 * the cause: elapsed, superseded, transport_reopened or shutdown (IR-63; PJ-2).
+	 */
+	public static final String PERMIT_JOIN_CLOSED = "permit_join_closed";
+
 	// ========== Capability Lifecycle — dot-namespaced (AMD-59) ==========
 
 	/** Event issued when an entity gains a capability after adoption. */

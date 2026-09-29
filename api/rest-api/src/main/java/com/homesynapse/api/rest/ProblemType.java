@@ -161,6 +161,17 @@ public enum ProblemType {
     TOKEN_REVOKE_REFUSED("token-revoke-refused", 409, "Token Revoke Refused"),
 
     /**
+     * The integration runs, but its adapter has no pairing window.
+     *
+     * <p>Returned by {@code POST /api/v1/integrations/{integrationId}/permit-join}
+     * when the hosted adapter does not implement the optional pairing-window
+     * capability (PJ-2, IR-63). 409 because the request conflicts with what the
+     * integration IS — the {@link #TOKEN_REVOKE_REFUSED} class: not a validation
+     * failure, and not an unhealthy integration.</p>
+     */
+    PAIRING_WINDOW_UNSUPPORTED("pairing-window-unsupported", 409, "Pairing Window Unsupported"),
+
+    /**
      * The target device is orphaned — its integration connection has been lost.
      *
      * <p>Returned when a command is issued to an entity whose parent device has

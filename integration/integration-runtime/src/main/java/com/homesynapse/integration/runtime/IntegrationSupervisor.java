@@ -5,6 +5,8 @@
 package com.homesynapse.integration.runtime;
 
 import com.homesynapse.integration.IntegrationFactory;
+import com.homesynapse.integration.PairingWindow;
+import com.homesynapse.integration.PairingWindowRequest;
 import com.homesynapse.platform.identity.IntegrationId;
 
 import java.util.List;
@@ -204,4 +206,25 @@ public interface IntegrationSupervisor {
      *         never {@code null}, may be empty
      */
     Set<IntegrationId> registeredIntegrations();
+
+    /**
+     * Opens the pairing window of a running integration (PJ-2, IR-63) — the endpoint's
+     * path: {@code POST /api/v1/integrations/{integrationId}/permit-join}.
+     *
+     * <p>The open runs on THAT adapter's single-threaded command executor (the same
+     * thread the command write path uses — never the caller's). Every refusal is the
+     * future's, never a synchronous throw: it completes exceptionally with
+     * {@link IllegalStateException} when the integration is not running (or its executor
+     * is stopping), with {@link UnsupportedOperationException} when the hosted adapter
+     * implements no {@link com.homesynapse.integration.PairingWindowControl}, and with
+     * the adapter's own throw when the coordinator rejects the open. An adapter throw
+     * here never feeds the health error window — the window is not a command.</p>
+     *
+     * @param id      the integration to open; never {@code null}
+     * @param request the validated request; never {@code null}
+     * @return a future completing with the window as the adapter opened it, or
+     *         exceptionally as above; never {@code null}
+     */
+    CompletableFuture<PairingWindow> openPairingWindow(IntegrationId id,
+                                                       PairingWindowRequest request);
 }

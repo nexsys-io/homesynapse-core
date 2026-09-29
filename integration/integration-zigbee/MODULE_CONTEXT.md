@@ -416,6 +416,8 @@ M9.4b makes the adapter REAL-WORLD-OPERABLE: production port location/probe/sess
 
 ## M9.4-PJ Implementation — Permit-Join Config Wiring (2026-07-06)
 
+**Status: SUPERSEDED by PJ-2 (2026-09-28): the key is ignored at boot; the window is the endpoint's** (the PJ-2 section below; the body of this section is the historical record).
+
 M9.4-PJ wires the already-schema'd `integrations.zigbee.permit_join_duration` key to `CoordinatorProtocol.permitJoin(int)` — the headless/bench operator path for the M9.4 "join two devices" step. Before this WU there was NO production caller of `permitJoin` (reachable only from unit tests). Type delta: ZERO (no new types). Change: 1 main file + 1 new test file; zero module-info/build.gradle/schema/dependency/event diffs. The REST permit-join surface remains the future UI mechanism — this does not preempt it.
 
 ### M9.4-PJ Behavior Deltas (existing types)
@@ -862,6 +864,28 @@ Type delta: **+1 PUBLIC record** (`LinkReading` — the Small Data Records table
 - **A physical plausibility is never a type invariant on the ingestion path:** `ZclIngestionUnit` has no `RuntimeException` arm and neither has `productionLoop()` — a throw in `route()` ends `run()`. Build wire-derived values through a total factory.
 - **`-` is a contract, not a gap:** a reader of either line must accept `-` in the three reading fields (a restarted hub prints it for every device until that device speaks).
 - **Test reach:** T7 is `lifecycle`'s `LinkReadIT` on `RealCoreFixture` — the rig already carries LQI 176 / RSSI −56 on every scripted frame (`ZigbeeHardwareFreeRig.incomingMessage`), so the IT needed no rig change.
+
+---
+
+## PJ-2 Implementation — the Pairing Window as a Declared Act (2026-09-28)
+
+PJ-2 (IR-63; D-v85-5) retires the boot-time window: **no window at boot since PJ-2; the key is ignored with one WARN; `openPairingWindow` on the executor; the close from the production loop.** Change: 1 main file + the schema description; 3 test files re-shaped; zero module-info/build.gradle deltas (`PairingWindowControl` and the two events come through the existing `requires transitive com.homesynapse.integration`).
+
+### PJ-2 Behavior Deltas (existing types)
+
+- **`ZigbeeIntegrationAdapter implements PairingWindowControl`:** the start path's `openPermitJoinWindow()` call is REMOVED; `run()` calls package-private `warnIfPermitJoinKeyConfigured()` instead — a `permit_join_duration` value present at production start logs ONE WARN `zigbee.permit_join_key_ignored: configured=<n>s — the window opens only by POST /api/v1/integrations/{id}/permit-join (PJ-2)` and opens NOTHING; an absent key logs nothing. `PERMIT_JOIN_MIN/MAX_SECONDS` (the clamp) are retired — the 1–254 bounds live on `PairingWindowRequest`. The driven mode is untouched.
+- **`openPairingWindow(PairingWindowRequest)` (public; the `PairingWindowControl` contract — called on the supervisor's command executor only):** `protocol.enablePreconfiguredKeyJoins()` THEN `protocol.permitJoin(duration)` (the M9.4-TCJ §A.1 order; a NAK'd enablement throws BEFORE any permit frame and nothing changes); only after both are accepted: a prior window still of record is closed FIRST with ONE `permit_join_closed` (`superseded`, `closedAt = now`, while its end is ahead; `elapsed`, `closedAt = its closesAt`, if the cycle had not yet observed its end), then the deadline is set, the window stored (`AtomicReference<PairingWindow> currentWindow`), `permitJoinEpoch` bumped, `permit_join_opened` published (`publishRoot`, subject `integration(id)`, origin INTEGRATION, priority NORMAL, eventTime = the clock) and `zigbee.permit_join_opened: duration={}s reason={} actor={}` logged (the token unchanged; two fields added). Returns the `PairingWindow`. `currentPairingWindow()` is empty once the window's end has passed, recorded or not (never-false-ALIVE).
+- **The closers (three, on three threads — the CAS is mandatory):** the run thread's `closeWindowIfElapsed()` at the END of `runCycleOnce()` (`compareAndSet(w, null)` wins → `permit_join_closed(elapsed, openedAt = opensAt, closedAt = the window's OWN closesAt — never the cycle's clock, which lags up to 50 ms)`; a lost CAS publishes nothing); the transport reopen (`attemptReopen()`, DP-B5) → `permit_join_closed(transport_reopened, closedAt = now)`; `close()` → `permit_join_closed(shutdown, closedAt = now)`, best effort inside a try/catch (WARN `zigbee.permit_join_close_failed`; the close proceeds). Exactly ONE close per window. The deadline is nulled after each CAS.
+- **The F-R4-1 epoch rule, re-homed:** the open (now on the executor) never touches the run-thread-confined `rejoinWindowClosedNoted`/`rejoinLookupAttempted`; it bumps `volatile long permitJoinEpoch`, and `runCycleOnce()` compares it with its run-thread `seenPermitJoinEpoch` at its TOP and clears both sets before the cycle's ingestion — `ZigbeeInterviewOnRejoinTest` T7's semantics preserved (a reopen clears the notes; the ONE set bounds the lookup pair).
+- **`isPermitJoinActive()` unchanged in shape** (the deadline read); the two admission gates unchanged. The window events ride `publishWindowEvent(type, payload)` — the posture re-emit's `publishRoot` form with the `SequenceConflictException` catch → ONE WARN `zigbee.permit_join_event_conflict: type={}: {}` (live, not theoretical: the supervisor's lifecycle events share the subject `integration(id)`); the window state stands.
+- **`zigbee-config-schema.json`:** the `permit_join_duration` description re-cut to the IGNORED-since-PJ-2 text; `type`/`minimum`/`maximum` unchanged (the key stays: `additionalProperties: false`; its removal is a later `CONFIG-ERROR:`-class decision).
+
+### PJ-2 Gotchas
+
+- **Tokens (grep-stable):** INFO `zigbee.permit_join_opened` (duration, reason, actor — unchanged token) · WARN `zigbee.permit_join_key_ignored` (configured) · WARN `zigbee.permit_join_event_conflict` (type) · WARN `zigbee.permit_join_close_failed` (the shutdown close's best-effort catch). The CLOSE has NO log line by design — `permit_join_closed` is its record; the bench's boot-health grep (BH-2) forbids `permit_join_opened` at boot, which the key path can no longer produce.
+- **The operator's log grammar:** `zigbee.production_session_started` → (a key present: `zigbee.permit_join_key_ignored`, once) → … → `zigbee.permit_join_opened: duration= reason= actor=` (the endpoint's open) → the admission lines (`rejoin_candidate`…) → nothing at the close (read the event).
+- **`ZigbeePermitJoinTest` is the window's tests of record (T1–T4 + the key-ignored inverse + the record's bounds + the clock window + driven mode + the reopen close); `ZigbeeInterviewOnRejoinTest` (16 sites) and `ZigbeeTrustCenterJoinTest` (7 + the NAK lambda) open by `openPairingWindow(request())`; their `published().isEmpty()` pins after an open are type-filtered (`nonWindowEvents()`), never bare.** The fake NCP's `0x0022` count is THE instrument for "the protocol sent permit-join".
+- **The bench pairs by the key today** (`bench.sh` writes it and restarts) — after PJ-2 lands on the card, a key-driven pairing opens NOTHING until the bench's `permit-join` verb (BH-3) carries the POST. The hub holds that fence.
 
 ---
 

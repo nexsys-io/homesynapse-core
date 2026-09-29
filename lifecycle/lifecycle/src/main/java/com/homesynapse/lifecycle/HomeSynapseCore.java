@@ -6,6 +6,8 @@ package com.homesynapse.lifecycle;
 
 import com.homesynapse.api.rest.AuthMiddleware;
 import com.homesynapse.api.rest.OpaqueTokenStore;
+import com.homesynapse.api.rest.PairingWindowPort;
+import com.homesynapse.api.rest.PairingWindowPort.PairingWindowView;
 import com.homesynapse.api.rest.RateLimiter;
 import com.homesynapse.api.rest.RestFilters;
 import com.homesynapse.api.rest.StandardAuthMiddleware;
@@ -66,6 +68,7 @@ import com.homesynapse.event.bus.SubscriberSnapshot;
 import com.homesynapse.event.bus.SubscriptionFilter;
 import com.homesynapse.integration.IntegrationEvents;
 import com.homesynapse.integration.IntegrationFactory;
+import com.homesynapse.integration.PairingWindowRequest;
 import com.homesynapse.integration.runtime.IntegrationSupervisor;
 import com.homesynapse.integration.runtime.IntegrationSupervisorAssembly;
 import com.homesynapse.observability.HealthStatus;
@@ -74,6 +77,7 @@ import com.homesynapse.persistence.PayloadCipher;
 import com.homesynapse.persistence.PersistenceFactory;
 import com.homesynapse.platform.HealthReporter;
 import com.homesynapse.platform.identity.HomeId;
+import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.SystemId;
 import com.homesynapse.platform.systemd.NoOpHealthReporter;
 import com.homesynapse.platform.systemd.SystemdHealthReporter;
@@ -106,6 +110,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -306,7 +311,11 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     private RunManager runManager;
     private CommandDispatchService commandDispatchService;
     private PendingCommandLedger pendingCommandLedger;
-    private IntegrationSupervisor integrationSupervisor;
+    /**
+     * Written by the boot thread in Phase 6 (or never — DP-7 skip-if-empty); read
+     * per request by the PJ-2 pairing-window port on Javalin threads, hence volatile.
+     */
+    private volatile IntegrationSupervisor integrationSupervisor;
     private HealthLoop healthLoop;
     private Javalin httpServer;
 
@@ -1104,6 +1113,15 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                     app, eventPublisher, entityRegistry, persistenceFactory.eventStore(),
                     (int) PendingCommandLedgerAssembly.DEFAULT_CONFIRMATION_TIMEOUT_MS,
                     stateProjection::cursorPosition, clock);
+            // PJ-2 (IR-63): the pairing window opens ONLY by POST
+            // /api/v1/integrations/{integrationId}/permit-join; the open runs on the
+            // adapter's own command executor (never this thread, never Javalin's) and
+            // the adapter records it. Phase 5 installs BEFORE Phase 6 assigns the
+            // supervisor, so the port reads the field PER REQUEST (null → a failed
+            // future → 503; the same on the DP-7 skip-if-empty boot). Same ordering
+            // class as the command surface: behind installAuth and the readiness gate.
+            RestFilters.installPermitJoinEndpoint(
+                    app, (PairingWindowPort) this::openPairingWindow, clock);
             // AB-1: loopback bind by default; LAN exposure is the explicit
             // config.bindHost() opt-in. Never bind all-interfaces by default.
             app.start(config.bindHost(), config.httpPort());
@@ -1268,6 +1286,33 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     // ════════════════════════════════════════════════════════════════════════
     // Internal
     // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * PJ-2 — the {@link PairingWindowPort} bridge: the supervisor field is read PER
+     * REQUEST because Phase 5 (the HTTP surface) runs before Phase 6 assigns it, and
+     * DP-7 leaves it null for good on a boot with no integration factories. The open
+     * itself runs on the adapter's command executor inside the supervisor; every
+     * refusal is the future's (the endpoint maps them), never a throw on Javalin's
+     * thread.
+     */
+    private CompletableFuture<PairingWindowView> openPairingWindow(
+            IntegrationId id, int durationSeconds, String reason, String actor) {
+        IntegrationSupervisor supervisor = this.integrationSupervisor;
+        if (supervisor == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "no integration supervisor yet (Phase 6 not reached, or DP-7)"));
+        }
+        PairingWindowRequest request;
+        try {
+            request = new PairingWindowRequest(durationSeconds, reason, actor);
+        } catch (IllegalArgumentException invalid) {
+            return CompletableFuture.failedFuture(invalid);
+        }
+        return supervisor.openPairingWindow(id, request)
+                .thenApply(window -> new PairingWindowView(
+                        window.integrationId(), window.opensAt(), window.closesAt(),
+                        window.durationSeconds(), window.reason(), window.actor()));
+    }
 
     private void doTeardown(String reason) {
         lifecycleLock.lock();
