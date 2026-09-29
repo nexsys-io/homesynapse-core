@@ -41,9 +41,9 @@ class EventTypesTest {
 	}
 
 	@Test
-	@DisplayName("exactly 73 public static final String constants")
+	@DisplayName("exactly 75 public static final String constants")
 	void exactConstantCount() {
-		assertThat(stringConstants()).hasSize(73);
+		assertThat(stringConstants()).hasSize(75);
 	}
 
 	@Test

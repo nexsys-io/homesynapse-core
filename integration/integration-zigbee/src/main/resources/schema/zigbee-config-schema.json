@@ -27,7 +27,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 254,
-      "description": "Permit-join window duration in seconds, opened once at adapter start while this key is SET (Zigbee spec maximum 254; 120 suits most pairing workflows). Absent: no window ever opens — the conservative default (M9.4-PJ); set the key to admit devices, remove it to stop the window re-opening on boot. Deliberately NO schema default: since PKG-SEC-2 this fragment composes before Phase-1 validation, so a declared default would merge into every unconfigured boot and open the network for joins."
+      "description": "IGNORED since PJ-2: the pairing window opens only by POST /api/v1/integrations/{id}/permit-join; a value here logs one WARN (zigbee.permit_join_key_ignored) at adapter start and opens nothing. Kept in the schema so a configuration carrying it still validates (additionalProperties is false); scheduled for removal."
     },
     "adopt_devices": {
       "type": "array",

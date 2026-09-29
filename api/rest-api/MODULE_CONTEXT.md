@@ -149,7 +149,7 @@ module com.homesynapse.api.rest {
 | `RestApiServer` | interface | Abstract HTTP server operations (isolates server implementation choice) | `registerRoute(String method, String pathPattern, EndpointHandler)`, `start(String host, int port)`, `stop(int drainSeconds)`, `isRunning() → boolean`, `port() → int`. Path patterns: `{param}` syntax. Virtual thread dispatch (LTD-01). Thread-safe. |
 | `RestApiLifecycle` | interface | Lifecycle management consumed by Doc 12 startup/shutdown module | `start()` — Phase 5 of startup (after Config, Event Bus, State Store, registries). `stop()` — shutdown step 4 (drain in-flight requests, unbind port). Thread-safe. |
 
-**Total: 28 public types + 9 package-private + 1 module-info.java = 38 Java files.** (M3.6e.1 added 1 public + 1 package-private — `RestFilters` and `ReadinessFilter`. M3.6e.2 added 8 package-private types — `EndpointContext`, `JavalinEndpointContext`, `EndpointResponses`, `ListEntitiesEndpoint`, `GetEntityEndpoint`, `GetEntityStateEndpoint`, `DlqStatusEndpoint`, `ProjectionStatusEndpoint`. M3.6e.2 also added two new public methods on `RestFilters` — `installEntityQueryEndpoints` and `installAdminEndpoints` — but no new public types.)
+**Total: 29 public types + 10 package-private + 1 module-info.java = 40 Java files** (PJ-2 2026-09-28: +`PairingWindowPort` public, with its nested `PairingWindowView` record; +`PermitJoinEndpoint` package-private). Prior: **28 public types + 9 package-private + 1 module-info.java = 38 Java files.** (M3.6e.1 added 1 public + 1 package-private — `RestFilters` and `ReadinessFilter`. M3.6e.2 added 8 package-private types — `EndpointContext`, `JavalinEndpointContext`, `EndpointResponses`, `ListEntitiesEndpoint`, `GetEntityEndpoint`, `GetEntityStateEndpoint`, `DlqStatusEndpoint`, `ProjectionStatusEndpoint`. M3.6e.2 also added two new public methods on `RestFilters` — `installEntityQueryEndpoints` and `installAdminEndpoints` — but no new public types.)
 
 ### AB-1 — Authentication impls + opaque-token store (2026-06-20)
 
@@ -402,6 +402,14 @@ None — no module declares `requires com.homesynapse.api.rest` in Phase 2.
 - **lifecycle** (`com.homesynapse.lifecycle`) — Will import `RestApiLifecycle` for startup sequencing (start at Phase 5) and graceful shutdown (stop at step 4).
 - **Future: observability** — May reference API types for JFR metric events.
 
+## PJ-2 — the pairing-window write surface (2026-09-28, IR-63)
+
+**`RestFilters.installPermitJoinEndpoint(Object javalinApp, Object pairingWindowPort, Clock clock)`** (the ONLY public gateway delta; the `installCommandEndpoints` form): registers `POST /api/v1/integrations/{integrationId}/permit-join` → package-private `PermitJoinEndpoint implements Handler`. Body `{"durationSeconds": 1–254 (an integral JSON number — a string "120" is 400), "reason": "<1–120 chars>"}`; the actor = `caller.keyId()` from `RestFilters.IDENTITY_ATTRIBUTE` (read in the `Handler` lambda, passed to the pure `apply(EndpointContext, ApiKeyIdentity)` — the `TokenAdminEndpoints` form; a null caller → 401). The handler calls `port.open(id, s, reason, actor)` and waits `PORT_TIMEOUT` (5 s; injectable through the package-private 3-arg ctor for tests) on the future — a Javalin thread, bounded. `200` = `{data: {integrationId, durationSeconds, reason, actor, opensAt, closesAt}, meta: {timestamp}}` (ISO-8601 instants; camelCase; NO `viewPosition` — no cursor supplier), `Cache-Control: no-store`. Problems: bad body / malformed id → 400 `INVALID_PARAMETERS`; the future's `IllegalStateException` (not running, no supervisor yet) → 503 `INTEGRATION_UNHEALTHY` with the message; `UnsupportedOperationException` → 409 **`PAIRING_WINDOW_UNSUPPORTED`** (`pairing-window-unsupported`, NEW `ProblemType` row after `TOKEN_REVOKE_REFUSED`); `IllegalArgumentException` → 400; timeout → 503 `"the integration did not answer in 5 s"`; any other cause (an NCP NAK) → 503 naming the exception's class + message, never a stack, never 500 (500 only if the port itself throws synchronously). **Publishes NOTHING** — `REST_ENDPOINTS_NO_EVENT_PUBLISHING` holds with its allowlist unchanged (the adapter owns `permit_join_opened`/`permit_join_closed`). Tests: `PermitJoinEndpointTest` (18).
+
+**`PairingWindowPort`** (public interface; `CompletableFuture<PairingWindowView> open(IntegrationId, int, String, String)`; nested public record `PairingWindowView(IntegrationId integrationId, Instant opensAt, Instant closesAt, int durationSeconds, String reason, String actor)`): the composition root bridges it to `IntegrationSupervisor.openPairingWindow`.
+
+**Module-info impact: ZERO.** The port is JDK + platform types; rest-api does NOT require integration-api. `IntegrationId` on the exported signature is readable through `requires transitive com.homesynapse.state` → state-store's `requires transitive com.homesynapse.platform` (`-Xlint:exports -Werror` clean).
+
 ## Cross-Module Contracts
 
 - **All API-boundary IDs are `String`, not typed ID wrappers.** ULIDs are serialized as 26-character Crockford Base32 strings at the wire boundary (LTD-04). Phase 3 endpoint handlers perform `String` ↔ typed ID conversion (e.g., `EntityId.of(string)`) when calling internal interfaces. Phase 2 types are independent of `com.homesynapse.platform`.
@@ -474,6 +482,8 @@ None. This module contains no sealed types.
 15. **The five operational planes have distinct consistency contracts.** State Query: eventually consistent (projection-derived). Command: accepted ≠ confirmed. Event History: strongly consistent (immutable log). Automation: configuration-consistent. System: real-time. Phase 3 endpoint handlers must respect these contracts. Reference: Doc 09 §3.2.
 
 ## Gotchas
+
+**GOTCHA (PJ-2): the port is JDK + platform types; rest-api does not require integration-api.** `PairingWindowPort`/`PairingWindowView` must never carry an integration-api type (`PairingWindow`, `PairingWindowRequest`) — that would be rest-api's first edge to `com.homesynapse.integration` and a module-info change; the composition root converts. The endpoint's 5-s `get` blocks a Jetty thread — acceptable for an operator's onboarding call; a timeout is 503, the honest word for a busy or dead adapter executor.
 
 **GOTCHA: `CommandStatusResponse` has 8 fields, not 7.** The handoff summary table says 7 fields but the detailed specification lists 8. The `terminal` boolean is the 8th component. Count carefully: commandId, correlationId, entityId, capability, command, lifecycle, currentPhase, terminal.
 

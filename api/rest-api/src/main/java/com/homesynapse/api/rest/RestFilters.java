@@ -487,6 +487,40 @@ public final class RestFilters {
                 new GetCommandStatusEndpoint(store, registry, viewPositionSupplier, clock));
     }
 
+    /**
+     * Registers the PJ-2 pairing-window write surface — {@code POST
+     * /api/v1/integrations/{integrationId}/permit-join} — on the given Javalin
+     * application instance. The window is a declared, time-boxed, RECORDED act: the
+     * handler asks the {@link PairingWindowPort} (the composition root's bridge to the
+     * integration supervisor; the open runs on the adapter's own command executor),
+     * waits a bounded 5 s, and answers 200 with the window — publishing NOTHING itself
+     * (the adapter owns {@code permit_join_opened} / {@code permit_join_closed}).
+     *
+     * <p>Auth and the rate limiter are inherited from {@link #installAuth}; the
+     * readiness gate from {@link #installReadinessGate}. The same {@code Object}-erased
+     * gateway form as {@link #installCommandEndpoints} (DEC-M3-16).</p>
+     *
+     * @param javalinApp        the {@link io.javalin.Javalin} instance, typed as
+     *                          {@code Object} (see class Javadoc); never {@code null}
+     * @param pairingWindowPort the {@link PairingWindowPort} bridge, typed as
+     *                          {@code Object} for the gateway's uniform shape; never
+     *                          {@code null}
+     * @param clock             injected clock for {@code meta.timestamp}; never
+     *                          {@code null}
+     * @throws ClassCastException if the erased parameters are not the documented types
+     */
+    public static void installPermitJoinEndpoint(Object javalinApp,
+                                                 Object pairingWindowPort,
+                                                 Clock clock) {
+        Objects.requireNonNull(javalinApp, "javalinApp");
+        Objects.requireNonNull(pairingWindowPort, "pairingWindowPort");
+        Objects.requireNonNull(clock, "clock");
+        Javalin app = (Javalin) javalinApp;
+        PairingWindowPort port = (PairingWindowPort) pairingWindowPort;
+        app.post("/api/v1/integrations/{integrationId}/permit-join",
+                new PermitJoinEndpoint(port, clock));
+    }
+
     /** Request attribute key carrying the authenticated identity to downstream handlers. */
     static final String IDENTITY_ATTRIBUTE = "hs.api.identity";
 

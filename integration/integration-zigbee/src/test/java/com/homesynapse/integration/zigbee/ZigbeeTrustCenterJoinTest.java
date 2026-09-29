@@ -12,9 +12,11 @@ import com.homesynapse.config.ConfigurationAccess;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
 import com.homesynapse.device.RegistryProjection;
+import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
+import com.homesynapse.integration.PairingWindowRequest;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.UlidFactory;
@@ -48,7 +50,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * M9.4-TCJ §A — Trust Center join enablement: the window-open path gains the TC
  * join policy + wildcard well-known transient link key (policy → transient key →
- * permitJoin, all riding the operator's {@code permit_join_duration} key), and the
+ * permitJoin, riding the operator's request since PJ-2 — never a config key), and the
  * {@code trustCenterJoinHandler} (0x0024) / {@code childJoinHandler} (0x0023)
  * callbacks become honest log-only observability.
  *
@@ -121,13 +123,13 @@ class ZigbeeTrustCenterJoinTest {
     void windowOpen_emitsEnablementBeforePermitJoin_inOrder() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> tcjHandler(ncp, command, List.of()));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, 200);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
 
         assertThat(enablementFrameIds(ncp))
                 .as("no enablement or join frame is emitted during boot")
                 .isEmpty();
 
-        adapter.openPermitJoinWindow();
+        adapter.openPairingWindow(request());
 
         assertThat(enablementFrameIds(ncp))
                 .as("policy → policy → transient key → permitJoin, exactly once each")
@@ -182,9 +184,9 @@ class ZigbeeTrustCenterJoinTest {
         new PersistentNetworkParameterStore(tempDir, clock).saveTclkSeed(seed);
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> tcjHandler(ncp, command, List.of()));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, 200);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
 
-        adapter.openPermitJoinWindow();
+        adapter.openPairingWindow(request());
 
         byte[] security = parametersOf(framesWithId(ncp,
                 FRAME_SET_INITIAL_SECURITY_STATE).get(0));
@@ -212,15 +214,15 @@ class ZigbeeTrustCenterJoinTest {
     // ── §A-2 key absent ⇒ zero enablement frames ────────────────────────────
 
     @Test
-    @DisplayName("§A-2: an absent permit_join_duration key emits ZERO policy and "
-            + "transient-key frames — the enablement rides the window (conservative "
-            + "default is LAW)")
+    @DisplayName("§A-2: the start path emits ZERO policy and transient-key frames — since "
+            + "PJ-2 the enablement rides the request's window only (conservative default "
+            + "is LAW; an absent key warns nothing)")
     void keyAbsent_emitsNoEnablementFrames() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> tcjHandler(ncp, command, List.of()));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
 
-        adapter.openPermitJoinWindow();
+        adapter.warnIfPermitJoinKeyConfigured();   // the :500 start-path call (PJ-2)
 
         assertThat(enablementFrameIds(ncp))
                 .as("no key ⇒ no policy, no transient key, no permitJoin — ever")
@@ -242,8 +244,8 @@ class ZigbeeTrustCenterJoinTest {
                 trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
                         EzspCoordinatorProtocol.DEVICE_UPDATE_UNSECURED_JOIN,
                         EzspCoordinatorProtocol.JOIN_DECISION_USE_PRECONFIGURED_KEY))));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, 200);
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+        adapter.openPairingWindow(request());
 
         deliverAndCycle(adapter);
 
@@ -259,8 +261,9 @@ class ZigbeeTrustCenterJoinTest {
                 .as("a fresh join never starts an interview — the F-R4-1 amended pin "
                         + "admits only an accepted REJOIN inside an open window")
                 .isZero();
-        assertThat(publisher.published())
-                .as("the join handler NEVER publishes an event").isEmpty();
+        assertThat(nonWindowEvents())
+                .as("the join handler NEVER publishes an event (the open's own is filtered)")
+                .isEmpty();
     }
 
     // ── §A-4 denied join ⇒ one WARN, ZERO synthesis ─────────────────────────
@@ -276,8 +279,8 @@ class ZigbeeTrustCenterJoinTest {
                 trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
                         EzspCoordinatorProtocol.DEVICE_UPDATE_UNSECURED_JOIN,
                         EzspCoordinatorProtocol.JOIN_DECISION_DENY_JOIN))));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, 200);
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+        adapter.openPairingWindow(request());
 
         deliverAndCycle(adapter);
 
@@ -290,7 +293,8 @@ class ZigbeeTrustCenterJoinTest {
         assertThat(adapter.allDevices()).isEmpty();
         assertThat(countFrames(ncp,
                 EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64)).isZero();
-        assertThat(publisher.published()).isEmpty();
+        assertThat(nonWindowEvents())
+                .as("no event of any type but permit_join_opened").isEmpty();
     }
 
     // ── §A-5 the happy path is unchanged (no double-drive) ──────────────────
@@ -306,8 +310,8 @@ class ZigbeeTrustCenterJoinTest {
                         EzspCoordinatorProtocol.DEVICE_UPDATE_UNSECURED_JOIN,
                         EzspCoordinatorProtocol.JOIN_DECISION_USE_PRECONFIGURED_KEY),
                 deviceAnnounceCallback(SNZB_IEEE, SNZB_NWK))));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, 200);
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+        adapter.openPairingWindow(request());
 
         deliverAndCycle(adapter);
 
@@ -341,9 +345,9 @@ class ZigbeeTrustCenterJoinTest {
             }
             return tcjHandler(ncp, command, List.of());
         });
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, 200);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
 
-        assertThatThrownBy(adapter::openPermitJoinWindow)
+        assertThatThrownBy(() -> adapter.openPairingWindow(request()))
                 .as("the rejection surfaces — TRANSIENT at the supervisor, never a "
                         + "silent half-open window")
                 .isInstanceOf(EzspCommandException.class)
@@ -365,8 +369,8 @@ class ZigbeeTrustCenterJoinTest {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> tcjHandler(ncp, command, List.of(
                 childJoinCallback(SNZB_IEEE, SNZB_NWK, true, 0x04))));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, 200);
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+        adapter.openPairingWindow(request());
 
         deliverAndCycle(adapter);
 
@@ -374,7 +378,8 @@ class ZigbeeTrustCenterJoinTest {
                 .containsExactly("zigbee.child_join: child=0x00124B0012345678 "
                         + "nwk=0x6b9a type=SLEEPY_END_DEVICE");
         assertThat(adapter.allDevices()).isEmpty();
-        assertThat(publisher.published()).isEmpty();
+        assertThat(nonWindowEvents())
+                .as("no event of any type but permit_join_opened").isEmpty();
     }
 
     // ── harness (the ZigbeePermitJoinTest production-ladder idiom) ──────────
@@ -405,18 +410,32 @@ class ZigbeeTrustCenterJoinTest {
      * channel until the protocol next reads — the nop keepalive's response loop
      * parks them in the callback queue, and the §G cycle drains them.
      */
+    /**
+     * PJ-2: an open now publishes {@code permit_join_opened}; the never-publishes pins after an
+     * open therefore filter that type out — "no event of any type but permit_join_opened".
+     */
+    private List<EventEnvelope> nonWindowEvents() {
+        return publisher.published().stream()
+                .filter(e -> !e.eventType().equals(EventTypes.PERMIT_JOIN_OPENED))
+                .toList();
+    }
+
+    /** PJ-2: the window opens by the request — the seconds the fixture's key used to set. */
+    private static PairingWindowRequest request() {
+        return new PairingWindowRequest(200, "test", "test");
+    }
+
     private static void deliverAndCycle(ZigbeeIntegrationAdapter adapter) {
         adapter.coordinatorProtocol().ping();
         adapter.runCycleOnce();
     }
 
     /** Boots a production adapter through the full §5.1 ladder to a formed network. */
-    private ZigbeeIntegrationAdapter bootProduction(FakeNcp ncp,
-            Integer permitJoinDuration) throws Exception {
+    private ZigbeeIntegrationAdapter bootProduction(FakeNcp ncp) throws Exception {
         Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
         channels.push(channelOver(ncp));
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
-                context(configAccess(permitJoinDuration)),
+                context(configAccess()),
                 new InMemoryDeviceRegistry(),
                 new RegistryProjection(new InMemoryDeviceRegistry(),
                         new InMemoryEntityRegistry()),
@@ -780,7 +799,7 @@ class ZigbeeTrustCenterJoinTest {
 
     // ── inert context stubs (the adapter never touches these paths here) ────
 
-    private static ConfigurationAccess configAccess(Integer permitJoinDuration) {
+    private static ConfigurationAccess configAccess() {
         return new ConfigurationAccess() {
             @Override
             public Map<String, Object> getConfig() {
@@ -794,9 +813,7 @@ class ZigbeeTrustCenterJoinTest {
 
             @Override
             public Optional<Integer> getInt(String key) {
-                return ZigbeeIntegrationAdapter.PERMIT_JOIN_DURATION_KEY.equals(key)
-                        ? Optional.ofNullable(permitJoinDuration)
-                        : Optional.empty();
+                return Optional.empty();   // PJ-2: no key — the window is the request's
             }
 
             @Override

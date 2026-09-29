@@ -26,6 +26,9 @@ import com.homesynapse.integration.IntegrationStarted;
 import com.homesynapse.integration.IntegrationStopped;
 import com.homesynapse.integration.IoType;
 import com.homesynapse.integration.IsolationLevel;
+import com.homesynapse.integration.PairingWindow;
+import com.homesynapse.integration.PairingWindowControl;
+import com.homesynapse.integration.PairingWindowRequest;
 import com.homesynapse.integration.PermanentIntegrationException;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.state.StateQueryService;
@@ -49,6 +52,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
@@ -378,6 +382,38 @@ final class StandardIntegrationSupervisor implements IntegrationSupervisor {
                     runtime.adapter, runtime.commandExecutor, runtime.integrationType));
         } finally {
             stateLock.unlock();
+        }
+    }
+
+    /**
+     * PJ-2 (DP-PJ2-1): the open rides the SAME route seam as a command — present only
+     * for a hosted, running adapter — and runs on that adapter's command executor.
+     * {@code supplyAsync} throws {@code RejectedExecutionException} SYNCHRONOUSLY when
+     * the executor is shut down ({@link #shutdownCommandExecutor}), so it is caught
+     * here and returned as a failed future; an adapter throw inside the supplier
+     * completes the future exceptionally on its own and never reaches
+     * {@link #recordHandlerError} — the window is not a command.
+     */
+    @Override
+    public CompletableFuture<PairingWindow> openPairingWindow(IntegrationId id,
+                                                              PairingWindowRequest request) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(request, "request");
+        Optional<RouteTarget> target = routeTarget(id);
+        if (target.isEmpty()) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("integration not running: " + id));
+        }
+        if (!(target.get().adapter() instanceof PairingWindowControl control)) {
+            return CompletableFuture.failedFuture(new UnsupportedOperationException(
+                    target.get().integrationType() + " has no pairing window"));
+        }
+        try {
+            return CompletableFuture.supplyAsync(
+                    () -> control.openPairingWindow(request), target.get().commandExecutor());
+        } catch (RejectedExecutionException stopped) {
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("integration stopping: " + id, stopped));
         }
     }
 

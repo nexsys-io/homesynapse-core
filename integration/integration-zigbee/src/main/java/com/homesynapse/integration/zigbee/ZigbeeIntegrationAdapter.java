@@ -12,6 +12,7 @@ import com.homesynapse.device.HardwareIdentifier;
 import com.homesynapse.device.RegistryEventMapper;
 import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.event.AvailabilityChangedEvent;
+import com.homesynapse.event.DomainEvent;
 import com.homesynapse.event.EntityRegisteredEvent;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventOrigin;
@@ -21,6 +22,11 @@ import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.integration.CommandHandler;
 import com.homesynapse.integration.IntegrationContext;
+import com.homesynapse.integration.PairingWindow;
+import com.homesynapse.integration.PairingWindowControl;
+import com.homesynapse.integration.PairingWindowRequest;
+import com.homesynapse.integration.PermitJoinClosed;
+import com.homesynapse.integration.PermitJoinOpened;
 import com.homesynapse.integration.PermanentIntegrationException;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
@@ -36,12 +42,14 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
@@ -77,7 +85,7 @@ import java.util.regex.Pattern;
  * <p>Thread-safe: lifecycle methods are supervisor-serialized; the cycle and the
  * command handler touch individually thread-safe collaborators.</p>
  */
-final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
+final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowControl {
 
     private static final Logger log =
             LoggerFactory.getLogger(ZigbeeIntegrationAdapter.class);
@@ -86,20 +94,15 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     static final String SERIAL_PORT_KEY = "serial_port";
 
     /**
-     * The {@code integrations.zigbee} config key naming the permit-join window
-     * duration in seconds (M9.4-PJ — the headless/bench operator path). Conservative
-     * default is LAW: an ABSENT key opens NOTHING; the schema's {@code default: 120}
-     * is documentation-side and never auto-opens a join window.
+     * The {@code integrations.zigbee} config key that USED to open the permit-join
+     * window at production start (M9.4-PJ). IGNORED since PJ-2: a value present at
+     * start logs ONE WARN ({@code zigbee.permit_join_key_ignored}) and opens nothing —
+     * the window opens only by {@code POST /api/v1/integrations/{id}/permit-join}
+     * ({@link #openPairingWindow}; the 1–254 s bounds live on
+     * {@link PairingWindowRequest}). The key stays in the schema so a configuration
+     * carrying it still validates; its removal is a later decision.
      */
     static final String PERMIT_JOIN_DURATION_KEY = "permit_join_duration";
-
-    /**
-     * The permit-join window clamp bounds (M9.4-PJ; the schema validates upstream —
-     * the clamp is the defensive floor/ceiling so a configured value never trips the
-     * protocol's own range throw). Max 254 per the Zigbee spec.
-     */
-    static final int PERMIT_JOIN_MIN_SECONDS = 1;
-    static final int PERMIT_JOIN_MAX_SECONDS = 254;
 
     /**
      * F-R4-1b DP-4 — the bound on the ZDO {@code IEEE_addr_req} exchange the
@@ -229,23 +232,45 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
      */
     private Set<Long> adoptAcceptList = Set.of();
     /**
-     * The permit-join window close instant (M9.4-PJ), or {@code null} when no
-     * window is open. Written once by {@link #openPermitJoinWindow()} on the
-     * production {@code run()} thread and CLEARED by a successful
-     * {@link #attemptReopen()} (DP-B5 — the reset NCP holds no window); read by
+     * The permit-join window close instant, or {@code null} when no window is open.
+     * Since PJ-2 it is WRITTEN by {@link #openPairingWindow} on the supervisor's
+     * command executor and NULLED by three closers on three threads — the executor
+     * (a superseding open), the run thread ({@link #closeWindowIfElapsed()} at the
+     * end of {@link #runCycleOnce()}; {@link #attemptReopen()}, DP-B5 — the reset NCP
+     * holds no window) and the supervisor's close thread ({@link #close()}); read by
      * {@link #isPermitJoinActive()} from query threads — {@code volatile} for
-     * cross-thread visibility.
+     * cross-thread visibility. {@link #currentWindow} is the window of record; the
+     * deadline is its derived, cheap read.
      */
     private volatile Instant permitJoinDeadline;
+    /**
+     * The open window of record (PJ-2), or {@code null}. Three closers on three
+     * threads race to close it, so every close is a CAS ({@code compareAndSet(w,
+     * null)} or {@code getAndSet(null)}) and only the winner publishes
+     * {@code permit_join_closed} — ONE close per window, never two.
+     */
+    private final AtomicReference<PairingWindow> currentWindow = new AtomicReference<>();
+    /**
+     * The admission epoch (PJ-2): bumped by every {@link #openPairingWindow} on the
+     * command executor (the single writer); {@link #runCycleOnce()} compares it
+     * against {@link #seenPermitJoinEpoch} at its top and clears the two
+     * run-thread-confined sets below when it moved — the F-R4-1 "a window (re)open is
+     * a fresh admission epoch" semantics, kept without touching those sets from the
+     * executor.
+     */
+    private volatile long permitJoinEpoch;
+    /** The epoch {@link #runCycleOnce()} last observed. Run-thread confined. */
+    private long seenPermitJoinEpoch;
     /**
      * F-R4-1 (R-10 Row 10 (a)) — the once-per-(invocation, nwk) note for the
      * silent-rejoiner hook (H-ii) while the door is closed. Keyed by the 16-bit
      * network address (bounded by construction: at most 65536 entries) and
-     * CLEARED on every {@link #openPermitJoinWindow()} — a window epoch is the
+     * CLEARED at the top of the first {@link #runCycleOnce()} after every
+     * {@link #openPairingWindow} (the epoch compare) — a window epoch is the
      * admission scope, so a device noted while closed is re-evaluated when the
-     * operator reopens. Run-thread confined: written by the ingestion cycle
-     * and the window-open call, which share the production run thread (driven
-     * mode: the gate thread, sequentially) — never a wall clock (SK-INV-02).
+     * operator reopens. Run-thread confined: written by the ingestion cycle only
+     * (driven mode: the gate thread, sequentially); the open, which runs on the
+     * command executor since PJ-2, never touches it — never a wall clock (SK-INV-02).
      */
     private final Set<Integer> rejoinWindowClosedNoted = new HashSet<>();
     /**
@@ -497,13 +522,14 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         protocol.awaitNetworkUp();
         log.info("zigbee.production_session_started: port={} protocolVersion={}",
                 port.systemPath(), protocol.negotiatedVersion());
-        openPermitJoinWindow();   // M9.4-PJ: the operator/bench join window (production only)
+        warnIfPermitJoinKeyConfigured();   // PJ-2: the key opens nothing — one WARN if present
         productionLoop();
     }
 
     @Override
     public void close() {
         stopSignal.countDown();
+        closeWindowOnShutdown();   // PJ-2: permit_join_closed(shutdown), best effort
         if (cache != null) {
             cache.flush();
         }
@@ -554,9 +580,8 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     @Override
     public boolean isPermitJoinActive() {
         // Never-false-ALIVE: the honest clock-based window — never claims open when
-        // closed. Null deadline (no window ever opened) reads false. The REST
-        // permit-join surface remains the future UI mechanism (M9.4-PJ does not
-        // preempt it).
+        // closed. Null deadline (no window ever opened) reads false. Since PJ-2 the
+        // deadline is written only by openPairingWindow (the endpoint's path).
         Instant deadline = permitJoinDeadline;
         return deadline != null && clock.instant().isBefore(deadline);
     }
@@ -567,9 +592,13 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
      * One §G pass: drain → route → interviews due/expire → availability
      * timeouts (M9.6-AVAIL DP-4 — after the drain, so this cycle's RX evidence
      * counts before silence is judged) → the ten-minute link summary when due
-     * (LINK-READ) → cache flush check.
+     * (LINK-READ) → cache flush check → the elapsed-window close (PJ-2). The
+     * admission-epoch compare runs FIRST (PJ-2): a window (re)open bumped the epoch
+     * on the command executor; this cycle clears the once-per-epoch sets before it
+     * ingests.
      */
     void runCycleOnce() {
+        observeAdmissionEpoch();
         ingestion.processCycle();
         for (PendingInterviewQueue.Pending due : interviewQueue.due()) {
             interviewDevice(due.ieeeAddress(), due.source());
@@ -578,6 +607,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
         evaluateAvailabilityTimeouts();
         logLinkSummaryIfDue();
         cache.maybeFlush();
+        closeWindowIfElapsed();
     }
 
     /**
@@ -870,56 +900,167 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
     }
 
     /**
-     * Opens the permit-join window from the operator config key
-     * ({@code integrations.zigbee.permit_join_duration}) — the headless/bench
-     * operator path (M9.4-PJ), production mode ONLY, called once after
-     * {@code NETWORK_UP} and before the watchdog-armed cycle loop.
-     *
-     * <p>Conservative default is LAW: an ABSENT key opens NOTHING (the schema's
-     * documentation-side default never auto-opens a window). A present value is
-     * clamped to [{@value #PERMIT_JOIN_MIN_SECONDS}, {@value #PERMIT_JOIN_MAX_SECONDS}]
-     * (an out-of-range value logs one WARN and proceeds with the clamp), the
-     * coordinator window is opened ONCE, and the real close instant is recorded so
-     * {@link #isPermitJoinActive()} never claims open past close (never-false-ALIVE).
-     * The deadline is recorded only AFTER the frame is accepted — a rejected open
-     * leaves the window honestly closed.
-     *
-     * <p>A restart naturally re-opens the window while the key is present — the
-     * designed bench semantic (the operator removes the key to stop re-opening on
-     * boot). This is never called from {@code initialize()} (INV-RF-03) nor from the
-     * M9.4a driven/test cadence ({@link #runCycleOnce()}); a watchdog reopen does not
-     * renew the window (reopen &ne; boot) — and therefore never re-runs the join
-     * enablement either (M9.4-TCJ: enablement is atomic-per-window).
-     *
-     * <p>M9.4-TCJ §A.1: the Trust Center join enablement (policy &rarr; transient
-     * well-known key) runs BEFORE the {@code permitJoin} frame — a MAC window
-     * without the key-exchange enablement admits no Zigbee 3.0 device. Enablement
-     * rides the same key: an absent key enables nothing. A rejected enablement
-     * propagates BEFORE the window opens, so a failed enablement never leaves a
-     * half-open door and the deadline stays unset (never-false-ALIVE).
+     * PJ-2 (DP-PJ2-5) — the start path's ONLY use of {@link #PERMIT_JOIN_DURATION_KEY}:
+     * a value present at production start is IGNORED with ONE WARN and NO frame; an
+     * absent key logs nothing. Boot never opens a window — the window opens only by the
+     * endpoint ({@link #openPairingWindow}). Package-private so the production-ladder
+     * fixture (which drives the ladder to {@code awaitNetworkUp()} and never reaches
+     * {@code run()}) can call it directly. Production only: the driven mode never
+     * reaches the start path.
      */
-    void openPermitJoinWindow() {
+    void warnIfPermitJoinKeyConfigured() {
         Optional<Integer> configured =
                 context.configAccess().getInt(PERMIT_JOIN_DURATION_KEY);
-        if (configured.isEmpty()) {
-            return;   // conservative default: no key ⇒ the window NEVER opens
+        if (configured.isPresent()) {
+            log.warn("zigbee.permit_join_key_ignored: configured={}s — the window opens only "
+                    + "by POST /api/v1/integrations/{id}/permit-join (PJ-2)", configured.get());
         }
-        int requested = configured.get();
-        int duration = Math.max(PERMIT_JOIN_MIN_SECONDS,
-                Math.min(PERMIT_JOIN_MAX_SECONDS, requested));
-        if (duration != requested) {
-            log.warn("zigbee.permit_join_clamped: configured={} clamped={}",
-                    requested, duration);
-        }
+    }
+
+    /**
+     * PJ-2 (DP-PJ2-3) — opens the pairing window for an operator's request. Runs ONLY
+     * on the supervisor's command executor (the {@link PairingWindowControl} contract)
+     * and touches the protocol, {@link #permitJoinDeadline}, {@link #currentWindow} and
+     * {@link #permitJoinEpoch} — nothing run-thread confined.
+     *
+     * <p>M9.4-TCJ §A.1: the Trust Center join enablement (policy &rarr; transient
+     * well-known key) runs BEFORE the {@code permitJoin} frame — a MAC window without
+     * the key-exchange enablement admits no Zigbee 3.0 device; a rejected enablement
+     * propagates BEFORE the window opens, so a failed enablement never leaves a
+     * half-open door and nothing here changes (never-false-ALIVE). Only after BOTH
+     * frames are accepted: a prior window still of record closes first with ONE
+     * {@code permit_join_closed} ({@code superseded} while its end is ahead, else
+     * {@code elapsed} at its own end — the cycle had not yet observed it), then the
+     * new window is stored, the admission epoch bumped, {@code permit_join_opened}
+     * published and the window returned. The coordinator restarts its own timer on
+     * the new {@code permitJoin}. Never called from {@code initialize()} (INV-RF-03),
+     * from the start path, nor from the M9.4a driven/test cadence.</p>
+     */
+    @Override
+    public PairingWindow openPairingWindow(PairingWindowRequest request) {
+        Objects.requireNonNull(request, "request");
+        int duration = request.durationSeconds();
         protocol.enablePreconfiguredKeyJoins();   // §A.1: policy → transient key
         protocol.permitJoin(duration);
-        permitJoinDeadline = clock.instant().plusSeconds(duration);
-        // F-R4-1: a window (re)open is a fresh admission epoch — the closed-
-        // door notes and the once-per-nwk lookup set clear, so a silent
-        // rejoiner noted while the door was closed is re-evaluated now.
-        rejoinWindowClosedNoted.clear();
-        rejoinLookupAttempted.clear();
-        log.info("zigbee.permit_join_opened: duration={}s", duration);
+        Instant opensAt = clock.instant();
+        PairingWindow window = new PairingWindow(context.integrationId(), opensAt,
+                opensAt.plusSeconds(duration), duration, request.reason(), request.actor());
+        PairingWindow prior = currentWindow.get();
+        if (prior != null && currentWindow.compareAndSet(prior, null)) {
+            closePrior(prior, opensAt);
+        }
+        permitJoinDeadline = window.closesAt();
+        currentWindow.set(window);
+        permitJoinEpoch++;   // the executor is the single writer
+        publishWindowEvent(EventTypes.PERMIT_JOIN_OPENED, new PermitJoinOpened(
+                context.integrationId(), context.integrationType(), duration,
+                request.reason(), request.actor(), opensAt, window.closesAt()));
+        log.info("zigbee.permit_join_opened: duration={}s reason={} actor={}",
+                duration, request.reason(), request.actor());
+        return window;
+    }
+
+    /** Never-false-ALIVE: a window past its own end is not current, recorded or not. */
+    @Override
+    public Optional<PairingWindow> currentPairingWindow() {
+        PairingWindow open = currentWindow.get();
+        return open != null && clock.instant().isBefore(open.closesAt())
+                ? Optional.of(open) : Optional.empty();
+    }
+
+    /**
+     * PJ-2 — the run thread's half of the F-R4-1 epoch rule: a window (re)open bumped
+     * {@link #permitJoinEpoch} on the command executor; the first cycle that observes
+     * the move clears the closed-door notes and the once-per-nwk lookup set BEFORE this
+     * cycle's ingestion, so a silent rejoiner noted while the door was closed is
+     * re-evaluated now. The two sets stay run-thread confined.
+     */
+    private void observeAdmissionEpoch() {
+        long epoch = permitJoinEpoch;
+        if (epoch != seenPermitJoinEpoch) {
+            rejoinWindowClosedNoted.clear();
+            rejoinLookupAttempted.clear();
+            seenPermitJoinEpoch = epoch;
+        }
+    }
+
+    /**
+     * PJ-2 (DP-PJ2-4) — the run thread's closer, at the end of every cycle: a window
+     * whose end has passed is closed with {@code permit_join_closed(elapsed)} whose
+     * {@code closedAt} is the window's own end, never the cycle's clock (the cycle
+     * lags by up to {@value #PRODUCTION_CYCLE_MILLIS} ms). A lost CAS publishes
+     * nothing; the deadline is nulled after the CAS.
+     */
+    private void closeWindowIfElapsed() {
+        PairingWindow open = currentWindow.get();
+        if (open == null || clock.instant().isBefore(open.closesAt())) {
+            return;
+        }
+        if (currentWindow.compareAndSet(open, null)) {
+            permitJoinDeadline = null;
+            publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, new PermitJoinClosed(
+                    context.integrationId(), context.integrationType(),
+                    PermitJoinClosed.CAUSE_ELAPSED, open.opensAt(), open.closesAt()));
+        }
+    }
+
+    /** The superseding open's close of the prior window (DP-PJ2-3; E5). */
+    private void closePrior(PairingWindow prior, Instant now) {
+        boolean stillOpen = now.isBefore(prior.closesAt());
+        publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, new PermitJoinClosed(
+                context.integrationId(), context.integrationType(),
+                stillOpen ? PermitJoinClosed.CAUSE_SUPERSEDED : PermitJoinClosed.CAUSE_ELAPSED,
+                prior.opensAt(), stillOpen ? now : prior.closesAt()));
+    }
+
+    /**
+     * The two unconditional closers' shared body (the transport reopen on the run
+     * thread; the shutdown on the supervisor's close thread): takes the window of
+     * record with {@code getAndSet(null)} — the winner publishes
+     * {@code permit_join_closed(cause, closedAt = now)}; a null means another closer
+     * won or no window was open, and nothing is published. The deadline is nulled
+     * after the CAS either way.
+     */
+    private void closeWindow(String cause) {
+        PairingWindow open = currentWindow.getAndSet(null);
+        if (open != null) {
+            publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, new PermitJoinClosed(
+                    context.integrationId(), context.integrationType(), cause,
+                    open.opensAt(), clock.instant()));
+        }
+        permitJoinDeadline = null;
+    }
+
+    /** {@link #close()}'s best-effort close: the record must never block the shutdown. */
+    private void closeWindowOnShutdown() {
+        try {
+            closeWindow(PermitJoinClosed.CAUSE_SHUTDOWN);
+        } catch (RuntimeException failure) {
+            log.warn("zigbee.permit_join_close_failed: cause=shutdown: {} — the close "
+                    + "proceeds; the record has a gap", failure.getMessage());
+        }
+    }
+
+    /**
+     * PJ-2 — the window events ride the adapter's own publish form (the posture
+     * re-emit's): a root draft on the integration subject, origin INTEGRATION, event
+     * time = the adapter's clock. The supervisor publishes its lifecycle events on the
+     * SAME subject, so a sequence conflict is live, not theoretical: ONE WARN, and the
+     * window state stands — the NCP's state is the truth; the record's gap is the
+     * finding.
+     */
+    private void publishWindowEvent(String eventType, DomainEvent payload) {
+        try {
+            context.eventPublisher().publishRoot(new EventDraft(
+                    eventType, 1, clock.instant(),
+                    SubjectRef.integration(context.integrationId()),
+                    EventPriority.NORMAL, EventOrigin.INTEGRATION,
+                    payload, null, null));
+        } catch (SequenceConflictException conflict) {
+            log.warn("zigbee.permit_join_event_conflict: type={}: {} — the NCP's window "
+                    + "state is the truth; the record has a gap", eventType,
+                    conflict.getMessage());
+        }
     }
 
     /**
@@ -1015,12 +1156,12 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter {
             protocol.startSession();
             protocol.resumeStored();
             // DP-B5 (M9.5-DURb): the reset NCP holds no join window, no TC
-            // policy, no transient key — clearing the deadline keeps
+            // policy, no transient key — closing the window of record keeps
             // isPermitJoinActive() from reading stale-true past a reopen (the
             // M9.4-TCJ recorded limitation, closed). Reopen ≠ boot: the window
-            // is NOT renewed; the operator re-opens by restart while the key
-            // is present.
-            permitJoinDeadline = null;
+            // is NOT renewed; the operator re-opens by the endpoint (PJ-2), and
+            // the close is recorded as permit_join_closed(transport_reopened).
+            closeWindow(PermitJoinClosed.CAUSE_TRANSPORT_REOPENED);
             log.info("zigbee.reopened: port={}", target.get().systemPath());
             return true;
         } catch (PermanentIntegrationException | RuntimeException failure) {

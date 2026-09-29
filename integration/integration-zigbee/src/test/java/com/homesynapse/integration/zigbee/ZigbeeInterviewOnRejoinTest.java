@@ -16,9 +16,11 @@ import com.homesynapse.device.HardwareIdentifier;
 import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
 import com.homesynapse.device.RegistryProjection;
+import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
+import com.homesynapse.integration.PairingWindowRequest;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.IntegrationId;
@@ -195,9 +197,8 @@ class ZigbeeInterviewOnRejoinTest {
             throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS,
-                List.of(SNZB_ACCEPT_ENTRY));
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of(SNZB_ACCEPT_ENTRY));
+        adapter.openPairingWindow(request());
 
         riders.add(occupancyReport(SNZB_NWK));
         deliverAndCycle(adapter);
@@ -264,7 +265,7 @@ class ZigbeeInterviewOnRejoinTest {
             throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, List.of());
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
 
         riders.add(occupancyReport(UNKNOWN_NWK));
         riders.add(occupancyReport(UNKNOWN_NWK));
@@ -292,7 +293,7 @@ class ZigbeeInterviewOnRejoinTest {
     void acceptedRejoinOutsideWindow_isIgnored() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, List.of());
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
 
         riders.add(trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
                 EzspCoordinatorProtocol.DEVICE_UPDATE_SECURED_REJOIN,
@@ -324,8 +325,8 @@ class ZigbeeInterviewOnRejoinTest {
             throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
         lookupStatus = 0x01;     // EMBER_ERR_FATAL: not in the address table
         ieeeAddrStatus = 0x81;   // ZDP DEVICE_NOT_FOUND from the air
 
@@ -357,7 +358,8 @@ class ZigbeeInterviewOnRejoinTest {
         assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
                 .isZero();
         assertThat(adapter.allDevices()).isEmpty();
-        assertThat(publisher.published()).isEmpty();
+        assertThat(nonWindowEvents())
+                .as("no event of any type but permit_join_opened").isEmpty();
     }
 
     @Test
@@ -369,9 +371,8 @@ class ZigbeeInterviewOnRejoinTest {
             throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS,
-                List.of(SNZB_ACCEPT_ENTRY));
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of(SNZB_ACCEPT_ENTRY));
+        adapter.openPairingWindow(request());
         lookupStatus = 0x01;     // the coordinator's own table misses (the SNZB-02P shape)
 
         riders.add(occupancyReport(UNKNOWN_NWK));
@@ -415,8 +416,8 @@ class ZigbeeInterviewOnRejoinTest {
             throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
         lookupStatus = 0x01;
         ieeeAddrSilent = true;
         Instant before = clock.instant();
@@ -441,7 +442,8 @@ class ZigbeeInterviewOnRejoinTest {
         assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
                 .isZero();
         assertThat(adapter.allDevices()).isEmpty();
-        assertThat(publisher.published()).isEmpty();
+        assertThat(nonWindowEvents())
+                .as("no event of any type but permit_join_opened").isEmpty();
     }
 
     @Test
@@ -451,8 +453,8 @@ class ZigbeeInterviewOnRejoinTest {
     void unknownSenderInsideWindow_tableHit_neverAsksTheAir() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
 
         riders.add(occupancyReport(SNZB_NWK));
         deliverAndCycle(adapter);
@@ -474,8 +476,8 @@ class ZigbeeInterviewOnRejoinTest {
             throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
         lookupStatus = 0x01;
         ieeeAddrResponseNwk = SNZB_NWK;   // the device answers from its live address
 
@@ -507,8 +509,8 @@ class ZigbeeInterviewOnRejoinTest {
     void acceptedSecuredRejoinInsideWindow_schedulesOnce() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
 
         riders.add(trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
                 EzspCoordinatorProtocol.DEVICE_UPDATE_SECURED_REJOIN,
@@ -542,8 +544,8 @@ class ZigbeeInterviewOnRejoinTest {
     void acceptedUnsecuredRejoinInsideWindow_schedulesOnce() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
 
         riders.add(trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
                 EzspCoordinatorProtocol.DEVICE_UPDATE_UNSECURED_REJOIN,
@@ -566,8 +568,8 @@ class ZigbeeInterviewOnRejoinTest {
     void rejoinThenAnnounce_interviewsOnce_announceOwnsProvenance() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
 
         riders.add(trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
                 EzspCoordinatorProtocol.DEVICE_UPDATE_SECURED_REJOIN,
@@ -593,8 +595,8 @@ class ZigbeeInterviewOnRejoinTest {
         DeviceId adopted = seedAdoptedSnzb();
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
         assertThat(adapter.adoptionSlice().deviceIdFor(SNZB)).contains(adopted);
 
         riders.add(trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
@@ -624,8 +626,8 @@ class ZigbeeInterviewOnRejoinTest {
         seedAdoptedSnzb();
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
         assertThat(adapter.device(SNZB)).as("a fresh cache: no NWK index").isEmpty();
 
         riders.add(occupancyReport(SNZB_NWK));
@@ -644,7 +646,8 @@ class ZigbeeInterviewOnRejoinTest {
         assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
                 .isZero();
         assertThat(adapter.device(SNZB)).as("no cache write for an adopted device").isEmpty();
-        assertThat(publisher.published()).isEmpty();
+        assertThat(nonWindowEvents())
+                .as("no event of any type but permit_join_opened").isEmpty();
     }
 
     // ── T6: denied / left ⇒ observability only (the pin's surviving half) ───
@@ -656,8 +659,8 @@ class ZigbeeInterviewOnRejoinTest {
     void deniedRejoinInsideWindow_neverSchedules() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
 
         riders.add(trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
                 EzspCoordinatorProtocol.DEVICE_UPDATE_SECURED_REJOIN,
@@ -672,7 +675,8 @@ class ZigbeeInterviewOnRejoinTest {
                 .isZero();
         assertThat(lookupRequests).isEmpty();
         assertThat(adapter.allDevices()).isEmpty();
-        assertThat(publisher.published()).isEmpty();
+        assertThat(nonWindowEvents())
+                .as("no event of any type but permit_join_opened").isEmpty();
     }
 
     @Test
@@ -680,8 +684,8 @@ class ZigbeeInterviewOnRejoinTest {
     void deviceLeftInsideWindow_neverSchedules() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
 
         riders.add(trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
                 EzspCoordinatorProtocol.DEVICE_UPDATE_DEVICE_LEFT,
@@ -693,21 +697,23 @@ class ZigbeeInterviewOnRejoinTest {
         assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
                 .isZero();
         assertThat(adapter.allDevices()).isEmpty();
-        assertThat(publisher.published()).isEmpty();
+        assertThat(nonWindowEvents())
+                .as("no event of any type but permit_join_opened").isEmpty();
     }
 
     // ── T7: a window reopen clears BOTH once-per-invocation sets ────────────
 
     @Test
     @DisplayName("T7: the once-per-(invocation, nwk) sets — the window-closed note AND "
-            + "the lookup-attempted set — clear on openPermitJoinWindow(): after a reopen "
+            + "the lookup-attempted set — clear at the first cycle after openPairingWindow() "
+            + "(PJ-2: the open bumps the epoch on the executor; the run thread clears): after a reopen "
             + "a previously-noted nwk logs the closed INFO again and is looked up again; "
             + "F-R4-1b: the ONE set bounds the PAIR, so the air is re-asked with it")
     void windowReopen_clearsTheOncePerInvocationSets() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::rejoinHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, WINDOW_SECONDS, List.of());
-        adapter.openPermitJoinWindow();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(request());
         clock.advance(Duration.ofSeconds(WINDOW_SECONDS + 1));
         assertThat(adapter.isPermitJoinActive()).as("closed by time").isFalse();
 
@@ -724,7 +730,7 @@ class ZigbeeInterviewOnRejoinTest {
         // holds no entry AND — F-R4-1b — an air that misses too (T7 pins the
         // SETS, not the surfaces): the lookup runs ONCE, the air is asked
         // ONCE, ONE WARN, then quiet.
-        adapter.openPermitJoinWindow();
+        adapter.openPairingWindow(request());
         lookupStatus = 0x01;
         ieeeAddrStatus = 0x81;
         riders.add(occupancyReport(UNKNOWN_NWK));
@@ -750,7 +756,7 @@ class ZigbeeInterviewOnRejoinTest {
 
         // A second reopen clears the attempted-set: the nwk is looked up again
         // — and the air asked again (the ONE set bounds the pair, DP-3).
-        adapter.openPermitJoinWindow();
+        adapter.openPairingWindow(request());
         riders.add(occupancyReport(UNKNOWN_NWK));
         deliverAndCycle(adapter);
         assertThat(lookupRequests).containsExactly(UNKNOWN_NWK, UNKNOWN_NWK);
@@ -810,6 +816,21 @@ class ZigbeeInterviewOnRejoinTest {
      * scheduled interview runs in the SAME cycle (the queue's entry is due
      * immediately).
      */
+    /**
+     * PJ-2: an open now publishes {@code permit_join_opened}; the never-publishes pins after an
+     * open therefore filter that type out — "no event of any type but permit_join_opened".
+     */
+    private List<EventEnvelope> nonWindowEvents() {
+        return publisher.published().stream()
+                .filter(e -> !e.eventType().equals(EventTypes.PERMIT_JOIN_OPENED))
+                .toList();
+    }
+
+    /** PJ-2: the window opens by the request — WINDOW_SECONDS, a test reason and actor. */
+    private static PairingWindowRequest request() {
+        return new PairingWindowRequest(WINDOW_SECONDS, "test", "test");
+    }
+
     private static void deliverAndCycle(ZigbeeIntegrationAdapter adapter) {
         adapter.coordinatorProtocol().ping();
         adapter.runCycleOnce();
@@ -817,11 +838,11 @@ class ZigbeeInterviewOnRejoinTest {
 
     /** Boots a production adapter through the full §5.1 ladder to a formed network. */
     private ZigbeeIntegrationAdapter bootProduction(FakeNcp ncp,
-            Integer permitJoinDuration, List<Object> adoptDevices) throws Exception {
+            List<Object> adoptDevices) throws Exception {
         Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
         channels.push(channelOver(ncp));
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
-                context(configAccess(permitJoinDuration, adoptDevices)),
+                context(configAccess(adoptDevices)),
                 deviceRegistry,
                 new RegistryProjection(deviceRegistry, entityRegistry),
                 tempDir, clock, null,
@@ -1255,8 +1276,7 @@ class ZigbeeInterviewOnRejoinTest {
 
     // ── inert context stubs (the adapter never touches these paths here) ────
 
-    private static ConfigurationAccess configAccess(Integer permitJoinDuration,
-            List<Object> adoptDevices) {
+    private static ConfigurationAccess configAccess(List<Object> adoptDevices) {
         return new ConfigurationAccess() {
             @Override
             public Map<String, Object> getConfig() {
@@ -1270,9 +1290,7 @@ class ZigbeeInterviewOnRejoinTest {
 
             @Override
             public Optional<Integer> getInt(String key) {
-                return ZigbeeIntegrationAdapter.PERMIT_JOIN_DURATION_KEY.equals(key)
-                        ? Optional.ofNullable(permitJoinDuration)
-                        : Optional.empty();
+                return Optional.empty();   // PJ-2: no key — the window is the request's
             }
 
             @Override

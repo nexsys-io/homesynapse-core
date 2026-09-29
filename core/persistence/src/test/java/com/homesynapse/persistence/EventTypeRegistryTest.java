@@ -39,11 +39,11 @@ class EventTypeRegistryTest {
     }
 
     @Test
-    @DisplayName("constructor registers all 55 core + integration classes")
+    @DisplayName("constructor registers all 57 core + integration classes")
     void construct_withCoreAndIntegration_registersAll() {
         EventTypeRegistry registry = new EventTypeRegistry(AllEventClasses.ALL_EVENTS);
 
-        assertThat(registry.size()).isEqualTo(55);
+        assertThat(registry.size()).isEqualTo(57);
     }
 
     @Test
