@@ -277,6 +277,36 @@ class ZigbeeAvailabilityWiringTest {
                 .isEmpty();
     }
 
+    @Test
+    @DisplayName("IR-67 T8: a restart boot whose context carries no DiscoveryServices (the "
+            + "fixture's five null tails) logs ONE zigbee.capability_reconcile_skipped WARN "
+            + "and ZERO zigbee.capability_reconcile: lines — the pass does not run")
+    void restartWithoutDiscovery_warnsOnce_runsNoPass() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, reporterInterview());
+        adapter.close();
+
+        // The restart (M-1's ladder): the registries carry the device. The capture
+        // attaches AFTER the first boot (its initialize() skips too), at INFO —
+        // a WARN-level capture would make the ZERO below vacuous (E2).
+        publisher = new RecordingEventPublisher(clock);
+        Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
+        captureAdapterLog(Level.INFO);
+        FakeNcp restartNcp = new FakeNcp();
+        restartNcp.onEzspCommand(this::scriptedNcp);
+        bootProduction(restartNcp, null);
+
+        assertThat(adapterMessages("zigbee.capability_reconcile_skipped"))
+                .as("the skip arm: ONE WARN per launch without DiscoveryServices")
+                .containsExactly(
+                        "zigbee.capability_reconcile_skipped: reason=no_discovery_services");
+        assertThat(adapterMessages("zigbee.capability_reconcile:"))
+                .as("no pass ran — the colon form is the bench's instrument (§9.9)")
+                .isEmpty();
+    }
+
     // ── WU-AVAIL-SEED: the sidecar seed + boot truth (T-1..T-6 + DP-5) ──────
     // The pre-seed "first frame still edges" pin is formally SUPERSEDED by this
     // WU: the seeded tracker and the served view (the log's replayed last

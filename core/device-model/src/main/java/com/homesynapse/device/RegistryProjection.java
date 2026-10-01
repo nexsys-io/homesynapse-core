@@ -8,7 +8,10 @@ import com.homesynapse.event.DeviceRegisteredEvent;
 import com.homesynapse.event.DeviceRemovedEvent;
 import com.homesynapse.event.EntityRegisteredEvent;
 import com.homesynapse.platform.identity.DeviceId;
+import com.homesynapse.platform.identity.EntityId;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
@@ -118,6 +121,50 @@ public final class RegistryProjection {
             } else if (!existing.get().equals(incoming)) {
                 entityRegistry.updateEntity(incoming);
             }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Appends a {@code capability.added} instance to an entity — REG-INV-1's fourth
+     * apply (IR-67, AMD-59). Idempotent by {@code capabilityId}, never by instance
+     * equality: an id the entity already carries is a no-op returning {@code true}
+     * (the adapter's write-ahead apply, the bus's live delivery of the same event
+     * and every boot replay meet here — the DP-8 form). An entity the registry
+     * lacks is the orphan no-op returning {@code false} (the DP-7 posture: a replay
+     * row for an entity a later wipe dropped is not an error); the CALLER logs —
+     * this module carries no logging edge.
+     *
+     * @param entityId the entity that gained the capability, never {@code null}
+     * @param instance the capability instance to append, never {@code null}
+     * @return {@code true} when the entity carries the id after the call (appended,
+     *         or already present); {@code false} when the registry has no such entity
+     */
+    public boolean applyCapabilityAdded(EntityId entityId, CapabilityInstance instance) {
+        Objects.requireNonNull(entityId, "entityId must not be null");
+        Objects.requireNonNull(instance, "instance must not be null");
+        lock.lock();
+        try {
+            Optional<Entity> existing = entityRegistry.findEntity(entityId);
+            if (existing.isEmpty()) {
+                return false;
+            }
+            Entity entity = existing.get();
+            boolean present = entity.capabilities().stream().anyMatch(
+                    carried -> carried.capabilityId().equals(instance.capabilityId()));
+            if (present) {
+                return true;
+            }
+            List<CapabilityInstance> capabilities = new ArrayList<>(entity.capabilities());
+            capabilities.add(instance);
+            // The 12-field record constructor: the eleven other fields unchanged.
+            entityRegistry.updateEntity(new Entity(
+                    entity.entityId(), entity.entitySlug(), entity.entityType(),
+                    entity.displayName(), entity.deviceId(), entity.endpointIndex(),
+                    entity.areaId(), entity.enabled(), entity.labels(), capabilities,
+                    entity.entityRole(), entity.createdAt()));
+            return true;
         } finally {
             lock.unlock();
         }

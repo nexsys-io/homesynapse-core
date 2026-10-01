@@ -43,7 +43,8 @@ class RegistryApplyCensusTest {
 
     /** The projection's apply methods — the census's method-name vocabulary. */
     private static final Set<String> PROJECTION_APPLY_METHODS = Set.of(
-            "applyDeviceRegistered", "applyEntityRegistered", "applyDeviceRemoved");
+            "applyDeviceRegistered", "applyEntityRegistered", "applyDeviceRemoved",
+            "applyCapabilityAdded");
 
     /** The sanctioned production apply-callers (DP-B7 — edit DELIBERATELY). */
     private static final Set<String> SANCTIONED_APPLY_CALLERS = Set.of(
