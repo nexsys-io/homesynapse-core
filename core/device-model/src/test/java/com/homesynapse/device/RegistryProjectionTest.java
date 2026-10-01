@@ -195,6 +195,70 @@ class RegistryProjectionTest {
         assertThat(entityRegistry.listAllEntities()).hasSize(1);
     }
 
+    // ── capability.added (IR-67 — REG-INV-1's fourth apply) ─────────────────
+
+    @Test
+    @DisplayName("applyCapabilityAdded appends the instance to the entity — true, ONE write")
+    void applyCapabilityAdded_appends() {
+        projection.applyDeviceRegistered(RegistryEventMapper.toPayload(device()));
+        projection.applyEntityRegistered(RegistryEventMapper.toPayload(
+                entity(ENTITY_ID, 1, List.of(onOff(5000L)))));
+        int entityWrites = entityRegistry.writes;
+
+        boolean applied = projection.applyCapabilityAdded(ENTITY_ID, brightness());
+
+        assertThat(applied).isTrue();
+        assertThat(entityRegistry.getEntity(ENTITY_ID).capabilities())
+                .extracting(CapabilityInstance::capabilityId)
+                .containsExactly("on_off", "brightness");
+        assertThat(entityRegistry.writes).isEqualTo(entityWrites + 1);
+    }
+
+    @Test
+    @DisplayName("applyCapabilityAdded is idempotent by capabilityId — a present id is a "
+            + "no-op returning true, the list unchanged in size and order, the stored "
+            + "instance untouched (the write-ahead apply and the bus delivery meet here)")
+    void applyCapabilityAdded_idempotentOnPresentId() {
+        projection.applyDeviceRegistered(RegistryEventMapper.toPayload(device()));
+        projection.applyEntityRegistered(RegistryEventMapper.toPayload(
+                entity(ENTITY_ID, 1, List.of(onOff(5000L), brightness()))));
+        int entityWrites = entityRegistry.writes;
+
+        boolean sameInstance = projection.applyCapabilityAdded(ENTITY_ID, brightness());
+        boolean sameIdDifferentTuning = projection.applyCapabilityAdded(ENTITY_ID, onOff(15000L));
+
+        assertThat(sameInstance).isTrue();
+        assertThat(sameIdDifferentTuning).as("the diff key is the id, never equals").isTrue();
+        assertThat(entityRegistry.writes)
+                .as("a present id must not write (the idempotent short-circuit)")
+                .isEqualTo(entityWrites);
+        assertThat(entityRegistry.getEntity(ENTITY_ID).capabilities())
+                .extracting(CapabilityInstance::capabilityId)
+                .containsExactly("on_off", "brightness");
+        assertThat(entityRegistry.getEntity(ENTITY_ID).capabilities().get(0)
+                .confirmation().defaultTimeoutMs()).isEqualTo(5000L);
+    }
+
+    @Test
+    @DisplayName("applyCapabilityAdded for an entity the registry lacks is the orphan no-op "
+            + "— false, no throw, the registries unchanged (the caller logs)")
+    void applyCapabilityAdded_orphanReturnsFalse() {
+        projection.applyDeviceRegistered(RegistryEventMapper.toPayload(device()));
+        projection.applyEntityRegistered(RegistryEventMapper.toPayload(
+                entity(ENTITY_ID, 1, List.of(onOff(5000L)))));
+        int deviceWrites = deviceRegistry.writes;
+        int entityWrites = entityRegistry.writes;
+
+        assertThatCode(() -> assertThat(
+                projection.applyCapabilityAdded(SECOND_ENTITY_ID, brightness())).isFalse())
+                .doesNotThrowAnyException();
+
+        assertThat(entityRegistry.writes).isEqualTo(entityWrites);
+        assertThat(deviceRegistry.writes).isEqualTo(deviceWrites);
+        assertThat(entityRegistry.listAllEntities()).hasSize(1);
+        assertThat(entityRegistry.getEntity(ENTITY_ID).capabilities()).hasSize(1);
+    }
+
     // ── Re-emit update (F1) ─────────────────────────────────────────────────
 
     @Test

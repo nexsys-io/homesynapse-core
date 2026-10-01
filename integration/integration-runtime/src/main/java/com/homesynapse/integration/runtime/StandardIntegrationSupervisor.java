@@ -15,6 +15,7 @@ import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.integration.BackoffParameters;
+import com.homesynapse.integration.DiscoveryServices;
 import com.homesynapse.integration.HealthState;
 import com.homesynapse.integration.IntegrationAdapter;
 import com.homesynapse.integration.IntegrationContext;
@@ -30,6 +31,7 @@ import com.homesynapse.integration.PairingWindow;
 import com.homesynapse.integration.PairingWindowControl;
 import com.homesynapse.integration.PairingWindowRequest;
 import com.homesynapse.integration.PermanentIntegrationException;
+import com.homesynapse.integration.RequiredService;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.state.StateQueryService;
 
@@ -1082,10 +1084,17 @@ final class StandardIntegrationSupervisor implements IntegrationSupervisor {
      * DP-12 context composition (M9.1 slice): the shared publisher/registries,
      * a per-integration {@link SupervisorHealthReporter}, per-integration-scoped
      * config access from the injected factory (the B7 preferred path), and the
-     * 5 service-gated tails null (the fake declares no RequiredService; real
-     * SCHEDULER/TELEMETRY wiring arrives with the Zigbee descriptor at M9.4).
+     * service-gated tails — the DISCOVERY family is provisioned since IR-67 (a
+     * {@link DiscoveryServices} over a {@link SupervisorCapabilityPublisher} when
+     * the descriptor declares {@link RequiredService#DISCOVERY});
+     * scheduler/telemetry/http/security remain null.
      */
     private IntegrationContext buildContext(IntegrationRuntime runtime) {
+        DiscoveryServices discovery =
+                runtime.descriptor.requiredServices().contains(RequiredService.DISCOVERY)
+                        ? new DiscoveryServices(new SupervisorCapabilityPublisher(
+                                runtime.id, publisher, entityRegistry, clock))
+                        : null;
         return new IntegrationContext(
                 runtime.id,
                 runtime.integrationType,
@@ -1094,7 +1103,7 @@ final class StandardIntegrationSupervisor implements IntegrationSupervisor {
                 stateQueryService,
                 new SupervisorHealthReporter(this, runtime.id),
                 configAccessFactory.apply(runtime.integrationType),
-                null, null, null, null, null);
+                null, null, null, null, discovery);
     }
 
     private void publishStarted(IntegrationRuntime runtime) {

@@ -113,6 +113,30 @@ final class EndpointClassifier {
      */
     static Optional<Classification> classify(EndpointDescriptor descriptor,
             ZoneType learnedZoneType) {
+        Optional<Classification> classified = classifyEndpoint(descriptor, learnedZoneType);
+        logClassified(descriptor, classified);
+        return classified;
+    }
+
+    /**
+     * IR-67: {@link #classify(EndpointDescriptor, ZoneType)} WITHOUT the
+     * {@code zigbee.endpoint_classified} INFO — the boot-time capability reconcile
+     * re-classifies every cached endpoint at every launch, and the bench greps that
+     * token as ADOPTION evidence. The shared body is {@link #classifyEndpoint}.
+     *
+     * @param descriptor the endpoint's simple descriptor, never {@code null}
+     * @param learnedZoneType the wire-learned IAS zone type; {@code null} when
+     *        none was learned (the motion fallback)
+     * @return the classification, or empty when nothing maps
+     */
+    static Optional<Classification> classifySilently(EndpointDescriptor descriptor,
+            ZoneType learnedZoneType) {
+        return classifyEndpoint(descriptor, learnedZoneType);
+    }
+
+    /** The shared body of {@link #classify} and {@link #classifySilently}: pure over the descriptor. */
+    private static Optional<Classification> classifyEndpoint(EndpointDescriptor descriptor,
+            ZoneType learnedZoneType) {
         List<Integer> in = descriptor.inputClusters();
         boolean hasOnOff = in.contains(OnOffHandler.CLUSTER_ID);
         boolean hasLevel = in.contains(LevelControlHandler.CLUSTER_ID);
@@ -152,7 +176,6 @@ final class EndpointClassifier {
         if (hasIdentify) {
             classified = classified.map(EndpointClassifier::withIdentify);
         }
-        logClassified(descriptor, classified);
         return classified;
     }
 

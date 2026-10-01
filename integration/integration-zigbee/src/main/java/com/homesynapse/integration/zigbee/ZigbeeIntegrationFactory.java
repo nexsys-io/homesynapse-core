@@ -13,6 +13,7 @@ import com.homesynapse.integration.IntegrationContext;
 import com.homesynapse.integration.IntegrationDescriptor;
 import com.homesynapse.integration.IoType;
 import com.homesynapse.integration.PermanentIntegrationException;
+import com.homesynapse.integration.RequiredService;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -127,14 +128,14 @@ public final class ZigbeeIntegrationFactory implements ZigbeeAdapterFactory {
 
     @Override
     public IntegrationDescriptor descriptor() {
-        // RequiredServices stays empty in M9.4a: the M9.1 supervisor composes no
-        // scheduler/telemetry services yet (the context tails are null) — declaring
-        // them would be a lie the supervisor cannot honor.
+        // DISCOVERY declared since IR-67: the supervisor provisions DiscoveryServices
+        // for it (the boot-time capability reconcile publishes through it);
+        // scheduler/telemetry stay undeclared — the supervisor composes neither.
         return new IntegrationDescriptor(
                 INTEGRATION_TYPE,
                 "Zigbee Coordinator",
                 IoType.SERIAL,
-                Set.of(),
+                Set.of(RequiredService.DISCOVERY),
                 Set.of(DataPath.DOMAIN),
                 HealthParameters.defaults(),
                 Set.of(),

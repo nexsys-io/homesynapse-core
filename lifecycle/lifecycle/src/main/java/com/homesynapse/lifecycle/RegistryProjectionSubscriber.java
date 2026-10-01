@@ -15,6 +15,7 @@ import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.bus.Subscriber;
 import com.homesynapse.event.bus.SubscriptionFilter;
+import com.homesynapse.integration.CapabilityAdded;
 import com.homesynapse.platform.identity.DeviceId;
 
 import org.slf4j.Logger;
@@ -24,7 +25,8 @@ import java.util.Objects;
 
 /**
  * The bus-facing wrapper of the {@link RegistryProjection} (AMD-99 §5 /
- * REG-INV-1): consumes the three registration/removal event types and
+ * REG-INV-1): consumes the four registry event types (the three
+ * registration/removal types and, since IR-67, {@code capability.added}) and
  * delegates every apply to the single projection-apply path. Because the
  * in-memory registries start empty every boot, the composition root resets
  * this subscriber's checkpoint to 0 BEFORE registration, so every boot replays
@@ -69,12 +71,13 @@ final class RegistryProjectionSubscriber implements Subscriber {
         this.entityRegistry = Objects.requireNonNull(entityRegistry, "entityRegistry");
     }
 
-    /** @return the type filter for the three registration/removal event types. */
+    /** @return the type filter for the four registry event types. */
     static SubscriptionFilter subscriptionFilter() {
         return SubscriptionFilter.forTypes(
                 EventTypes.DEVICE_REGISTERED,
                 EventTypes.ENTITY_REGISTERED,
-                EventTypes.DEVICE_REMOVED);
+                EventTypes.DEVICE_REMOVED,
+                EventTypes.CAPABILITY_ADDED);
     }
 
     @Override
@@ -86,6 +89,17 @@ final class RegistryProjectionSubscriber implements Subscriber {
                     projection.applyEntityRegistered(registered);
             case DeviceRemovedEvent removed -> projection.applyDeviceRemoved(
                     new DeviceId(event.subjectRef().id()), removed);
+            case CapabilityAdded added -> {
+                // IR-67: the fourth apply. The orphan arm (an entity the registry
+                // lacks — a wipe or a half-registration repair, both handled
+                // downstream) is the projection's false; the WARN is this
+                // subscriber's — device-model carries no logging edge.
+                if (!projection.applyCapabilityAdded(added.entityId(), added.instance())) {
+                    LOG.warn("registry.capability_added_orphan: entity={} capability={} "
+                                    + "position={}",
+                            added.entityId(), added.capabilityId(), event.globalPosition());
+                }
+            }
             case DegradedEvent degraded ->
                     // A registration row that failed decode cannot rebuild its
                     // registry entry — loud, never silent (the registry view is

@@ -495,6 +495,12 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
             portLocator = new PortLocator(portEnumerator, pathCanonicalizer);
             watchdog = new PortWatchdog(clock, this::attemptReopen);
         }
+        // IR-67: the boot-time capability reconcile — AFTER the ingestion unit
+        // seeded the learned zone types (above; earlier, every IAS endpoint would
+        // re-classify under the motion fallback) and the configurator, immediately
+        // before zigbee.initialized. Per LAUNCH (the supervisor's transient
+        // restart path runs initialize() too), pure CPU, before any cycle.
+        reconcileCapabilities();
         log.info("zigbee.initialized: integration_id={} data_dir={} mode={}",
                 context.integrationId(), dataDirectory,
                 channelOpener != null ? "driven" : "production");
@@ -1367,6 +1373,28 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         // vacuous-silence class. The token is FROZEN (the 5b/acceptance-run
         // boot glance-point).
         log.info("zigbee.adoption_maps_rehydrated: devices={}", rehydrated);
+    }
+
+    /**
+     * IR-67 (DP-IR67-3): the boot-time capability reconcile through AMD-59's seam.
+     * {@code context.discovery()} is null for the fixtures that build the context
+     * with five null tails (row 29) — ONE WARN and no pass; production never takes
+     * that arm (the descriptor declares DISCOVERY and the supervisor provisions
+     * it). Otherwise the slice's pass runs over every cached record and ONE
+     * unconditional INFO summarizes the launch — the count prints at zero too
+     * (the DP-B3 precedent of {@code zigbee.adoption_maps_rehydrated}).
+     */
+    private void reconcileCapabilities() {
+        if (context.discovery() == null) {
+            log.warn("zigbee.capability_reconcile_skipped: reason=no_discovery_services");
+            return;
+        }
+        ZigbeeAdoptionSlice.ReconcileSummary summary = adoption.reconcileCapabilities(
+                cache.all(), context.discovery().capabilityPublisher());
+        log.info("zigbee.capability_reconcile: endpoints={} entities={} added={} shrink={} "
+                        + "relearned={} unbound={}",
+                summary.endpoints(), summary.entities(), summary.added(), summary.shrink(),
+                summary.relearned(), summary.unbound());
     }
 
     /**

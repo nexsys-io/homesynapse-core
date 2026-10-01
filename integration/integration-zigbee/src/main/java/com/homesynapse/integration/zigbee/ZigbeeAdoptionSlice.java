@@ -12,6 +12,7 @@ import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.device.HardwareIdentifier;
 import com.homesynapse.device.RegistryEventMapper;
 import com.homesynapse.device.RegistryProjection;
+import com.homesynapse.device.StandardCapabilities;
 import com.homesynapse.event.DeviceAdoptedEvent;
 import com.homesynapse.event.DeviceDiscoveredEvent;
 import com.homesynapse.event.DeviceRegisteredEvent;
@@ -23,6 +24,7 @@ import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectRef;
+import com.homesynapse.integration.CapabilityPublisher;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.IntegrationId;
@@ -34,6 +36,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -79,6 +82,16 @@ final class ZigbeeAdoptionSlice {
     static final String UNKNOWN_IDENTITY = "unknown";
     /** The stale-offer horizon (N-8, M9.4b §6.6): matches the sleepy-interview horizon. */
     static final Duration PROPOSAL_MAX_AGE = Duration.ofHours(24);
+    /**
+     * IR-67 (E5): the IAS family — the classifier's two IAS arms. A wanted id of
+     * the family while the entity holds a DIFFERENT family id is a RE-LEARN (a
+     * device adopted under the DP-6 motion fallback whose zone type was learned
+     * later): a REPLACE that belongs to the removal unit — never an add, never a
+     * shrink; ONE WARN per endpoint at every launch until that unit lands.
+     */
+    private static final Set<String> IAS_FAMILY = Set.of(
+            StandardCapabilities.motion().capabilityId(),
+            StandardCapabilities.contact().capabilityId());
 
     /** Stage-2 outcome of a discovery. */
     enum DiscoveryOutcome {
@@ -95,6 +108,24 @@ final class ZigbeeAdoptionSlice {
      * @param entityIds the minted entity ids keyed by endpoint
      */
     record AdoptedDevice(DeviceId deviceId, Map<Integer, EntityId> entityIds) {
+    }
+
+    /**
+     * One launch's boot-time capability reconcile (IR-67), summarized for the
+     * adapter's {@code zigbee.capability_reconcile:} INFO.
+     *
+     * @param endpoints every cached endpoint examined
+     * @param entities the endpoints with a bound, registry-present entity that classified
+     * @param added the ids published and applied (one {@code capability.added} each)
+     * @param shrink the ids an entity carries that the classifier no longer yields
+     *        (counted per id; one WARN per endpoint; no event)
+     * @param relearned the IAS endpoints whose family id swapped — a re-learn,
+     *        neither an add nor a shrink (E5)
+     * @param unbound the endpoints of devices with no (or an empty) entity map,
+     *        plus the registry misses of mapped entities
+     */
+    record ReconcileSummary(int endpoints, int entities, int added, int shrink,
+            int relearned, int unbound) {
     }
 
     private record Proposal(InterviewResult interview, String matchedProfileId,
@@ -578,6 +609,147 @@ final class ZigbeeAdoptionSlice {
         // log; the log line below is the relink's sole observable.
         log.info("zigbee.device_relinked: device={} deviceId={} — re-pairing, "
                 + "no new adoption", ieee, device.deviceId());
+    }
+
+    /**
+     * IR-67 — the boot-time capability reconcile (DP-IR67-3): for every cached
+     * record, re-classifies each endpoint bound to a registry entity (the adoption
+     * form through {@link EndpointClassifier#classifySilently}, the matched
+     * profile's tuning installed as adoption installs it) and diffs the capability
+     * ids against the entity's — the key is {@code capabilityId}, never instance
+     * equality (AMD-59-INV-03). Each missing id is published through the PUBLISHER
+     * HANDED IN (the AMD-59 seam — never this slice's own publisher) and then
+     * applied write-ahead through the projection (adoption's publish-then-apply
+     * order). A shrink is ONE WARN per endpoint and NO event, NO registry write
+     * ({@code removal=none}); an IAS-family swap is ONE WARN per endpoint and a
+     * re-learn (E5).
+     *
+     * <p>The unbound arm (E4): a record with no entity map (a cache-only device —
+     * interviewed at the proposal, never adopted) or an EMPTY map (a relinked
+     * device with no entities, DP-B1) counts every endpoint as {@code unbound},
+     * ONE DEBUG per device — never a WARN; an un-adopted cached device is normal.
+     * A registry miss for a mapped entity (unreachable at boot — the map is built
+     * FROM the registry) is the defensive arm, counted the same way. An endpoint of
+     * a bound device that adoption classified empty has no entity and is counted
+     * in {@code endpoints} only: the pass never adopts.</p>
+     *
+     * <p>Lock discipline: the maps are read under the slice lock and COPIED; the
+     * registry, the profile registry, the publisher and the projection are reached
+     * OUTSIDE it (the F-8 discipline — the projection's own lock serializes the
+     * apply). Pure CPU: no radio, no file I/O. Runs on the launching thread before
+     * any cycle thread exists; idempotent by construction (a present id is nothing).</p>
+     *
+     * @param records the cached device records, never {@code null}
+     * @param publisher the DISCOVERY family's publisher, never {@code null}
+     * @return the launch's summary
+     */
+    ReconcileSummary reconcileCapabilities(Collection<ZigbeeDeviceRecord> records,
+            CapabilityPublisher publisher) {
+        Objects.requireNonNull(records, "records");
+        Objects.requireNonNull(publisher, "publisher");
+        int endpoints = 0;
+        int entities = 0;
+        int added = 0;
+        int shrink = 0;
+        int relearned = 0;
+        int unbound = 0;
+        for (ZigbeeDeviceRecord record : records) {
+            IEEEAddress ieee = record.ieeeAddress();
+            List<EndpointDescriptor> recordEndpoints =
+                    record.endpoints() == null ? List.of() : record.endpoints();
+            endpoints += recordEndpoints.size();
+            Map<Integer, EntityId> links;
+            String linkedProfileId;
+            lock.lock();
+            try {
+                Map<Integer, EntityId> bound = entitiesByIeee.get(ieee.value());
+                links = bound == null ? null : Map.copyOf(bound);
+                linkedProfileId = profilesByIeee.get(ieee.value());
+            } finally {
+                lock.unlock();
+            }
+            if (links == null || links.isEmpty()) {
+                unbound += recordEndpoints.size();
+                log.debug("zigbee.capability_reconcile_unbound: device={} endpoints={}",
+                        ieee, recordEndpoints.size());
+                continue;
+            }
+            String matchedProfileId = linkedProfileId != null
+                    ? linkedProfileId : record.matchedProfileId();
+            int deviceUnbound = 0;
+            for (EndpointDescriptor endpoint : recordEndpoints) {
+                EntityId entityId = links.get(endpoint.endpointId());
+                if (entityId == null) {
+                    continue;
+                }
+                Optional<Entity> entity = entityRegistry.findEntity(entityId);
+                if (entity.isEmpty()) {
+                    deviceUnbound++;
+                    continue;
+                }
+                ZoneType learnedZoneType = endpoint.inputClusters()
+                        .contains(IasZoneHandler.CLUSTER_ID)
+                        ? zoneTypeSource.apply(ieee).orElse(null) : null;
+                Optional<EndpointClassifier.Classification> classification =
+                        EndpointClassifier.classifySilently(endpoint, learnedZoneType);
+                if (classification.isEmpty()) {
+                    continue;
+                }
+                entities++;
+                List<CapabilityInstance> wanted = installOverrides(matchedProfileId,
+                        classification.get().capabilities());
+                List<String> wantedIds = wanted.stream()
+                        .map(CapabilityInstance::capabilityId).toList();
+                List<String> haveIds = entity.get().capabilities().stream()
+                        .map(CapabilityInstance::capabilityId).toList();
+                // THE IAS-SWAP ARM (E5): a wanted family id against a DIFFERENT held
+                // family id is a re-learn — excluded from the add AND the shrink.
+                String wantedIas = wantedIds.stream().filter(IAS_FAMILY::contains)
+                        .findFirst().orElse(null);
+                String haveIas = haveIds.stream().filter(IAS_FAMILY::contains)
+                        .findFirst().orElse(null);
+                boolean swapped = wantedIas != null && haveIas != null
+                        && !wantedIas.equals(haveIas);
+                if (swapped) {
+                    relearned++;
+                    log.warn("zigbee.capability_reconcile_ias_relearned: device={} "
+                                    + "endpoint={} entity={} have={} want={}",
+                            ieee, endpoint.endpointId(), entityId, haveIas, wantedIas);
+                }
+                for (CapabilityInstance instance : wanted) {
+                    String capabilityId = instance.capabilityId();
+                    if (haveIds.contains(capabilityId)
+                            || (swapped && capabilityId.equals(wantedIas))) {
+                        continue;
+                    }
+                    // Publish FIRST (durable at return), apply SECOND — adoption's
+                    // write-ahead form. The apply's return is not read: the entity
+                    // was looked up just above (the orphan arm is the subscriber's).
+                    publisher.publishAdded(entityId, instance);
+                    registryProjection.applyCapabilityAdded(entityId, instance);
+                    added++;
+                    log.info("zigbee.capability_added: device={} endpoint={} entity={} "
+                                    + "capability={}",
+                            ieee, endpoint.endpointId(), entityId, capabilityId);
+                }
+                List<String> missing = haveIds.stream()
+                        .filter(capabilityId -> !wantedIds.contains(capabilityId))
+                        .filter(capabilityId -> !(swapped && capabilityId.equals(haveIas)))
+                        .toList();
+                if (!missing.isEmpty()) {
+                    shrink += missing.size();
+                    log.warn("zigbee.capability_reconcile_shrink: device={} endpoint={} "
+                                    + "entity={} missing={}",
+                            ieee, endpoint.endpointId(), entityId, missing);
+                }
+            }
+            if (deviceUnbound > 0) {
+                unbound += deviceUnbound;
+                log.debug("zigbee.capability_reconcile_unbound: device={} endpoints={}",
+                        ieee, deviceUnbound);
+            }
+        }
+        return new ReconcileSummary(endpoints, entities, added, shrink, relearned, unbound);
     }
 
     /**
