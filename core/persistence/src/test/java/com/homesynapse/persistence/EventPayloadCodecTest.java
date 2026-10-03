@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.homesynapse.event.AutomationCompletedEvent;
 import com.homesynapse.event.CommandIssuedEvent;
 import com.homesynapse.event.CommandResultEvent;
+import com.homesynapse.event.AvailabilityChangedEvent;
 import com.homesynapse.event.DegradedEvent;
 import com.homesynapse.event.DomainEvent;
 import com.homesynapse.event.EventId;
@@ -333,6 +334,113 @@ class EventPayloadCodecTest {
         @DisplayName("capability.added with a command-bearing instance round-trips (AMD-87 acceptance)")
         void capabilityAdded_onOff_roundTrips() throws Exception {
             assertRoundTrip(TestEventSamples.capabilityAddedOnOff(), EventTypes.CAPABILITY_ADDED);
+        }
+    }
+
+    // ===== J1 / LINK-READ-2: availability_changed v2 — the tolerant decode IS the upcast =====
+
+    @Nested
+    @DisplayName("availability_changed v2 (J1): both directions through the tolerant decode")
+    class AvailabilityChangedV2 {
+
+        @Test
+        @DisplayName("T6: a version-1 row (snake_case, two keys) decodes to the record with the "
+                + "five additions null — never a DegradedEvent")
+        void versionOneRow_decodesWithNulls() {
+            byte[] v1 = "{\"previous_status\":\"online\",\"new_status\":\"offline\"}"
+                    .getBytes(StandardCharsets.UTF_8);
+
+            DomainEvent decoded = codec.decode(EventTypes.AVAILABILITY_CHANGED, 1, v1);
+
+            assertThat(decoded).isEqualTo(new AvailabilityChangedEvent("online", "offline",
+                    null, null, null, null, null));
+        }
+
+        @Test
+        @DisplayName("T6: a full version-2 payload round-trips whole; the wire keys are "
+                + "snake_case — previous_status, new_status, reason, last_seen_at, lqi, "
+                + "rssi_dbm, link_at")
+        void versionTwoPayload_roundTripsWhole_snakeCaseKeys() throws Exception {
+            AvailabilityChangedEvent event = TestEventSamples.availabilityChanged();
+
+            byte[] bytes = codec.encode(event);
+            String json = new String(bytes, StandardCharsets.UTF_8);
+
+            assertThat(json)
+                    .contains("\"previous_status\"")
+                    .contains("\"new_status\"")
+                    .contains("\"reason\"")
+                    .contains("\"last_seen_at\"")
+                    .contains("\"lqi\"")
+                    .contains("\"rssi_dbm\"")
+                    .contains("\"link_at\"");
+            assertThat(json)
+                    .doesNotContain("\"rssiDbm\"")
+                    .doesNotContain("\"lastSeenAt\"")
+                    .doesNotContain("\"linkAt\"");
+            assertThat(codec.decode(EventTypes.AVAILABILITY_CHANGED, 2, bytes)).isEqualTo(event);
+        }
+
+        @Test
+        @DisplayName("T6: a version-2 payload with five nulls writes the version-1 byte-shape "
+                + "(NON_NULL) — the rollback direction")
+        void versionTwoNulls_writeTheVersionOneShape() throws Exception {
+            byte[] bytes = codec.encode(new AvailabilityChangedEvent("online", "offline",
+                    null, null, null, null, null));
+
+            assertThat(new String(bytes, StandardCharsets.UTF_8))
+                    .isEqualTo("{\"previous_status\":\"online\",\"new_status\":\"offline\"}");
+        }
+
+        @Test
+        @DisplayName("T6: an unknown extra key on a version-2 row is ignored — the posture a "
+                + "newer writer depends on")
+        void unknownExtraKey_stillDecodesTheRecord() {
+            String json = "{\"previous_status\":\"online\",\"new_status\":\"offline\","
+                    + "\"reason\":\"ping_timeout\",\"future_key\":1}";
+
+            DomainEvent decoded = codec.decode(EventTypes.AVAILABILITY_CHANGED, 2,
+                    json.getBytes(StandardCharsets.UTF_8));
+
+            assertThat(decoded).isInstanceOf(AvailabilityChangedEvent.class);
+            assertThat(((AvailabilityChangedEvent) decoded).reason()).isEqualTo("ping_timeout");
+        }
+
+        @Test
+        @DisplayName("T6: the schemaVersion column is informational for this type — a v2 payload "
+                + "read under 1 decodes whole (the codec gates only state_changed v1)")
+        void schemaVersionIsNotADecodeGate() throws Exception {
+            AvailabilityChangedEvent event = TestEventSamples.availabilityChanged();
+
+            assertThat(codec.decode(EventTypes.AVAILABILITY_CHANGED, 1, codec.encode(event)))
+                    .isEqualTo(event);
+        }
+
+        @Test
+        @DisplayName("T6: a camelCase literal is NOT the wire form — it decodes to a "
+                + "DegradedEvent (previous_status absent → the compact constructor throws)")
+        void camelCaseLiteral_degrades() {
+            String json = "{\"previousStatus\":\"online\",\"newStatus\":\"offline\"}";
+
+            DomainEvent decoded = codec.decode(EventTypes.AVAILABILITY_CHANGED, 1,
+                    json.getBytes(StandardCharsets.UTF_8));
+
+            assertThat(decoded).isInstanceOf(DegradedEvent.class);
+        }
+
+        @Test
+        @DisplayName("T6: a partial link triple on the wire degrades (the record's all-or-none "
+                + "invariant) with the raw payload preserved")
+        void partialTriple_degrades() {
+            String json = "{\"previous_status\":\"online\",\"new_status\":\"offline\",\"lqi\":200}";
+
+            DomainEvent decoded = codec.decode(EventTypes.AVAILABILITY_CHANGED, 2,
+                    json.getBytes(StandardCharsets.UTF_8));
+
+            assertThat(decoded).isInstanceOf(DegradedEvent.class);
+            DegradedEvent degraded = (DegradedEvent) decoded;
+            assertThat(degraded.failureReason()).contains("all null or all set");
+            assertThat(degraded.rawPayload()).isEqualTo(json);
         }
     }
 

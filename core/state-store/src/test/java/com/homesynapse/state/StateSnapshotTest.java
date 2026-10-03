@@ -55,7 +55,7 @@ class StateSnapshotTest {
                 BASE_TIME,
                 null,
                 false
-        );
+        , null, null, null);
     }
 
     // ── Tier 1: Construction and field access ───────────────────────────

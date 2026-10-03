@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.homesynapse.value.AttributeValue;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.state.Availability;
+import com.homesynapse.state.EntityLink;
 import com.homesynapse.state.EntityState;
 
 import java.io.IOException;
@@ -47,7 +48,10 @@ import java.util.Objects;
  *       "lastUpdated": "2026-01-01T00:00:00Z",
  *       "lastReported": "2026-01-01T00:00:00Z",
  *       "staleAfter": "2026-01-01T00:10:00Z" | null,
- *       "stale": false
+ *       "stale": false,
+ *       "availabilityReason": "ping_timeout" | null,
+ *       "lastSeenAt": "2026-10-03T12:00:00Z" | null,
+ *       "link": { "lqi": 200, "rssiDbm": -45, "at": "2026-10-03T11:59:30Z" } | null
  *     }
  *   }
  * }
@@ -67,7 +71,10 @@ import java.util.Objects;
  *
  * <h2>Null handling</h2>
  *
- * <p>{@link EntityState#staleAfter()} is nullable, and an attribute value may be {@code null}
+ * <p>{@link EntityState#staleAfter()} is nullable — as are J1's {@code availabilityReason},
+ * {@code lastSeenAt} and {@code link} (LINK-READ-2, 2026-10-03; read by name, so a pre-J1
+ * checkpoint without those keys loads with the three {@code null}; {@code projectionVersion}
+ * is NOT bumped for them) — and an attribute value may be {@code null}
  * (a schema-declared attribute that has never received a report). The supplied
  * {@link ObjectMapper} MUST be configured to preserve null values in serialized output (use
  * {@code JsonInclude.Include.ALWAYS} or do not configure a {@code NON_NULL} default) so that
@@ -240,7 +247,19 @@ final class CheckpointSerializer {
                 state.lastUpdated(),
                 state.lastReported(),
                 state.staleAfter(),
-                state.stale());
+                state.stale(),
+                state.availabilityReason(),
+                state.lastSeenAt(),
+                toSerializableLink(state.link()));
+    }
+
+    private static SerializableEntityLink toSerializableLink(EntityLink link) {
+        return link == null ? null
+                : new SerializableEntityLink(link.lqi(), link.rssiDbm(), link.at());
+    }
+
+    private static EntityLink fromSerializableLink(SerializableEntityLink link) {
+        return link == null ? null : new EntityLink(link.lqi(), link.rssiDbm(), link.at());
     }
 
     private static EntityState fromSerializable(
@@ -261,7 +280,10 @@ final class CheckpointSerializer {
                 s.lastUpdated(),
                 s.lastReported(),
                 s.staleAfter(),
-                s.stale());
+                s.stale(),
+                s.availabilityReason(),
+                s.lastSeenAt(),
+                fromSerializableLink(s.link()));
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -283,8 +305,18 @@ final class CheckpointSerializer {
             Instant lastUpdated,
             Instant lastReported,
             Instant staleAfter,
-            boolean stale
+            boolean stale,
+            String availabilityReason,
+            Instant lastSeenAt,
+            SerializableEntityLink link
     ) { }
+
+    /**
+     * J1 (LINK-READ-2): the internal shape of {@link EntityLink} — the last link reading with
+     * its frame's instant. Written {@code null} (under {@code Include.ALWAYS}) when the entity
+     * holds none; absent from a pre-J1 checkpoint and then read as {@code null}.
+     */
+    record SerializableEntityLink(int lqi, int rssiDbm, Instant at) { }
 
     /**
      * Internal Jackson-serializable shape of a checkpoint payload. The

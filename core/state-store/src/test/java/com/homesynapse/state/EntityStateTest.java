@@ -6,7 +6,9 @@ package com.homesynapse.state;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.lang.reflect.RecordComponent;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 
@@ -69,7 +71,7 @@ class EntityStateTest {
                 BASE_TIME,
                 null,
                 false
-        );
+        , null, null, null);
     }
 
     // ── Tier 1: Construction and field access ───────────────────────────
@@ -97,7 +99,7 @@ class EntityStateTest {
                     BASE_TIME.plusSeconds(5),
                     staleAfter,
                     false
-            );
+            , null, null, null);
 
             assertThat(state.entityId()).isEqualTo(ENTITY_ID);
             assertThat(state.entityId()).isInstanceOf(EntityId.class);
@@ -117,9 +119,35 @@ class EntityStateTest {
         }
 
         @Test
-        @DisplayName("exactly 9 record components")
-        void exactlyNineRecordComponents() {
-            assertThat(EntityState.class.getRecordComponents()).hasSize(9);
+        @DisplayName("exactly 12 record components — the nine plus J1's availabilityReason, "
+                + "lastSeenAt, link, in that order (the component names ARE the Get "
+                + "endpoints' wire keys)")
+        void exactlyTwelveRecordComponents() {
+            assertThat(EntityState.class.getRecordComponents()).hasSize(12);
+            assertThat(Arrays.stream(EntityState.class.getRecordComponents())
+                    .map(RecordComponent::getName))
+                    .containsExactly("entityId", "attributes", "availability", "stateVersion",
+                            "lastChanged", "lastUpdated", "lastReported", "staleAfter", "stale",
+                            "availabilityReason", "lastSeenAt", "link");
+        }
+
+        @Test
+        @DisplayName("J1: availabilityReason, lastSeenAt and link are accessible and nullable")
+        void availabilityDetailAccessibleAndNullable() {
+            var dark = new EntityState(ENTITY_ID, ATTRIBUTES, Availability.UNAVAILABLE, 2L,
+                    BASE_TIME, BASE_TIME, BASE_TIME, null, false,
+                    "ping_timeout", BASE_TIME, new EntityLink(200, -45, BASE_TIME));
+            assertThat(dark.availabilityReason()).isEqualTo("ping_timeout");
+            assertThat(dark.lastSeenAt()).isEqualTo(BASE_TIME);
+            assertThat(dark.link()).isEqualTo(new EntityLink(200, -45, BASE_TIME));
+            assertThat(dark.link().lqi()).isEqualTo(200);
+            assertThat(dark.link().rssiDbm()).isEqualTo(-45);
+            assertThat(dark.link().at()).isEqualTo(BASE_TIME);
+
+            var plain = validState();
+            assertThat(plain.availabilityReason()).isNull();
+            assertThat(plain.lastSeenAt()).isNull();
+            assertThat(plain.link()).isNull();
         }
 
         @Test
@@ -138,7 +166,7 @@ class EntityStateTest {
                     BASE_TIME,
                     null,
                     false
-            );
+            , null, null, null);
 
             assertThat(state.attributes()).containsKey("temperature_c");
             assertThat(state.attributes().get("temperature_c")).isNull();
@@ -163,7 +191,7 @@ class EntityStateTest {
                     ENTITY_ID, ATTRIBUTES, Availability.AVAILABLE,
                     1L, BASE_TIME, BASE_TIME, BASE_TIME,
                     null, false
-            );
+            , null, null, null);
 
             assertThat(state.staleAfter()).isNull();
             assertThat(state.stale()).isFalse();
@@ -177,7 +205,7 @@ class EntityStateTest {
                     ENTITY_ID, ATTRIBUTES, Availability.AVAILABLE,
                     5L, BASE_TIME, BASE_TIME, BASE_TIME,
                     pastStaleAfter, true
-            );
+            , null, null, null);
 
             assertThat(state.staleAfter()).isEqualTo(pastStaleAfter);
             assertThat(state.staleAfter()).isBefore(BASE_TIME);
@@ -192,7 +220,7 @@ class EntityStateTest {
                     ENTITY_ID, ATTRIBUTES, Availability.AVAILABLE,
                     3L, BASE_TIME, BASE_TIME, BASE_TIME,
                     futureStaleAfter, false
-            );
+            , null, null, null);
 
             assertThat(state.staleAfter()).isEqualTo(futureStaleAfter);
             assertThat(state.staleAfter()).isAfter(BASE_TIME);
@@ -215,7 +243,7 @@ class EntityStateTest {
                     ENTITY_ID, ATTRIBUTES, Availability.AVAILABLE,
                     10L, BASE_TIME, BASE_TIME, BASE_TIME,
                     expiredStaleAfter, expectedStale1
-            );
+            , null, null, null);
 
             assertThat(expectedStale1).isTrue();
             assertThat(staleState.stale()).isEqualTo(expectedStale1);
@@ -227,7 +255,7 @@ class EntityStateTest {
                     ENTITY_ID, ATTRIBUTES, Availability.AVAILABLE,
                     11L, BASE_TIME, BASE_TIME, BASE_TIME,
                     freshStaleAfter, expectedStale2
-            );
+            , null, null, null);
 
             assertThat(expectedStale2).isFalse();
             assertThat(freshState.stale()).isEqualTo(expectedStale2);
@@ -250,7 +278,7 @@ class EntityStateTest {
                     ENTITY_ID, ATTRIBUTES, Availability.AVAILABLE,
                     1L, BASE_TIME, BASE_TIME, BASE_TIME,
                     null, true
-            );
+            , null, null, null);
 
             // The record permits this inconsistent construction — no compact constructor
             assertThat(state.staleAfter()).isNull();
@@ -280,7 +308,7 @@ class EntityStateTest {
                     ENTITY_ID, ATTRIBUTES, Availability.AVAILABLE,
                     5L, lastChanged, lastUpdated, lastReported,
                     null, false
-            );
+            , null, null, null);
 
             // All three are distinct and return their respective values
             assertThat(state.lastChanged()).isEqualTo(lastChanged);
@@ -306,13 +334,13 @@ class EntityStateTest {
                     ENTITY_ID, sameAttributes, Availability.AVAILABLE,
                     1L, BASE_TIME, BASE_TIME, BASE_TIME,
                     null, false
-            );
+            , null, null, null);
 
             var version2 = new EntityState(
                     ENTITY_ID, sameAttributes, Availability.AVAILABLE,
                     2L, BASE_TIME, BASE_TIME.plusSeconds(30), BASE_TIME.plusSeconds(30),
                     null, false
-            );
+            , null, null, null);
 
             assertThat(version1.attributes()).isEqualTo(version2.attributes());
             assertThat(version2.stateVersion()).isGreaterThan(version1.stateVersion());
@@ -349,7 +377,7 @@ class EntityStateTest {
                     2L,
                     BASE_TIME, BASE_TIME, BASE_TIME,
                     null, false
-            );
+            , null, null, null);
 
             assertThat(a.entityId()).isEqualTo(b.entityId());
             assertThat(a).isNotEqualTo(b);

@@ -135,7 +135,7 @@ class InMemoryStateProjectionTest extends StateProjectionContractTest {
                 clock.instant(),
                 clock.instant(),
                 null,
-                false));
+                false, null, null, null));
 
         StateProjection p = createProjection(
                 new ProjectionId(viewName),
@@ -185,7 +185,7 @@ class InMemoryStateProjectionTest extends StateProjectionContractTest {
                 clock.instant(),
                 clock.instant(),
                 null,
-                false));
+                false, null, null, null));
 
         StateProjection p = createProjection(
                 new ProjectionId(viewName),

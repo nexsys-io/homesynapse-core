@@ -45,6 +45,14 @@ import java.util.function.LongSupplier;
  * by {@code MaterializedStateQueryService} from {@code staleAfter} and the
  * injected clock (Doc 03 §3.8 / AMD-11). The handler does not re-derive it.</p>
  *
+ * <h2>Availability detail (J1 / LINK-READ-2, 2026-10-03)</h2>
+ *
+ * <p>The record's {@code availabilityReason}, {@code lastSeenAt} and {@code link}
+ * components render by their component names (camelCase) through the same
+ * serialisation — no handler code; {@code null} where the projection holds none.
+ * A dark entity's record therefore says why, when it was last heard and how its
+ * link read at that frame.</p>
+ *
  * <h2>Thread safety</h2>
  *
  * <p>Stateless — same threading discipline as {@link ListEntitiesEndpoint}.</p>

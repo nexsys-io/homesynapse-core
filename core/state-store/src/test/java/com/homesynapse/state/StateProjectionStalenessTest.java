@@ -139,7 +139,7 @@ final class StateProjectionStalenessTest {
         Instant oldStaleAfter = T.minusSeconds(60);
         stateStore.put(entityId, new EntityState(entityId, Map.of(), Availability.AVAILABLE, 5L,
                 T.minusSeconds(1300), T.minusSeconds(1260), T.minusSeconds(1260),
-                oldStaleAfter, true));
+                oldStaleAfter, true, null, null, null));
 
         projection.onEvent(changed(T, "81.0"));
         EntityState afterChange = stateStore.get(entityId).orElseThrow();
@@ -207,7 +207,7 @@ final class StateProjectionStalenessTest {
 
     private EventEnvelope availability(Instant eventTime) {
         return envelope(EventTypes.AVAILABILITY_CHANGED, eventTime,
-                new AvailabilityChangedEvent("online", "offline"));
+                new AvailabilityChangedEvent("online", "offline", null, null, null, null, null));
     }
 
     /** An inbound envelope whose ingest time trails its event time by 2 s. */

@@ -52,7 +52,7 @@ final class GetEntityStateEndpointTest {
                 Instant.EPOCH,
                 Instant.EPOCH,
                 null,
-                false);
+                false, null, null, null);
         FakeStateQueryService qs = new FakeStateQueryService()
                 .withViewPosition(5L)
                 .put(state);
@@ -104,7 +104,7 @@ final class GetEntityStateEndpointTest {
                 Instant.EPOCH,
                 Instant.EPOCH,
                 Instant.parse("2026-05-22T11:00:00Z"), // past — so stale
-                true);                                  // already true
+                true, null, null, null);                                  // already true
         FakeStateQueryService qs = new FakeStateQueryService().put(staleByQs);
         GetEntityStateEndpoint endpoint =
                 new GetEntityStateEndpoint(qs, qs::getViewPosition, FIXED_CLOCK);
@@ -117,5 +117,31 @@ final class GetEntityStateEndpointTest {
         Map<String, Object> body = (Map<String, Object>) ctx.body;
         EntityState returned = (EntityState) body.get("data");
         assertThat(returned.stale()).isTrue();
+    }
+
+    @Test
+    @DisplayName("J1 T9: the full record in data carries availabilityReason, lastSeenAt and "
+            + "link exactly as the query service produced them — nulls included")
+    void dataCarriesTheAvailabilityDetail_nullsIncluded() {
+        Instant seen = Instant.parse("2026-10-03T12:00:00Z");
+        EntityState dark = new EntityState(EntityId.of(Ulid.parse(VALID_ULID)),
+                Map.<String, AttributeValue>of(), Availability.UNAVAILABLE, 3L,
+                Instant.EPOCH, Instant.EPOCH, Instant.EPOCH, null, false,
+                "silence_timeout", seen, null);
+        FakeStateQueryService qs = new FakeStateQueryService().put(dark);
+        GetEntityStateEndpoint endpoint =
+                new GetEntityStateEndpoint(qs, qs::getViewPosition, FIXED_CLOCK);
+        RecordingEndpointContext ctx = new RecordingEndpointContext()
+                .withPathParam("entityId", VALID_ULID);
+
+        endpoint.apply(ctx);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) ctx.body;
+        EntityState returned = (EntityState) body.get("data");
+        assertThat(returned).isSameAs(dark);
+        assertThat(returned.availabilityReason()).isEqualTo("silence_timeout");
+        assertThat(returned.lastSeenAt()).isEqualTo(seen);
+        assertThat(returned.link()).as("no reading carried — a value, not an error").isNull();
     }
 }

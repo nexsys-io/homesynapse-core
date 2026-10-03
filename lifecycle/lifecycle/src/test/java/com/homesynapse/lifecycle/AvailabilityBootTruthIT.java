@@ -15,6 +15,7 @@ import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.state.Availability;
+import com.homesynapse.state.EntityState;
 import com.homesynapse.test.TestClock;
 
 import org.junit.jupiter.api.AfterEach;
@@ -24,6 +25,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -114,6 +116,43 @@ final class AvailabilityBootTruthIT {
 
         awaitServed(Availability.UNAVAILABLE,
                 "the DP-2 floor: served UNAVAILABLE within one window of boot");
+    }
+
+    @Test
+    @DisplayName("J1 (LINK-READ-2 + IR-121, a non-gate pin): a dead mains device is SERVED "
+            + "UNAVAILABLE with availabilityReason=ping_timeout and lastSeenAt = its last frame, "
+            + "inside the simulated 90 s — 61 s of silence, one unanswered ping, the next cycle")
+    void deadMainsDevice_namedDarkWithReasonAndLastSeen_insideNinetySeconds(
+            @TempDir Path tempDir) throws Exception {
+        boot(tempDir);
+
+        // The announce is the tracker's evidence (FIRST_CONTACT) and its last-seen.
+        Instant announceAt = clock.instant();
+        rig.announce(ZigbeeHardwareFreeRig.HUE_IEEE);
+        rig.deliverAndCycle();
+        hueEntity = rig.adopt(ZigbeeHardwareFreeRig.HUE_IEEE)
+                .get(ZigbeeHardwareFreeRig.HUE_ENDPOINT);
+        awaitServed(Availability.AVAILABLE, "the adopted Hue serving AVAILABLE");
+        EntityState alive = core.stateQueryService().getState(hueEntity).orElseThrow();
+        assertThat(alive.availabilityReason()).isEqualTo("first_contact");
+        assertThat(alive.lastSeenAt()).isEqualTo(announceAt);
+
+        // The device dies; 61 s of silence makes it a ping candidate (60 s, strict), the
+        // one Basic read goes unanswered, and the PING_TIMEOUT verdict rides publish →
+        // projection → read with the reason and the last-seen instant on it.
+        rig.silence(ZigbeeHardwareFreeRig.HUE_IEEE);
+        rig.clock().advance(Duration.ofSeconds(61));
+        rig.deliverAndCycle();
+
+        awaitServed(Availability.UNAVAILABLE, "named dark inside D-v94-25's 90 s");
+        EntityState dark = core.stateQueryService().getState(hueEntity).orElseThrow();
+        assertThat(dark.availabilityReason()).isEqualTo("ping_timeout");
+        assertThat(dark.lastSeenAt())
+                .as("the last evidence instant — the announce frame, never the verdict")
+                .isEqualTo(announceAt);
+        assertThat(Duration.between(announceAt, rig.clock().instant()))
+                .as("the simulated naming time stays inside the 90-s acceptance")
+                .isLessThanOrEqualTo(Duration.ofSeconds(90));
     }
 
     // ── harness (the RestartHonestyIT boot shape, config-less) ──────────────

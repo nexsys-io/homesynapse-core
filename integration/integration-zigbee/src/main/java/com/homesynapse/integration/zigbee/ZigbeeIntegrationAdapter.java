@@ -11,6 +11,7 @@ import com.homesynapse.device.Entity;
 import com.homesynapse.device.HardwareIdentifier;
 import com.homesynapse.device.RegistryEventMapper;
 import com.homesynapse.device.RegistryProjection;
+import com.homesynapse.device.StandardCapabilities;
 import com.homesynapse.event.AvailabilityChangedEvent;
 import com.homesynapse.event.DomainEvent;
 import com.homesynapse.event.EntityRegisteredEvent;
@@ -30,6 +31,7 @@ import com.homesynapse.integration.PermitJoinOpened;
 import com.homesynapse.integration.PermanentIntegrationException;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
+import com.homesynapse.state.RegistryStalenessResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,6 +43,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -181,6 +184,15 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
     static final long AVAILABILITY_PING_TIMEOUT_MILLIS = 5_000;
 
     /**
+     * J1 (LINK-READ-2): {@code availability_changed} publishes at schema version
+     * 2 — the v1 status pair plus the nullable {@code reason}, {@code lastSeenAt},
+     * {@code lqi}, {@code rssiDbm}, {@code linkAt}. Additive-nullable: the
+     * persistence codec's tolerant decode is the upcast (a v1 row reads as the
+     * record with nulls; a v2 row read by a pre-J1 core ignores the extras).
+     */
+    static final int AVAILABILITY_CHANGED_SCHEMA_VERSION = 2;
+
+    /**
      * LINK-READ: what {@code last_lqi=}, {@code last_rssi_dbm=} and
      * {@code last_link_at=} print for a device with no link reading this
      * process (a seeded device that has not spoken) — never a default number.
@@ -213,6 +225,8 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
     private StandardDeviceProfileRegistry profileRegistry;
     private ZigbeeDeviceCache cache;
     private ZigbeeAdoptionSlice adoption;
+    /** IR-121: the declared-interval source behind {@link #expectedSilenceFor}. */
+    private RegistryStalenessResolver declaredIntervals;
     private EzspAshTransport transport;
     private EzspCoordinatorProtocol protocol;
     private PendingInterviewQueue interviewQueue;
@@ -362,6 +376,12 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
                 // adoption only runs on the ingestion cycle after run() starts
                 // (the factory's Supplier<RegistryProjection> R4 shape).
                 this::learnedZoneTypeFor);
+        // IR-121: the per-device silence limit's source — source 2 of Doc 03
+        // §3.8's chain ONLY (no per-entity overrides, no global default: the
+        // staleness knobs do not bear on availability), over the same registry
+        // and capability catalog the state projection's resolver reads.
+        declaredIntervals = new RegistryStalenessResolver(context.entityRegistry(),
+                StandardCapabilities.all(), Map.of(), Optional.empty());
         adoptAcceptList = readAdoptAcceptList();
         // DP-6 (AMD-99 §3 boundary note): the adapter-local IEEE->id / entity /
         // binding maps rebuild FROM the projection-rebuilt registries (Phase 3
@@ -408,6 +428,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         availabilityTracker = new StandardAvailabilityTracker(clock,
                 ieee -> cache.device(ieee)
                         .map(ZigbeeDeviceRecord::powerSource).orElse(0),
+                this::expectedSilenceFor,
                 availabilitySeed,
                 availabilityPublisher);
         long fromSidecar = availabilitySeed.values().stream()
@@ -665,14 +686,21 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
      * {@link #NO_LINK_READING} placeholder — never a default number.
      */
     private LinkFields linkFields(IEEEAddress device) {
-        Optional<LinkReading> link = availabilityTracker.lastLink(device);
+        return linkFields(availabilityTracker.lastLink(device).orElse(null),
+                availabilityTracker.lastLinkAt(device).orElse(null));
+    }
+
+    /**
+     * LINK-READ-2: the same three fields rendered from a transition's snapshot
+     * (the listener's arguments) — never re-read through the tracker after the
+     * unlock. The two are {@code null} together; a {@code null} prints the
+     * placeholder.
+     */
+    private static LinkFields linkFields(LinkReading link, Instant at) {
         return new LinkFields(
-                link.map(reading -> Integer.toString(reading.lqi()))
-                        .orElse(NO_LINK_READING),
-                link.map(reading -> Integer.toString(reading.rssiDbm()))
-                        .orElse(NO_LINK_READING),
-                availabilityTracker.lastLinkAt(device).map(Instant::toString)
-                        .orElse(NO_LINK_READING));
+                link == null ? NO_LINK_READING : Integer.toString(link.lqi()),
+                link == null ? NO_LINK_READING : Integer.toString(link.rssiDbm()),
+                at == null ? NO_LINK_READING : at.toString());
     }
 
     /** The rendered fields of {@link #linkFields(IEEEAddress)}. */
@@ -706,6 +734,27 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
             availabilityTracker.recordCommandResult(candidate,
                     outcome == PingOutcome.OK, pingEnd);
         }
+    }
+
+    /**
+     * IR-121: a device's declared silence limit — the SMALLEST expected report
+     * interval declared across its adopted entities' capabilities, resolved per
+     * entity through a {@link RegistryStalenessResolver} built with NO overrides
+     * and NO global default (source 2 of Doc 03 §3.8's chain only). Empty when no
+     * entity declares one — the tracker's 25 h window then applies. Read at
+     * every evaluation on the run thread, OUTSIDE the tracker's lock (LTD-11);
+     * a registry failure propagates to the tracker's per-cycle WARN arm.
+     */
+    private Optional<Duration> expectedSilenceFor(IEEEAddress device) {
+        Duration smallest = null;
+        for (EntityId entityId : adoption.entitiesFor(device).values()) {
+            Optional<Duration> declared = declaredIntervals.thresholdFor(entityId);
+            if (declared.isPresent()
+                    && (smallest == null || declared.get().compareTo(smallest) < 0)) {
+                smallest = declared.get();
+            }
+        }
+        return Optional.ofNullable(smallest);
     }
 
     /** The DP-5(b) per-ping outcome vocabulary ({@code ok|timeout|error}). */
@@ -1649,7 +1698,9 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         private final Map<Long, Boolean> lastPublished = new ConcurrentHashMap<>();
 
         @Override
-        public void onTransition(IEEEAddress device, boolean available) {
+        public void onTransition(IEEEAddress device, Instant instant,
+                boolean available, AvailabilityReason reason, Instant lastSeen,
+                LinkReading lastLink, Instant lastLinkAt) {
             // LINK-READ: the SIBLING of the tracker's frozen DP-8 line
             // (zigbee.availability_changed — byte-frozen, out of bounds), logged
             // right after it: every transition names its reason, the last link
@@ -1659,19 +1710,22 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
             // carries the reading of the very frame that produced it; a device
             // with no reading this process prints the placeholders. The count
             // lives in the ingestion unit — this adapter holds both, so the
-            // two instrument lines share one home.
-            LinkFields link = linkFields(device);
+            // two instrument lines share one home. LINK-READ-2 (J1): the
+            // reason and the reading are the tracker's SNAPSHOT in this call's
+            // arguments — taken inside its lock — never re-read after the
+            // unlock; the same snapshot rides the v2 event below.
+            LinkFields link = linkFields(lastLink, lastLinkAt);
             log.info("zigbee.availability_link: device={} available={} reason={} "
                             + "last_lqi={} last_rssi_dbm={} last_link_at={} "
                             + "frames_since_summary={}",
-                    device, available, availabilityTracker.lastReason(device),
+                    device, available, reason,
                     link.lqi(), link.rssiDbm(), link.at(),
                     ingestion.framesSince(device));
             Boolean prior = lastPublished.put(device.value(), available);
             cache.setAvailability(device, available);
             publishForEntities(device,
                     prior == null ? "unknown" : prior ? "online" : "offline",
-                    available);
+                    available, reason, lastSeen, lastLink, lastLinkAt);
         }
 
         /**
@@ -1697,24 +1751,48 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
                 return;
             }
             lastPublished.put(device.value(), true);
-            publishForEntities(device, "unknown", true);
+            // LINK-READ-2: no listener call carries this publish — read the
+            // tracker's accessors (each under its lock) for the same snapshot.
+            publishForEntities(device, "unknown", true,
+                    availabilityTracker.lastReason(device),
+                    availabilityTracker.lastSeen(device).orElse(null),
+                    availabilityTracker.lastLink(device).orElse(null),
+                    availabilityTracker.lastLinkAt(device).orElse(null));
         }
 
+        /**
+         * One {@code availability_changed} per adopted entity of the device, at
+         * {@link #AVAILABILITY_CHANGED_SCHEMA_VERSION} (J1 / LINK-READ-2): the
+         * status pair plus the tracker's snapshot — the reason token (the
+         * {@link AvailabilityReason} name lower-cased: {@code ping_timeout},
+         * {@code silence_timeout}, …), the last-seen instant and the last link
+         * reading with its frame's instant. Absent values ride as {@code null}
+         * (the persistence mapper's NON_NULL then writes the v1 byte-shape); the
+         * reading rides whole or not at all (the record's invariant).
+         */
         private void publishForEntities(IEEEAddress device, String previous,
-                boolean available) {
+                boolean available, AvailabilityReason reason, Instant lastSeenAt,
+                LinkReading lastLink, Instant lastLinkAt) {
             String next = available ? "online" : "offline";
             EventPriority priority =
                     available ? EventPriority.NORMAL : EventPriority.CRITICAL;
+            String reasonToken = reason == null ? null
+                    : reason.name().toLowerCase(Locale.ROOT);
+            boolean reading = lastLink != null && lastLinkAt != null;
+            Integer lqi = reading ? lastLink.lqi() : null;
+            Integer rssiDbm = reading ? lastLink.rssiDbm() : null;
+            Instant linkAt = reading ? lastLinkAt : null;
             for (EntityId entityId : adoption.entitiesFor(device).values()) {
                 try {
                     context.eventPublisher().publishRoot(new EventDraft(
                             EventTypes.AVAILABILITY_CHANGED,
-                            1,
+                            AVAILABILITY_CHANGED_SCHEMA_VERSION,
                             clock.instant(),
                             SubjectRef.entity(entityId),
                             priority,
                             EventOrigin.INTEGRATION,
-                            new AvailabilityChangedEvent(previous, next),
+                            new AvailabilityChangedEvent(previous, next, reasonToken,
+                                    lastSeenAt, lqi, rssiDbm, linkAt),
                             null,
                             null));
                 } catch (SequenceConflictException conflict) {

@@ -90,6 +90,9 @@ class ZigbeeAvailabilityWiringTest {
     /** The uninterviewed-class identity (PowerSource 0x00 — the N-5 posture). */
     private static final long ZERO_PS_IEEE = 0x00124B00AAAAAAAAL;
     private static final int ZERO_PS_NWK = 0x77AA;
+    /** J1 T11: a battery device (PowerSource 0x03) whose endpoint lists 0x0B04 → power_meter. */
+    private static final long METERING_IEEE = 0x00124B00BEEF0001L;
+    private static final int METERING_NWK = 0x5A5A;
 
     private static final String REPORTER_LISTED = "0x00124b0012345678";
 
@@ -453,7 +456,9 @@ class ZigbeeAvailabilityWiringTest {
         deliverReport(adapter, REPORTER_NWK, 1, 0x0406, occupancyReport(1, 1));
         adapter.close();
 
-        clock.advance(Duration.ofMinutes(1));
+        // IR-121: 30 s — inside the 60-s probe window (the pre-J1 1-min advance
+        // would sit ON the new boundary of the strict compare).
+        clock.advance(Duration.ofSeconds(30));
         publisher = new RecordingEventPublisher(clock);
         trackerLogCapture.list.clear();
         Files.deleteIfExists(tempDir.resolve("zigbee-network.json"));
@@ -603,11 +608,11 @@ class ZigbeeAvailabilityWiringTest {
                 .singleElement().asString().contains("outcome=ok");
 
         // The success refreshed the silence clock: no re-ping inside a fresh
-        // 10 min window, then one once it lapses.
-        clock.advance(Duration.ofMinutes(9));
+        // 60-s window (IR-121; was 10 min), then one once it lapses.
+        clock.advance(Duration.ofSeconds(30));
         restarted.runCycleOnce();
         assertThat(pingUnicasts(restartNcp, MAINS_NWK)).isEqualTo(1);
-        clock.advance(Duration.ofMinutes(2));
+        clock.advance(Duration.ofSeconds(31));
         restarted.runCycleOnce();
         assertThat(pingUnicasts(restartNcp, MAINS_NWK)).isEqualTo(2);
     }
@@ -689,7 +694,8 @@ class ZigbeeAvailabilityWiringTest {
     // ── the mains read-ping arm (DP-4 — load-bearing) ───────────────────────
 
     @Test
-    @DisplayName("mains ping-timeout: 10 min of silence sends ONE Basic read; no "
+    @DisplayName("mains ping-timeout: 60 s of silence (IR-121; this test advances 11 min) "
+            + "sends ONE Basic read; no "
             + "response ⇒ PING_TIMEOUT ⇒ offline CRITICAL — a dead mains device no "
             + "longer stays ALIVE forever; the next report honestly recovers it")
     void mainsPingTimeout_offlineCritical_thenRecovers() throws Exception {
@@ -757,16 +763,134 @@ class ZigbeeAvailabilityWiringTest {
         // The ping response was consumed by the exchange itself (it never rides
         // the ingestion drain), so the refreshed silence clock is the
         // recordCommandResult(true) wiring — observable as no re-ping inside a
-        // fresh 10 min window...
-        clock.advance(Duration.ofMinutes(9));
+        // fresh 60-s window (IR-121; was 10 min)...
+        clock.advance(Duration.ofSeconds(30));
         adapter.runCycleOnce();
         assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(1);
 
         // ...and a second ping once that window lapses.
-        clock.advance(Duration.ofMinutes(2));
+        clock.advance(Duration.ofSeconds(31));
         adapter.runCycleOnce();
         assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(2);
         assertThat(entityAvailability()).hasSize(1);
+    }
+
+    // ── J1 (LINK-READ-2 + IR-121): the v2 payload and the declared silence limit ──
+
+    @Test
+    @DisplayName("J1 T4 (LINK-READ-2): availability_changed publishes at schema version 2 — "
+            + "reason, lastSeenAt and the LAST link reading ride the payload; the offline "
+            + "edge stays CRITICAL and carries the reading of the frame that made the "
+            + "device available, never the timeout's")
+    void availabilityChangedV2_carriesReasonLastSeenAndLink() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, mainsInterview());
+        Instant frameAt = clock.instant();
+        deliverReport(adapter, MAINS_NWK, 11, 0x0006, 200, -45, onOffReport(1, true));
+
+        List<EventEnvelope> online = entityAvailability();
+        assertThat(online).hasSize(1);
+        assertThat(online.get(0).schemaVersion())
+                .as("the v2 schema on the wire")
+                .isEqualTo(2);
+        AvailabilityChangedEvent up = (AvailabilityChangedEvent) online.get(0).payload();
+        assertThat(up.previousStatus()).isEqualTo("unknown");
+        assertThat(up.newStatus()).isEqualTo("online");
+        assertThat(up.reason()).isEqualTo("first_contact");
+        assertThat(up.lastSeenAt()).isEqualTo(frameAt);
+        assertThat(up.lqi()).isEqualTo(200);
+        assertThat(up.rssiDbm()).isEqualTo(-45);
+        assertThat(up.linkAt()).isEqualTo(frameAt);
+
+        pingSilent = true;
+        clock.advance(Duration.ofSeconds(61));
+        adapter.runCycleOnce();
+
+        List<EventEnvelope> events = entityAvailability();
+        assertThat(events)
+                .as("61 s silent + one unanswered ping = named dark inside 90 s")
+                .hasSize(2);
+        EventEnvelope offline = events.get(1);
+        assertThat(offline.schemaVersion()).isEqualTo(2);
+        assertThat(offline.priority())
+                .as("CRITICAL toward offline (preservation)")
+                .isEqualTo(EventPriority.CRITICAL);
+        AvailabilityChangedEvent down = (AvailabilityChangedEvent) offline.payload();
+        assertThat(down.previousStatus()).isEqualTo("online");
+        assertThat(down.newStatus()).isEqualTo("offline");
+        assertThat(down.reason()).isEqualTo("ping_timeout");
+        assertThat(down.lastSeenAt())
+                .as("the last evidence instant — the frame, never the timeout")
+                .isEqualTo(frameAt);
+        assertThat(down.lqi()).isEqualTo(200);
+        assertThat(down.rssiDbm()).isEqualTo(-45);
+        assertThat(down.linkAt()).isEqualTo(frameAt);
+    }
+
+    @Test
+    @DisplayName("J1 T4b: the adoption-time view seed (announce precedes adoption) publishes "
+            + "the v2 shape from the tracker's own accessors — reason first_contact, "
+            + "lastSeenAt the announce frame's instant")
+    void seedFreshAdoption_publishesV2FromTheTrackerAccessors() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter =
+                bootProduction(ncp, List.<Object>of(REPORTER_LISTED));
+        Instant announceAt = clock.instant();
+
+        announce(adapter, REPORTER_IEEE, REPORTER_NWK);
+
+        List<EventEnvelope> online = entityAvailability();
+        assertThat(online).hasSize(1);
+        assertThat(online.get(0).schemaVersion()).isEqualTo(2);
+        AvailabilityChangedEvent payload =
+                (AvailabilityChangedEvent) online.get(0).payload();
+        assertThat(payload.previousStatus()).isEqualTo("unknown");
+        assertThat(payload.newStatus()).isEqualTo("online");
+        assertThat(payload.reason()).isEqualTo("first_contact");
+        assertThat(payload.lastSeenAt())
+                .as("the seed path reads the tracker's last-seen — the announce frame")
+                .isEqualTo(announceAt);
+    }
+
+    @Test
+    @DisplayName("J1 T11 (IR-121): a non-mains device whose entity declares power_meter "
+            + "(1200 s) is named dark at 1201 s of silence, not 25 h — the registry → "
+            + "catalog lookup end-to-end; a device declaring nothing keeps the 25 h window")
+    void declaredInterval_namesANonMainsDeviceDarkAtTheDeclaredLimit() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, batteryMeteringInterview());
+        adoptDirect(adapter, reporterInterview());
+        deliverReport(adapter, METERING_NWK, 1, 0x0406, occupancyReport(1, 1));
+        deliverReport(adapter, REPORTER_NWK, 1, 0x0406, occupancyReport(2, 1));
+        assertThat(entityAvailability()).hasSize(2);
+
+        clock.advance(Duration.ofSeconds(1199));
+        adapter.runCycleOnce();
+        assertThat(entityAvailability())
+                .as("1199 s is inside power_meter's declared 1200-s interval")
+                .hasSize(2);
+
+        clock.advance(Duration.ofSeconds(2));
+        adapter.runCycleOnce();
+
+        List<EventEnvelope> events = entityAvailability();
+        assertThat(events)
+                .as("the metering device is named dark at its declared limit; the "
+                        + "undeclared reporter waits for the 25 h window")
+                .hasSize(3);
+        AvailabilityChangedEvent dark = (AvailabilityChangedEvent) events.get(2).payload();
+        assertThat(dark.newStatus()).isEqualTo("offline");
+        assertThat(dark.reason()).isEqualTo("silence_timeout");
+        assertThat(new EntityId(events.get(2).subjectRef().id()))
+                .isIn(adoptedEntityIds(METERING_IEEE));
+        assertThat(pingUnicasts(ncp, METERING_NWK))
+                .as("non-mains: never pinged — the silence verdict is passive")
+                .isZero();
     }
 
     // ── never-false-ALIVE: what must NOT feed the tracker ───────────────────
@@ -1042,6 +1166,20 @@ class ZigbeeAvailabilityWiringTest {
                 List.of(new EndpointDescriptor(1, 0x0104, 0x0107,
                         List.of(0x0000, 0x0406), List.of())),
                 "unknown", "unknown", 0, InterviewStatus.COMPLETE);
+    }
+
+    /**
+     * J1 T11: the reporter's shape (battery, PowerSource 0x03) with 0x0B04 on the
+     * endpoint — the classifier's cluster-first metering attach gives the entity
+     * {@code power_meter} (1200 s declared), so the device's silence limit is the
+     * declared interval, not the 25 h window.
+     */
+    private static InterviewResult batteryMeteringInterview() {
+        return new InterviewResult(new IEEEAddress(METERING_IEEE), METERING_NWK,
+                new NodeDescriptor(2, 0x1286, 82, 128),
+                List.of(new EndpointDescriptor(1, 0x0104, 0x0107,
+                        List.of(0x0000, 0x0001, 0x0406, 0x0B04), List.of())),
+                "HomeSynapse Fixture", "BATTERY-METER", 3, InterviewStatus.COMPLETE);
     }
 
     /**

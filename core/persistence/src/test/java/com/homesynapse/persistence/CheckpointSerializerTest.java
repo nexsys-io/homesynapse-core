@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.homesynapse.value.AttributeValue;
 import com.homesynapse.value.BooleanValue;
@@ -19,12 +20,14 @@ import com.homesynapse.value.StringValue;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.state.Availability;
+import com.homesynapse.state.EntityLink;
 import com.homesynapse.state.EntityState;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -52,6 +55,7 @@ final class CheckpointSerializerTest {
     private static final EntityId ENT_B = new EntityId(
             new Ulid(0x02__00_00_00_00_00_00_00L, 0x00_00_00_00_00_00_00_02L));
 
+    private ObjectMapper mapper;
     private CheckpointSerializer serializer;
 
     /** Required no-arg constructor for {@code -Xlint:all -Werror} builds. */
@@ -67,7 +71,7 @@ final class CheckpointSerializerTest {
         // PersistenceJacksonModule registers the AMD-52 AttributeValue typed-envelope
         // codec, which the typed attribute representation depends on (mirrors the
         // composition root's checkpoint mapper: events mapper + Include.ALWAYS).
-        ObjectMapper mapper = JsonMapper.builder()
+        mapper = JsonMapper.builder()
                 .addModule(new JavaTimeModule())
                 .addModule(new PersistenceJacksonModule())
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
@@ -75,6 +79,79 @@ final class CheckpointSerializerTest {
                 .serializationInclusion(JsonInclude.Include.ALWAYS)
                 .build();
         serializer = new CheckpointSerializer(mapper);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // J1 / LINK-READ-2: availabilityReason · lastSeenAt · link
+    // ──────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("J1 T8: availabilityReason, lastSeenAt and link round-trip whole; an entity "
+            + "without them round-trips nulls (Include.ALWAYS writes them as null)")
+    void availabilityDetailRoundTrips() {
+        EntityLink link = new EntityLink(200, -45, T1);
+        Map<EntityId, EntityState> input = new LinkedHashMap<>();
+        input.put(ENT_A, new EntityState(ENT_A, Map.of(), Availability.UNAVAILABLE, 7L,
+                T0, T1, T2, null, false, "ping_timeout", T1, link));
+        input.put(ENT_B, new EntityState(ENT_B, Map.of(), Availability.AVAILABLE, 3L,
+                T0, T1, T2, null, false, null, null, null));
+
+        byte[] bytes = serializer.serialize(input, 1, null, null, null);
+        String json = new String(bytes, StandardCharsets.UTF_8);
+        assertThat(json)
+                .contains("\"availabilityReason\":\"ping_timeout\"")
+                .contains("\"lastSeenAt\":\"2026-01-01T00:01:00Z\"")
+                .contains("\"link\":{\"lqi\":200,\"rssiDbm\":-45,\"at\":\"2026-01-01T00:01:00Z\"}")
+                .contains("\"availabilityReason\":null")
+                .contains("\"link\":null");
+
+        CheckpointData parsed = serializer.deserialize(bytes);
+        EntityState a = parsed.stateMap().get(ENT_A);
+        assertThat(a.availabilityReason()).isEqualTo("ping_timeout");
+        assertThat(a.lastSeenAt()).isEqualTo(T1);
+        assertThat(a.link()).isEqualTo(link);
+        EntityState b = parsed.stateMap().get(ENT_B);
+        assertThat(b.availabilityReason()).isNull();
+        assertThat(b.lastSeenAt()).isNull();
+        assertThat(b.link()).isNull();
+    }
+
+    @Test
+    @DisplayName("J1 T8: a pre-J1 checkpoint (no availabilityReason / lastSeenAt / link keys) "
+            + "loads with the three null and everything else intact — built by removing the "
+            + "keys from a fresh serialization, never a hand-written literal")
+    void preJ1CheckpointLoadsWithNulls() throws Exception {
+        Map<EntityId, EntityState> input = Map.of(ENT_A, new EntityState(ENT_A,
+                Map.of("on", new StringValue("true")), Availability.AVAILABLE, 5L,
+                T0, T1, T2, T_STALE, false, "frame_received", T1, new EntityLink(200, -45, T1)));
+        byte[] fresh = serializer.serialize(input, 4, T_RECONCILED, 3, 4);
+
+        ObjectNode root = (ObjectNode) mapper.readTree(fresh);
+        ObjectNode stateMap = (ObjectNode) root.get("stateMap");
+        stateMap.fieldNames().forEachRemaining(key -> {
+            ObjectNode entity = (ObjectNode) stateMap.get(key);
+            entity.remove("availabilityReason");
+            entity.remove("lastSeenAt");
+            entity.remove("link");
+        });
+        byte[] preJ1 = mapper.writeValueAsBytes(root);
+        assertThat(new String(preJ1, StandardCharsets.UTF_8))
+                .doesNotContain("availabilityReason")
+                .doesNotContain("lastSeenAt")
+                .doesNotContain("\"link\"");
+
+        CheckpointData parsed = serializer.deserialize(preJ1);
+        EntityState a = parsed.stateMap().get(ENT_A);
+        assertThat(a.availabilityReason()).isNull();
+        assertThat(a.lastSeenAt()).isNull();
+        assertThat(a.link()).isNull();
+        assertThat(a.availability()).isEqualTo(Availability.AVAILABLE);
+        assertThat(a.stateVersion()).isEqualTo(5L);
+        assertThat(a.staleAfter()).isEqualTo(T_STALE);
+        assertThat(((StringValue) a.attributes().get("on")).value()).isEqualTo("true");
+        assertThat(parsed.projectionVersion())
+                .as("projectionVersion is the code's version — J1 does not bump it")
+                .isEqualTo(4);
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -321,6 +398,6 @@ final class CheckpointSerializerTest {
         return new EntityState(
                 id, attrs, availability, stateVersion,
                 lastChanged, lastUpdated, lastReported,
-                staleAfter, stale);
+                staleAfter, stale, null, null, null);
     }
 }

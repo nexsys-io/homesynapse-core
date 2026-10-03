@@ -211,6 +211,6 @@ class ProductionDerivationRuleTest {
                 FIXED,
                 FIXED,
                 null,
-                false);
+                false, null, null, null);
     }
 }

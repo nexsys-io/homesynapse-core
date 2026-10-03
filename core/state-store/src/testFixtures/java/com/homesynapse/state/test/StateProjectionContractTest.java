@@ -361,7 +361,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
                 now,
                 now,
                 null,
-                false));
+                false, null, null, null));
 
         int before = spyPublisher.publishCount();
 
@@ -477,7 +477,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
         Instant now = clock.instant();
         stateStore.put(staleEntity, new EntityState(
                 staleEntity, Map.of(), Availability.UNKNOWN,
-                7L, now, now, now, null, false));
+                7L, now, now, now, null, false, null, null, null));
 
         // Seed a checkpoint. The seeded byte payload is opaque to the
         // contract test; reconciliation is driven by the StateCheckpointSource's
@@ -525,7 +525,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
         Instant now = clock.instant();
         EntityState staleEntityState = new EntityState(
                 staleEntity, Map.of(), Availability.UNKNOWN,
-                7L, now, now, now, null, false);
+                7L, now, now, now, null, false, null, null, null);
         stateStore.put(staleEntity, staleEntityState);
 
         String viewName = "recon-flag-test";
@@ -678,7 +678,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
                 entityId,
                 Map.of("color", new StringValue("blue")),
                 Availability.AVAILABLE,
-                3L, now, now, now, null, false);
+                3L, now, now, now, null, false, null, null, null);
         EventEnvelope env =
                 makeStateReportedEnvelope(SubjectRef.entity(entityId), 1L, "color", "blue");
 
@@ -957,7 +957,7 @@ public abstract class StateProjectionContractTest extends SubscriberContractTest
         InMemoryStateStore store = new InMemoryStateStore();
         store.put(entityId, new EntityState(
                 entityId, Map.of("level", new StringValue("7")), Availability.AVAILABLE,
-                4L, activity, activity, activity, threshold, false));
+                4L, activity, activity, activity, threshold, false, null, null, null));
 
         // Read BEFORE the threshold -> not stale; activity timestamps untouched.
         StateQueryService beforeView = StateQueryService.materialized(

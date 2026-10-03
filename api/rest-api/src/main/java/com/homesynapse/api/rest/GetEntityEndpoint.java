@@ -34,13 +34,18 @@ import java.util.function.LongSupplier;
  * <h2>Response (200)</h2>
  * <pre>{@code
  * {
- *   "data": { "entityId": "...", "availability": "...", "attributes": {...}, "stale": false, ... },
+ *   "data": { "entityId": "...", "availability": "...", "attributes": {...}, "stale": false, ...,
+ *             "availabilityReason": "<token|null>", "lastSeenAt": "<ISO-8601|null>",
+ *             "link": { "lqi": n, "rssiDbm": n, "at": "<ISO-8601>" } | null },
  *   "meta": { "viewPosition": 12345, "timestamp": "2026-05-22T..." }
  * }
  * }</pre>
  *
  * <p>The {@code data} object is the {@link EntityState} record itself,
- * serialised by Javalin's built-in Jackson. {@link EntityState#attributes()}
+ * serialised by Javalin's built-in Jackson — since J1 (LINK-READ-2, 2026-10-03)
+ * its {@code availabilityReason}, {@code lastSeenAt} and {@code link} components
+ * render by their component names (camelCase), with NO handler code, {@code null}
+ * where the projection holds none. {@link EntityState#attributes()}
  * may contain {@code null} values (per the contract documented in
  * state-store {@code MODULE_CONTEXT.md}); Jackson serialises {@code null}
  * values directly — do <em>not</em> call {@code Map.copyOf()} on

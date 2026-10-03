@@ -17,14 +17,17 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 import java.util.function.ToIntFunction;
 
 /**
  * The {@link AvailabilityTracker} implementation (Doc 08 §3.11 + the §8.1 M-1
- * restart rule): power-source-aware silence timeouts — battery end devices go
- * unavailable passively after 25 h; mains devices become PING CANDIDATES after
- * 10 min (the active ping is the M9.4 ZCL read; silence alone never marks a
- * mains device offline).
+ * restart rule): power-source-aware silence timeouts — a non-mains device goes
+ * unavailable passively after its silence limit (IR-121: the smallest expected
+ * report interval its entities' capabilities declare, through the injected
+ * lookup; 25 h when none declares); mains devices become PING CANDIDATES after
+ * {@link #MAINS_PING_SILENCE} = 60 s (the active ping is the M9.4 ZCL read;
+ * silence alone never marks a mains device offline).
  *
  * <p><strong>Power posture (M9.4b §6.10 N-5):</strong> classification is
  * fail-conservative — a device gets the battery posture UNLESS its ZCL Basic
@@ -49,9 +52,29 @@ import java.util.function.ToIntFunction;
  */
 final class StandardAvailabilityTracker implements AvailabilityTracker {
 
-    /** Mains-powered silence before an active ping is due (Doc 08 §9). */
-    static final Duration MAINS_PING_SILENCE = Duration.ofMinutes(10);
-    /** Battery-powered passive offline timeout (Doc 08 §9). */
+    /**
+     * Mains-powered silence before an active ping is due (Doc 08 §9). IR-121
+     * (J1): 60 s, from D-v94-25's acceptance — a mains device named dark in
+     * ≤ 90 s. THE DERIVATION: the probe is ONE ZCL Basic read per silent mains
+     * device per interval (≤ 10 reads/min on the ten-device run fleet), each
+     * bounded by {@code ZigbeeIntegrationAdapter.AVAILABILITY_PING_TIMEOUT_MILLIS}
+     * = 5 s; the worst-case naming time for ONE device is 60 s of silence + the
+     * 5-s deadline + one 50-ms cycle = 65.05 s (under 90 s). The pings are
+     * SEQUENTIAL on the run thread, so N simultaneously silent mains devices
+     * name the last one at 60 + 5·N + 0.05 s — 85.05 s at the run fleet's five
+     * (the two G4s, the S31, the Hue, the TR3): the acceptance holds for N ≤ 5.
+     * The radio cost is measured at R6 and this constant moves only on that
+     * measurement (Z2M probes at 10 min; ours is a product number). A constant
+     * by design, like {@link #LINK_SUMMARY_PERIOD}: the run's fleet is fixed.
+     * Pre-J1 this was 10 min.
+     */
+    static final Duration MAINS_PING_SILENCE = Duration.ofSeconds(60);
+    /**
+     * The non-mains fallback window (Doc 08 §9): a device whose entities declare
+     * no expected report interval is named dark after 25 h of silence. IR-121:
+     * a declared interval replaces this per device — see the constructor's
+     * {@code expectedSilenceLookup}.
+     */
     static final Duration BATTERY_OFFLINE_SILENCE = Duration.ofHours(25);
     /**
      * LINK-READ — the sampling rule for the link reading and the frame count.
@@ -82,16 +105,37 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
     /** ZCL Basic PowerSource table: mains (3 phase). */
     private static final int POWER_SOURCE_MAINS_THREE_PHASE = 0x02;
 
-    /** Availability transition sink (the availability_changed publish + persist). */
+    /**
+     * Availability transition sink (the availability_changed publish + persist).
+     *
+     * <p>LINK-READ-2 (J1): every call carries the tracker's SNAPSHOT of the
+     * device at the moment of the transition — the reason, the last-seen
+     * instant and the LAST link reading with the instant of the frame that
+     * delivered it — taken INSIDE the lock before the sink fires, so the sink
+     * never re-reads the tracker after the unlock. On a timeout verdict the
+     * reading and last-seen are those of the device's last frame ({@code null}
+     * when no frame reached this process — a seeded device); on an online edge
+     * they are the edging frame's own.
+     */
     interface TransitionListener {
 
         /**
          * A device's availability genuinely changed.
          *
          * @param device the device
+         * @param instant the transition's instant — the evidence's or the verdict's
          * @param available the new state
+         * @param reason the transition reason, never {@code null}
+         * @param lastSeen the last device-originated evidence instant known at
+         *        the transition, or {@code null} (unknown recency)
+         * @param lastLink the last link reading kept for the device, or
+         *        {@code null} when no frame delivered one to this process
+         * @param lastLinkAt the receipt instant of the frame that delivered
+         *        {@code lastLink}; {@code null} exactly when {@code lastLink} is
          */
-        void onTransition(IEEEAddress device, boolean available);
+        void onTransition(IEEEAddress device, Instant instant, boolean available,
+                AvailabilityReason reason, Instant lastSeen, LinkReading lastLink,
+                Instant lastLinkAt);
     }
 
     /**
@@ -136,6 +180,7 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
 
     private final Clock clock;
     private final ToIntFunction<IEEEAddress> powerSourceLookup;
+    private final Function<IEEEAddress, Optional<Duration>> expectedSilenceLookup;
     private final TransitionListener listener;
     private final ReentrantLock lock = new ReentrantLock();
     private final Map<Long, DeviceState> states = new HashMap<>();
@@ -146,6 +191,14 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
      * @param clock the time source, never {@code null}
      * @param powerSourceLookup resolves a device's ZCL PowerSource value
      *        ({@code 0} when unknown), never {@code null}
+     * @param expectedSilenceLookup IR-121: resolves a device's declared silence
+     *        limit — the smallest expected report interval its entities'
+     *        capabilities declare (source 2 of Doc 03 §3.8's chain ONLY; never
+     *        the per-entity override nor the global default); empty →
+     *        {@link #BATTERY_OFFLINE_SILENCE}; read at EVERY evaluation, so a
+     *        capability declared later takes effect without a restart; a throw
+     *        is caught per device per cycle (WARN) and reads as empty; applied
+     *        OUTSIDE the lock; never {@code null}
      * @param persistedSeed the per-device seed by IEEE value (the cache
      *        sidecar — availability + evidence recency), never {@code null};
      *        entry values never {@code null}, their components may be
@@ -153,11 +206,14 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
      */
     StandardAvailabilityTracker(Clock clock,
             ToIntFunction<IEEEAddress> powerSourceLookup,
+            Function<IEEEAddress, Optional<Duration>> expectedSilenceLookup,
             Map<Long, Seed> persistedSeed,
             TransitionListener listener) {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.powerSourceLookup =
                 Objects.requireNonNull(powerSourceLookup, "powerSourceLookup");
+        this.expectedSilenceLookup =
+                Objects.requireNonNull(expectedSilenceLookup, "expectedSilenceLookup");
         this.listener = Objects.requireNonNull(listener, "listener");
         Objects.requireNonNull(persistedSeed, "persistedSeed");
         // M-1: carry the pre-restart state forward SILENTLY — no transitions
@@ -210,6 +266,28 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
             DeviceState state = states.get(device.value());
             return state == null ? Optional.empty()
                     : Optional.ofNullable(state.lastLinkAt);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * LINK-READ-2: the last device-originated evidence instant the tracker
+     * holds for the device — a frame's or a ping reply's receipt instant, or
+     * the persisted seed's (DP-1: the seed sets the silence clock but is never
+     * this-process evidence). Empty for an untracked device or unknown recency.
+     * The adoption-time view seed reads it where no listener call carries it.
+     *
+     * @param device the device, never {@code null}
+     * @return the last-seen instant, or empty
+     */
+    Optional<Instant> lastSeen(IEEEAddress device) {
+        Objects.requireNonNull(device, "device");
+        lock.lock();
+        try {
+            DeviceState state = states.get(device.value());
+            return state == null ? Optional.empty()
+                    : Optional.ofNullable(state.lastSeen);
         } finally {
             lock.unlock();
         }
@@ -278,9 +356,17 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
     }
 
     /**
-     * Evaluates silence timeouts (called each ingestion cycle): battery devices
-     * past 25 h transition to unavailable; mains devices past 10 min are
+     * Evaluates silence timeouts (called each ingestion cycle): a non-mains
+     * device past its silence limit — the declared expected report interval
+     * through the injected lookup, else 25 h (IR-121) — transitions to
+     * unavailable; mains devices past {@link #MAINS_PING_SILENCE} (60 s) are
      * returned as ping candidates for the M9.4 active-ping path.
+     *
+     * <p>Two phases (LTD-11: never a registry call under the lock): the
+     * per-device snapshot {@code (device, lastSeen)} is taken UNDER the lock
+     * and released; BOTH lookups (power source, declared interval) then run
+     * OUTSIDE it, the compare follows, and {@link #transition} fires — itself
+     * outside the lock, as before.
      *
      * <p>DP-1: seeded entries are evaluated too — AVAILABLE and seeded-UNKNOWN
      * states both (an UNKNOWN entry can only come from the seed; live
@@ -292,35 +378,41 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
      * @return the mains devices whose silence warrants an active ping
      */
     List<IEEEAddress> evaluateTimeouts() {
-        List<IEEEAddress> pingCandidates = new ArrayList<>();
-        List<IEEEAddress> timedOut = new ArrayList<>();
+        record Snapshot(IEEEAddress device, Instant lastSeen) { }
+        List<Snapshot> snapshots = new ArrayList<>();
+        Instant now;
         lock.lock();
         try {
-            Instant now = clock.instant();
+            now = clock.instant();
             for (Map.Entry<Long, DeviceState> entry : states.entrySet()) {
                 DeviceState state = entry.getValue();
                 if (state.state == State.UNAVAILABLE) {
                     continue;
                 }
-                boolean unknownRecency = state.lastSeen == null;
-                Duration silence = unknownRecency ? null
-                        : Duration.between(state.lastSeen, now);
-                IEEEAddress device = new IEEEAddress(entry.getKey());
-                // N-5: mains-membership test, not battery-equality — every
-                // non-mains value (UNKNOWN 0x00 included) takes the 25 h
-                // battery-conservative window.
-                if (isMainsPowered(powerSourceLookup.applyAsInt(device))) {
-                    if (unknownRecency
-                            || silence.compareTo(MAINS_PING_SILENCE) > 0) {
-                        pingCandidates.add(device);
-                    }
-                } else if (unknownRecency
-                        || silence.compareTo(BATTERY_OFFLINE_SILENCE) > 0) {
-                    timedOut.add(device);
-                }
+                snapshots.add(new Snapshot(new IEEEAddress(entry.getKey()),
+                        state.lastSeen));
             }
         } finally {
             lock.unlock();
+        }
+        List<IEEEAddress> pingCandidates = new ArrayList<>();
+        List<IEEEAddress> timedOut = new ArrayList<>();
+        for (Snapshot snapshot : snapshots) {
+            boolean unknownRecency = snapshot.lastSeen() == null;
+            Duration silence = unknownRecency ? null
+                    : Duration.between(snapshot.lastSeen(), now);
+            // N-5: mains-membership test, not battery-equality — every
+            // non-mains value (UNKNOWN 0x00 included) takes the passive
+            // window: the declared limit, else the 25 h battery-conservative one.
+            if (isMainsPowered(powerSourceLookup.applyAsInt(snapshot.device()))) {
+                if (unknownRecency
+                        || silence.compareTo(MAINS_PING_SILENCE) > 0) {
+                    pingCandidates.add(snapshot.device());
+                }
+            } else if (unknownRecency
+                    || silence.compareTo(silenceLimitFor(snapshot.device())) > 0) {
+                timedOut.add(snapshot.device());
+            }
         }
         for (IEEEAddress device : timedOut) {
             transition(device, clock.instant(), false,
@@ -330,12 +422,29 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
     }
 
     /**
+     * IR-121: the non-mains silence limit — the declared expected report
+     * interval the lookup yields, else the 25 h window. A lookup failure is
+     * logged once per device per cycle ({@code zigbee.availability_limit_lookup_failed})
+     * and reads as the 25 h arm: never a stuck cycle, never a verdict from a
+     * failed read. Called outside the lock.
+     */
+    private Duration silenceLimitFor(IEEEAddress device) {
+        try {
+            return expectedSilenceLookup.apply(device).orElse(BATTERY_OFFLINE_SILENCE);
+        } catch (RuntimeException failure) {
+            log.warn("zigbee.availability_limit_lookup_failed: device={} — the 25 h "
+                    + "window applies this cycle: {}", device, failure.getMessage());
+            return BATTERY_OFFLINE_SILENCE;
+        }
+    }
+
+    /**
      * N-5 fail-conservative power posture: battery UNLESS the value is one of
      * the ZCL Basic PowerSource table's mains classes ({@code 0x01} mains
      * single-phase, {@code 0x02} mains 3-phase). UNKNOWN ({@code 0x00}) and
-     * every exotic class (DC source, emergency supplies) fall to the 25 h
-     * battery window — a possibly-sleepy device must never be false-offlined
-     * by the 10-min active-ping regime.
+     * every exotic class (DC source, emergency supplies) fall to the passive
+     * window — a possibly-sleepy device must never be false-offlined by the
+     * 60-s active-ping regime.
      *
      * @param powerSource the device's ZCL Basic PowerSource value
      * @return {@code true} only for the mains classes
@@ -358,6 +467,13 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
             boolean available, AvailabilityReason explicitReason,
             LinkReading link) {
         boolean changed;
+        // LINK-READ-2: the listener's snapshot, taken INSIDE the lock after
+        // the state moves — never re-read through the accessors after the
+        // unlock (another frame could land between).
+        AvailabilityReason reason;
+        Instant lastSeen;
+        LinkReading lastLink;
+        Instant lastLinkAt;
         lock.lock();
         try {
             DeviceState state = states.computeIfAbsent(device.value(),
@@ -386,13 +502,18 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
                                 : AvailabilityReason.FRAME_RECEIVED;
                 changed = true;
             }
+            reason = state.reason;
+            lastSeen = state.lastSeen;
+            lastLink = state.lastLink;
+            lastLinkAt = state.lastLinkAt;
         } finally {
             lock.unlock();
         }
         if (changed) {
             log.info("zigbee.availability_changed: device={} available={}",
                     device, available);
-            listener.onTransition(device, available);
+            listener.onTransition(device, timestamp, available, reason, lastSeen,
+                    lastLink, lastLinkAt);
         }
     }
 }

@@ -318,7 +318,7 @@ final class SqliteStateStoreTest {
         return new EntityState(
                 id, attrs, availability, stateVersion,
                 lastChanged, lastUpdated, lastReported,
-                staleAfter, stale);
+                staleAfter, stale, null, null, null);
     }
 
     /**

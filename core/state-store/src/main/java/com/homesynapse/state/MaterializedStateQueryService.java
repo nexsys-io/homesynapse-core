@@ -233,7 +233,10 @@ final class MaterializedStateQueryService implements StateQueryService {
                 state.lastUpdated(),
                 state.lastReported(),
                 state.staleAfter(),
-                derivedStale);
+                derivedStale,
+                state.availabilityReason(),
+                state.lastSeenAt(),
+                state.link());
     }
 
     /**
@@ -284,7 +287,10 @@ final class MaterializedStateQueryService implements StateQueryService {
                 state.lastUpdated(),
                 state.lastReported(),
                 state.staleAfter(),
-                state.stale());
+                state.stale(),
+                state.availabilityReason(),
+                state.lastSeenAt(),
+                state.link());
     }
 
     /**

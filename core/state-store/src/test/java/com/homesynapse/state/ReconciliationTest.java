@@ -827,7 +827,7 @@ class ReconciliationTest {
         // and re-materializes from the log.
         EntityState legacy = new EntityState(
                 entityId, Map.of("level", new StringValue("999")), Availability.AVAILABLE,
-                42L, clock.instant(), clock.instant(), clock.instant(), null, false);
+                42L, clock.instant(), clock.instant(), clock.instant(), null, false, null, null, null);
         EntityState healed = healViaReconciliation("heal-legacy", entityId, corpus, legacy);
 
         // All three activity timestamps healed to the last report's event-time...
@@ -935,7 +935,8 @@ class ReconciliationTest {
                 eventId, EventTypes.AVAILABILITY_CHANGED, 1, ingestTime, eventTime, subject,
                 position, position, EventPriority.NORMAL, EventOrigin.PHYSICAL,
                 List.of(EventCategory.DEVICE_STATE), CausalContext.root(eventId.value()),
-                null, new AvailabilityChangedEvent(previousStatus, newStatus));
+                null, new AvailabilityChangedEvent(previousStatus, newStatus,
+                        null, null, null, null, null));
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1002,7 +1003,7 @@ class ReconciliationTest {
         Map<String, AttributeValue> attrs = Map.of("k", new StringValue("v"));
         return new EntityState(
                 id, attrs, Availability.AVAILABLE,
-                version, now, now, now, null, false);
+                version, now, now, now, null, false, null, null, null);
     }
 
     private static StateCheckpointSource fixedSource(byte[] payload, int loadedVersion) {

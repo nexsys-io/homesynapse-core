@@ -902,7 +902,10 @@ public final class StateProjection implements Subscriber {
                     stamp,
                     stamp,
                     staleAfter,
-                    false);
+                    false,
+                    prior.availabilityReason(),
+                    prior.lastSeenAt(),
+                    prior.link());
         } else if (envelope.payload() instanceof StateChangedEvent sc) {
             if (backfillActive) {
                 // AMD-50 §2.2 supersession. During an active version-transition
@@ -926,7 +929,10 @@ public final class StateProjection implements Subscriber {
                         stamp,
                         prior.lastReported(),
                         prior.staleAfter(),
-                        prior.stale());
+                        prior.stale(),
+                        prior.availabilityReason(),
+                        prior.lastSeenAt(),
+                        prior.link());
             } else {
                 Map<String, AttributeValue> newAttrs = new HashMap<>(prior.attributes());
                 newAttrs.put(sc.attributeKey(), sc.newValue());  // typed value (AMD-52 S2)
@@ -939,9 +945,16 @@ public final class StateProjection implements Subscriber {
                         stamp,
                         prior.lastReported(),
                         prior.staleAfter(),
-                        prior.stale());
+                        prior.stale(),
+                        prior.availabilityReason(),
+                        prior.lastSeenAt(),
+                        prior.link());
             }
         } else if (envelope.payload() instanceof AvailabilityChangedEvent ac) {
+            // J1 (LINK-READ-2): the event is the truth at its instant — the reason,
+            // the last-seen instant and the link reading come from THIS event (a
+            // version-1 payload or a null triple leaves them null); the prior's
+            // values are never carried into an availability transition.
             updated = new EntityState(
                     prior.entityId(),
                     prior.attributes(),
@@ -951,7 +964,10 @@ public final class StateProjection implements Subscriber {
                     stamp,
                     prior.lastReported(),
                     prior.staleAfter(),
-                    prior.stale());
+                    prior.stale(),
+                    ac.reason(),
+                    ac.lastSeenAt(),
+                    linkOf(ac));
         } else {
             updated = new EntityState(
                     prior.entityId(),
@@ -962,7 +978,10 @@ public final class StateProjection implements Subscriber {
                     stamp,
                     prior.lastReported(),
                     prior.staleAfter(),
-                    prior.stale());
+                    prior.stale(),
+                    prior.availabilityReason(),
+                    prior.lastSeenAt(),
+                    prior.link());
         }
         stateStore.put(entityId, updated);
     }
@@ -1061,7 +1080,10 @@ public final class StateProjection implements Subscriber {
                 prior.lastUpdated(),      // preserved (owned by the triggering state_reported)
                 prior.lastReported(),     // preserved (owned by the triggering state_reported)
                 prior.staleAfter(),
-                prior.stale());
+                prior.stale(),
+                prior.availabilityReason(),   // J1: the availability detail is owned by
+                prior.lastSeenAt(),           // availability_changed alone — carried
+                prior.link());
         stateStore.put(entityId, updated);
     }
 
@@ -1096,7 +1118,10 @@ public final class StateProjection implements Subscriber {
                 seed,       // lastUpdated
                 null,       // lastReported — owned by state_reported alone (§1.5 as corrected)
                 null,       // staleAfter
-                false);     // stale
+                false,      // stale
+                null,       // availabilityReason — owned by availability_changed alone (J1)
+                null,       // lastSeenAt
+                null);      // link
     }
 
     private static Availability parseAvailability(String value) {
@@ -1110,6 +1135,18 @@ public final class StateProjection implements Subscriber {
             case "offline", "unavailable" -> Availability.UNAVAILABLE;
             default -> Availability.UNKNOWN;
         };
+    }
+
+    /**
+     * J1 (LINK-READ-2): the event's link reading as the read model's {@link EntityLink}, or
+     * {@code null} when the event carries none. The record's invariant makes the triple
+     * all-or-none, so one {@code null} component means "no reading".
+     */
+    private static EntityLink linkOf(AvailabilityChangedEvent ac) {
+        if (ac.lqi() == null || ac.rssiDbm() == null || ac.linkAt() == null) {
+            return null;
+        }
+        return new EntityLink(ac.lqi(), ac.rssiDbm(), ac.linkAt());
     }
 
     private static EntityId subjectEntityIdOrNull(SubjectRef ref) {

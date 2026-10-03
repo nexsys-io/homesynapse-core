@@ -11,10 +11,12 @@ import java.util.Optional;
  * Per-device availability state machine with power-source-aware timeout logic.
  *
  * <p>Tracks device availability based on frame receipt and command results. Mains-powered
- * devices (routers) trigger active pings after 10 minutes of silence. Battery-powered
- * devices (end devices) use passive timeout after 25 hours. Availability transitions
- * produce {@code availability_changed} events with CRITICAL priority for offline
- * transitions and NORMAL priority for online transitions.
+ * devices (routers) trigger active pings after 60 s of silence (IR-121; was 10 minutes).
+ * Non-mains devices (end devices) use a passive timeout — the smallest expected report
+ * interval their entities' capabilities declare, else 25 hours. Availability transitions
+ * produce {@code availability_changed} events (schema version 2 since J1: the reason, the
+ * last-seen instant and the last link reading ride the payload) with CRITICAL priority for
+ * offline transitions and NORMAL priority for online transitions.
  *
  * <p>Doc 08 §8.1.
  *

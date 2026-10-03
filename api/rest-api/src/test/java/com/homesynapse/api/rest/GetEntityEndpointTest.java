@@ -10,6 +10,7 @@ import com.homesynapse.value.AttributeValue;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.state.Availability;
+import com.homesynapse.state.EntityLink;
 import com.homesynapse.state.EntityState;
 
 import java.time.Clock;
@@ -119,6 +120,35 @@ final class GetEntityEndpointTest {
         assertThat(meta).containsEntry("viewPosition", 12_345L);
     }
 
+    @Test
+    @DisplayName("J1 T9: the record placed in data carries availabilityReason, lastSeenAt and "
+            + "link — Javalin's Jackson renders them by component name, no handler code")
+    void dataCarriesTheAvailabilityDetail() {
+        Instant seen = Instant.parse("2026-10-03T12:00:00Z");
+        EntityLink link = new EntityLink(200, -45, Instant.parse("2026-10-03T11:59:30Z"));
+        EntityState dark = new EntityState(EntityId.of(Ulid.parse(VALID_ULID)),
+                Map.<String, AttributeValue>of(), Availability.UNAVAILABLE, 2L,
+                Instant.EPOCH, Instant.EPOCH, Instant.EPOCH, null, false,
+                "ping_timeout", seen, link);
+        FakeStateQueryService qs = new FakeStateQueryService()
+                .withViewPosition(9L)
+                .put(dark);
+        GetEntityEndpoint endpoint =
+                new GetEntityEndpoint(qs, qs::getViewPosition, FIXED_CLOCK);
+        RecordingEndpointContext ctx = new RecordingEndpointContext()
+                .withPathParam("entityId", VALID_ULID);
+
+        endpoint.apply(ctx);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) ctx.body;
+        EntityState returned = (EntityState) body.get("data");
+        assertThat(returned).isSameAs(dark);
+        assertThat(returned.availabilityReason()).isEqualTo("ping_timeout");
+        assertThat(returned.lastSeenAt()).isEqualTo(seen);
+        assertThat(returned.link()).isEqualTo(link);
+    }
+
     private static EntityState entity(String ulid) {
         return new EntityState(
                 EntityId.of(Ulid.parse(ulid)),
@@ -129,6 +159,6 @@ final class GetEntityEndpointTest {
                 Instant.EPOCH,
                 Instant.EPOCH,
                 null,
-                false);
+                false, null, null, null);
     }
 }

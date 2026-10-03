@@ -152,7 +152,7 @@ final class AutomationTestSupport {
     static EntityState state(EntityId id, Availability availability,
                              Map<String, AttributeValue> attributes) {
         return new EntityState(id, attributes, availability, 1L,
-                FIXED_INSTANT, FIXED_INSTANT, FIXED_INSTANT, null, false);
+                FIXED_INSTANT, FIXED_INSTANT, FIXED_INSTANT, null, false, null, null, null);
     }
 
     static StateSnapshot snapshot(Map<EntityId, EntityState> states) {
@@ -369,12 +369,12 @@ final class AutomationTestSupport {
 
     static EventEnvelope entityAvailabilityChanged(EntityId entity, String previous, String next) {
         return envelope("availability_changed", SubjectRef.entity(entity),
-                new AvailabilityChangedEvent(previous, next));
+                new AvailabilityChangedEvent(previous, next, null, null, null, null, null));
     }
 
     static EventEnvelope deviceAvailabilityChanged(DeviceId device, String previous, String next) {
         return envelope("availability_changed", SubjectRef.device(device),
-                new AvailabilityChangedEvent(previous, next));
+                new AvailabilityChangedEvent(previous, next, null, null, null, null, null));
     }
 
     static EventEnvelope automationInvoked(AutomationId automationId, String context) {

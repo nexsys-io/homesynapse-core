@@ -31,6 +31,7 @@ import com.homesynapse.event.StoragePressureChangedEvent;
 import com.homesynapse.event.SystemStartedEvent;
 import com.homesynapse.event.SystemStoppedEvent;
 import com.homesynapse.event.TelemetrySummaryEvent;
+import java.time.Instant;
 import com.homesynapse.device.Capability;
 import com.homesynapse.device.CapabilityInstance;
 import com.homesynapse.device.StandardCapabilities;
@@ -132,8 +133,11 @@ final class TestEventSamples {
         return new DeviceRemovedEvent("user initiated removal");
     }
 
+    /** J1 (LINK-READ-2): the version-2 shape, every addition set — the full round trip. */
     static AvailabilityChangedEvent availabilityChanged() {
-        return new AvailabilityChangedEvent("online", "offline");
+        return new AvailabilityChangedEvent("online", "offline", "ping_timeout",
+                Instant.parse("2026-10-03T12:00:00Z"), 200, -45,
+                Instant.parse("2026-10-03T11:59:30Z"));
     }
 
     static AutomationTriggeredEvent automationTriggered() {

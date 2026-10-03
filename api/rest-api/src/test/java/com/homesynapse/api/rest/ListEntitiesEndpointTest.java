@@ -14,6 +14,7 @@ import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.state.Availability;
+import com.homesynapse.state.EntityLink;
 import com.homesynapse.state.EntityState;
 
 import java.time.Clock;
@@ -199,9 +200,51 @@ final class ListEntitiesEndpointTest {
 
         endpoint.apply(ctx);
 
-        // The LinkedHashMap order IS the wire order: the v1.1 base first, the two v1.1.3 keys appended.
+        // The LinkedHashMap order IS the wire order: the v1.1 base first, the two v1.1.3 keys
+        // appended, then J1's three (the additive path; the frozen keys' order unchanged).
         assertThat(rows(ctx).get(0).keySet())
-                .containsExactly("entityId", "availability", "stale", "deviceId", "lastReported");
+                .containsExactly("entityId", "availability", "stale", "deviceId", "lastReported",
+                        "availabilityReason", "lastSeenAt", "link");
+    }
+
+    @Test
+    @DisplayName("J1 T9: availabilityReason, lastSeenAt (ISO-8601 Z) and link {lqi, rssiDbm, at} "
+            + "render after the frozen keys — JSON null for an entity without them")
+    void j1Keys_renderAfterTheFrozenKeys_nullWhenAbsent() {
+        Instant seen = Instant.parse("2026-10-03T12:00:00Z");
+        Instant at = Instant.parse("2026-10-03T11:59:30Z");
+        EntityState dark = new EntityState(EntityId.of(Ulid.parse(ULID_A)),
+                Map.<String, AttributeValue>of(), Availability.UNAVAILABLE, 2L,
+                Instant.EPOCH, Instant.EPOCH, null, null, false,
+                "ping_timeout", seen, new EntityLink(200, -45, at));
+        FakeStateQueryService qs = new FakeStateQueryService().put(dark).put(entity(ULID_B));
+        ListEntitiesEndpoint endpoint =
+                new ListEntitiesEndpoint(qs, new FakeEntityRegistry(), qs::getViewPosition,
+                        FIXED_CLOCK);
+        RecordingEndpointContext ctx = new RecordingEndpointContext();
+
+        endpoint.apply(ctx);
+
+        Map<String, Object> row = rows(ctx).get(0);
+        assertThat(row.get("entityId")).isEqualTo(ULID_A);
+        assertThat(row.get("availabilityReason")).isEqualTo("ping_timeout");
+        assertThat(row.get("lastSeenAt"))
+                .as("Instant.toString() — the same ISO-8601 UTC rendering as lastReported")
+                .isEqualTo("2026-10-03T12:00:00Z");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> link = (Map<String, Object>) row.get("link");
+        assertThat(link.keySet()).containsExactly("lqi", "rssiDbm", "at");
+        assertThat(link)
+                .containsEntry("lqi", 200)
+                .containsEntry("rssiDbm", -45)
+                .containsEntry("at", "2026-10-03T11:59:30Z");
+
+        Map<String, Object> plain = rows(ctx).get(1);
+        assertThat(plain.get("entityId")).isEqualTo(ULID_B);
+        assertThat(plain).containsKeys("availabilityReason", "lastSeenAt", "link");
+        assertThat(plain.get("availabilityReason")).isNull();
+        assertThat(plain.get("lastSeenAt")).isNull();
+        assertThat(plain.get("link")).isNull();
     }
 
     @Test
@@ -268,7 +311,7 @@ final class ListEntitiesEndpointTest {
                 Instant.EPOCH,
                 lastReported,
                 null,
-                false);
+                false, null, null, null);
     }
 
     /** A registry {@link Entity} for {@code ulid} owned by {@code deviceId} ({@code null} = helper). */

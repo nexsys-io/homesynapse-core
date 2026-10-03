@@ -90,7 +90,7 @@ class MaterializedStateQueryServicePercentTest {
     private void store(EntityId id, Map<String, AttributeValue> attributes) {
         HashMap<String, AttributeValue> map = new HashMap<>(attributes);
         stateStore.put(id, new EntityState(id, java.util.Collections.unmodifiableMap(map),
-                Availability.AVAILABLE, 1L, T0, T0, T0, null, false));
+                Availability.AVAILABLE, 1L, T0, T0, T0, null, false, null, null, null));
     }
 
     // ── the derivation table ────────────────────────────────────────────────

@@ -62,6 +62,19 @@ import java.util.Map;
  * stamp plus the entity's threshold (IR-61; Doc 03 §3.8's chain) — and leaves it
  * {@code null} where no source applies.</p>
  *
+ * <h2>Availability detail (J1 / LINK-READ-2)</h2>
+ *
+ * <p>Three nullable fields say why and when the entity's availability last moved:
+ * {@code availabilityReason} (the integration's transition reason token — {@code ping_timeout},
+ * {@code silence_timeout}, {@code first_contact}, …), {@code lastSeenAt} (the last
+ * device-originated evidence instant known at that transition) and {@code link} (the last link
+ * reading, with the instant of the frame that delivered it — {@link EntityLink}). The
+ * projection sets all three from each {@code availability_changed} event: the event is the
+ * truth at its instant, so a version-1 event or one carrying no reading leaves them
+ * {@code null} (the prior's values are not carried), while every other event carries them
+ * forward unchanged. A dark device's row therefore says WHEN it was last heard and HOW its
+ * link read at that frame.</p>
+ *
  * <p>Defined in Doc 03 §4.1.</p>
  *
  * @param entityId the unique identifier for this entity, never {@code null}
@@ -80,9 +93,16 @@ import java.util.Map;
  *        {@code null} if staleness detection is disabled for this entity
  * @param stale whether this entity is currently stale, derived from {@code staleAfter}
  *        and the wall clock at read time
+ * @param availabilityReason the integration's reason token for the last availability
+ *        transition, or {@code null} (no availability event yet, or a version-1 event)
+ * @param lastSeenAt the last device-originated evidence instant known at the last
+ *        availability transition, or {@code null}
+ * @param link the last link reading known at the last availability transition, or
+ *        {@code null} when the event carried none
  * @see StateQueryService
  * @see StateSnapshot
  * @see Availability
+ * @see EntityLink
  * @see com.homesynapse.value.AttributeValue
  * @see com.homesynapse.event.EventEnvelope
  * @since 1.0
@@ -96,5 +116,8 @@ public record EntityState(
         Instant lastUpdated,
         Instant lastReported,
         Instant staleAfter,
-        boolean stale
+        boolean stale,
+        String availabilityReason,
+        Instant lastSeenAt,
+        EntityLink link
 ) { }

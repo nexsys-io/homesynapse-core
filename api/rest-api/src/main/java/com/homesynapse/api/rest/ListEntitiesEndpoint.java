@@ -7,6 +7,7 @@ package com.homesynapse.api.rest;
 import com.homesynapse.device.Entity;
 import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.platform.identity.DeviceId;
+import com.homesynapse.state.EntityLink;
 import com.homesynapse.state.EntityState;
 import com.homesynapse.state.StateQueryService;
 import com.homesynapse.state.StateSnapshot;
@@ -41,7 +42,9 @@ import java.util.function.LongSupplier;
  * <pre>{@code
  * {
  *   "data": [ { "entityId": "...", "availability": "...", "stale": false,
- *               "deviceId": "<ulid|null>", "lastReported": "<ISO-8601|null>" } ],
+ *               "deviceId": "<ulid|null>", "lastReported": "<ISO-8601|null>",
+ *               "availabilityReason": "<token|null>", "lastSeenAt": "<ISO-8601|null>",
+ *               "link": { "lqi": n, "rssiDbm": n, "at": "<ISO-8601>" } | null } ],
  *   "meta": { "viewPosition": 12345, "timestamp": "2026-05-22T..." }
  * }
  * }</pre>
@@ -187,7 +190,7 @@ final class ListEntitiesEndpoint implements Handler {
     }
 
     private Map<String, Object> summarise(EntityState state) {
-        Map<String, Object> summary = new LinkedHashMap<>(5);
+        Map<String, Object> summary = new LinkedHashMap<>(8);
         summary.put("entityId", state.entityId().toString());
         summary.put("availability", state.availability().name());
         summary.put("stale", state.stale());
@@ -202,7 +205,25 @@ final class ListEntitiesEndpoint implements Handler {
         // rendering as meta.timestamp), or JSON null when the projection holds none.
         summary.put("lastReported",
                 state.lastReported() == null ? null : state.lastReported().toString());
+        // J1 (LINK-READ-2, 2026-10-03): the dark-device line — WHY the availability last
+        // moved, WHEN the device was last heard, HOW its link read at that frame. Appended
+        // after the frozen keys (the additive path); camelCase like every v1.1 key; the
+        // instants via toString() as lastReported is; JSON null where the projection holds
+        // none (no availability event yet, or a version-1 event).
+        summary.put("availabilityReason", state.availabilityReason());
+        summary.put("lastSeenAt",
+                state.lastSeenAt() == null ? null : state.lastSeenAt().toString());
+        summary.put("link", state.link() == null ? null : linkJson(state.link()));
         return summary;
+    }
+
+    /** The link reading's wire object: {@code {"lqi": n, "rssiDbm": n, "at": "…Z"}}. */
+    private static Map<String, Object> linkJson(EntityLink link) {
+        Map<String, Object> json = new LinkedHashMap<>(3);
+        json.put("lqi", link.lqi());
+        json.put("rssiDbm", link.rssiDbm());
+        json.put("at", link.at().toString());
+        return json;
     }
 
     private static int parseLimit(String raw) {

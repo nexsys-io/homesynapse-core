@@ -180,6 +180,6 @@ final class ProjectionStatusEndpointTest {
                 Instant.EPOCH,
                 Instant.EPOCH,
                 null,
-                false);
+                false, null, null, null);
     }
 }

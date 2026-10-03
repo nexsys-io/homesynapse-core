@@ -356,6 +356,6 @@ final class MaterializedStateQueryServiceTest {
                 CLOCK_INSTANT.minus(Duration.ofMinutes(1)),
                 CLOCK_INSTANT.minus(Duration.ofMinutes(1)),
                 staleAfter,
-                storedStale);
+                storedStale, null, null, null);
     }
 }

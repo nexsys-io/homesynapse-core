@@ -83,7 +83,8 @@ final class TestEvents {
                 SubjectRef.entity(entityId),
                 EventPriority.NORMAL,
                 EventOrigin.DEVICE_AUTONOMOUS,
-                new AvailabilityChangedEvent(previousStatus, newStatus),
+                new AvailabilityChangedEvent(previousStatus, newStatus,
+                        null, null, null, null, null),
                 /* actorRef */ null,
                 /* idempotencyKey */ null);
     }
