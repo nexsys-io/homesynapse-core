@@ -328,6 +328,63 @@ class EzspProtocolTest {
         assertThat(extendedParameters(command)).containsExactly(0x3C);
     }
 
+    // ── J2b: the scoped enablement and the three-act close (byte-exact) ──────
+
+    @Test
+    @DisplayName("T8a (J2b): enableScopedKeyJoins writes TC policy 0x0013, TC_KEY_REQUEST 0x51, "
+            + "then importTransientKey whose first 8 bytes are the partner EUI64 LITTLE-ENDIAN")
+    void enableScopedKeyJoins_writesPolicy0x0013_andThePartnerLittleEndian() {
+        connect(13);
+        startSessionOrFail();
+        ncp.onEzspCommand(this::securityCapableHandler);
+
+        protocol.enableScopedKeyJoins(new IEEEAddress(0x00124B0012345678L));
+
+        List<byte[]> policies = commandsWithFrameId(0x0055);
+        assertThat(policies).hasSize(2);
+        assertThat(extendedParameters(policies.get(0)))
+                .as("TRUST_CENTER_POLICY = ALLOW_JOINS | ALLOW_UNSECURED_REJOINS | "
+                        + "JOINS_USE_INSTALL_CODE_KEY (0x0013), u16 LE")
+                .containsExactly(0x00, 0x13, 0x00);
+        assertThat(extendedParameters(policies.get(1)))
+                .as("TC_KEY_REQUEST_POLICY unchanged: allow + send current key")
+                .containsExactly(0x05, 0x51, 0x00);
+        byte[] transientKey = extendedParameters(lastCommandWithFrameId(0x0111));
+        assertThat(transientKey).hasSize(25);
+        assertThat(Arrays.copyOfRange(transientKey, 0, 8))
+                .as("the partner EUI64 in wire order (LE) — the inverse of KeyEstablishment.parse")
+                .containsExactly(0x78, 0x56, 0x34, 0x12, 0x00, 0x4B, 0x12, 0x00);
+        assertThat(Arrays.copyOfRange(transientKey, 8, 24))
+                .as("the well-known key material, as the wildcard form installs it")
+                .containsExactly("ZigBeeAlliance09".getBytes(StandardCharsets.US_ASCII));
+        assertThat(transientKey[24]).isEqualTo((byte) 0x00);
+        assertThat(securityFrameIds()).containsExactly(0x0055, 0x0055, 0x0111);
+        assertThat(protocolMessages("zigbee.tc_scoped_joins_enabled"))
+                .containsExactly("zigbee.tc_scoped_joins_enabled: partner=0x00124B0012345678 "
+                        + "policy=0x0013 frames=0x0055,0x0055,0x0111");
+    }
+
+    @Test
+    @DisplayName("T8b (J2b): closeJoinWindow sends clearTransientLinkKeys (0x006B, no status "
+            + "byte), TC policy 0x0002, then permitJoin(0) — in that order")
+    void closeJoinWindow_threeActs_inOrder() {
+        connect(13);
+        startSessionOrFail();
+        ncp.onEzspCommand(this::securityCapableHandler);
+
+        protocol.closeJoinWindow();
+
+        assertThat(securityFrameIds()).containsExactly(0x006B, 0x0055, 0x0022);
+        assertThat(extendedParameters(lastCommandWithFrameId(0x006B))).isEmpty();
+        assertThat(extendedParameters(lastCommandWithFrameId(0x0055)))
+                .as("ALLOW_UNSECURED_REJOINS only — the standing posture between windows")
+                .containsExactly(0x00, 0x02, 0x00);
+        assertThat(extendedParameters(lastCommandWithFrameId(0x0022))).containsExactly(0x00);
+        assertThat(protocolMessages("zigbee.tc_join_window_closed"))
+                .containsExactly("zigbee.tc_join_window_closed: frames=0x006B,0x0055,0x0022 "
+                        + "policy=0x0002 permit_join=0");
+    }
+
     @Test
     @DisplayName("permitJoin surfaces a non-success NCP status")
     void permitJoin_statusFailure() {
@@ -908,6 +965,48 @@ class EzspProtocolTest {
     // ------------------------------------------------------------------
     // Handler plumbing
     // ------------------------------------------------------------------
+
+    /** J2b: the default handler plus the security frames (policy, key import, key clear). */
+    private List<byte[]> securityCapableHandler(byte[] command) {
+        if (isLegacyVersion(command)) {
+            return defaultHandler(command);
+        }
+        int seq = command[0] & 0xFF;
+        return switch (frameIdOf(command)) {
+            case 0x0055 -> List.of(extendedResponse(seq, 0x0055, new byte[] {0x00}));
+            case 0x0111 -> List.of(extendedResponse(seq, 0x0111,
+                    new byte[] {0x00, 0x00, 0x00, 0x00}));   // sl_Status OK, u32 LE
+            case 0x006B -> List.of(extendedResponse(seq, 0x006B, new byte[0]));
+            default -> defaultHandler(command);
+        };
+    }
+
+    /** Every non-legacy command with {@code frameId}, in send order. */
+    private List<byte[]> commandsWithFrameId(int frameId) {
+        List<byte[]> matches = new ArrayList<>();
+        for (byte[] command : ncp.receivedEzspCommands()) {
+            if (!isLegacyVersion(command) && frameIdOf(command) == frameId) {
+                matches.add(command);
+            }
+        }
+        return matches;
+    }
+
+    /** The security-surface frame ids (0x0055 · 0x0111 · 0x006B · 0x0022), in send order. */
+    private List<Integer> securityFrameIds() {
+        List<Integer> ids = new ArrayList<>();
+        for (byte[] command : ncp.receivedEzspCommands()) {
+            if (isLegacyVersion(command)) {
+                continue;
+            }
+            int frameId = frameIdOf(command);
+            if (frameId == 0x0055 || frameId == 0x0111 || frameId == 0x006B
+                    || frameId == 0x0022) {
+                ids.add(frameId);
+            }
+        }
+        return ids;
+    }
 
     private List<byte[]> defaultHandler(byte[] command) {
         if (isLegacyVersion(command)) {

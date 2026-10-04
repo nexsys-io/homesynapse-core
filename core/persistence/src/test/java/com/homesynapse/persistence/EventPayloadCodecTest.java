@@ -20,11 +20,14 @@ import com.homesynapse.event.StateChangedEvent;
 import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.integration.IntegrationHealthChanged;
 import com.homesynapse.integration.IntegrationStarted;
+import com.homesynapse.integration.JoinRejected;
+import com.homesynapse.integration.PermitJoinOpened;
 import com.homesynapse.value.FloatValue;
 import com.homesynapse.value.StringValue;
 import com.homesynapse.platform.identity.Ulid;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -338,6 +341,61 @@ class EventPayloadCodecTest {
     }
 
     // ===== J1 / LINK-READ-2: availability_changed v2 — the tolerant decode IS the upcast =====
+
+    @Nested
+    @DisplayName("permit_join_opened v2 + join_rejected (J2): the additive-nullable scope and "
+            + "the new window event")
+    class PairingWindowV2AndJoinRejected {
+
+        private final Instant opensAt = Instant.parse("2026-10-04T19:00:00Z");
+
+        @Test
+        @DisplayName("T14a: a version-1 row (seven snake_case keys, no scope) decodes to the "
+                + "record with scope null — and the v2 record with a null scope ENCODES to that "
+                + "same byte shape (NON_NULL omits the key)")
+        void versionOneRow_decodesWithNullScope() throws Exception {
+            PermitJoinOpened unscoped = new PermitJoinOpened(TestEventSamples.INTEGRATION_ID_1,
+                    "zigbee", 120, "pair the hallway sensor", "key-01", opensAt,
+                    opensAt.plusSeconds(120), null);
+            byte[] v1 = codec.encode(unscoped);
+            String json = new String(v1, StandardCharsets.UTF_8);
+            assertThat(json).doesNotContain("scope");
+            assertThat(json).contains("\"duration_seconds\":120");
+
+            DomainEvent decoded = codec.decode(EventTypes.PERMIT_JOIN_OPENED, 1, v1);
+
+            assertThat(decoded).isEqualTo(unscoped);
+        }
+
+        @Test
+        @DisplayName("T14b: a scoped v2 row carries scope as a snake_case key and round-trips "
+                + "at version 2")
+        void scopedRow_roundTripsAtVersionTwo() throws Exception {
+            PermitJoinOpened scoped = new PermitJoinOpened(TestEventSamples.INTEGRATION_ID_1,
+                    "zigbee", 120, "recover the hallway sensor", "key-01", opensAt,
+                    opensAt.plusSeconds(120), "0x00124B0012345678");
+            byte[] v2 = codec.encode(scoped);
+            assertThat(new String(v2, StandardCharsets.UTF_8))
+                    .contains("\"scope\":\"0x00124B0012345678\"");
+
+            assertThat(codec.decode(EventTypes.PERMIT_JOIN_OPENED, 2, v2)).isEqualTo(scoped);
+        }
+
+        @Test
+        @DisplayName("T14c: join_rejected round-trips — with a scope and without (the null "
+                + "scope omitted from the bytes)")
+        void joinRejected_roundTrips() throws Exception {
+            JoinRejected scoped = new JoinRejected(TestEventSamples.INTEGRATION_ID_1, "zigbee",
+                    "0x00124B00AAAAAAAA", "0x00124B0012345678", "UNSECURED_JOIN", opensAt);
+            assertRoundTrip(scoped, EventTypes.JOIN_REJECTED);
+
+            JoinRejected unscoped = new JoinRejected(TestEventSamples.INTEGRATION_ID_1, "zigbee",
+                    "0x00124B00AAAAAAAA", null, "UNSECURED_JOIN", opensAt);
+            assertThat(new String(codec.encode(unscoped), StandardCharsets.UTF_8))
+                    .doesNotContain("scope");
+            assertRoundTrip(unscoped, EventTypes.JOIN_REJECTED);
+        }
+    }
 
     @Nested
     @DisplayName("availability_changed v2 (J1): both directions through the tolerant decode")

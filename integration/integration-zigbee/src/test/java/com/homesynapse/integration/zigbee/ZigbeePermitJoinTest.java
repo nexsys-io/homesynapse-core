@@ -42,6 +42,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
@@ -80,9 +81,15 @@ class ZigbeePermitJoinTest {
 
     private static final int WINDOW_SECONDS = 120;
     private static final PairingWindowRequest REQUEST =
-            new PairingWindowRequest(WINDOW_SECONDS, "pair the hallway sensor", "key-01");
+            new PairingWindowRequest(WINDOW_SECONDS, "pair the hallway sensor", "key-01", null);
     private static final PairingWindowRequest SECOND_REQUEST =
-            new PairingWindowRequest(60, "pair the second sensor", "key-02");
+            new PairingWindowRequest(60, "pair the second sensor", "key-02", null);
+    /** J2b: the device-scoped open — the SNZB's IEEE as an operator writes it. */
+    private static final String SCOPE_LOWER = "0x00124b0012345678";
+    private static final String SCOPE_CANONICAL = "0x00124B0012345678";
+    private static final PairingWindowRequest SCOPED_REQUEST =
+            new PairingWindowRequest(WINDOW_SECONDS, "recover the hallway sensor", "key-01",
+                    SCOPE_LOWER);
 
     @TempDir
     Path tempDir;
@@ -140,7 +147,7 @@ class ZigbeePermitJoinTest {
         assertThat(opensAt).as("opensAt is the fixture clock's instant").isEqualTo(clock.instant());
         assertThat(window).isEqualTo(new PairingWindow(integrationId, opensAt,
                 opensAt.plusSeconds(WINDOW_SECONDS), WINDOW_SECONDS, REQUEST.reason(),
-                REQUEST.actor()));
+                REQUEST.actor(), null));
 
         List<EventEnvelope> opened = publisher.ofType(EventTypes.PERMIT_JOIN_OPENED).toList();
         assertThat(opened).as("ONE permit_join_opened").hasSize(1);
@@ -149,14 +156,134 @@ class ZigbeePermitJoinTest {
         assertThat(envelope.origin()).isEqualTo(EventOrigin.INTEGRATION);
         assertThat(envelope.priority()).isEqualTo(EventPriority.NORMAL);
         assertThat(envelope.eventTime()).isEqualTo(opensAt);
+        assertThat(envelope.schemaVersion())
+                .as("J2: permit_join_opened publishes at schema 2 (+ nullable scope)")
+                .isEqualTo(2);
         assertThat(envelope.payload()).isEqualTo(new PermitJoinOpened(integrationId, "zigbee",
                 WINDOW_SECONDS, REQUEST.reason(), REQUEST.actor(), opensAt,
-                opensAt.plusSeconds(WINDOW_SECONDS)));
+                opensAt.plusSeconds(WINDOW_SECONDS), null));
         assertThat(publisher.published()).as("nothing but the open").hasSize(1);
         assertThat(messages(Level.INFO, "zigbee.permit_join_opened"))
                 .containsExactly("zigbee.permit_join_opened: duration=120s "
                         + "reason=pair the hallway sensor actor=key-01");
         assertThat(messages(Level.WARN, "zigbee.permit_join")).isEmpty();
+    }
+
+    // ── J2b: the scoped open, the un-scoped bytes, the three-act close ───────
+
+    @Test
+    @DisplayName("T1s (J2b): a SCOPED open writes TC policy 0x0013 and installs the transient "
+            + "key with the partner's EUI64 (wire order) in its first 8 bytes; the window, the "
+            + "event and the INFO carry the canonical scope; the opened event is schema 2")
+    void scopedOpen_writesPolicy0x0013_andThePartnerBytes() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> formationHandler(ncp, command));
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+
+        PairingWindow window = adapter.openPairingWindow(SCOPED_REQUEST);
+
+        List<byte[]> policies = framesWithId(ncp, EzspCoordinatorProtocol.FRAME_SET_POLICY);
+        assertThat(policies).hasSize(2);
+        assertThat(parametersOf(policies.get(0)))
+                .as("ALLOW_JOINS | ALLOW_UNSECURED_REJOINS | JOINS_USE_INSTALL_CODE_KEY, u16 LE")
+                .containsExactly(0x00, 0x13, 0x00);
+        assertThat(parametersOf(policies.get(1)))
+                .as("TC_KEY_REQUEST_POLICY unchanged").containsExactly(0x05, 0x51, 0x00);
+        byte[] transientKey = parametersOf(
+                framesWithId(ncp, EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY).get(0));
+        assertThat(transientKey).hasSize(25);
+        assertThat(Arrays.copyOfRange(transientKey, 0, 8))
+                .as("the partner EUI64 little-endian — the inverse of KeyEstablishment.parse")
+                .containsExactly(0x78, 0x56, 0x34, 0x12, 0x00, 0x4B, 0x12, 0x00);
+        assertThat(enablementFrameIds(ncp)).containsExactly(
+                EzspCoordinatorProtocol.FRAME_SET_POLICY,
+                EzspCoordinatorProtocol.FRAME_SET_POLICY,
+                EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY,
+                FRAME_PERMIT_JOINING);
+        assertThat(window.scope()).as("canonical: 0x + upper-case").isEqualTo(SCOPE_CANONICAL);
+        EventEnvelope opened = publisher.ofType(EventTypes.PERMIT_JOIN_OPENED).findFirst()
+                .orElseThrow();
+        assertThat(opened.schemaVersion()).isEqualTo(2);
+        assertThat(opened.payload()).isEqualTo(new PermitJoinOpened(integrationId, "zigbee",
+                WINDOW_SECONDS, SCOPED_REQUEST.reason(), SCOPED_REQUEST.actor(),
+                window.opensAt(), window.closesAt(), SCOPE_CANONICAL));
+        assertThat(messages(Level.INFO, "zigbee.permit_join_"))
+                .as("the frozen opened line first, byte-exact; the scope line AFTER it")
+                .containsExactly(
+                        "zigbee.permit_join_opened: duration=120s "
+                                + "reason=recover the hallway sensor actor=key-01",
+                        "zigbee.permit_join_scoped: scope=" + SCOPE_CANONICAL);
+    }
+
+    @Test
+    @DisplayName("T2u (J2b): the un-scoped open is byte-for-byte today's — policy 0x0003, the "
+            + "wildcard partner, no scope line; scope null on the window and the event")
+    void unscopedOpen_todaysBytesExactly() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> formationHandler(ncp, command));
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+
+        PairingWindow window = adapter.openPairingWindow(REQUEST);
+
+        List<byte[]> policies = framesWithId(ncp, EzspCoordinatorProtocol.FRAME_SET_POLICY);
+        assertThat(parametersOf(policies.get(0))).containsExactly(0x00, 0x03, 0x00);
+        assertThat(parametersOf(policies.get(1))).containsExactly(0x05, 0x51, 0x00);
+        byte[] transientKey = parametersOf(
+                framesWithId(ncp, EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY).get(0));
+        byte[] wildcard = new byte[8];
+        Arrays.fill(wildcard, (byte) 0xFF);
+        assertThat(Arrays.copyOfRange(transientKey, 0, 8)).containsExactly(wildcard);
+        assertThat(window.scope()).isNull();
+        assertThat(((PermitJoinOpened) publisher.published().get(0).payload()).scope()).isNull();
+        assertThat(messages(Level.INFO, "zigbee.permit_join_scoped")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("T3 (J2b): the elapsed close runs the NCP's three-act close — 0x006B, then "
+            + "setPolicy(TC, 0x0002), then permitJoin(0) — BEFORE permit_join_closed(elapsed) "
+            + "is published; the event-sequence pin holds")
+    void elapsedClose_runsTheThreeActNcpClose_beforePublishing() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        List<Long> closedEventsAtClear = new ArrayList<>();
+        ncp.onEzspCommand(command -> {
+            if (!isLegacyVersion(command) && frameIdOf(command)
+                    == EzspCoordinatorProtocol.FRAME_CLEAR_TRANSIENT_LINK_KEYS) {
+                closedEventsAtClear.add(
+                        publisher.ofType(EventTypes.PERMIT_JOIN_CLOSED).count());
+            }
+            return formationHandler(ncp, command);
+        });
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        adapter.openPairingWindow(REQUEST);
+        int framesAtOpen = ncp.receivedEzspCommands().size();
+        clock.advance(Duration.ofSeconds(WINDOW_SECONDS + 1));
+
+        adapter.runCycleOnce();
+
+        List<byte[]> afterOpen = ncp.receivedEzspCommands()
+                .subList(framesAtOpen, ncp.receivedEzspCommands().size());
+        assertThat(windowFrameIdsOf(afterOpen))
+                .as("clearTransientLinkKeys → setPolicy → permitJoin, nothing else window-shaped")
+                .containsExactly(
+                        EzspCoordinatorProtocol.FRAME_CLEAR_TRANSIENT_LINK_KEYS,
+                        EzspCoordinatorProtocol.FRAME_SET_POLICY,
+                        FRAME_PERMIT_JOINING);
+        List<byte[]> closeFrames = afterOpen.stream()
+                .filter(c -> !isLegacyVersion(c)).toList();
+        assertThat(parametersOf(frameOf(closeFrames,
+                EzspCoordinatorProtocol.FRAME_CLEAR_TRANSIENT_LINK_KEYS)))
+                .as("0x006B carries no parameters").isEmpty();
+        assertThat(parametersOf(frameOf(closeFrames, EzspCoordinatorProtocol.FRAME_SET_POLICY)))
+                .as("ALLOW_UNSECURED_REJOINS only — the standing posture between windows")
+                .containsExactly(0x00, 0x02, 0x00);
+        assertThat(parametersOf(frameOf(closeFrames, FRAME_PERMIT_JOINING)))
+                .as("permitJoin(0) closes the MAC window").containsExactly(0x00);
+        assertThat(closedEventsAtClear)
+                .as("the NCP close ran BEFORE the record's close was published")
+                .containsExactly(0L);
+        assertThat(publisher.published()).extracting(EventEnvelope::eventType)
+                .containsExactly(EventTypes.PERMIT_JOIN_OPENED, EventTypes.PERMIT_JOIN_CLOSED);
+        assertThat(messages(Level.WARN, "zigbee.permit_join_ncp_close_failed")).isEmpty();
     }
 
     // ── T2: the cycle closes an elapsed window ONCE ──────────────────────────
@@ -246,11 +373,11 @@ class ZigbeePermitJoinTest {
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
         ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
 
-        assertThatThrownBy(() -> new PairingWindowRequest(0, "pair", "key-01"))
+        assertThatThrownBy(() -> new PairingWindowRequest(0, "pair", "key-01", null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("1")
                 .hasMessageContaining("254");
-        assertThatThrownBy(() -> new PairingWindowRequest(255, "pair", "key-01"))
+        assertThatThrownBy(() -> new PairingWindowRequest(255, "pair", "key-01", null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("254");
 
@@ -271,7 +398,7 @@ class ZigbeePermitJoinTest {
 
         assertThat(adapter.isPermitJoinActive()).as("closed before open").isFalse();
 
-        adapter.openPairingWindow(new PairingWindowRequest(200, "pair", "key-01"));
+        adapter.openPairingWindow(new PairingWindowRequest(200, "pair", "key-01", null));
         assertThat(adapter.isPermitJoinActive()).as("open at t0").isTrue();
 
         clock.advance(Duration.ofSeconds(199));
@@ -350,8 +477,18 @@ class ZigbeePermitJoinTest {
         assertThat(closed.get(0).payload()).isEqualTo(new PermitJoinClosed(integrationId,
                 "zigbee", PermitJoinClosed.CAUSE_TRANSPORT_REOPENED, window.opensAt(),
                 clock.instant()));
-        assertThat(countFrames(reopenedNcp, FRAME_PERMIT_JOINING))
-                .as("Reopen ≠ boot: the window is NOT renewed on the reopened NCP").isZero();
+        List<byte[]> reopenedJoins = framesWithId(reopenedNcp, FRAME_PERMIT_JOINING);
+        assertThat(reopenedJoins)
+                .as("Reopen ≠ boot: the window is NOT renewed — the ONE 0x0022 on the reopened "
+                        + "NCP is J2's close (permitJoin(0)), never an open")
+                .hasSize(1);
+        assertThat(reopenedJoins.get(0)[5]).isEqualTo((byte) 0);
+        assertThat(windowFrameIds(reopenedNcp))
+                .as("J2: the three-act close on the reopened NCP, in order; no enablement")
+                .containsExactly(
+                        EzspCoordinatorProtocol.FRAME_CLEAR_TRANSIENT_LINK_KEYS,
+                        EzspCoordinatorProtocol.FRAME_SET_POLICY,
+                        FRAME_PERMIT_JOINING);
     }
 
     // ── T4: shutdown and superseding opens ───────────────────────────────────
@@ -400,18 +537,39 @@ class ZigbeePermitJoinTest {
                 renewed.opensAt()));
         assertThat(publisher.published().get(2).payload()).isEqualTo(new PermitJoinOpened(
                 integrationId, "zigbee", 60, SECOND_REQUEST.reason(), SECOND_REQUEST.actor(),
-                renewed.opensAt(), renewed.opensAt().plusSeconds(60)));
+                renewed.opensAt(), renewed.opensAt().plusSeconds(60), null));
         assertThat(renewed.opensAt()).isEqualTo(first.opensAt().plusSeconds(30));
         List<byte[]> joins = framesWithId(ncp, FRAME_PERMIT_JOINING);
-        assertThat(joins).as("two permit-join frames").hasSize(2);
+        assertThat(joins).as("open(120) → the prior's close permitJoin(0) → open(60)")
+                .hasSize(3);
         assertThat(joins.get(0)[5]).isEqualTo((byte) WINDOW_SECONDS);
-        assertThat(joins.get(1)[5]).isEqualTo((byte) 60);
-        assertThat(enablementFrameIds(ncp))
-                .as("policy ×2 → transient key → permitJoin, for EACH open")
+        assertThat(joins.get(1)[5]).as("J2: the superseded window's MAC close")
+                .isEqualTo((byte) 0);
+        assertThat(joins.get(2)[5]).isEqualTo((byte) 60);
+        assertThat(windowFrameIds(ncp))
+                .as("J2: the prior's three-act close COMPLETES before the new enablement — "
+                        + "never between a policy write and a key import")
                 .containsExactly(
                         EzspCoordinatorProtocol.FRAME_SET_POLICY,
                         EzspCoordinatorProtocol.FRAME_SET_POLICY,
                         EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY,
+                        FRAME_PERMIT_JOINING,
+                        EzspCoordinatorProtocol.FRAME_CLEAR_TRANSIENT_LINK_KEYS,
+                        EzspCoordinatorProtocol.FRAME_SET_POLICY,
+                        FRAME_PERMIT_JOINING,
+                        EzspCoordinatorProtocol.FRAME_SET_POLICY,
+                        EzspCoordinatorProtocol.FRAME_SET_POLICY,
+                        EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY,
+                        FRAME_PERMIT_JOINING);
+        assertThat(enablementFrameIds(ncp))
+                .as("the enablement surface: the close's policy revert + permitJoin(0) sit "
+                        + "between the two enablements")
+                .containsExactly(
+                        EzspCoordinatorProtocol.FRAME_SET_POLICY,
+                        EzspCoordinatorProtocol.FRAME_SET_POLICY,
+                        EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY,
+                        FRAME_PERMIT_JOINING,
+                        EzspCoordinatorProtocol.FRAME_SET_POLICY,
                         FRAME_PERMIT_JOINING,
                         EzspCoordinatorProtocol.FRAME_SET_POLICY,
                         EzspCoordinatorProtocol.FRAME_SET_POLICY,
@@ -451,6 +609,28 @@ class ZigbeePermitJoinTest {
         assertThat(publisher.published())
                 .as("the cycle sees the renewed window still open — nothing more")
                 .hasSize(3);
+    }
+
+    @Test
+    @DisplayName("T4a-J2: close() with an open window runs the three-act NCP close (0x006B, "
+            + "policy 0x0002, permitJoin(0)) before the transport closes; the record closes once")
+    void close_withOpenWindow_runsTheNcpCloseFirst() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> formationHandler(ncp, command));
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        adapter.openPairingWindow(REQUEST);
+        int framesAtOpen = ncp.receivedEzspCommands().size();
+
+        adapter.close();
+
+        assertThat(windowFrameIdsOf(ncp.receivedEzspCommands()
+                .subList(framesAtOpen, ncp.receivedEzspCommands().size())))
+                .containsExactly(
+                        EzspCoordinatorProtocol.FRAME_CLEAR_TRANSIENT_LINK_KEYS,
+                        EzspCoordinatorProtocol.FRAME_SET_POLICY,
+                        FRAME_PERMIT_JOINING);
+        assertThat(publisher.ofType(EventTypes.PERMIT_JOIN_CLOSED).count()).isEqualTo(1);
+        assertThat(messages(Level.WARN, "zigbee.permit_join")).isEmpty();
     }
 
     // ── harness ─────────────────────────────────────────────────────────────
@@ -590,6 +770,12 @@ class ZigbeePermitJoinTest {
             return List.of(extendedResponse(seq, frameId,
                     new byte[] {0x00, 0x00, 0x00, 0x00}));
         }
+        if (frameId == EzspCoordinatorProtocol.FRAME_CLEAR_TRANSIENT_LINK_KEYS) {
+            // J2: clearTransientLinkKeys (0x006B) answers with NO status byte (bellows
+            // `(0x006B, (), ())`) — arrival is success. Unanswered, the close would
+            // never return on the TestClock: every closer here needs this arm.
+            return List.of(extendedResponse(seq, frameId, new byte[0]));
+        }
         return switch (frameId) {
             case 0x0005 -> List.of(extendedResponse(seq, 0x0005, new byte[0]));
             case FRAME_NETWORK_INIT, FRAME_FORM_NETWORK, FRAME_PERMIT_JOINING,
@@ -661,6 +847,43 @@ class ZigbeePermitJoinTest {
             }
         }
         return ids;
+    }
+
+    /** J2: the window-shaped frame ids (enablement + close) in send order. */
+    private static List<Integer> windowFrameIds(FakeNcp ncp) {
+        return windowFrameIdsOf(ncp.receivedEzspCommands());
+    }
+
+    private static List<Integer> windowFrameIdsOf(List<byte[]> commands) {
+        List<Integer> ids = new ArrayList<>();
+        for (byte[] command : commands) {
+            if (isLegacyVersion(command)) {
+                continue;
+            }
+            int frameId = frameIdOf(command);
+            if (frameId == EzspCoordinatorProtocol.FRAME_SET_POLICY
+                    || frameId == EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY
+                    || frameId == EzspCoordinatorProtocol.FRAME_CLEAR_TRANSIENT_LINK_KEYS
+                    || frameId == FRAME_PERMIT_JOINING) {
+                ids.add(frameId);
+            }
+        }
+        return ids;
+    }
+
+    /** The first non-legacy command with {@code frameId} in {@code commands}. */
+    private static byte[] frameOf(List<byte[]> commands, int frameId) {
+        for (byte[] command : commands) {
+            if (!isLegacyVersion(command) && frameIdOf(command) == frameId) {
+                return command;
+            }
+        }
+        throw new AssertionError("no frame 0x" + Integer.toHexString(frameId));
+    }
+
+    /** The parameters of an extended command (seq, 0x00, 0x01, id lo, id hi, params…). */
+    private static byte[] parametersOf(byte[] extendedCommand) {
+        return Arrays.copyOfRange(extendedCommand, 5, extendedCommand.length);
     }
 
     private static Logger adapterLogger() {

@@ -83,24 +83,44 @@ class PairingWindowEventTypeAnnotationTest {
     }
 
     @Test
-    @DisplayName("PairingWindowEvent is sealed and permits exactly the two records")
-    void sealedPermitsAreExactlyTheTwoRecords() {
+    @DisplayName("PairingWindowEvent is sealed and permits exactly the three records (J2: + JoinRejected)")
+    void sealedPermitsAreExactlyTheThreeRecords() {
         assertThat(PairingWindowEvent.class.isSealed()).isTrue();
         assertThat(PairingWindowEvent.class.getPermittedSubclasses())
-                .containsExactlyInAnyOrder(PermitJoinOpened.class, PermitJoinClosed.class);
+                .containsExactlyInAnyOrder(PermitJoinOpened.class, PermitJoinClosed.class,
+                        JoinRejected.class);
         assertThat(IntegrationLifecycleEvent.class.getPermittedSubclasses())
                 .as("the lifecycle hierarchy keeps its ten permits")
                 .hasSize(10)
-                .doesNotContain(PermitJoinOpened.class, PermitJoinClosed.class);
+                .doesNotContain(PermitJoinOpened.class, PermitJoinClosed.class,
+                        JoinRejected.class);
     }
 
     @Test
-    @DisplayName("the lifecycle manifest (the seam's codec registration) carries both, appended")
-    void lifecycleManifestCarriesBothAppended() {
+    @DisplayName("the lifecycle manifest (the seam's codec registration) carries the three, "
+            + "appended in order — JoinRejected last (J2)")
+    void lifecycleManifestCarriesTheThreeAppended() {
         List<Class<? extends DomainEvent>> manifest = IntegrationEvents.LIFECYCLE_EVENT_CLASSES;
-        assertThat(manifest).hasSize(12);
-        assertThat(manifest.subList(10, 12))
-                .containsExactly(PermitJoinOpened.class, PermitJoinClosed.class);
+        assertThat(manifest).hasSize(13);
+        assertThat(manifest.subList(10, 13))
+                .containsExactly(PermitJoinOpened.class, PermitJoinClosed.class,
+                        JoinRejected.class);
+    }
+
+    @Test
+    @DisplayName("J2: JoinRejected carries @EventType(EventTypes.JOIN_REJECTED) = join_rejected — "
+            + "an EventTypes constant outside the permit_join_ prefix (the two prefixed records "
+            + "stay exactly two) — and is a window event, never a lifecycle event")
+    void joinRejectedCarriesItsConstant_asAWindowEventApart() throws IllegalAccessException {
+        assertThat(JoinRejected.class.getAnnotation(EventType.class))
+                .as("JoinRejected is annotated").isNotNull()
+                .extracting(EventType::value).isEqualTo(EventTypes.JOIN_REJECTED);
+        assertThat(EventTypes.JOIN_REJECTED).isEqualTo("join_rejected");
+        assertThat(collectEventTypesConstants()).contains(EventTypes.JOIN_REJECTED);
+        assertThat(EXPECTED_RECORDS).hasSize(2).doesNotContain(JoinRejected.class);
+        assertThat(JoinRejected.class.isRecord()).isTrue();
+        assertThat(PairingWindowEvent.class.isAssignableFrom(JoinRejected.class)).isTrue();
+        assertThat(IntegrationLifecycleEvent.class.isAssignableFrom(JoinRejected.class)).isFalse();
     }
 
     @Test

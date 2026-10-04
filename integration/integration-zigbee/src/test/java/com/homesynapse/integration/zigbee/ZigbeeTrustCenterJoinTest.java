@@ -16,6 +16,7 @@ import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
+import com.homesynapse.integration.JoinRejected;
 import com.homesynapse.integration.PairingWindowRequest;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.IntegrationId;
@@ -99,6 +100,8 @@ class ZigbeeTrustCenterJoinTest {
     private TestClock clock;
     private RecordingEventPublisher publisher;
     private ListAppender<ILoggingEvent> ingestionLogCapture;
+    /** J2b T5b: callback frames delivered on the NEXT nop keepalive (no window to ride). */
+    private final Deque<byte[]> nopRiders = new ArrayDeque<>();
 
     @BeforeEach
     void setUp() {
@@ -293,8 +296,76 @@ class ZigbeeTrustCenterJoinTest {
         assertThat(adapter.allDevices()).isEmpty();
         assertThat(countFrames(ncp,
                 EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64)).isZero();
+        // J2b: the DENY is now ALSO the store event join_rejected — this window is
+        // un-scoped, so scope is null; the WARN above is byte-unchanged.
         assertThat(nonWindowEvents())
-                .as("no event of any type but permit_join_opened").isEmpty();
+                .as("ONE join_rejected and nothing else")
+                .extracting(EventEnvelope::eventType)
+                .containsExactly(EventTypes.JOIN_REJECTED);
+        assertThat(nonWindowEvents().get(0).schemaVersion()).isEqualTo(1);
+        JoinRejected rejected = (JoinRejected) nonWindowEvents().get(0).payload();
+        assertThat(rejected.integrationType()).isEqualTo("zigbee");
+        assertThat(rejected.joiner()).isEqualTo("0x00124B0012345678");
+        assertThat(rejected.scope()).isNull();
+        assertThat(rejected.status()).isEqualTo("UNSECURED_JOIN");
+        assertThat(rejected.at()).isEqualTo(clock.instant());
+    }
+
+    // ── J2b T5: the rejected joiner is a product event ──────────────────────
+
+    @Test
+    @DisplayName("T5a (J2b): a DENY_JOIN inside a SCOPED window → ONE join_rejected naming the "
+            + "joiner and the window's scope; the WARN is byte-unchanged; nothing synthesized")
+    void deniedJoinInsideScopedWindow_publishesOneJoinRejectedWithScope() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> tcjHandler(ncp, command, List.of(
+                trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
+                        EzspCoordinatorProtocol.DEVICE_UPDATE_UNSECURED_JOIN,
+                        EzspCoordinatorProtocol.JOIN_DECISION_DENY_JOIN))));
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+        adapter.openPairingWindow(scopedRequest("0x00124b00aaaaaaaa"));
+
+        deliverAndCycle(adapter);
+
+        assertThat(ingestionMessages(Level.WARN, "zigbee.device_join_failed"))
+                .containsExactly("zigbee.device_join_failed: "
+                        + "device=0x00124B0012345678 status=UNSECURED_JOIN "
+                        + "decision=DENY_JOIN");
+        assertThat(nonWindowEvents()).extracting(EventEnvelope::eventType)
+                .containsExactly(EventTypes.JOIN_REJECTED);
+        JoinRejected rejected = (JoinRejected) nonWindowEvents().get(0).payload();
+        assertThat(rejected.joiner()).isEqualTo("0x00124B0012345678");
+        assertThat(rejected.scope()).as("the window's scope, canonical")
+                .isEqualTo("0x00124B00AAAAAAAA");
+        assertThat(rejected.status()).isEqualTo("UNSECURED_JOIN");
+        assertThat(adapter.allDevices()).isEmpty();
+        assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
+                .isZero();
+    }
+
+    @Test
+    @DisplayName("T5b (J2b): a DENY_JOIN with NO window open → ONE join_rejected with scope "
+            + "null (P5's between-windows reading: a router still permitting)")
+    void deniedJoinWithNoWindow_publishesOneJoinRejectedWithoutScope() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> nopRiderHandler(ncp, command));
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+        assertThat(adapter.isPermitJoinActive()).isFalse();
+
+        nopRiders.add(trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
+                EzspCoordinatorProtocol.DEVICE_UPDATE_UNSECURED_JOIN,
+                EzspCoordinatorProtocol.JOIN_DECISION_DENY_JOIN));
+        deliverAndCycle(adapter);
+
+        assertThat(ingestionMessages(Level.WARN, "zigbee.device_join_failed")).hasSize(1);
+        assertThat(publisher.published()).extracting(EventEnvelope::eventType)
+                .as("no window ever opened: the rejection is the only event")
+                .containsExactly(EventTypes.JOIN_REJECTED);
+        JoinRejected rejected = (JoinRejected) publisher.published().get(0).payload();
+        assertThat(rejected.joiner()).isEqualTo("0x00124B0012345678");
+        assertThat(rejected.scope()).isNull();
+        assertThat(rejected.status()).isEqualTo("UNSECURED_JOIN");
+        assertThat(countFrames(ncp, FRAME_PERMIT_JOINING)).isZero();
     }
 
     // ── §A-5 the happy path is unchanged (no double-drive) ──────────────────
@@ -422,7 +493,12 @@ class ZigbeeTrustCenterJoinTest {
 
     /** PJ-2: the window opens by the request — the seconds the fixture's key used to set. */
     private static PairingWindowRequest request() {
-        return new PairingWindowRequest(200, "test", "test");
+        return new PairingWindowRequest(200, "test", "test", null);
+    }
+
+    /** J2b: the device-scoped open. */
+    private static PairingWindowRequest scopedRequest(String scope) {
+        return new PairingWindowRequest(200, "test", "test", scope);
     }
 
     private static void deliverAndCycle(ZigbeeIntegrationAdapter adapter) {
@@ -494,6 +570,19 @@ class ZigbeeTrustCenterJoinTest {
                     handleUnicast(seq, extendedParameters(command));
             default -> defaultResponses(seq, command);
         };
+    }
+
+    /** The tcjHandler with the nop keepalive as the rider carrier (T5b: no 0x0022 to ride). */
+    private List<byte[]> nopRiderHandler(FakeNcp ncp, byte[] command) {
+        if (!isLegacyVersion(command) && frameIdOf(command) == 0x0005) {
+            List<byte[]> frames = new ArrayList<>();
+            while (!nopRiders.isEmpty()) {
+                frames.add(nopRiders.poll());
+            }
+            frames.add(extendedResponse(command[0] & 0xFF, 0x0005, new byte[0]));
+            return frames;
+        }
+        return tcjHandler(ncp, command, List.of());
     }
 
     private List<byte[]> defaultResponses(int seq, byte[] command) {

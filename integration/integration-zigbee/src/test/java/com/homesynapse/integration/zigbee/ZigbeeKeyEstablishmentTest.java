@@ -14,6 +14,7 @@ import com.homesynapse.device.InMemoryEntityRegistry;
 import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
+import com.homesynapse.integration.PairingWindowRequest;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.IntegrationId;
 import com.homesynapse.platform.identity.UlidFactory;
@@ -85,6 +86,8 @@ class ZigbeeKeyEstablishmentTest {
     private InMemoryDeviceRegistry deviceRegistry;
     private InMemoryEntityRegistry entityRegistry;
     private ListAppender<ILoggingEvent> ingestionLogCapture;
+    /** J2b / IR-115: the adapter's reclassification INFO rides the adapter logger. */
+    private ListAppender<ILoggingEvent> adapterLogCapture;
 
     /** Callback frames delivered on the NEXT nop keepalive (the rig pump idiom). */
     private final Deque<byte[]> riders = new ArrayDeque<>();
@@ -98,11 +101,15 @@ class ZigbeeKeyEstablishmentTest {
         ingestionLogCapture = new ListAppender<>();
         ingestionLogCapture.start();
         ingestionLogger().addAppender(ingestionLogCapture);
+        adapterLogCapture = new ListAppender<>();
+        adapterLogCapture.start();
+        adapterLogger().addAppender(adapterLogCapture);
     }
 
     @AfterEach
     void tearDown() {
         ingestionLogger().detachAppender(ingestionLogCapture);
+        adapterLogger().detachAppender(adapterLogCapture);
     }
 
     @Test
@@ -157,6 +164,76 @@ class ZigbeeKeyEstablishmentTest {
                 .containsExactly("zigbee.key_establishment_failed: device="
                         + PARTNER_HEX + " status=0x77");
         assertPin(adapter, ncp);
+    }
+
+    // ── J2b / IR-115: the scoped window's own partner at expiry ─────────────
+
+    @Test
+    @DisplayName("T11a (IR-115): after a SCOPED open, a failure-class 0x009B naming the scoped "
+            + "partner keeps the WARN byte-exact AND adds ONE INFO zigbee.transient_key_expired")
+    void failureForScopedPartner_warnUnchanged_plusExpiredInfo() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::formationHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+        adapter.openPairingWindow(new PairingWindowRequest(60, "recover", "test",
+                "0x00124b0012345678"));
+
+        deliver(adapter, keyEstablishmentCallback(PARTNER_IEEE,
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT));
+
+        assertThat(ingestionMessages(Level.WARN, "zigbee.key_establishment_failed"))
+                .containsExactly("zigbee.key_establishment_failed: device="
+                        + PARTNER_HEX + " status=TC_REQUESTER_VERIFY_KEY_TIMEOUT");
+        assertThat(adapterMessages(Level.INFO, "zigbee.transient_key_expired"))
+                .containsExactly("zigbee.transient_key_expired: partner=" + PARTNER_HEX
+                        + " scope=" + PARTNER_HEX);
+        assertThat(adapter.device(new IEEEAddress(PARTNER_IEEE)))
+                .as("the handler still creates no device").isEmpty();
+    }
+
+    @Test
+    @DisplayName("T11b (IR-115): a failure for a FOREIGN partner after a scoped open is the "
+            + "WARN alone — never reclassified")
+    void failureForForeignPartner_warnOnly() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::formationHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+        adapter.openPairingWindow(new PairingWindowRequest(60, "recover", "test",
+                "0x00124b0012345678"));
+
+        deliver(adapter, keyEstablishmentCallback(0x00124B00AAAAAAAAL,
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT));
+
+        assertThat(ingestionMessages(Level.WARN, "zigbee.key_establishment_failed"))
+                .containsExactly("zigbee.key_establishment_failed: device=0x00124B00AAAAAAAA"
+                        + " status=TC_REQUESTER_VERIFY_KEY_TIMEOUT");
+        assertThat(adapterMessages(Level.INFO, "zigbee.transient_key_expired")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("T11c (IR-115): the all-zeros partner (EmberZNet's 'no specific partner') is "
+            + "the scoped key expiring ONLY once a scoped window has been opened — before "
+            + "that, the same frame is the WARN alone")
+    void allZerosPartner_infoOnlyAfterAScopedOpen() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::formationHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+
+        deliver(adapter, keyEstablishmentCallback(0L,
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT));
+        assertThat(adapterMessages(Level.INFO, "zigbee.transient_key_expired"))
+                .as("no scoped window yet: nothing to attribute the expiry to").isEmpty();
+
+        adapter.openPairingWindow(new PairingWindowRequest(60, "recover", "test",
+                "0x00124b0012345678"));
+        deliver(adapter, keyEstablishmentCallback(0L,
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT));
+
+        assertThat(ingestionMessages(Level.WARN, "zigbee.key_establishment_failed"))
+                .as("both frames WARN — the reclassification is an ADDED line").hasSize(2);
+        assertThat(adapterMessages(Level.INFO, "zigbee.transient_key_expired"))
+                .containsExactly("zigbee.transient_key_expired: partner=0x0000000000000000 "
+                        + "scope=" + PARTNER_HEX);
     }
 
     @Test
@@ -567,6 +644,15 @@ class ZigbeeKeyEstablishmentTest {
                 frames.add(extendedResponse(seq, FRAME_NOP, new byte[0]));
                 yield frames;
             }
+            // J2b T11: the scoped open's enablement (the ZigbeePermitJoinTest arms). No
+            // close is ever reached in this class — no 0x006B arm, by design.
+            case EzspCoordinatorProtocol.FRAME_SET_POLICY ->
+                    List.of(extendedResponse(seq, EzspCoordinatorProtocol.FRAME_SET_POLICY,
+                            new byte[] {0x00}));
+            case EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY ->
+                    List.of(extendedResponse(seq,
+                            EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY,
+                            new byte[] {0x00, 0x00, 0x00, 0x00}));
             case FRAME_NETWORK_INIT, FRAME_PERMIT_JOINING,
                     FRAME_SET_INITIAL_SECURITY_STATE ->
                     List.of(extendedResponse(seq, frameIdOf(command),
@@ -630,6 +716,18 @@ class ZigbeeKeyEstablishmentTest {
                 .map(ILoggingEvent::getFormattedMessage)
                 .filter(message -> message.startsWith(prefix))
                 .toList();
+    }
+
+    private List<String> adapterMessages(Level level, String prefix) {
+        return adapterLogCapture.list.stream()
+                .filter(event -> event.getLevel() == level)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith(prefix))
+                .toList();
+    }
+
+    private static Logger adapterLogger() {
+        return (Logger) LoggerFactory.getLogger(ZigbeeIntegrationAdapter.class);
     }
 
     private static Logger ingestionLogger() {

@@ -23,6 +23,7 @@ import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.integration.CommandHandler;
 import com.homesynapse.integration.IntegrationContext;
+import com.homesynapse.integration.JoinRejected;
 import com.homesynapse.integration.PairingWindow;
 import com.homesynapse.integration.PairingWindowControl;
 import com.homesynapse.integration.PairingWindowRequest;
@@ -53,6 +54,7 @@ import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
@@ -193,6 +195,15 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
     static final int AVAILABILITY_CHANGED_SCHEMA_VERSION = 2;
 
     /**
+     * J2b: {@code permit_join_opened} publishes at schema version 2 — PJ-2's seven
+     * fields plus the nullable {@code scope}. Additive-nullable like J1's event: a v1
+     * row decodes to the record with {@code scope == null}; a v2 row with a null scope
+     * encodes to the v1 byte shape. {@code permit_join_closed} and {@code join_rejected}
+     * stay at 1.
+     */
+    static final int PERMIT_JOIN_OPENED_SCHEMA_VERSION = 2;
+
+    /**
      * LINK-READ: what {@code last_lqi=}, {@code last_rssi_dbm=} and
      * {@code last_link_at=} print for a device with no link reading this
      * process (a seeded device that has not spoken) — never a default number.
@@ -264,6 +275,23 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
      * {@code permit_join_closed} — ONE close per window, never two.
      */
     private final AtomicReference<PairingWindow> currentWindow = new AtomicReference<>();
+    /**
+     * J2b — the fence between the NCP's window frames: an enablement (policy ×2 → key
+     * import → permitJoin) and a close (0x006B → policy → permitJoin(0)) never
+     * interleave. Held by {@link #openPairingWindow} across the prior's close, the
+     * enablement, {@code permitJoin} and {@code currentWindow.set}; by every closer
+     * across {@link #closeOnNcp}. Lock order: THIS lock outside, the protocol's own
+     * per-exchange lock inside — never the reverse. {@link ReentrantLock} only (LTD-11).
+     */
+    private final ReentrantLock ncpWindowLock = new ReentrantLock();
+    /**
+     * J2b / IR-115 — the canonical IEEE of the last SCOPED window opened (never cleared
+     * by a close: the scoped transient key outlives the window on the NCP by up to its
+     * own ~300 s lifetime, and its expiry names this partner or the all-zeros "no
+     * specific partner"). {@code null} until a scoped window opens. Written on the
+     * command executor, read on the run thread — {@code volatile}.
+     */
+    private volatile String lastScopedPartner;
     /**
      * The admission epoch (PJ-2): bumped by every {@link #openPairingWindow} on the
      * command executor (the single writer); {@link #runCycleOnce()} compares it
@@ -998,24 +1026,51 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
     public PairingWindow openPairingWindow(PairingWindowRequest request) {
         Objects.requireNonNull(request, "request");
         int duration = request.durationSeconds();
-        protocol.enablePreconfiguredKeyJoins();   // §A.1: policy → transient key
-        protocol.permitJoin(duration);
-        Instant opensAt = clock.instant();
-        PairingWindow window = new PairingWindow(context.integrationId(), opensAt,
-                opensAt.plusSeconds(duration), duration, request.reason(), request.actor());
-        PairingWindow prior = currentWindow.get();
-        if (prior != null && currentWindow.compareAndSet(prior, null)) {
-            closePrior(prior, opensAt);
+        ncpWindowLock.lock();
+        try {
+            // J2b (§4.2's fence): the prior window's close — the record AND the NCP's
+            // three acts — runs to completion BEFORE the new enablement, never between
+            // a policy write and a key import; the deadline is nulled here too, so a
+            // failed enablement below leaves no window on either side.
+            PairingWindow prior = currentWindow.get();
+            if (prior != null && currentWindow.compareAndSet(prior, null)) {
+                closePrior(prior, clock.instant());
+            }
+            permitJoinDeadline = null;
+            if (request.scope() != null) {
+                // J2b: the device-scoped recovery window — TC policy 0x0013 and the
+                // transient key partnered with the one named device (D-v94-24).
+                protocol.enableScopedKeyJoins(IEEEAddress.fromHexString(request.scope()));
+            } else {
+                protocol.enablePreconfiguredKeyJoins();   // §A.1: policy → transient key
+            }
+            protocol.permitJoin(duration);
+            Instant opensAt = clock.instant();
+            PairingWindow window = new PairingWindow(context.integrationId(), opensAt,
+                    opensAt.plusSeconds(duration), duration, request.reason(),
+                    request.actor(), request.scope());
+            if (window.scope() != null) {
+                lastScopedPartner = window.scope();
+            }
+            permitJoinDeadline = window.closesAt();
+            currentWindow.set(window);
+            permitJoinEpoch++;   // the executor is the single writer
+            publishWindowEvent(EventTypes.PERMIT_JOIN_OPENED,
+                    PERMIT_JOIN_OPENED_SCHEMA_VERSION, new PermitJoinOpened(
+                            context.integrationId(), context.integrationType(), duration,
+                            request.reason(), request.actor(), opensAt, window.closesAt(),
+                            window.scope()));
+            // The opened line is FROZEN (bench.sh watches it); the scope rides a second
+            // INFO after it, only when scoped.
+            log.info("zigbee.permit_join_opened: duration={}s reason={} actor={}",
+                    duration, request.reason(), request.actor());
+            if (window.scope() != null) {
+                log.info("zigbee.permit_join_scoped: scope={}", window.scope());
+            }
+            return window;
+        } finally {
+            ncpWindowLock.unlock();
         }
-        permitJoinDeadline = window.closesAt();
-        currentWindow.set(window);
-        permitJoinEpoch++;   // the executor is the single writer
-        publishWindowEvent(EventTypes.PERMIT_JOIN_OPENED, new PermitJoinOpened(
-                context.integrationId(), context.integrationType(), duration,
-                request.reason(), request.actor(), opensAt, window.closesAt()));
-        log.info("zigbee.permit_join_opened: duration={}s reason={} actor={}",
-                duration, request.reason(), request.actor());
-        return window;
     }
 
     /** Never-false-ALIVE: a window past its own end is not current, recorded or not. */
@@ -1056,19 +1111,57 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         }
         if (currentWindow.compareAndSet(open, null)) {
             permitJoinDeadline = null;
-            publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, new PermitJoinClosed(
+            closeOnNcp(PermitJoinClosed.CAUSE_ELAPSED);
+            publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, 1, new PermitJoinClosed(
                     context.integrationId(), context.integrationType(),
                     PermitJoinClosed.CAUSE_ELAPSED, open.opensAt(), open.closesAt()));
         }
     }
 
-    /** The superseding open's close of the prior window (DP-PJ2-3; E5). */
+    /**
+     * The superseding open's close of the prior window (DP-PJ2-3; E5). Since J2b the
+     * NCP's three-act close runs here too, BEFORE the caller's new enablement (the
+     * caller holds {@link #ncpWindowLock} across both, and this method re-enters it).
+     * {@code now} is read before the new open's enablement, so on a fixed clock the
+     * superseded window's {@code closedAt} EQUALS the renewed window's {@code opensAt}
+     * (accepted at GO); on silicon it precedes it by the enablement's round trips.
+     */
     private void closePrior(PairingWindow prior, Instant now) {
         boolean stillOpen = now.isBefore(prior.closesAt());
-        publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, new PermitJoinClosed(
-                context.integrationId(), context.integrationType(),
-                stillOpen ? PermitJoinClosed.CAUSE_SUPERSEDED : PermitJoinClosed.CAUSE_ELAPSED,
+        String cause = stillOpen ? PermitJoinClosed.CAUSE_SUPERSEDED
+                : PermitJoinClosed.CAUSE_ELAPSED;
+        closeOnNcp(cause);
+        publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, 1, new PermitJoinClosed(
+                context.integrationId(), context.integrationType(), cause,
                 prior.opensAt(), stillOpen ? now : prior.closesAt()));
+    }
+
+    /**
+     * J2b — the NCP side of EVERY close: {@link CoordinatorProtocol#closeJoinWindow()}
+     * (0x006B → policy 0x0002 → permitJoin(0)) under {@link #ncpWindowLock}, so it never
+     * interleaves with an enablement's frames. Inside the lock the window of record is
+     * re-read: a closer that lost the race to a fresh open (the elapsed closer's CAS
+     * won, then the executor opened and enabled a NEW window before this thread took the
+     * lock) must not clear the new window's key and policy — it skips with a DEBUG and
+     * the new enablement stands. A rejected or timed-out exchange is ONE WARN; the record
+     * still closes (the stack's own transient-key expiry is the backstop — today's
+     * behavior). Lock order: this lock outside, the protocol's per-exchange lock inside.
+     */
+    private void closeOnNcp(String cause) {
+        ncpWindowLock.lock();
+        try {
+            if (currentWindow.get() != null) {
+                log.debug("zigbee.permit_join_ncp_close_skipped: cause={} "
+                        + "reason=newer_window_open", cause);
+                return;
+            }
+            protocol.closeJoinWindow();
+        } catch (RuntimeException failure) {
+            log.warn("zigbee.permit_join_ncp_close_failed: cause={}: {}", cause,
+                    failure.getMessage());
+        } finally {
+            ncpWindowLock.unlock();
+        }
     }
 
     /**
@@ -1082,7 +1175,8 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
     private void closeWindow(String cause) {
         PairingWindow open = currentWindow.getAndSet(null);
         if (open != null) {
-            publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, new PermitJoinClosed(
+            closeOnNcp(cause);   // J2b: the NCP's three acts before the record's close
+            publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, 1, new PermitJoinClosed(
                     context.integrationId(), context.integrationType(), cause,
                     open.opensAt(), clock.instant()));
         }
@@ -1107,10 +1201,11 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
      * window state stands — the NCP's state is the truth; the record's gap is the
      * finding.
      */
-    private void publishWindowEvent(String eventType, DomainEvent payload) {
+    private void publishWindowEvent(String eventType, int schemaVersion,
+            DomainEvent payload) {
         try {
             context.eventPublisher().publishRoot(new EventDraft(
-                    eventType, 1, clock.instant(),
+                    eventType, schemaVersion, clock.instant(),
                     SubjectRef.integration(context.integrationId()),
                     EventPriority.NORMAL, EventOrigin.INTEGRATION,
                     payload, null, null));
@@ -1713,6 +1808,37 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         }
 
         /**
+         * J2b (D-v94-24): the WARN the unit logged becomes the store event
+         * {@code join_rejected} — the joiner beside the OPEN window's scope ({@code null}
+         * when the window is un-scoped or no window is open: P5's between-windows
+         * reading). ONE event per 0x0024 DENY; the unit stays event-free.
+         */
+        @Override
+        public void onJoinDenied(IEEEAddress joiner, String status, String decision) {
+            PairingWindow open = currentWindow.get();
+            publishWindowEvent(EventTypes.JOIN_REJECTED, 1, new JoinRejected(
+                    context.integrationId(), context.integrationType(), joiner.toHexString(),
+                    open != null ? open.scope() : null, status, clock.instant()));
+        }
+
+        /**
+         * J2b / IR-115: after a scoped open the NCP's key-establishment failure names
+         * THAT partner — or EmberZNet's all-zeros "no specific partner" — when the scoped
+         * transient key expires: a device-shaped WARN that is the designed expiry, so it
+         * is reclassified by ONE INFO beside the WARN (which stays, byte-exact). Any
+         * other partner, or no scoped window ever opened, stays the WARN alone — never
+         * guess the cause.
+         */
+        @Override
+        public void onKeyEstablishment(IEEEAddress partner, int status) {
+            String scope = lastScopedPartner;
+            if (scope != null && (partner.value() == 0L
+                    || scope.equals(partner.toHexString()))) {
+                log.info("zigbee.transient_key_expired: partner={} scope={}", partner, scope);
+            }
+        }
+
+        /**
          * The admission (F-R4-1 §1/§4/§5): relink ≠ adopt — a device already
          * in the adoption maps never re-enters (today's relink path is
          * untouched; DEBUG-noted); otherwise EXACTLY the announce path's two
@@ -1723,6 +1849,17 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
          */
         private void admitRejoinCandidate(IEEEAddress device, int networkAddress,
                 String source) {
+            // J2b: a SCOPED window admits its one device only — the host-side half of
+            // the trust center's deny (a rejoin needs no key, so the NCP cannot refuse
+            // it; this gate can). A NEW line beside the two existing reasons.
+            PairingWindow open = currentWindow.get();
+            if (open != null && open.scope() != null
+                    && !open.scope().equals(device.toHexString())) {
+                log.debug("zigbee.rejoin_candidate_ignored: device={} nwk=0x{} "
+                                + "source={} reason=outside_scope scope={}",
+                        device, Integer.toHexString(networkAddress), source, open.scope());
+                return;
+            }
             if (adoption.deviceIdFor(device).isPresent()) {
                 log.debug("zigbee.rejoin_candidate_ignored: device={} nwk=0x{} "
                                 + "source={} reason=already_adopted",

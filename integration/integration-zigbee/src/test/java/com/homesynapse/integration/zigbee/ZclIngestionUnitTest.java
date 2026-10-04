@@ -58,6 +58,8 @@ class ZclIngestionUnitTest {
     private List<Optional<LinkReading>> linksSeen;
     private List<NwkHook> nwkHooks;
     private List<IeeeHook> ieeeHooks;
+    private List<JoinDenied> joinDenials;
+    private List<KeyHook> keyHooks;
     private List<ZclFrame> sentFrames;
     private List<Integer> sentTargets;
     private boolean sendAccepted;
@@ -76,6 +78,10 @@ class ZclIngestionUnitTest {
 
     /** One F-R4-1 H-i signal: an accepted rejoin's (EUI64, nwk). */
     private record IeeeHook(IEEEAddress device, int networkAddress) { }
+    /** J2b: one {@code onJoinDenied} call as the unit raised it. */
+    private record JoinDenied(IEEEAddress joiner, String status, String decision) { }
+    /** J2b: one {@code onKeyEstablishment} call as the unit raised it (the failure arm). */
+    private record KeyHook(IEEEAddress partner, int status) { }
 
     @BeforeEach
     void setUp() {
@@ -94,6 +100,8 @@ class ZclIngestionUnitTest {
         linksSeen = new ArrayList<>();
         nwkHooks = new ArrayList<>();
         ieeeHooks = new ArrayList<>();
+        joinDenials = new ArrayList<>();
+        keyHooks = new ArrayList<>();
         sentFrames = new ArrayList<>();
         sentTargets = new ArrayList<>();
         sendAccepted = true;
@@ -144,6 +152,17 @@ class ZclIngestionUnitTest {
                     public void onRejoinCandidate(IEEEAddress device,
                             int networkAddress) {
                         ieeeHooks.add(new IeeeHook(device, networkAddress));
+                    }
+
+                    @Override
+                    public void onJoinDenied(IEEEAddress joiner, String status,
+                            String decision) {
+                        joinDenials.add(new JoinDenied(joiner, status, decision));
+                    }
+
+                    @Override
+                    public void onKeyEstablishment(IEEEAddress partner, int status) {
+                        keyHooks.add(new KeyHook(partner, status));
                     }
                 };
         ingestion = new ZclIngestionUnit(() -> {
@@ -350,6 +369,47 @@ class ZclIngestionUnitTest {
         assertThat(ingestionMessages(Level.INFO, "zigbee.device_join:")).hasSize(1);
         assertThat(ingestionMessages(Level.WARN, "zigbee.device_join_failed")).hasSize(1);
         assertThat(ingestionMessages(Level.INFO, "zigbee.device_left")).hasSize(1);
+        assertThat(publisher.published()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("J2b T6a: a DENIED 0x0024 raises onJoinDenied(joiner, status, decision) ONCE — "
+            + "the WARN text is byte-unchanged; the unit itself still publishes nothing")
+    void deniedJoin_raisesOnJoinDenied_warnUnchanged() {
+        pendingFrames.add(trustCenterJoinFrame(SNZB.value(), SNZB_NWK,
+                EzspCoordinatorProtocol.DEVICE_UPDATE_UNSECURED_JOIN,
+                EzspCoordinatorProtocol.JOIN_DECISION_DENY_JOIN));
+
+        ingestion.processCycle();
+
+        assertThat(joinDenials).containsExactly(
+                new JoinDenied(SNZB, "UNSECURED_JOIN", "DENY_JOIN"));
+        assertThat(ingestionMessages(Level.WARN, "zigbee.device_join_failed"))
+                .containsExactly("zigbee.device_join_failed: device=0x00124B0012345678 "
+                        + "status=UNSECURED_JOIN decision=DENY_JOIN");
+        assertThat(ieeeHooks).isEmpty();
+        assertThat(keyHooks).isEmpty();
+        assertThat(publisher.published()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("J2b T6b: a FAILED 0x009B raises onKeyEstablishment(partner, status) ONCE with "
+            + "the WARN byte-unchanged; an established status raises nothing")
+    void failedKeyEstablishment_raisesOnKeyEstablishment_warnUnchanged() {
+        pendingFrames.add(keyEstablishmentFrame(SNZB.value(),
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT));
+        pendingFrames.add(keyEstablishmentFrame(SNZB.value(),
+                EzspCoordinatorProtocol.KEY_STATUS_TRUST_CENTER_LINK_KEY_ESTABLISHED));
+
+        ingestion.processCycle();
+
+        assertThat(keyHooks).containsExactly(new KeyHook(SNZB,
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT));
+        assertThat(ingestionMessages(Level.WARN, "zigbee.key_establishment_failed"))
+                .containsExactly("zigbee.key_establishment_failed: device=0x00124B0012345678 "
+                        + "status=TC_REQUESTER_VERIFY_KEY_TIMEOUT");
+        assertThat(ingestionMessages(Level.INFO, "zigbee.key_established")).hasSize(1);
+        assertThat(joinDenials).isEmpty();
         assertThat(publisher.published()).isEmpty();
     }
 
@@ -1296,6 +1356,18 @@ class ZclIngestionUnitTest {
     }
 
     /** A 0x0024 trustCenterJoinHandler callback: nodeId, EUI64, status, decision, parent. */
+    /** A 0x009B zigbeeKeyEstablishmentHandler callback: partner EUI64 LE + status u8. */
+    private static EzspFrame keyEstablishmentFrame(long partner, int status) {
+        byte[] parameters = new byte[9];
+        for (int i = 0; i < 8; i++) {
+            parameters[i] = (byte) (partner >> (8 * i));
+        }
+        parameters[8] = (byte) status;
+        return new EzspFrame(
+                EzspCoordinatorProtocol.FRAME_ZIGBEE_KEY_ESTABLISHMENT_HANDLER, true,
+                parameters);
+    }
+
     private static EzspFrame trustCenterJoinFrame(long ieee, int nwk, int status,
             int decision) {
         byte[] parameters = new byte[14];

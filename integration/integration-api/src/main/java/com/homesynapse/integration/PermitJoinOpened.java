@@ -17,6 +17,12 @@ import java.util.Objects;
  * the adapter after the coordinator accepted the open; the fields mirror the
  * {@link PairingWindow} the adapter returned.
  *
+ * <p><strong>Version history.</strong> Schema version 1 (PJ-2): the seven fields
+ * {@code integrationId … closesAt}. Schema version 2 (J2b): {@code + scope}, additive and
+ * nullable — the persistence codec's tolerant decode is the upcast: a v1 row reads as this
+ * record with {@code scope == null}; a v2 row with a null scope ENCODES to the v1 byte
+ * shape (the mapper omits nulls); a v2 row read by a pre-J2 core ignores the extra key.
+ *
  * @param integrationId   the integration instance identity; never {@code null}
  * @param integrationType the software identity (e.g., {@code "zigbee"}); never {@code null}
  * @param durationSeconds the accepted window length in seconds
@@ -24,7 +30,11 @@ import java.util.Objects;
  * @param actor           the caller's API key id; never {@code null}
  * @param opensAt         the adapter's clock instant of the accepted open; never {@code null}
  * @param closesAt        {@code opensAt + durationSeconds}; never {@code null}
+ * @param scope           the one device the window admits, canonical {@code 0x} + 16
+ *                        upper-case hex (J2b, schema 2), or {@code null} for an un-scoped
+ *                        window — never required by the constructor
  * @see PermitJoinClosed
+ * @see JoinRejected
  */
 @EventType(EventTypes.PERMIT_JOIN_OPENED)
 public record PermitJoinOpened(
@@ -34,7 +44,8 @@ public record PermitJoinOpened(
         String reason,
         String actor,
         Instant opensAt,
-        Instant closesAt
+        Instant closesAt,
+        String scope
 ) implements PairingWindowEvent {
 
     public PermitJoinOpened {

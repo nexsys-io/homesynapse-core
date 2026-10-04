@@ -119,6 +119,15 @@ class FixtureReplayTest {
             @Override
             public void onRejoinCandidate(IEEEAddress device, int networkAddress) {
             }
+
+            @Override
+            public void onJoinDenied(IEEEAddress joiner, String status, String decision) {
+                // Fixture replay opens no window: a denial is observability only.
+            }
+
+            @Override
+            public void onKeyEstablishment(IEEEAddress partner, int status) {
+            }
         }, deduplicator, publisher, clock, (frame, networkAddress) -> true);
     }
 

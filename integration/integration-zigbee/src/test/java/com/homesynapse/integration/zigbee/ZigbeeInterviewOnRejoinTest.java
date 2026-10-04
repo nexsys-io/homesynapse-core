@@ -20,6 +20,7 @@ import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.integration.HealthReporter;
 import com.homesynapse.integration.IntegrationContext;
+import com.homesynapse.integration.JoinRejected;
 import com.homesynapse.integration.PairingWindowRequest;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
@@ -675,8 +676,61 @@ class ZigbeeInterviewOnRejoinTest {
                 .isZero();
         assertThat(lookupRequests).isEmpty();
         assertThat(adapter.allDevices()).isEmpty();
-        assertThat(nonWindowEvents())
-                .as("no event of any type but permit_join_opened").isEmpty();
+        // J2b: the DENY is now ALSO the store event join_rejected (scope null — this
+        // window is un-scoped); still no schedule, no device, no lookup.
+        assertThat(nonWindowEvents()).extracting(EventEnvelope::eventType)
+                .containsExactly(EventTypes.JOIN_REJECTED);
+        JoinRejected rejected = (JoinRejected) nonWindowEvents().get(0).payload();
+        assertThat(rejected.joiner()).isEqualTo("0x00124B0012345678");
+        assertThat(rejected.scope()).isNull();
+        assertThat(rejected.status()).isEqualTo("SECURED_REJOIN");
+    }
+
+    @Test
+    @DisplayName("J2b T7a: inside a SCOPED window an accepted rejoin from a device OUTSIDE the "
+            + "scope is DEBUG-noted reason=outside_scope and never scheduled")
+    void acceptedRejoinOutsideScope_neverSchedules() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::rejoinHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(scopedRequest("0x00124b00aaaaaaaa"));
+
+        riders.add(trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
+                EzspCoordinatorProtocol.DEVICE_UPDATE_SECURED_REJOIN,
+                EzspCoordinatorProtocol.JOIN_DECISION_NO_ACTION));
+        deliverAndCycle(adapter);
+
+        assertThat(ingestionMessages(Level.INFO, "zigbee.device_join:")).hasSize(1);
+        assertThat(adapterMessages(Level.DEBUG, "zigbee.rejoin_candidate_ignored"))
+                .containsExactly("zigbee.rejoin_candidate_ignored: "
+                        + "device=0x00124B0012345678 nwk=0x6b9a source=tc_join "
+                        + "reason=outside_scope scope=0x00124B00AAAAAAAA");
+        assertThat(adapterMessages(Level.INFO, "zigbee.rejoin_candidate:")).isEmpty();
+        assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
+                .isZero();
+        assertThat(nonWindowEvents()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("J2b T7b: inside a SCOPED window the scoped device's own accepted rejoin "
+            + "admits exactly as today — rejoin_candidate, ONE interview walk")
+    void acceptedRejoinInsideScope_admitsAsToday() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::rejoinHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, List.of());
+        adapter.openPairingWindow(scopedRequest("0x00124b0012345678"));
+
+        riders.add(trustCenterJoinCallback(SNZB_IEEE, SNZB_NWK,
+                EzspCoordinatorProtocol.DEVICE_UPDATE_SECURED_REJOIN,
+                EzspCoordinatorProtocol.JOIN_DECISION_NO_ACTION));
+        deliverAndCycle(adapter);
+
+        assertThat(adapterMessages(Level.INFO, "zigbee.rejoin_candidate:"))
+                .containsExactly("zigbee.rejoin_candidate: device=0x00124B0012345678 "
+                        + "nwk=0x6b9a source=tc_join");
+        assertThat(adapterMessages(Level.DEBUG, "zigbee.rejoin_candidate_ignored")).isEmpty();
+        assertThat(countFrames(ncp, EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64))
+                .as("exactly ONE interview walk started").isEqualTo(1);
     }
 
     @Test
@@ -828,7 +882,12 @@ class ZigbeeInterviewOnRejoinTest {
 
     /** PJ-2: the window opens by the request — WINDOW_SECONDS, a test reason and actor. */
     private static PairingWindowRequest request() {
-        return new PairingWindowRequest(WINDOW_SECONDS, "test", "test");
+        return new PairingWindowRequest(WINDOW_SECONDS, "test", "test", null);
+    }
+
+    /** J2b: the device-scoped open. */
+    private static PairingWindowRequest scopedRequest(String scope) {
+        return new PairingWindowRequest(WINDOW_SECONDS, "test", "test", scope);
     }
 
     private static void deliverAndCycle(ZigbeeIntegrationAdapter adapter) {
@@ -934,6 +993,11 @@ class ZigbeeInterviewOnRejoinTest {
         if (frameId == EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY) {
             return List.of(extendedResponse(seq, frameId,
                     new byte[] {0x00, 0x00, 0x00, 0x00}));
+        }
+        if (frameId == EzspCoordinatorProtocol.FRAME_CLEAR_TRANSIENT_LINK_KEYS) {
+            // J2: 0x006B answers with NO status byte — arrival is success; unanswered,
+            // a close would never return on the TestClock.
+            return List.of(extendedResponse(seq, frameId, new byte[0]));
         }
         if (frameId == EzspCoordinatorProtocol.FRAME_LOOKUP_NODE_ID_BY_EUI64) {
             return List.of(extendedResponse(seq, frameId, new byte[] {

@@ -8,22 +8,24 @@ import com.homesynapse.event.DomainEvent;
 import com.homesynapse.platform.identity.IntegrationId;
 
 /**
- * Sealed root of the pairing-window event payloads (PJ-2, DP-PJ2-2): the window is a
- * declared, time-boxed, RECORDED act, and these two events are its record.
+ * Sealed root of the pairing-window event payloads (PJ-2, DP-PJ2-2; J2b): the window is a
+ * declared, time-boxed, RECORDED act, and these three events are its record — the open,
+ * the close, and the joiner the trust center turned away.
  *
  * <p>Deliberately a sibling of {@link IntegrationLifecycleEvent}, not a member of it —
  * a window event is not a health transition and carries no {@code previousState} /
- * {@code newState}. Both records are published by the ADAPTER (origin
+ * {@code newState}. All three records are published by the ADAPTER (origin
  * {@code INTEGRATION}, subject {@code integration(id)}) and registered through
  * {@link IntegrationEvents#LIFECYCLE_EVENT_CLASSES}, the seam's codec manifest.</p>
  *
  * <ul>
- *   <li>{@link PermitJoinOpened} — {@code permit_join_opened}</li>
+ *   <li>{@link PermitJoinOpened} — {@code permit_join_opened} (schema 2 since J2b)</li>
  *   <li>{@link PermitJoinClosed} — {@code permit_join_closed}</li>
+ *   <li>{@link JoinRejected} — {@code join_rejected} (J2b)</li>
  * </ul>
  */
 public sealed interface PairingWindowEvent extends DomainEvent
-        permits PermitJoinOpened, PermitJoinClosed {
+        permits PermitJoinOpened, PermitJoinClosed, JoinRejected {
 
     /**
      * Returns the integration whose window this event records.

@@ -197,6 +197,35 @@ final class ZclIngestionUnit {
          * @param networkAddress the device's 16-bit network address
          */
         void onRejoinCandidate(IEEEAddress device, int networkAddress);
+
+        /**
+         * J2b — the trust center DENIED a join (0x0024 {@code DENY_JOIN}, or an
+         * unknown status): raised right after the {@code zigbee.device_join_failed}
+         * WARN, which continues byte-unchanged. The unit detects, the adapter
+         * decides — it publishes {@code join_rejected} with the open window's scope
+         * beside the joiner (the unit stays event-free; this handler NEVER creates
+         * a device).
+         *
+         * @param joiner the denied device's IEEE address, never {@code null}
+         * @param status the device-update status word ({@code UNSECURED_JOIN}, …)
+         * @param decision the trust center's decision word ({@code DENY_JOIN}, …)
+         */
+        void onJoinDenied(IEEEAddress joiner, String status, String decision);
+
+        /**
+         * J2b / IR-115 — a FAILURE-class 0x009B key-establishment status, raised
+         * right after the {@code zigbee.key_establishment_failed} WARN (byte-
+         * unchanged; the established and progress arms never reach here). The
+         * adapter owns the window and so the reclassification: a partner that is
+         * the scoped window's device, or the all-zeros "no specific partner", is
+         * the scoped transient key expiring ({@code zigbee.transient_key_expired});
+         * any other partner stays the WARN alone.
+         *
+         * @param partner the EUI64 the NCP named — the scoped device, all-zeros, or
+         *        the all-ones wildcard sentinel; never {@code null}
+         * @param status the raw EmberKeyStatus byte
+         */
+        void onKeyEstablishment(IEEEAddress partner, int status);
     }
 
     /** Sends one ZCL frame; {@code true} = the NCP accepted it (the F-7a response seam). */
@@ -499,6 +528,9 @@ final class ZclIngestionUnit {
         // observability the escalation asked for, never a device.
         log.warn("zigbee.device_join_failed: device={} status={} decision={}",
                 join.newNodeEui64(), join.statusName(), join.decisionName());
+        // J2b: the denial is ALSO a product event — the adapter publishes it with
+        // the window's scope (D-v94-24); this unit stays event-free.
+        listener.onJoinDenied(join.newNodeEui64(), join.statusName(), join.decisionName());
     }
 
     /**
@@ -569,6 +601,9 @@ final class ZclIngestionUnit {
         // partner only (the WARN stays for every real partner).
         log.warn("zigbee.key_establishment_failed: device={} status={}",
                 key.partner(), key.statusName());
+        // J2b / IR-115: the adapter knows the scoped window's partner — it adds the
+        // reclassifying INFO beside this WARN when the partner is that device.
+        listener.onKeyEstablishment(key.partner(), key.status());
     }
 
     /**

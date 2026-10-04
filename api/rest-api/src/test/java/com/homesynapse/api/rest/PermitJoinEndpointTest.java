@@ -83,6 +83,86 @@ final class PermitJoinEndpointTest {
         assertThat(port.calls.get(0).reason()).isEqualTo("pair the hallway sensor");
         assertThat(port.calls.get(0).actor()).as("the actor is the caller's keyId")
                 .isEqualTo("key-01");
+        assertThat(port.calls.get(0).scope()).as("no scope key → an un-scoped open (J2b)")
+                .isNull();
+    }
+
+    // ── J2b: the optional scope ──────────────────────────────────────────
+
+    @Test
+    @DisplayName("200 (J2b): a valid scope rides to the port as given and comes back as the "
+            + "seventh data key, after closesAt")
+    void scope_valid_200_seventhKey_portReceivesIt() {
+        RecordingPort port = RecordingPort.completing(NOW, NOW.plusSeconds(120), 120,
+                "recover the hallway sensor", "key-01");
+        RecordingEndpointContext ctx = post("{\"durationSeconds\":120,"
+                + "\"reason\":\"recover the hallway sensor\",\"scope\":\"0x00124B0012345678\"}");
+
+        endpointOver(port).apply(ctx, CALLER);
+
+        assertThat(ctx.statusSet).isEqualTo(200);
+        Map<String, Object> data = section(bodyOf(ctx), "data");
+        assertThat(data.keySet()).containsExactly("integrationId", "durationSeconds", "reason",
+                "actor", "opensAt", "closesAt", "scope");
+        assertThat(data.get("scope")).isEqualTo("0x00124B0012345678");
+        assertThat(port.calls).hasSize(1);
+        assertThat(port.calls.get(0).scope()).isEqualTo("0x00124B0012345678");
+    }
+
+    @Test
+    @DisplayName("200 (J2b): the endpoint passes the scope text through unchanged — the request "
+            + "record is the one canonicalizer (lower-case in, lower-case to the port)")
+    void scope_lowerCase_passesThroughToThePort() {
+        RecordingPort port = RecordingPort.completing(NOW, NOW.plusSeconds(120), 120,
+                "recover", "key-01");
+        RecordingEndpointContext ctx = post("{\"durationSeconds\":120,\"reason\":\"recover\","
+                + "\"scope\":\"0x00124b0012345678\"}");
+
+        endpointOver(port).apply(ctx, CALLER);
+
+        assertThat(ctx.statusSet).isEqualTo(200);
+        assertThat(port.calls.get(0).scope()).isEqualTo("0x00124b0012345678");
+    }
+
+    @Test
+    @DisplayName("200 (J2b): an explicit null scope is the un-scoped open — no scope key on "
+            + "the wire, null to the port")
+    void scope_null_isUnscoped() {
+        RecordingPort port = RecordingPort.completing(NOW, NOW.plusSeconds(120), 120,
+                "pair the hallway sensor", "key-01");
+        RecordingEndpointContext ctx = post("{\"durationSeconds\":120,"
+                + "\"reason\":\"pair the hallway sensor\",\"scope\":null}");
+
+        endpointOver(port).apply(ctx, CALLER);
+
+        assertThat(ctx.statusSet).isEqualTo(200);
+        assertThat(section(bodyOf(ctx), "data").keySet()).containsExactly(
+                "integrationId", "durationSeconds", "reason", "actor", "opensAt", "closesAt");
+        assertThat(port.calls.get(0).scope()).isNull();
+    }
+
+    @Test
+    @DisplayName("400 (J2b): a scope that is not 0x + 16 hex digits — too short, un-prefixed, "
+            + "non-hex, or not a string — is INVALID_PARAMETERS with the one problem text; "
+            + "the port is never called")
+    void scope_invalid_400() {
+        for (String body : new String[] {
+            "{\"durationSeconds\":120,\"reason\":\"recover\",\"scope\":\"0x123\"}",
+            "{\"durationSeconds\":120,\"reason\":\"recover\",\"scope\":\"00124B0012345678\"}",
+            "{\"durationSeconds\":120,\"reason\":\"recover\",\"scope\":\"0x00124B001234567G\"}",
+            "{\"durationSeconds\":120,\"reason\":\"recover\",\"scope\":42}"}) {
+            RecordingPort port = RecordingPort.completing(NOW, NOW.plusSeconds(120), 120,
+                    "recover", "key-01");
+            RecordingEndpointContext ctx = post(body);
+
+            endpointOver(port).apply(ctx, CALLER);
+
+            assertThat(ctx.statusSet).as(body).isEqualTo(400);
+            assertThat(bodyOf(ctx).get("title")).isEqualTo("Invalid Parameters");
+            assertThat(bodyOf(ctx).get("detail"))
+                    .isEqualTo("scope must be 0x followed by 16 hex digits");
+            assertThat(port.calls).as(body).isEmpty();
+        }
     }
 
     // ── 400: the body ────────────────────────────────────────────────────
@@ -305,7 +385,8 @@ final class PermitJoinEndpointTest {
     }
 
     /** One recorded port call. */
-    record Call(IntegrationId integrationId, int durationSeconds, String reason, String actor) {
+    record Call(IntegrationId integrationId, int durationSeconds, String reason, String actor,
+                String scope) {
     }
 
     /** A port stub: records every call; answers with the configured future. */
@@ -339,13 +420,13 @@ final class PermitJoinEndpointTest {
         @Override
         public CompletableFuture<PairingWindowView> open(IntegrationId integrationId,
                                                          int durationSeconds, String reason,
-                                                         String actor) {
-            calls.add(new Call(integrationId, durationSeconds, reason, actor));
+                                                         String actor, String scope) {
+            calls.add(new Call(integrationId, durationSeconds, reason, actor, scope));
             if (answer != null) {
                 return answer;
             }
             return CompletableFuture.completedFuture(new PairingWindowView(
-                    integrationId, opensAt, closesAt, durationSeconds, reason, actor));
+                    integrationId, opensAt, closesAt, durationSeconds, reason, actor, scope));
         }
     }
 }

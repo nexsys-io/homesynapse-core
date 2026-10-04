@@ -75,6 +75,40 @@ public interface CoordinatorProtocol {
     void enablePreconfiguredKeyJoins();
 
     /**
+     * J2b — the DEVICE-SCOPED enablement (the recovery window of D-v94-24): sets
+     * the trust-center join policy to {@code ALLOW_JOINS | ALLOW_UNSECURED_REJOINS
+     * | JOINS_USE_INSTALL_CODE_KEY} (EzspDecisionBitmask 0x0013 — "allow joins if
+     * there is an entry in the transient key table", so a joiner WITHOUT an entry
+     * is DENIED at the trust center and reads {@code decision=DENY_JOIN}), writes
+     * the TC key-request policy exactly as the wildcard form does, and installs the
+     * well-known key as a TRANSIENT credential partnered with {@code partner}'s
+     * EUI64 — the import frame 0x0111 with the EUI64 LITTLE-ENDIAN in its first
+     * eight bytes — instead of the 0xFF wildcard. One named device may join; any
+     * other is refused by the stack itself.
+     *
+     * <p>Call BEFORE {@link #permitJoin(int)}, as the wildcard form is called. A
+     * coordinator that rejects any of the three exchanges surfaces the failure to
+     * the caller — the window must NOT be opened over a half-enabled surface.
+     *
+     * @param partner the one device the transient key admits, never {@code null}
+     */
+    void enableScopedKeyJoins(IEEEAddress partner);
+
+    /**
+     * J2b — the explicit close of a join window on the coordinator: the SDK's own
+     * three acts, in order — {@code clearTransientLinkKeys} (0x006B; the response
+     * carries no status byte, arrival is success), the trust-center policy back to
+     * {@code ALLOW_UNSECURED_REJOINS} alone (0x0002, the standing posture between
+     * windows), then {@link #permitJoin(int) permitJoin(0)} to close the MAC
+     * association window. The adapter runs it for EVERY close — elapsed,
+     * superseded, transport-reopened, shutdown — before the record's
+     * {@code permit_join_closed}. A rejected exchange propagates to the caller,
+     * who logs and lets the record close (the stack's own transient-key expiry
+     * is the backstop).
+     */
+    void closeJoinWindow();
+
+    /**
      * Resolves a 16-bit network address to the device's IEEE address from the
      * coordinator's own address table (F-R4-1 — interview-on-rejoin, R-10
      * Row 10 (a)): the admission hop for a device that rejoined on its own

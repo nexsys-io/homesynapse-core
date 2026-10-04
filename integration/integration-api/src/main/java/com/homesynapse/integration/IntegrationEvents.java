@@ -65,7 +65,8 @@ public final class IntegrationEvents {
 					IntegrationReauthCompleted.class,
 					IntegrationMigrationCompleted.class,
 					PermitJoinOpened.class,
-					PermitJoinClosed.class);
+					PermitJoinClosed.class,
+					JoinRejected.class);
 
 	/**
 	 * Canonical, ordered list of the 2 concrete {@link CapabilityEvent} subtypes shipped

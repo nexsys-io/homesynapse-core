@@ -11,9 +11,9 @@ import java.util.Objects;
 
 /**
  * An open pairing window as the adapter holds it (PJ-2): the interval the coordinator
- * admits joins, plus the request that opened it. Returned by
- * {@link PairingWindowControl#openPairingWindow} and mirrored field-for-field by the
- * {@link PermitJoinOpened} event of record.
+ * admits joins, plus the request that opened it — including, since J2b, the request's
+ * device scope. Returned by {@link PairingWindowControl#openPairingWindow} and mirrored
+ * field-for-field by the {@link PermitJoinOpened} event of record.
  *
  * @param integrationId   the integration that opened the window; never {@code null}
  * @param opensAt         the adapter's clock instant after the coordinator accepted the
@@ -23,6 +23,9 @@ import java.util.Objects;
  * @param durationSeconds the accepted window length in seconds
  * @param reason          the request's reason; never {@code null}
  * @param actor           the request's actor; never {@code null}
+ * @param scope           the one device this window admits — the request's scope in its
+ *                        canonical form ({@code 0x} + 16 upper-case hex) — or
+ *                        {@code null} for an un-scoped window (J2b)
  */
 public record PairingWindow(
         IntegrationId integrationId,
@@ -30,7 +33,8 @@ public record PairingWindow(
         Instant closesAt,
         int durationSeconds,
         String reason,
-        String actor
+        String actor,
+        String scope
 ) {
 
     public PairingWindow {

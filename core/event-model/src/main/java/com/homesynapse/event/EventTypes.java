@@ -311,6 +311,14 @@ public final class EventTypes {
 	 */
 	public static final String PERMIT_JOIN_CLOSED = "permit_join_closed";
 
+	/**
+	 * Event issued when the trust center DENIES a joiner (J2b, D-v94-24: "a device that is not
+	 * yours tried to join") — under a device-scoped pairing window, a joiner without a transient-key
+	 * entry; between windows, a joiner a router still permitted. Carries the joiner and the window's
+	 * scope. Published by the adapter beside its {@code device_join_failed} WARN.
+	 */
+	public static final String JOIN_REJECTED = "join_rejected";
+
 	// ========== Capability Lifecycle — dot-namespaced (AMD-59) ==========
 
 	/** Event issued when an entity gains a capability after adoption. */

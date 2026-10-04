@@ -227,6 +227,39 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
      */
     static final int DECISION_ALLOW_TC_KEY_REQUESTS = 0x51;
     /**
+     * J2b — EzspDecisionBitmask ALLOW_JOINS (0x0001) | ALLOW_UNSECURED_REJOINS (0x0002)
+     * | JOINS_USE_INSTALL_CODE_KEY (0x0010) = 0x0013. DERIVATION: gecko_sdk v4.4.3
+     * {@code app/util/ezsp/ezsp-enum.h:420–439} — the 0x0010 bit reads "Allow joins if
+     * there is an entry in the transient key table"; the SDK's own install-code-only
+     * open ORs it into 0x0003 ({@code network-creator-security.c:290–300}). Under this
+     * decision a joiner WITHOUT a transient-key entry is DENIED at the trust center
+     * (0x0024 {@code decision=DENY_JOIN}) — the one named partner joins. Written ONLY
+     * by {@link #enableScopedKeyJoins}; the un-scoped open keeps 0x0003 byte-for-byte.
+     * BENCH-VERIFY: the pre-registered P1 (a foreign joiner reads DENY_JOIN, never
+     * USE_PRECONFIGURED_KEY) is the rig's adjudication of this reading.
+     */
+    static final int DECISION_ALLOW_SCOPED_KEY_JOINS = 0x0013;
+    /**
+     * J2b — EzspDecisionBitmask ALLOW_UNSECURED_REJOINS alone (0x0002): the standing
+     * trust-center posture BETWEEN windows that {@link #closeJoinWindow} writes —
+     * rejoins of devices already holding the network key continue, fresh joins are
+     * refused. DERIVATION: {@code ezsp-enum.h:420–439}; the SDK's close
+     * ({@code network-creator-security.c:258–267}) reverts to rejoins-only. Where 0x0003
+     * lingered between windows before J2b, this now stands (P5).
+     */
+    static final int DECISION_ALLOW_REJOINS_ONLY = 0x0002;
+    /**
+     * J2b — EZSP {@code clearTransientLinkKeys} (0x006B): clears every transient link key
+     * the import frame installed. The response carries NO status byte (bellows
+     * {@code (0x006B, (), ())}) — arrival is success, so the exchange runs WITHOUT
+     * {@code requireSuccess}. DERIVATION: {@code ezsp-enum.h:755–757}
+     * ({@code EZSP_CLEAR_TRANSIENT_LINK_KEYS = 0x006B}); the SDK's close calls
+     * {@code emberClearTransientLinkKeys()} first. BENCH-VERIFY: P5 (a join attempt
+     * between windows reads NO 0x0024 — the MAC refuses) is the rig's reading of the
+     * three-act close.
+     */
+    static final int FRAME_CLEAR_TRANSIENT_LINK_KEYS = 0x006B;
+    /**
      * EZSP {@code importTransientKey} — the EmberZNet 7.x/v13 security-manager
      * frame: EUI64[8] + KeyData[16] + flags u8. SILICON-VERIFIED: iteration 1
      * accepted the exchange (no NAK) and iteration 2's joins completed through
@@ -1053,6 +1086,62 @@ final class EzspCoordinatorProtocol implements CoordinatorProtocol {
         log.info("zigbee.tc_joins_enabled: join policy set; wildcard well-known "
                 + "transient link key installed (stack-bounded lifetime — expected "
                 + "to self-expire with the join window)");
+    }
+
+    /**
+     * J2b — the device-scoped enablement: {@link #DECISION_ALLOW_SCOPED_KEY_JOINS}
+     * on the trust-center policy, the key-request policy as the wildcard form writes
+     * it, then the well-known key imported as a transient credential partnered with
+     * {@code partner} — its EUI64 LITTLE-ENDIAN in the import's first eight bytes
+     * (the encoding {@link #lookupNetworkAddress} uses; the inverse of
+     * {@link KeyEstablishment#parse}). The key material is never logged (INV-SE-03).
+     */
+    @Override
+    public void enableScopedKeyJoins(IEEEAddress partner) {
+        Objects.requireNonNull(partner, "partner");
+        EzspFrame joinPolicy = execute(FRAME_SET_POLICY,
+                encodePolicy(POLICY_TRUST_CENTER, DECISION_ALLOW_SCOPED_KEY_JOINS),
+                DEFAULT_COMMAND_TIMEOUT_MILLIS);
+        requireSuccess("setPolicy(trustCenterPolicy)", joinPolicy);
+        EzspFrame keyRequestPolicy = execute(FRAME_SET_POLICY,
+                encodePolicy(POLICY_TC_KEY_REQUEST, DECISION_ALLOW_TC_KEY_REQUESTS),
+                DEFAULT_COMMAND_TIMEOUT_MILLIS);
+        requireSuccess("setPolicy(tcKeyRequestPolicy)", keyRequestPolicy);
+
+        byte[] parameters = new byte[25];
+        long eui64 = partner.value();
+        for (int i = 0; i < 8; i++) {
+            parameters[i] = (byte) (eui64 >> (8 * i));   // partner EUI64, wire order (LE)
+        }
+        System.arraycopy(TC_LINK_KEY, 0, parameters, 8, 16);
+        parameters[24] = (byte) TRANSIENT_KEY_FLAGS_NONE;
+        EzspFrame transientKey = execute(FRAME_IMPORT_TRANSIENT_KEY, parameters,
+                DEFAULT_COMMAND_TIMEOUT_MILLIS);
+        requireSuccess("importTransientKey", transientKey);
+        log.info("zigbee.tc_scoped_joins_enabled: partner={} policy=0x{} frames=0x{},0x{},0x{}",
+                partner, String.format("%04X", DECISION_ALLOW_SCOPED_KEY_JOINS),
+                String.format("%04X", FRAME_SET_POLICY),
+                String.format("%04X", FRAME_SET_POLICY),
+                String.format("%04X", FRAME_IMPORT_TRANSIENT_KEY));
+    }
+
+    /**
+     * J2b — the SDK's three-act close, in order. 0x006B runs without
+     * {@code requireSuccess}: its response has no status byte (arrival is success).
+     */
+    @Override
+    public void closeJoinWindow() {
+        execute(FRAME_CLEAR_TRANSIENT_LINK_KEYS, NO_PARAMETERS, DEFAULT_COMMAND_TIMEOUT_MILLIS);
+        EzspFrame joinPolicy = execute(FRAME_SET_POLICY,
+                encodePolicy(POLICY_TRUST_CENTER, DECISION_ALLOW_REJOINS_ONLY),
+                DEFAULT_COMMAND_TIMEOUT_MILLIS);
+        requireSuccess("setPolicy(trustCenterPolicy)", joinPolicy);
+        permitJoin(0);
+        log.info("zigbee.tc_join_window_closed: frames=0x{},0x{},0x{} policy=0x{} permit_join=0",
+                String.format("%04X", FRAME_CLEAR_TRANSIENT_LINK_KEYS),
+                String.format("%04X", FRAME_SET_POLICY),
+                String.format("%04X", FRAME_PERMIT_JOINING),
+                String.format("%04X", DECISION_ALLOW_REJOINS_ONLY));
     }
 
     /** Encodes one setPolicy exchange: policyId u8 + decision u16 LE (v8+ width). */

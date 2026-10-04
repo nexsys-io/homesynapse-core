@@ -1296,7 +1296,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
      * thread.
      */
     private CompletableFuture<PairingWindowView> openPairingWindow(
-            IntegrationId id, int durationSeconds, String reason, String actor) {
+            IntegrationId id, int durationSeconds, String reason, String actor, String scope) {
         IntegrationSupervisor supervisor = this.integrationSupervisor;
         if (supervisor == null) {
             return CompletableFuture.failedFuture(new IllegalStateException(
@@ -1304,14 +1304,19 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         }
         PairingWindowRequest request;
         try {
-            request = new PairingWindowRequest(durationSeconds, reason, actor);
+            // J2b: the scope rides through as the endpoint received it; the request
+            // record validates the shape and canonicalizes (0x + upper-case hex) —
+            // a malformed scope is the future's IllegalArgumentException, as the
+            // duration and reason bounds are.
+            request = new PairingWindowRequest(durationSeconds, reason, actor, scope);
         } catch (IllegalArgumentException invalid) {
             return CompletableFuture.failedFuture(invalid);
         }
         return supervisor.openPairingWindow(id, request)
                 .thenApply(window -> new PairingWindowView(
                         window.integrationId(), window.opensAt(), window.closesAt(),
-                        window.durationSeconds(), window.reason(), window.actor()));
+                        window.durationSeconds(), window.reason(), window.actor(),
+                        window.scope()));
     }
 
     private void doTeardown(String reason) {

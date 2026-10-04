@@ -40,7 +40,7 @@ class JacksonWarmupTest {
     void warmup_createsWritersAndReadersForAllTypes() {
         JacksonWarmup warmup = JacksonWarmup.warmup(mapper, registry);
 
-        assertThat(warmup.size()).isEqualTo(57);
+        assertThat(warmup.size()).isEqualTo(58);   // J2: + join_rejected
 
         for (Class<? extends DomainEvent> eventClass : AllEventClasses.ALL_EVENTS) {
             assertThat(warmup.writerFor(eventClass))

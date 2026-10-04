@@ -64,7 +64,7 @@ final class PairingWindowRoutingTest {
     private static final Instant T0 = Instant.parse("2026-01-01T00:00:00Z");
     private static final Duration TEST_GRACE = Duration.ofMillis(200);
     private static final PairingWindowRequest REQUEST =
-            new PairingWindowRequest(120, "pair the hallway sensor", "key-01");
+            new PairingWindowRequest(120, "pair the hallway sensor", "key-01", null);
 
     private TestClock clock;
     private InMemoryEventStore store;
@@ -250,7 +250,7 @@ final class PairingWindowRoutingTest {
             Instant opensAt = clock.instant();
             return new PairingWindow(integrationId, opensAt,
                     opensAt.plusSeconds(request.durationSeconds()), request.durationSeconds(),
-                    request.reason(), request.actor());
+                    request.reason(), request.actor(), request.scope());
         }
 
         @Override

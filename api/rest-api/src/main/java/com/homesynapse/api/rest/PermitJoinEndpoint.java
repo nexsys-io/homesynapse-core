@@ -23,18 +23,23 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Pattern;
 
 /**
  * Javalin handler for {@code POST /api/v1/integrations/{integrationId}/permit-join} —
  * the pairing window as a declared act (PJ-2, IR-63, DP-PJ2-6).
  *
- * <p>Body {@code {"durationSeconds": 1–254, "reason": "<1–120 chars>"}}; the actor is
+ * <p>Body {@code {"durationSeconds": 1–254, "reason": "<1–120 chars>", "scope":
+ * "0x<16 hex>"}} — {@code scope} optional (J2b): absent or {@code null} is the un-scoped
+ * window; present, it names the ONE device the window admits and must be {@code 0x} + 16
+ * hex digits, passed to the port as written (the request record canonicalizes); the actor is
  * the authenticated caller's key id (the identity the auth filter attached). The open
  * runs on the adapter's command executor through the {@link PairingWindowPort}; this
  * handler waits at most {@link #PORT_TIMEOUT} on the port's future (a Javalin thread,
  * bounded — the EZSP round trip is milliseconds; a timeout means the adapter's executor
  * is busy or dead, and 503 is the honest word). {@code 200} carries the sibling's
- * {@code {data, meta}} envelope with the six window fields. This endpoint publishes
+ * {@code {data, meta}} envelope with the six window fields (+ {@code scope} when the
+ * window is scoped). This endpoint publishes
  * NOTHING — the adapter owns the events of record ({@code permit_join_opened} /
  * {@code permit_join_closed}); {@code REST_ENDPOINTS_NO_EVENT_PUBLISHING} holds without
  * an allowlist edit.</p>
@@ -62,6 +67,16 @@ final class PermitJoinEndpoint implements Handler {
     static final int MIN_DURATION_SECONDS = 1;
     static final int MAX_DURATION_SECONDS = 254;
     static final int MAX_REASON_LENGTH = 120;
+
+    /**
+     * J2b: the scope's shape — {@code 0x} or {@code 0X} + 16 hex digits — the twin of
+     * {@code PairingWindowRequest.SCOPE_PATTERN} (rest-api takes no edge to integration-api;
+     * the record canonicalizes, this gate refuses).
+     */
+    static final Pattern SCOPE_SHAPE = Pattern.compile("^0[xX][0-9a-fA-F]{16}$");
+
+    /** The one problem text for a malformed scope (400 {@code INVALID_PARAMETERS}). */
+    static final String SCOPE_PROBLEM = "scope must be 0x followed by 16 hex digits";
 
     /** rest-api is the JSON boundary (LTD-08) — the body is parsed here only. */
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -161,10 +176,22 @@ final class PermitJoinEndpoint implements Handler {
                     "reason must be at most " + MAX_REASON_LENGTH + " characters");
             return;
         }
+        // J2b: the optional device scope — absent or JSON null is the un-scoped open;
+        // present, it must be textual and shaped 0x + 16 hex. Passed through as written:
+        // PairingWindowRequest is the one canonicalizer on the path.
+        String scope = null;
+        JsonNode scopeNode = root.get("scope");
+        if (scopeNode != null && !scopeNode.isNull()) {
+            if (!scopeNode.isTextual() || !SCOPE_SHAPE.matcher(scopeNode.asText()).matches()) {
+                EndpointResponses.problem(ctx, ProblemType.INVALID_PARAMETERS, SCOPE_PROBLEM);
+                return;
+            }
+            scope = scopeNode.asText();
+        }
 
         CompletableFuture<PairingWindowView> future;
         try {
-            future = port.open(integrationId, durationSeconds, reason, caller.keyId());
+            future = port.open(integrationId, durationSeconds, reason, caller.keyId(), scope);
         } catch (RuntimeException portFailure) {
             // The port itself threw before producing a future — the API's own fault.
             EndpointResponses.problem(ctx, ProblemType.INTERNAL_ERROR,
@@ -215,13 +242,16 @@ final class PermitJoinEndpoint implements Handler {
     // ── Response building (the live {data, meta} inline idiom, DP-2) ────
 
     private void respondOpened(EndpointContext ctx, PairingWindowView window) {
-        Map<String, Object> data = new LinkedHashMap<>(6);
+        Map<String, Object> data = new LinkedHashMap<>(7);
         data.put("integrationId", window.integrationId().toString());
         data.put("durationSeconds", window.durationSeconds());
         data.put("reason", window.reason());
         data.put("actor", window.actor());
         data.put("opensAt", window.opensAt().toString());
         data.put("closesAt", window.closesAt().toString());
+        if (window.scope() != null) {
+            data.put("scope", window.scope());   // J2b: the seventh key, ONLY when scoped
+        }
 
         Map<String, Object> meta = new LinkedHashMap<>(1);
         meta.put("timestamp", clock.instant().toString());
