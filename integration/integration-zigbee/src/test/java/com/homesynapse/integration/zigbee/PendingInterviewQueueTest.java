@@ -198,4 +198,23 @@ class PendingInterviewQueueTest {
                 .as("a rejoin is a fresh contact; a later announce is the newer truth")
                 .containsExactly(PendingInterviewQueue.Source.ANNOUNCE);
     }
+
+    @Test
+    @DisplayName("J2a (IR-114): Source.BOOT_LISTED is the third provenance — token "
+            + "boot_listed; schedule(ieee, nwk, BOOT_LISTED) records it; the two "
+            + "existing tokens are byte-unchanged")
+    void bootListedSourceIsRecorded() {
+        assertThat(PendingInterviewQueue.Source.BOOT_LISTED.token()).isEqualTo("boot_listed");
+        assertThat(PendingInterviewQueue.Source.values())
+                .containsExactly(PendingInterviewQueue.Source.ANNOUNCE,
+                        PendingInterviewQueue.Source.REJOIN,
+                        PendingInterviewQueue.Source.BOOT_LISTED);
+        assertThat(PendingInterviewQueue.Source.ANNOUNCE.token()).isEqualTo("announce");
+        assertThat(PendingInterviewQueue.Source.REJOIN.token()).isEqualTo("rejoin");
+
+        queue.schedule(IEEE, NWK, PendingInterviewQueue.Source.BOOT_LISTED);
+
+        assertThat(queue.due()).extracting(PendingInterviewQueue.Pending::source)
+                .containsExactly(PendingInterviewQueue.Source.BOOT_LISTED);
+    }
 }

@@ -57,7 +57,15 @@ final class PendingInterviewQueue {
          * Interview-on-rejoin: an accepted 0x0024 rejoin or an unknown-sender
          * frame resolved inside an open permit-join window (F-R4-1).
          */
-        REJOIN("rejoin");
+        REJOIN("rejoin"),
+        /**
+         * J2a (IR-114) — the boot re-proposal: a device on the adopt-accept list
+         * that the announce cache knows and the adoption maps do not, scheduled
+         * once per {@code initialize()} after the maps rehydrate. A sleepy device
+         * that does not answer rides this queue's ladder and parks like any
+         * other; nothing is adopted without a completed interview.
+         */
+        BOOT_LISTED("boot_listed");
 
         private final String token;
 
@@ -65,7 +73,7 @@ final class PendingInterviewQueue {
             this.token = token;
         }
 
-        /** The log vocabulary ({@code source=announce|rejoin}). */
+        /** The log vocabulary ({@code source=announce|rejoin|boot_listed}). */
         String token() {
             return token;
         }

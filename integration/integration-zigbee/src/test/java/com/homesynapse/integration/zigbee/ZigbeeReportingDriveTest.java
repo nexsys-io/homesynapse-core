@@ -243,6 +243,35 @@ class ZigbeeReportingDriveTest {
         assertThat(configuratorMessages(Level.WARN, "zigbee.")).isEmpty();
     }
 
+    @Test
+    @DisplayName("T12 (IR-123): the drive logs ONE zigbee.reporting_cluster INFO per "
+            + "ReportingPostureFact beside the aggregate — device, endpoint, cluster, "
+            + "attribute, posture and authority as the fact carries them")
+    void freshAdoption_logsOneReportingClusterLinePerFact() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::reportingHandler);
+        ZigbeeIntegrationAdapter adapter =
+                bootProduction(ncp, List.<Object>of(LIGHT_LISTED));
+
+        announce(adapter, LIGHT_IEEE, LIGHT_NWK);
+
+        // The aggregate stays byte-exact (M9.4-RPT's anti-vacuous INFO)...
+        assertThat(adapterMessages(Level.INFO, "zigbee.reporting_configured"))
+                .containsExactly("zigbee.reporting_configured: device="
+                        + LIGHT_HEX + " clusters=2 verified=2 degraded=0");
+        // ...and the per-cluster line names what the aggregate only counts: the
+        // two DEFAULTS rows (OnOff 0x0006 / 0x0000, Level 0x0008 / 0x0000), both
+        // read back as configured (min 0 and 5 s → change-driven), in fact order.
+        assertThat(adapterMessages(Level.INFO, "zigbee.reporting_cluster"))
+                .containsExactly(
+                        "zigbee.reporting_cluster: device=" + LIGHT_HEX
+                                + " endpoint=1 cluster=0x0006 attribute=0x0000 "
+                                + "posture=on_change authoritative=verified_reports",
+                        "zigbee.reporting_cluster: device=" + LIGHT_HEX
+                                + " endpoint=1 cluster=0x0008 attribute=0x0000 "
+                                + "posture=on_change authoritative=verified_reports");
+    }
+
     // ── T2 (scenario 2): the re-link drive — onRejoin, no re-adoption ───────
 
     @Test

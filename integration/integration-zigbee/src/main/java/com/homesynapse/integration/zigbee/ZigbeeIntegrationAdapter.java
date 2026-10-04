@@ -399,6 +399,9 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         parameterStore = new PersistentNetworkParameterStore(dataDirectory, clock);
         protocol = new EzspCoordinatorProtocol(transport, parameterStore, clock);
         interviewQueue = new PendingInterviewQueue(clock);
+        // J2a (IR-114): the boot re-proposal — the maps have rehydrated (DP-6
+        // above) and the queue now exists; nothing has opened a port yet.
+        proposeListedCachedDevices();
         // WU-AVAIL-SEED DP-1/DP-2 (supersedes the M9.6-AVAIL empty-map
         // posture): the tracker seeds from the sidecar — EVERY cached device
         // enters tracking with its last-known availability plus the DP-4
@@ -1239,6 +1242,11 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         return cache;
     }
 
+    /** J2a's test seam: the interview queue as {@code initialize()} left it. */
+    PendingInterviewQueue interviewQueue() {
+        return interviewQueue;
+    }
+
     EzspCoordinatorProtocol coordinatorProtocol() {
         return protocol;
     }
@@ -1330,6 +1338,19 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
             log.info("zigbee.reporting_configured: device={} clusters={} "
                             + "verified={} degraded={}",
                     ieee, facts.size(), verified, facts.size() - verified);
+            // IR-123: the per-cluster line the aggregate only counts (J1's
+            // fork 2 found none; the R6 reading) — one INFO per fact, the
+            // enum names lower-cased as grep-stable tokens, ZCL ids as 4 hex.
+            for (ReportingPostureFact fact : facts) {
+                log.info("zigbee.reporting_cluster: device={} endpoint={} "
+                                + "cluster=0x{} attribute=0x{} posture={} "
+                                + "authoritative={}",
+                        ieee, fact.endpoint(),
+                        String.format("%04X", fact.clusterId()),
+                        String.format("%04X", fact.attributeId()),
+                        fact.reportingPosture().name().toLowerCase(Locale.ROOT),
+                        fact.reportsAuthoritative().name().toLowerCase(Locale.ROOT));
+            }
             applyPostureRouting(ieee, facts);
         } catch (RuntimeException failure) {
             log.warn("zigbee.reporting_drive_failed: device={}: {}", ieee,
@@ -1422,6 +1443,48 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         // vacuous-silence class. The token is FROZEN (the 5b/acceptance-run
         // boot glance-point).
         log.info("zigbee.adoption_maps_rehydrated: devices={}", rehydrated);
+    }
+
+    /**
+     * J2a (IR-114) — the boot re-proposal. Once per {@code initialize()}, right
+     * after {@link #rehydrateAdoptionMaps()} and the queue's construction: every
+     * IEEE on the adopt-accept list that the announce cache knows with a usable
+     * network address and the adoption maps do not is scheduled on the interview
+     * queue with {@link PendingInterviewQueue.Source#BOOT_LISTED}; the interview
+     * then proposes through the slice's one proposal site, and the config
+     * acceptance gate adopts as it does for an announce. In-memory only — no
+     * registry write, no event (REG-INV-1 holds by construction); a sleepy
+     * device that does not answer rides the queue's retry ladder and parks.
+     *
+     * <p>The miss this closes: before J2a a listed, cached, unadopted device got
+     * NOTHING at boot — the boot read the list once and rehydrated the REGISTRY
+     * only, so a sensor that never re-announced stayed un-proposed. Every skip
+     * is a DEBUG with its reason; every schedule is ONE INFO.
+     */
+    private void proposeListedCachedDevices() {
+        for (long listed : adoptAcceptList) {
+            IEEEAddress ieee = new IEEEAddress(listed);
+            Optional<ZigbeeDeviceRecord> record = cache.device(ieee);
+            if (record.isEmpty()) {
+                log.debug("zigbee.boot_listed_skipped: device={} reason=not_cached", ieee);
+                continue;
+            }
+            int networkAddress = record.get().networkAddress();
+            if (networkAddress == ZigbeeDeviceCache.NETWORK_ADDRESS_UNKNOWN) {
+                log.debug("zigbee.boot_listed_skipped: device={} reason=address_unknown",
+                        ieee);
+                continue;
+            }
+            if (adoption.deviceIdFor(ieee).isPresent()) {
+                log.debug("zigbee.boot_listed_skipped: device={} reason=already_adopted",
+                        ieee);
+                continue;
+            }
+            interviewQueue.schedule(ieee, networkAddress,
+                    PendingInterviewQueue.Source.BOOT_LISTED);
+            log.info("zigbee.boot_listed_candidate: device={} nwk=0x{}",
+                    ieee, Integer.toHexString(networkAddress));
+        }
     }
 
     /**
