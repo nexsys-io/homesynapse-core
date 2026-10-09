@@ -145,6 +145,35 @@ final class HomeSynapseCoreStartupFailureTest {
                 .isEqualTo(1);
     }
 
+    @Test
+    @DisplayName("T4b (CONFIG-ERROR-1 L-5, AMD-102): ONE unknown key inside a core section "
+            + "fails start() with the UNWRAPPED ConfigurationLoadException naming the dotted "
+            + "path, reports (FOUNDATION, configuration, the config recommendation) — the seam "
+            + "ExitCodes maps to CONFIGURATION_FAILURE (10) — and logs one "
+            + "lifecycle.startup_failed line carrying the exception")
+    void unknownCoreKeyReportsConfiguration(@TempDir Path tempDir) throws Exception {
+        // state_store is a core section registered at Phase 1 (IR-61b); its staleness
+        // object is additionalProperties: false — the typo is the AMD-102 case.
+        writeRoot(tempDir, "state_store:\n  staleness:\n    bogus: 1\n");
+        core = newCore(tempDir);
+
+        Throwable fatal = catchThrowable(core::start);
+
+        assertThat(fatal)
+                .as("the throw type sits beside the report, never wraps it")
+                .isInstanceOf(ConfigurationLoadException.class)
+                .hasMessageContaining("state_store.staleness.bogus");
+        assertThat(core.currentPhase()).isEqualTo(LifecyclePhase.STOPPED);
+        assertThat(core.lastStartupFailure()).contains(new StartupFailureReport(
+                LifecyclePhase.FOUNDATION, "configuration", CONFIGURATION_RECOMMENDATION));
+        assertThat(startupFailedLines()).singleElement().asString().startsWith(
+                "lifecycle.startup_failed: phase=FOUNDATION subsystem=configuration "
+                        + "recommendation=\"" + CONFIGURATION_RECOMMENDATION + "\"");
+        assertThat(errorEventsWithThrowable())
+                .as("the operator's record: the paths ride in the exception the line carries")
+                .isEqualTo(1);
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // T5 — Phase 2: a persistence-open failure reports (DATA_INFRASTRUCTURE, persistence)
     // ════════════════════════════════════════════════════════════════════════

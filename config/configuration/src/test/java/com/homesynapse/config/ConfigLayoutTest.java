@@ -267,15 +267,16 @@ class ConfigLayoutTest {
                   zigbee: !include integrations/zigbee.yaml
                 """);
 
-        ConfigModel model = service().load();
-
-        // ERROR at startup: the key reverts to its schema default (DP-2).
-        assertThat(model.sections().get("integrations.zigbee").values())
-                .containsEntry("channel", 15);
+        // AMD-102 (CONFIG-ERROR-1): an ERROR at startup fails the load naming
+        // the dotted path the post-merge validation found — the include's key
+        // under its section; nothing reverts.
+        assertThatThrownBy(() -> service().load())
+                .isInstanceOf(ConfigurationLoadException.class)
+                .hasMessageContaining("integrations.zigbee.channel");
         // Pin went 1 -> 2 at M6.4 (2026-06-11, R1/DP-10 ruling): a completed
-        // validation pass with an ERROR issue now publishes one config_error
-        // per ERROR alongside the validation summary. No ordering contract
-        // between the two — select by type.
+        // validation pass with an ERROR issue publishes one config_error per
+        // ERROR alongside the validation summary — both BEFORE the AMD-102
+        // throw. No ordering contract between the two — select by type.
         assertThat(publisher.rootDrafts).hasSize(2);
         List<ConfigErrorEvent> errorEvents = publisher.rootDrafts.stream()
                 .map(EventDraft::payload)

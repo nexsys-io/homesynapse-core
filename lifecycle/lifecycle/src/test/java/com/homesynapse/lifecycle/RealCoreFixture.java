@@ -222,12 +222,17 @@ final class RealCoreFixture {
                 TEST_HOME_ID,
                 null,
                 List.of(rig.factory()));
+        // PKG-SEC-2 / AMD-102 (CONFIG-ERROR-1): the fragment is supplied BEFORE start(),
+        // exactly as Main does — it composes at Phase-1 validation, so the fixture's
+        // integrations.zigbee block validates against the real fragment. Registered
+        // after start() (the pre-AMD-102 shape) the block was an unknown key at Phase 1:
+        // a WARNING then, a boot failure now.
+        core.registerIntegrationSchema(ZigbeeIntegrationFactory.INTEGRATION_TYPE,
+                ZigbeeIntegrationFactory.configSchemaJson());
         core.start();
 
         // §4.2 boot smoke: the supervisor created + started the adapter green over
-        // the scripted NCP, and the W10 schema registration is visible.
-        core.registerIntegrationSchema(ZigbeeIntegrationFactory.INTEGRATION_TYPE,
-                ZigbeeIntegrationFactory.configSchemaJson());
+        // the scripted NCP, and the schema registration is visible in the composition.
         assertThat(core.schemaRegistry().getComposedSchema()).contains("zigbee");
         awaitRuntimeSubscribersLive(livePolls);
     }

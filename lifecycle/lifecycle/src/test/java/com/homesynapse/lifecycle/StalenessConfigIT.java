@@ -6,11 +6,10 @@ package com.homesynapse.lifecycle;
 
 import static com.homesynapse.lifecycle.BusPositionCensusIT.heroMotionConfigYaml;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.tuple;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
-import com.homesynapse.config.ConfigIssue;
+import com.homesynapse.config.ConfigurationReloadException;
 import com.homesynapse.config.ReloadResult;
-import com.homesynapse.config.Severity;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.StateReportedEvent;
@@ -98,8 +97,9 @@ final class StalenessConfigIT {
     }
 
     @Test
-    @DisplayName("T4: a reload with state_store.staleness.bogus → exactly one WARNING naming "
-            + "state_store.staleness.bogus; the same file without bogus → zero issues")
+    @DisplayName("T4: a reload with state_store.staleness.bogus is REJECTED naming "
+            + "state_store.staleness.bogus (AMD-102: an unknown key is an ERROR; the active "
+            + "model unchanged); the same file without bogus → zero issues")
     void stateStoreSection_validatesAgainstItsFragment(@TempDir Path root) throws Exception {
         String configYaml = RealCoreFixture.withGen4AcceptListed(heroMotionConfigYaml());
         fixture = RealCoreFixture.boot(root, configYaml);
@@ -109,12 +109,13 @@ final class StalenessConfigIT {
                 + "  staleness:\n"
                 + "    default_staleness_threshold: PT2H\n"
                 + "    bogus: 1\n");
-        ReloadResult withBogus = fixture.core().configurationService().reload();
-        System.out.println("staleness-config.t4: with bogus -> " + withBogus.issues());
-        assertThat(withBogus.issues())
-                .extracting(ConfigIssue::severity, ConfigIssue::path)
+        Throwable rejected = catchThrowable(
+                () -> fixture.core().configurationService().reload());
+        System.out.println("staleness-config.t4: with bogus -> " + rejected);
+        assertThat(rejected)
                 .as("the fragment's additionalProperties: false inside staleness names the key")
-                .containsExactly(tuple(Severity.WARNING, "state_store.staleness.bogus"));
+                .isInstanceOf(ConfigurationReloadException.class)
+                .hasMessageContaining("state_store.staleness.bogus");
 
         writeConfig(fixture, configYaml
                 + "state_store:\n"

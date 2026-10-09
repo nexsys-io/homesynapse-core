@@ -45,13 +45,15 @@ import java.util.function.LongSupplier;
  * by {@code MaterializedStateQueryService} from {@code staleAfter} and the
  * injected clock (Doc 03 §3.8 / AMD-11). The handler does not re-derive it.</p>
  *
- * <h2>Availability detail (J1 / LINK-READ-2, 2026-10-03)</h2>
+ * <h2>Availability detail (J1 / LINK-READ-2) and the one instant shape (IR-132)</h2>
  *
- * <p>The record's {@code availabilityReason}, {@code lastSeenAt} and {@code link}
- * components render by their component names (camelCase) through the same
- * serialisation — no handler code; {@code null} where the projection holds none.
- * A dark entity's record therefore says why, when it was last heard and how its
- * link read at that frame.</p>
+ * <p>The {@code data} object renders through
+ * {@link EntityStateJson#render(EntityState)} (CONFIG-ERROR-1 §4.4): the record's
+ * components by name, in their order, every instant as {@code Instant.toString()}
+ * (ISO-8601 UTC — the same rendering as the list read and {@code meta.timestamp});
+ * the J1 keys {@code availabilityReason}, {@code lastSeenAt} and {@code link} ride
+ * with it, {@code null} where the projection holds none. A dark entity's record
+ * therefore says why, when it was last heard and how its link read at that frame.</p>
  *
  * <h2>Thread safety</h2>
  *
@@ -119,7 +121,7 @@ final class GetEntityStateEndpoint implements Handler {
         meta.put("timestamp", clock.instant().toString());
 
         Map<String, Object> body = new LinkedHashMap<>(2);
-        body.put("data", maybeState.get());
+        body.put("data", EntityStateJson.render(maybeState.get()));
         body.put("meta", meta);
 
         ctx.status(200);

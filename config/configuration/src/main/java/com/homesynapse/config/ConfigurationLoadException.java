@@ -8,13 +8,14 @@ import com.homesynapse.event.HomeSynapseException;
 
 /**
  * Thrown by {@link ConfigurationService#load()} when the loading pipeline
- * (Doc 06 §3.1) encounters {@link Severity#FATAL} validation issues that
- * prevent startup.
+ * (Doc 06 §3.1) encounters {@link Severity#FATAL} or {@link Severity#ERROR}
+ * validation issues (AMD-102) that prevent startup.
  *
  * <p>This exception signals that the configuration file is structurally
- * invalid or missing required sections, making it impossible to construct
- * a valid {@link ConfigModel}. The system cannot start until the
- * configuration is corrected.</p>
+ * invalid, missing required sections, carries a value that fails its schema,
+ * or carries a key the composed schema does not declare — the message names
+ * every such path. The system cannot start until the configuration is
+ * corrected.</p>
  *
  * <p>HTTP status 503 (Service Unavailable) is suggested because the system
  * is unable to serve requests without valid configuration.</p>

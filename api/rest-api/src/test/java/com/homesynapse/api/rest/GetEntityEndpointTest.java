@@ -52,7 +52,11 @@ final class GetEntityEndpointTest {
         assertThat(ctx.statusSet).isEqualTo(200);
         @SuppressWarnings("unchecked")
         Map<String, Object> body = (Map<String, Object>) ctx.body;
-        assertThat(body.get("data")).isSameAs(state);
+        // IR-132 (CONFIG-ERROR-1): data is the renderer's map, never the record itself.
+        assertThat(body.get("data")).isInstanceOf(Map.class);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) body.get("data");
+        assertThat(data).containsEntry("entityId", VALID_ULID);
         assertThat(ctx.headers).containsEntry(
                 ListEntitiesEndpoint.VIEW_POSITION_HEADER, "7");
     }
@@ -121,8 +125,9 @@ final class GetEntityEndpointTest {
     }
 
     @Test
-    @DisplayName("J1 T9: the record placed in data carries availabilityReason, lastSeenAt and "
-            + "link — Javalin's Jackson renders them by component name, no handler code")
+    @DisplayName("J1 T9 (as IR-132 renders it): data carries availabilityReason, lastSeenAt and "
+            + "link — through EntityStateJson, the instants ISO-8601 UTC, the link as the list "
+            + "read's {lqi, rssiDbm, at}")
     void dataCarriesTheAvailabilityDetail() {
         Instant seen = Instant.parse("2026-10-03T12:00:00Z");
         EntityLink link = new EntityLink(200, -45, Instant.parse("2026-10-03T11:59:30Z"));
@@ -142,11 +147,78 @@ final class GetEntityEndpointTest {
 
         @SuppressWarnings("unchecked")
         Map<String, Object> body = (Map<String, Object>) ctx.body;
-        EntityState returned = (EntityState) body.get("data");
-        assertThat(returned).isSameAs(dark);
-        assertThat(returned.availabilityReason()).isEqualTo("ping_timeout");
-        assertThat(returned.lastSeenAt()).isEqualTo(seen);
-        assertThat(returned.link()).isEqualTo(link);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) body.get("data");
+        assertThat(data)
+                .containsEntry("availability", "UNAVAILABLE")
+                .containsEntry("availabilityReason", "ping_timeout")
+                .containsEntry("lastSeenAt", "2026-10-03T12:00:00Z");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> linkJson = (Map<String, Object>) data.get("link");
+        assertThat(linkJson.keySet()).containsExactly("lqi", "rssiDbm", "at");
+        assertThat(linkJson)
+                .containsEntry("lqi", 200)
+                .containsEntry("rssiDbm", -45)
+                .containsEntry("at", "2026-10-03T11:59:30Z");
+    }
+
+    @Test
+    @DisplayName("IR-132 (CONFIG-ERROR-1 R-1): every instant on data renders Instant.toString() "
+            + "— lastChanged, lastUpdated, lastReported, staleAfter, lastSeenAt and link.at are "
+            + "ISO-8601 UTC strings Instant.parse accepts (never epoch seconds); the record's "
+            + "key order is kept; attributes pass through as the object they are")
+    void everyInstantRendersIso8601_keyOrderKept() {
+        Instant changed = Instant.parse("2026-10-08T02:00:58.784419723Z");
+        Instant updated = Instant.parse("2026-10-08T02:01:00Z");
+        Instant reported = Instant.parse("2026-10-08T02:01:30.5Z");
+        Instant staleAfter = Instant.parse("2026-10-08T02:21:30.5Z");
+        Instant seen = Instant.parse("2026-10-08T02:00:58.103646800Z");
+        EntityLink link = new EntityLink(255, -40, Instant.parse("2026-10-08T02:00:58.103646800Z"));
+        Map<String, AttributeValue> attributes = Map.of();
+        EntityState state = new EntityState(EntityId.of(Ulid.parse(VALID_ULID)),
+                attributes, Availability.AVAILABLE, 4L,
+                changed, updated, reported, staleAfter, false,
+                "first_contact", seen, link);
+        FakeStateQueryService qs = new FakeStateQueryService()
+                .withViewPosition(11L)
+                .put(state);
+        GetEntityEndpoint endpoint =
+                new GetEntityEndpoint(qs, qs::getViewPosition, FIXED_CLOCK);
+        RecordingEndpointContext ctx = new RecordingEndpointContext()
+                .withPathParam("entityId", VALID_ULID);
+
+        endpoint.apply(ctx);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) ctx.body;
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) body.get("data");
+        assertThat(data.keySet()).containsExactly("entityId", "attributes", "availability",
+                "stateVersion", "lastChanged", "lastUpdated", "lastReported", "staleAfter",
+                "stale", "availabilityReason", "lastSeenAt", "link");
+        assertThat(data)
+                .containsEntry("entityId", VALID_ULID)
+                .containsEntry("availability", "AVAILABLE")
+                .containsEntry("stateVersion", 4L)
+                .containsEntry("stale", false)
+                .containsEntry("availabilityReason", "first_contact");
+        assertThat(data.get("attributes")).isSameAs(attributes);
+        assertThat(data.get("lastChanged")).isInstanceOf(String.class);
+        assertThat(data.get("lastUpdated")).isInstanceOf(String.class);
+        assertThat(data.get("lastReported")).isInstanceOf(String.class);
+        assertThat(data.get("staleAfter")).isInstanceOf(String.class);
+        assertThat(data.get("lastSeenAt")).isInstanceOf(String.class);
+        assertThat(Instant.parse((String) data.get("lastChanged"))).isEqualTo(changed);
+        assertThat(Instant.parse((String) data.get("lastUpdated"))).isEqualTo(updated);
+        assertThat(Instant.parse((String) data.get("lastReported"))).isEqualTo(reported);
+        assertThat(Instant.parse((String) data.get("staleAfter"))).isEqualTo(staleAfter);
+        assertThat(Instant.parse((String) data.get("lastSeenAt"))).isEqualTo(seen);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> linkJson = (Map<String, Object>) data.get("link");
+        assertThat(linkJson.keySet()).containsExactly("lqi", "rssiDbm", "at");
+        assertThat(linkJson).containsEntry("lqi", 255).containsEntry("rssiDbm", -40);
+        assertThat(linkJson.get("at")).isInstanceOf(String.class);
+        assertThat(Instant.parse((String) linkJson.get("at"))).isEqualTo(link.at());
     }
 
     private static EntityState entity(String ulid) {

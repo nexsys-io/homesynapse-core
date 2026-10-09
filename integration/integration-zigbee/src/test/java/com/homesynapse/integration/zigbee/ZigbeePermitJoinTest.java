@@ -56,8 +56,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * PJ-2 — the pairing window as a DECLARED, TIME-BOXED, RECORDED act: the window's
  * tests of record. It opens ONLY by {@link ZigbeeIntegrationAdapter#openPairingWindow}
  * (the endpoint's path, run on the adapter's command executor — the fixture calls it
- * directly), never at start: a {@code permit_join_duration} key present at boot is
- * IGNORED with one WARN and opens nothing (M9.4-PJ's start-path window is retired).
+ * directly), never at start: the start path reads no join key at all —
+ * {@code permit_join_duration} left the schema with AMD-102 (CONFIG-ERROR-1), and a
+ * configuration carrying it fails the boot (M9.4-PJ's start-path window is retired).
  * Every open publishes {@code permit_join_opened}; every close publishes ONE
  * {@code permit_join_closed} naming its cause ({@code elapsed} from the cycle,
  * {@code superseded} by a later open, {@code transport_reopened}, {@code shutdown}).
@@ -123,7 +124,7 @@ class ZigbeePermitJoinTest {
     void openPairingWindow_opensProtocolWindow_publishesOpened() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
         assertThat(countFrames(ncp, FRAME_PERMIT_JOINING))
                 .as("no permit-join frame is emitted during boot").isZero();
 
@@ -178,7 +179,7 @@ class ZigbeePermitJoinTest {
     void scopedOpen_writesPolicy0x0013_andThePartnerBytes() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
 
         PairingWindow window = adapter.openPairingWindow(SCOPED_REQUEST);
 
@@ -221,7 +222,7 @@ class ZigbeePermitJoinTest {
     void unscopedOpen_todaysBytesExactly() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
 
         PairingWindow window = adapter.openPairingWindow(REQUEST);
 
@@ -253,7 +254,7 @@ class ZigbeePermitJoinTest {
             }
             return formationHandler(ncp, command);
         });
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
         adapter.openPairingWindow(REQUEST);
         int framesAtOpen = ncp.receivedEzspCommands().size();
         clock.advance(Duration.ofSeconds(WINDOW_SECONDS + 1));
@@ -295,7 +296,7 @@ class ZigbeePermitJoinTest {
     void runCycleOnce_pastDeadline_publishesElapsedOnce() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
         PairingWindow window = adapter.openPairingWindow(REQUEST);
         clock.advance(Duration.ofSeconds(WINDOW_SECONDS + 1));
 
@@ -318,50 +319,10 @@ class ZigbeePermitJoinTest {
                 .containsExactly(EventTypes.PERMIT_JOIN_OPENED, EventTypes.PERMIT_JOIN_CLOSED);
     }
 
-    // ── T3: a key at boot opens NOTHING — one WARN ──────────────────────────
-
-    @Test
-    @DisplayName("T3: a present key opens NOTHING at start — zero 0x0022 frames across the "
-            + "boot and the start-path call, the window closed, no event, and exactly ONE "
-            + "WARN zigbee.permit_join_key_ignored naming the configured value")
-    void keyPresent_opensNothing_warnsOnce() throws Exception {
-        FakeNcp ncp = new FakeNcp();
-        ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, 200);
-        assertThat(countFrames(ncp, FRAME_PERMIT_JOINING))
-                .as("no permit-join frame is emitted during boot").isZero();
-
-        adapter.warnIfPermitJoinKeyConfigured();   // the :500 start-path call, PJ-2
-
-        assertThat(countFrames(ncp, FRAME_PERMIT_JOINING))
-                .as("the key opens nothing — zero 0x0022 frames").isZero();
-        assertThat(adapter.isPermitJoinActive()).as("the window stays closed").isFalse();
-        assertThat(adapter.currentPairingWindow()).isEmpty();
-        assertThat(publisher.published()).as("no event of record from the key").isEmpty();
-        assertThat(messages(Level.WARN, "zigbee.permit_join_key_ignored"))
-                .as("exactly one WARN naming the configured value")
-                .containsExactly("zigbee.permit_join_key_ignored: configured=200s — the "
-                        + "window opens only by POST /api/v1/integrations/{id}/permit-join "
-                        + "(PJ-2)");
-    }
-
-    @Test
-    @DisplayName("an absent key opens nothing and warns nothing — zero 0x0022 frames, zero "
-            + "WARN lines across the whole production boot (conservative default is LAW)")
-    void keyAbsent_neverOpens() throws Exception {
-        FakeNcp ncp = new FakeNcp();
-        ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
-
-        adapter.warnIfPermitJoinKeyConfigured();
-
-        assertThat(countFrames(ncp, FRAME_PERMIT_JOINING))
-                .as("no key ⇒ no permit-join frame ever")
-                .isZero();
-        assertThat(adapter.isPermitJoinActive()).as("the window stays closed").isFalse();
-        assertThat(messages(Level.WARN, "zigbee.permit_join")).isEmpty();
-        assertThat(publisher.published()).isEmpty();
-    }
+    // ── T3 (the key-ignored pair) RETIRED by AMD-102 / CONFIG-ERROR-1: the key left the
+    //    schema and the adapter reads none; a configuration carrying it fails the boot
+    //    (HomeSynapseCoreSchemaAdmissionTest T3). The start path's "zero enablement
+    //    frames" pin lives in ZigbeeTrustCenterJoinTest §A-2. ────────────────────────
 
     // ── the record rejects out-of-range durations before any frame ──────────
 
@@ -371,7 +332,7 @@ class ZigbeePermitJoinTest {
     void requestOutOfRange_rejectedByTheRecord() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
 
         assertThatThrownBy(() -> new PairingWindowRequest(0, "pair", "key-01", null))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -394,7 +355,7 @@ class ZigbeePermitJoinTest {
     void isPermitJoinActive_reflectsClockWindow() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
 
         assertThat(adapter.isPermitJoinActive()).as("closed before open").isFalse();
 
@@ -415,16 +376,16 @@ class ZigbeePermitJoinTest {
     // ── driven mode is untouched (the M9.4a hero substrate) ─────────────────
 
     @Test
-    @DisplayName("the M9.4a driven cadence never opens the window even with the key set "
-            + "— runCycleOnce() opens nothing, so the window never opens")
+    @DisplayName("the M9.4a driven cadence never opens the window — runCycleOnce() opens "
+            + "nothing, so the window never opens")
     void drivenMode_neverOpensWindow() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
         FakeSerialByteChannel channel = channelOver(ncp);
-        // Driven mode: an injected channel opener selects the M9.4a rig path; the
-        // key is set to prove it is inert everywhere — the driven cadence ignores it.
+        // Driven mode: an injected channel opener selects the M9.4a rig path (no join
+        // key exists for the adapter to read since AMD-102).
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
-                context(configAccess(null, 200)), new InMemoryDeviceRegistry(),
+                context(configAccess(null)), new InMemoryDeviceRegistry(),
                 new RegistryProjection(new InMemoryDeviceRegistry(),
                         new InMemoryEntityRegistry()),
                 tempDir, clock, ignored -> channel);
@@ -456,7 +417,7 @@ class ZigbeePermitJoinTest {
         Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
         channels.push(channelOver(reopenedNcp));
         channels.push(channelOver(formingNcp));   // pop order: forming, then reopened
-        ZigbeeIntegrationAdapter adapter = bootProduction(channels, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(channels, null);
         PairingWindow window = adapter.openPairingWindow(REQUEST);
         assertThat(adapter.isPermitJoinActive()).as("the window opened").isTrue();
         NetworkParameters formed = new PersistentNetworkParameterStore(tempDir, clock)
@@ -499,7 +460,7 @@ class ZigbeePermitJoinTest {
     void close_withOpenWindow_publishesShutdown() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
         PairingWindow window = adapter.openPairingWindow(REQUEST);
         clock.advance(Duration.ofSeconds(7));
 
@@ -522,7 +483,7 @@ class ZigbeePermitJoinTest {
     void supersedingOpen_closesPriorFirst() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
         PairingWindow first = adapter.openPairingWindow(REQUEST);
         clock.advance(Duration.ofSeconds(30));
 
@@ -588,7 +549,7 @@ class ZigbeePermitJoinTest {
     void supersedingOpen_afterElapsed_closesPriorAsElapsed() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
         PairingWindow first = adapter.openPairingWindow(REQUEST);
         clock.advance(Duration.ofSeconds(WINDOW_SECONDS + 5));
         assertThat(adapter.isPermitJoinActive()).as("elapsed, unobserved by a cycle").isFalse();
@@ -617,7 +578,7 @@ class ZigbeePermitJoinTest {
     void close_withOpenWindow_runsTheNcpCloseFirst() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> formationHandler(ncp, command));
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
         adapter.openPairingWindow(REQUEST);
         int framesAtOpen = ncp.receivedEzspCommands().size();
 
@@ -658,19 +619,18 @@ class ZigbeePermitJoinTest {
     }
 
     /** Boots a production adapter through the full §5.1 ladder to a formed network. */
-    private ZigbeeIntegrationAdapter bootProduction(FakeNcp ncp, String serialPort,
-            Integer permitJoinDuration) throws Exception {
+    private ZigbeeIntegrationAdapter bootProduction(FakeNcp ncp, String serialPort)
+            throws Exception {
         Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
         channels.push(channelOver(ncp));
-        return bootProduction(channels, serialPort, permitJoinDuration);
+        return bootProduction(channels, serialPort);
     }
 
     /** The multi-channel variant (the reopen leg pops a second channel). */
     private ZigbeeIntegrationAdapter bootProduction(
-            Deque<FakeSerialByteChannel> channels, String serialPort,
-            Integer permitJoinDuration) throws Exception {
+            Deque<FakeSerialByteChannel> channels, String serialPort) throws Exception {
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
-                context(configAccess(serialPort, permitJoinDuration)),
+                context(configAccess(serialPort)),
                 new InMemoryDeviceRegistry(),
                 new RegistryProjection(new InMemoryDeviceRegistry(),
                         new InMemoryEntityRegistry()),
@@ -892,8 +852,7 @@ class ZigbeePermitJoinTest {
 
     // ── inert context stubs (the adapter never touches these paths here) ────
 
-    private static ConfigurationAccess configAccess(String serialPort,
-            Integer permitJoinDuration) {
+    private static ConfigurationAccess configAccess(String serialPort) {
         return new ConfigurationAccess() {
             @Override
             public Map<String, Object> getConfig() {
@@ -909,9 +868,7 @@ class ZigbeePermitJoinTest {
 
             @Override
             public Optional<Integer> getInt(String key) {
-                return ZigbeeIntegrationAdapter.PERMIT_JOIN_DURATION_KEY.equals(key)
-                        ? Optional.ofNullable(permitJoinDuration)
-                        : Optional.empty();
+                return Optional.empty();   // AMD-102: no join key exists to answer
             }
 
             @Override

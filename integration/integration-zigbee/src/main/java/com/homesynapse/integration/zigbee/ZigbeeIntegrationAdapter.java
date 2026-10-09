@@ -100,17 +100,6 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
     static final String SERIAL_PORT_KEY = "serial_port";
 
     /**
-     * The {@code integrations.zigbee} config key that USED to open the permit-join
-     * window at production start (M9.4-PJ). IGNORED since PJ-2: a value present at
-     * start logs ONE WARN ({@code zigbee.permit_join_key_ignored}) and opens nothing —
-     * the window opens only by {@code POST /api/v1/integrations/{id}/permit-join}
-     * ({@link #openPairingWindow}; the 1–254 s bounds live on
-     * {@link PairingWindowRequest}). The key stays in the schema so a configuration
-     * carrying it still validates; its removal is a later decision.
-     */
-    static final String PERMIT_JOIN_DURATION_KEY = "permit_join_duration";
-
-    /**
      * F-R4-1b DP-4 — the bound on the ZDO {@code IEEE_addr_req} exchange the
      * interview-on-rejoin arm sends after a clean coordinator-table miss: the
      * interview's own per-step budget
@@ -304,11 +293,14 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
      */
     private final ReentrantLock ncpWindowLock = new ReentrantLock();
     /**
-     * J2b / IR-115 — the canonical IEEE of the last SCOPED window opened (never cleared
-     * by a close: the scoped transient key outlives the window on the NCP by up to its
-     * own ~300 s lifetime, and its expiry names this partner or the all-zeros "no
-     * specific partner"). {@code null} until a scoped window opens. Written on the
-     * command executor, read on the run thread — {@code volatile}.
+     * J2b / IR-115 — the canonical IEEE of the scope of the LAST window opened, set by
+     * EVERY open: a scoped open writes its partner, an un-scoped open writes
+     * {@code null} (IR-126 — the expiry of the key an un-scoped window imported is
+     * never attributed to an older scope). Never cleared by a close: the scoped
+     * transient key outlives the window on the NCP by up to its own ~300 s lifetime,
+     * and its expiry names this partner or the all-zeros "no specific partner".
+     * {@code null} until a scoped window opens. Written on the command executor, read
+     * on the run thread — {@code volatile}.
      */
     private volatile String lastScopedPartner;
     /**
@@ -600,7 +592,6 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         protocol.awaitNetworkUp();
         log.info("zigbee.production_session_started: port={} protocolVersion={}",
                 port.systemPath(), protocol.negotiatedVersion());
-        warnIfPermitJoinKeyConfigured();   // PJ-2: the key opens nothing — one WARN if present
         productionLoop();
     }
 
@@ -1114,24 +1105,6 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
     }
 
     /**
-     * PJ-2 (DP-PJ2-5) — the start path's ONLY use of {@link #PERMIT_JOIN_DURATION_KEY}:
-     * a value present at production start is IGNORED with ONE WARN and NO frame; an
-     * absent key logs nothing. Boot never opens a window — the window opens only by the
-     * endpoint ({@link #openPairingWindow}). Package-private so the production-ladder
-     * fixture (which drives the ladder to {@code awaitNetworkUp()} and never reaches
-     * {@code run()}) can call it directly. Production only: the driven mode never
-     * reaches the start path.
-     */
-    void warnIfPermitJoinKeyConfigured() {
-        Optional<Integer> configured =
-                context.configAccess().getInt(PERMIT_JOIN_DURATION_KEY);
-        if (configured.isPresent()) {
-            log.warn("zigbee.permit_join_key_ignored: configured={}s — the window opens only "
-                    + "by POST /api/v1/integrations/{id}/permit-join (PJ-2)", configured.get());
-        }
-    }
-
-    /**
      * PJ-2 (DP-PJ2-3) — opens the pairing window for an operator's request. Runs ONLY
      * on the supervisor's command executor (the {@link PairingWindowControl} contract)
      * and touches the protocol, {@link #permitJoinDeadline}, {@link #currentWindow} and
@@ -1177,9 +1150,9 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
             PairingWindow window = new PairingWindow(context.integrationId(), opensAt,
                     opensAt.plusSeconds(duration), duration, request.reason(),
                     request.actor(), request.scope());
-            if (window.scope() != null) {
-                lastScopedPartner = window.scope();
-            }
+            // IR-126: EVERY open sets the scope — null on an un-scoped open — so a later
+            // all-zeros expiry is never attributed to a scope that did not open this window.
+            lastScopedPartner = window.scope();
             permitJoinDeadline = window.closesAt();
             currentWindow.set(window);
             permitJoinEpoch++;   // the executor is the single writer

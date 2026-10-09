@@ -10,7 +10,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -23,19 +22,22 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * the real {@code integrations.{type}} schemas (R-4 C-1). The map is the one
  * seam {@code main()} iterates; this pins what it carries.
  *
- * <p>The second test pins the fragment's {@code permit_join_duration} shape at
- * the point of supply: a composed fragment's every {@code default} is OPERATIVE
- * (Doc 06 §3.1 stage 4 merges it into the model on every boot), and the M9.4-PJ
- * law is that an ABSENT key opens no join window — so the supplied fragment must
- * declare no default for that key, or every unconfigured boot would open the
- * network for joins.</p>
+ * <p>The third test pins the fragment at the point of supply since AMD-102
+ * (CONFIG-ERROR-1): it declares NEITHER {@code permit_join_duration} (IGNORED
+ * since PJ-2; REMOVED) NOR {@code availability} (IR-122: no reader; REMOVED) —
+ * a composed fragment's every property is OPERATIVE at Phase-1 validation, and
+ * under AMD-102 a configuration carrying an undeclared key fails the boot naming
+ * it, so a key that is dead in the code must be absent from the fragment.</p>
  */
 @DisplayName("Main -- the pre-start integration schema fragments (PKG-SEC-2)")
 final class MainSchemaFragmentsTest {
 
     /** The {@code permit_join_duration} property object in the fragment text. */
     private static final Pattern PERMIT_JOIN_PROPERTY =
-            Pattern.compile("\"permit_join_duration\"\\s*:\\s*\\{([^}]*)\\}");
+            Pattern.compile("\"permit_join_duration\"\\s*:\\s*\\{");
+    /** The {@code availability} property object in the fragment text. */
+    private static final Pattern AVAILABILITY_PROPERTY =
+            Pattern.compile("\"availability\"\\s*:\\s*\\{");
 
     /** Explicit no-arg constructor for {@code -Xlint:all -Werror} builds. */
     MainSchemaFragmentsTest() {
@@ -50,8 +52,9 @@ final class MainSchemaFragmentsTest {
         assertThat(fragments).containsOnlyKeys(ZigbeeIntegrationFactory.INTEGRATION_TYPE);
         assertThat(fragments.get(ZigbeeIntegrationFactory.INTEGRATION_TYPE))
                 .isEqualTo(ZigbeeIntegrationFactory.configSchemaJson())
-                .contains("\"permit_join_duration\"")
-                .containsPattern("\"maximum\"\\s*:\\s*254");
+                .doesNotContain("\"permit_join_duration\"")
+                .doesNotContain("\"availability\"")
+                .containsPattern("\"maximum\"\\s*:\\s*26");
     }
 
     @Test
@@ -62,19 +65,20 @@ final class MainSchemaFragmentsTest {
     }
 
     @Test
-    @DisplayName("the supplied zigbee fragment declares NO default for permit_join_duration — "
-            + "absent ⇒ no join window (M9.4-PJ); a default here would open the door on every "
-            + "unconfigured boot once the fragment composes at Phase 1")
-    void zigbeeFragment_declaresNoPermitJoinDefault() {
+    @DisplayName("the supplied zigbee fragment declares NEITHER permit_join_duration NOR "
+            + "availability (REMOVED, AMD-102 R-D / IR-122) — a configuration carrying either "
+            + "fails the boot naming it; the 254 maximum left with the key (the channel's 26 "
+            + "remains)")
+    void zigbeeFragment_declaresNoRemovedKeys() {
         String fragment = Main.integrationSchemaFragments()
                 .get(ZigbeeIntegrationFactory.INTEGRATION_TYPE);
-        Matcher property = PERMIT_JOIN_PROPERTY.matcher(fragment);
 
-        assertThat(property.find()).as("the key is declared").isTrue();
-        assertThat(property.group(1))
-                .as("the property object carries min/max but no default")
-                .containsPattern("\"minimum\"\\s*:\\s*1")
-                .containsPattern("\"maximum\"\\s*:\\s*254")
-                .doesNotContain("\"default\"");
+        assertThat(PERMIT_JOIN_PROPERTY.matcher(fragment).find())
+                .as("permit_join_duration left the fragment (AMD-102 R-D)").isFalse();
+        assertThat(AVAILABILITY_PROPERTY.matcher(fragment).find())
+                .as("availability left the fragment (IR-122)").isFalse();
+        assertThat(fragment)
+                .doesNotContainPattern("\"maximum\"\\s*:\\s*254")
+                .containsPattern("\"maximum\"\\s*:\\s*26");
     }
 }

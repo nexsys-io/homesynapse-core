@@ -219,13 +219,11 @@ class ZigbeeTrustCenterJoinTest {
     @Test
     @DisplayName("§A-2: the start path emits ZERO policy and transient-key frames — since "
             + "PJ-2 the enablement rides the request's window only (conservative default "
-            + "is LAW; an absent key warns nothing)")
-    void keyAbsent_emitsNoEnablementFrames() throws Exception {
+            + "is LAW; since AMD-102 the start path reads no join key at all)")
+    void startPath_emitsNoEnablementFrames() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(command -> tcjHandler(ncp, command, List.of()));
         ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
-
-        adapter.warnIfPermitJoinKeyConfigured();   // the :500 start-path call (PJ-2)
 
         assertThat(enablementFrameIds(ncp))
                 .as("no key ⇒ no policy, no transient key, no permitJoin — ever")

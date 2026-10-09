@@ -21,9 +21,12 @@ import java.util.Objects;
  *   <li>{@link Severity#FATAL} — the configuration is structurally invalid.
  *       {@code appliedDefault} is always {@code null} because no default can
  *       compensate for a structural error.</li>
- *   <li>{@link Severity#ERROR} — the key failed validation. On startup the
- *       system reverts the key to the schema default ({@code appliedDefault}
- *       is non-null). On reload the entire candidate is rejected.</li>
+ *   <li>{@link Severity#ERROR} — the key failed validation, or the key is one
+ *       the composed schema does not declare. At startup an ERROR fails the
+ *       load (AMD-102); {@code appliedDefault} carries the schema default the
+ *       operator could write — informational, never applied ({@code null}
+ *       where the schema declares none). On reload the entire candidate is
+ *       rejected.</li>
  *   <li>{@link Severity#WARNING} — informational. {@code appliedDefault} is
  *       always {@code null} because the value is accepted as-is.</li>
  * </ul>
@@ -35,9 +38,10 @@ import java.util.Objects;
  *                       never {@code null}
  * @param invalidValue   the value that failed validation, or {@code null} for
  *                       missing-key issues
- * @param appliedDefault the schema default applied in place of the invalid value,
- *                       or {@code null} for {@link Severity#FATAL} and
- *                       {@link Severity#WARNING} issues
+ * @param appliedDefault the schema default the operator could write for the path
+ *                       (informational since AMD-102 — nothing is applied), or
+ *                       {@code null} when the schema declares none and for
+ *                       {@link Severity#FATAL} and {@link Severity#WARNING} issues
  * @param yamlLine       the line number in the YAML file where the issue was
  *                       detected, or {@code null} when the parser cannot determine
  *                       the line number

@@ -20,12 +20,14 @@ import static org.assertj.core.api.Assertions.assertThatNullPointerException;
  * implementation over networknt json-schema-validator in allErrors mode
  * (Doc 06 §3.1 stage 5, §3.6).
  *
- * <p>Severity classification under the three-tier model (§3.6): violations of
- * {@code required} are FATAL (a missing required section is structural),
- * {@code additionalProperties} violations are WARNING (unknown key — possible
- * typo), and every value-level violation (type, enum, range, pattern) is
- * ERROR. ERROR issues carry the schema default that the startup pipeline
- * applies in their place (DP-2).</p>
+ * <p>Severity classification under the three-tier model (§3.6, as amended by
+ * AMD-102): violations of {@code required} are FATAL (a missing required section
+ * is structural), {@code additionalProperties} violations are ERROR (an unknown
+ * key — a key the composed schema does not declare — fails the load like any
+ * value error), and every value-level violation (type, enum, range, pattern) is
+ * ERROR. ERROR issues carry the schema default the operator could write
+ * ({@code appliedDefault} — informational since AMD-102; {@code null} where the
+ * schema declares none, which is every undeclared path).</p>
  */
 @DisplayName("JsonSchemaCompositeValidator (Doc 06 §3.6 three-tier model)")
 class JsonSchemaCompositeValidatorTest {
@@ -188,15 +190,18 @@ class JsonSchemaCompositeValidatorTest {
         }
 
         @Test
-        @DisplayName("unknown key is WARNING (possible typo; value accepted)")
-        void unknownKeyIsWarning() {
+        @DisplayName("unknown key is ERROR (AMD-102: a key the composed schema does not declare "
+                + "fails the load like any value error) — path <section>.<key>, the value named, "
+                + "appliedDefault null (no default exists for an undeclared path)")
+        void unknownKeyIsError() {
             List<ConfigIssue> issues = validator.validate(
                     Map.of("event_bus", Map.of("qeue_capacity", 64)), SCHEMA);
 
             assertThat(issues).hasSize(1);
             ConfigIssue issue = issues.get(0);
-            assertThat(issue.severity()).isEqualTo(Severity.WARNING);
+            assertThat(issue.severity()).isEqualTo(Severity.ERROR);
             assertThat(issue.path()).isEqualTo("event_bus.qeue_capacity");
+            assertThat(issue.invalidValue()).isEqualTo(64);
             assertThat(issue.appliedDefault()).isNull();
         }
 

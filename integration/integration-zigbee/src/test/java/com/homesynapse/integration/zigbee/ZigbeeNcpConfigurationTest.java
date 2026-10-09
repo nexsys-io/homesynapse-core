@@ -104,7 +104,7 @@ class ZigbeeNcpConfigurationTest {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::formationHandler);
 
-        bootProduction(ncp, null);
+        bootProduction(ncp);
 
         List<byte[]> extended = nonLegacyCommands(ncp);
         assertThat(frameIdOf(extended.get(0)))
@@ -184,7 +184,7 @@ class ZigbeeNcpConfigurationTest {
             }
             return formationHandler(command);
         });
-        ZigbeeIntegrationAdapter adapter = productionAdapter(ncp, 200);
+        ZigbeeIntegrationAdapter adapter = productionAdapter(ncp);
 
         assertThatThrownBy(() -> adapter.coordinatorProtocol().startSession())
                 .as("a REQUIRED rejection is honest failure — the supervisor classifies")
@@ -229,7 +229,7 @@ class ZigbeeNcpConfigurationTest {
             }
             return formationHandler(command);
         });
-        ZigbeeIntegrationAdapter adapter = productionAdapter(ncp, 200);
+        ZigbeeIntegrationAdapter adapter = productionAdapter(ncp);
 
         assertThatThrownBy(() -> adapter.coordinatorProtocol().startSession())
                 .isInstanceOf(IllegalStateException.class)
@@ -267,7 +267,7 @@ class ZigbeeNcpConfigurationTest {
             return formationHandler(command);
         });
 
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
 
         assertThat(protocolMessages(Level.WARN, "zigbee.ncp_config_skipped"))
                 .as("exactly one WARN names the skipped id and status")
@@ -291,7 +291,7 @@ class ZigbeeNcpConfigurationTest {
     void noOpStartSession_neverRewritesConfig() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::formationHandler);
-        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
         assertThat(countFrames(ncp,
                 EzspCoordinatorProtocol.FRAME_SET_CONFIGURATION_VALUE)).isEqualTo(10);
 
@@ -365,12 +365,11 @@ class ZigbeeNcpConfigurationTest {
     }
 
     /** Builds + initializes + binds the production adapter, WITHOUT startSession. */
-    private ZigbeeIntegrationAdapter productionAdapter(FakeNcp ncp,
-            Integer permitJoinDuration) throws Exception {
+    private ZigbeeIntegrationAdapter productionAdapter(FakeNcp ncp) throws Exception {
         Deque<FakeSerialByteChannel> channels = new ArrayDeque<>();
         channels.push(channelOver(ncp));
         ZigbeeIntegrationAdapter adapter = new ZigbeeIntegrationAdapter(
-                context(configAccess(permitJoinDuration)),
+                context(configAccess()),
                 new InMemoryDeviceRegistry(),
                 new RegistryProjection(new InMemoryDeviceRegistry(),
                         new InMemoryEntityRegistry()),
@@ -383,9 +382,8 @@ class ZigbeeNcpConfigurationTest {
     }
 
     /** Boots a production adapter through the full §5.1 ladder to a formed network. */
-    private ZigbeeIntegrationAdapter bootProduction(FakeNcp ncp,
-            Integer permitJoinDuration) throws Exception {
-        ZigbeeIntegrationAdapter adapter = productionAdapter(ncp, permitJoinDuration);
+    private ZigbeeIntegrationAdapter bootProduction(FakeNcp ncp) throws Exception {
+        ZigbeeIntegrationAdapter adapter = productionAdapter(ncp);
         adapter.coordinatorProtocol().startSession();
         adapter.resumeOrForm();
         adapter.coordinatorProtocol().awaitNetworkUp();
@@ -544,7 +542,7 @@ class ZigbeeNcpConfigurationTest {
 
     // ── inert context stubs (the adapter never touches these paths here) ────
 
-    private static ConfigurationAccess configAccess(Integer permitJoinDuration) {
+    private static ConfigurationAccess configAccess() {
         return new ConfigurationAccess() {
             @Override
             public Map<String, Object> getConfig() {
@@ -558,9 +556,7 @@ class ZigbeeNcpConfigurationTest {
 
             @Override
             public Optional<Integer> getInt(String key) {
-                return ZigbeeIntegrationAdapter.PERMIT_JOIN_DURATION_KEY.equals(key)
-                        ? Optional.ofNullable(permitJoinDuration)
-                        : Optional.empty();
+                return Optional.empty();   // AMD-102: no join key exists to answer
             }
 
             @Override

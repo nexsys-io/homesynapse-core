@@ -26,7 +26,7 @@ import java.util.Set;
  * json-schema-validator (LTD-09) in allErrors mode — every issue in the
  * document is collected in a single pass (Doc 06 §3.1 stage 5, P4).
  *
- * <h2>Severity classification (Doc 06 §3.6)</h2>
+ * <h2>Severity classification (Doc 06 §3.6, as amended by AMD-102)</h2>
  *
  * <p>Each schema violation maps to the three-tier model by its JSON Schema
  * keyword:</p>
@@ -35,14 +35,22 @@ import java.util.Set;
  *   <li>{@code required} → {@link Severity#FATAL} — a missing required key
  *       survived the default merge, so no default exists to compensate;
  *       the document is structurally incomplete.</li>
- *   <li>{@code additionalProperties} → {@link Severity#WARNING} — an
- *       unknown key is a possible typo; the value is accepted as-is.</li>
+ *   <li>{@code additionalProperties} → {@link Severity#ERROR} — an unknown
+ *       key is a key the composed schema does not declare; since AMD-102 it
+ *       fails the load like any value error (a typo in a core section or in
+ *       an integration's fragment, or a key a fragment has removed, is a boot
+ *       failure naming the key — never a note on a dashboard). Its
+ *       {@code appliedDefault} is {@code null}: no schema default exists for
+ *       an undeclared path.</li>
  *   <li>everything else (type, enum, range, length, pattern, format) →
  *       {@link Severity#ERROR} — a value-level violation. The issue
- *       carries the schema default the startup pipeline applies in its
- *       place (DP-2); {@code appliedDefault} is {@code null} when the
- *       schema declares no default for the path.</li>
+ *       carries the schema default the operator could write for the path
+ *       ({@code appliedDefault} — informational since AMD-102, nothing is
+ *       applied; {@code null} when the schema declares none).</li>
  * </ul>
+ *
+ * <p>After AMD-102 no arm of this classifier emits {@link Severity#WARNING};
+ * the tier has no producer until a deprecation annotation exists (IR-141).</p>
  *
  * <p>Schema-validation issues carry no YAML line number: validation runs
  * against the merged map (Doc 06 §3.1 stage 4 output, AMD-71 §2.4
@@ -125,7 +133,7 @@ final class JsonSchemaCompositeValidator implements ConfigValidator {
 
     private static Severity classify(String keyword) {
         return switch (keyword) {
-            case KEYWORD_ADDITIONAL_PROPERTIES -> Severity.WARNING;
+            case KEYWORD_ADDITIONAL_PROPERTIES -> Severity.ERROR;   // AMD-102 R-B
             case KEYWORD_REQUIRED -> Severity.FATAL;
             default -> Severity.ERROR;
         };

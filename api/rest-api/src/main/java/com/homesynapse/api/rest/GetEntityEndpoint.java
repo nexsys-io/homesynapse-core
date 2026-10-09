@@ -41,15 +41,16 @@ import java.util.function.LongSupplier;
  * }
  * }</pre>
  *
- * <p>The {@code data} object is the {@link EntityState} record itself,
- * serialised by Javalin's built-in Jackson — since J1 (LINK-READ-2, 2026-10-03)
- * its {@code availabilityReason}, {@code lastSeenAt} and {@code link} components
- * render by their component names (camelCase), with NO handler code, {@code null}
- * where the projection holds none. {@link EntityState#attributes()}
- * may contain {@code null} values (per the contract documented in
- * state-store {@code MODULE_CONTEXT.md}); Jackson serialises {@code null}
- * values directly — do <em>not</em> call {@code Map.copyOf()} on
- * attributes, which would reject them.</p>
+ * <p>The {@code data} object is {@link EntityStateJson#render(EntityState)}'s map
+ * (IR-132, CONFIG-ERROR-1 §4.4): the record's components by name, in their order,
+ * every instant as {@code Instant.toString()} (ISO-8601 UTC — the same rendering
+ * as the list read and {@code meta.timestamp}); the J1 (LINK-READ-2, 2026-10-03)
+ * keys {@code availabilityReason}, {@code lastSeenAt} and {@code link} ride with
+ * it, {@code null} where the projection holds none. {@link EntityState#attributes()}
+ * is handed through as the object it is and may contain {@code null} values (per
+ * the contract documented in state-store {@code MODULE_CONTEXT.md}); Jackson
+ * serialises {@code null} values directly — do <em>not</em> call
+ * {@code Map.copyOf()} on attributes, which would reject them.</p>
  *
  * <h2>Response (404)</h2>
  *
@@ -127,7 +128,7 @@ final class GetEntityEndpoint implements Handler {
         meta.put("timestamp", clock.instant().toString());
 
         Map<String, Object> body = new LinkedHashMap<>(2);
-        body.put("data", maybeState.get());
+        body.put("data", EntityStateJson.render(maybeState.get()));
         body.put("meta", meta);
 
         ctx.status(200);

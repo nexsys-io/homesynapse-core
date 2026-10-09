@@ -64,13 +64,17 @@ import java.util.stream.Stream;
  * The reload pipeline shares the same stages, so tags resolve identically
  * on reload.</p>
  *
- * <h2>Startup error model (DP-2 / Doc 06 §3.6)</h2>
+ * <h2>Startup error model (Doc 06 §3.6 as amended by AMD-102)</h2>
  *
- * <p>On {@link #load()}: {@link Severity#ERROR} issues revert the offending
- * key to its schema default — the system starts degraded but functional
- * (INV-RF-06). {@link Severity#FATAL} issues abort with
- * {@link ConfigurationLoadException}. Structural FATALs from the parse
- * stage abort before any validation pass runs.</p>
+ * <p>On {@link #load()}: any {@link Severity#ERROR} issue — a value that fails
+ * its schema OR a key the composed schema does not declare — fails the load
+ * with {@link ConfigurationLoadException} naming every path (AMD-102, the
+ * {@code CONFIG-ERROR: fatal} ruling); nothing reverts to a default and no
+ * model is activated. {@link Severity#FATAL} issues abort the same way.
+ * Structural FATALs from the parse stage abort before any validation pass
+ * runs. Startup and reload thus agree — a configuration with any issue above
+ * WARNING never runs; the difference is only what is preserved (on reload
+ * the active model, at startup nothing).</p>
  *
  * <h2>Migration trigger (AMD-67-INV-02) and write-back (§3.7 step 7)</h2>
  *
@@ -141,7 +145,9 @@ import java.util.stream.Stream;
  * {@link #load()} validation pass — including a pass that found FATAL
  * issues. After the same pass, one {@code config_error} event is published
  * per {@link Severity#ERROR} issue (M6.4, R1 — Doc 06 §4.5 "at startup";
- * never from {@link #reload()}), with the §12.4 fence: an
+ * never from {@link #reload()}) — BEFORE the AMD-102 throw, its
+ * {@code appliedDefault} informational (the schema default the operator
+ * could write; nothing is applied) — with the §12.4 fence: an
  * {@code x-sensitive} path publishes {@code "[REDACTED]"} for the message
  * and {@code "(none)"} for the default. {@code config.section_reloaded}
  * fires once per section actually changed by a reload, after listener
@@ -350,20 +356,18 @@ final class StandardConfigurationService implements ConfigurationService {
             throw loadException(e.issues());
         }
 
-        // §3.6 startup error model over the completed validation pass.
-        boolean fatal = outcome.issues().stream()
-                .anyMatch(issue -> issue.severity() == Severity.FATAL);
-        if (fatal) {
+        // §3.6 startup error model over the completed validation pass — AMD-102:
+        // FATAL or ERROR (a value error OR an unknown key) fails the load naming
+        // every path; nothing reverts. The ORDER is a pin: the validation summary,
+        // then one config_error per ERROR, then the throw.
+        boolean rejecting = outcome.issues().stream()
+                .anyMatch(issue -> issue.severity() != Severity.WARNING);
+        if (rejecting) {
             publishValidationCompleted(outcome.documentVersion(), outcome.issues());
             publishConfigErrors(outcome.issues(), outcome.composedSchema());
             throw loadException(outcome.issues());
         }
         Map<String, Object> merged = outcome.merged();
-        for (ConfigIssue issue : outcome.issues()) {
-            if (issue.severity() == Severity.ERROR) {
-                revertToDefault(merged, issue.path(), outcome.defaultsTree());
-            }
-        }
 
         // §3.7 step 7 (DP-11): persist the migrated document, refresh the
         // optimistic-concurrency token from the NEW file.
@@ -977,8 +981,8 @@ final class StandardConfigurationService implements ConfigurationService {
 
     /**
      * Merges schema defaults into the document for absent keys only — user
-     * values always win. Returns a deeply fresh tree so the §3.6 ERROR
-     * reverts can mutate it without aliasing the defaults tree.
+     * values always win. Returns a deeply fresh tree: the model owns its map
+     * and never aliases the defaults tree.
      */
     private static Map<String, Object> mergeDefaults(Map<String, Object> user,
                                                      Map<String, Object> defaults) {
@@ -1005,38 +1009,6 @@ final class StandardConfigurationService implements ConfigurationService {
                     : defaultValue);
         }
         return merged;
-    }
-
-    /** Reverts an ERROR key to its schema default, or removes it when none. */
-    private static void revertToDefault(Map<String, Object> merged, String dottedPath,
-                                        Map<String, Object> defaultsTree) {
-        List<String> segments = List.of(dottedPath.split("\\.", -1));
-        Map<String, Object> parent = merged;
-        for (int i = 0; i < segments.size() - 1; i++) {
-            Object next = parent.get(segments.get(i));
-            if (!(next instanceof Map<?, ?>)) {
-                return;
-            }
-            parent = asStringMap(next);
-        }
-        String leaf = segments.get(segments.size() - 1);
-        Object defaultValue = valueAt(defaultsTree, segments);
-        if (defaultValue != null) {
-            parent.put(leaf, defaultValue);
-        } else {
-            parent.remove(leaf);
-        }
-    }
-
-    private static Object valueAt(Map<String, Object> tree, List<String> segments) {
-        Object current = tree;
-        for (String segment : segments) {
-            if (!(current instanceof Map<?, ?> map)) {
-                return null;
-            }
-            current = map.get(segment);
-        }
-        return current;
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1109,10 +1081,14 @@ final class StandardConfigurationService implements ConfigurationService {
 
     /**
      * DP-10 (R1): one {@code config_error} per ERROR-severity issue after a
-     * completed startup validation pass (Doc 06 §4.5) — including a FATAL
-     * pass, before its throw. The §12.4 fence redacts {@code x-sensitive}
-     * paths: the message becomes {@code "[REDACTED]"} and the default
-     * {@code "(none)"} — the invalid value itself is never published.
+     * completed startup validation pass (Doc 06 §4.5) — always before the
+     * AMD-102 throw that an ERROR or FATAL pass ends in. The event's keys are
+     * unchanged (AMD-102 R-C): {@code appliedDefault} carries the schema
+     * default the operator could write, or {@code "(none)"} where the schema
+     * declares none (every unknown key) — informational, nothing is applied.
+     * The §12.4 fence redacts {@code x-sensitive} paths: the message becomes
+     * {@code "[REDACTED]"} and the default {@code "(none)"} — the invalid
+     * value itself is never published.
      */
     private void publishConfigErrors(List<ConfigIssue> issues, String composedSchema) {
         List<ConfigIssue> errors = issues.stream()
@@ -1233,12 +1209,17 @@ final class StandardConfigurationService implements ConfigurationService {
                 .collect(Collectors.joining("; "));
     }
 
+    /**
+     * AMD-102: every issue above WARNING is named, in issue order — the exception
+     * message is the operator's record of every path that refused the boot.
+     */
     private static ConfigurationLoadException loadException(List<ConfigIssue> issues) {
-        List<ConfigIssue> fatals = issues.stream()
-                .filter(issue -> issue.severity() == Severity.FATAL)
+        List<ConfigIssue> rejecting = issues.stream()
+                .filter(issue -> issue.severity() != Severity.WARNING)
                 .toList();
         return new ConfigurationLoadException(
-                "Configuration load failed with FATAL issues: " + summarize(fatals));
+                "Configuration load failed; the configuration does not run (AMD-102): "
+                        + summarize(rejecting));
     }
 
     private static ConfigurationReloadException reloadException(

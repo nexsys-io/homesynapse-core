@@ -1,5 +1,5 @@
 {
-  "$comment": "Integration config schema for the integrations.zigbee section (Doc 08 §9). Shipped at M9.3; since PKG-SEC-2 the composition root supplies it to HomeSynapseCore.registerIntegrationSchema BEFORE start(), so it composes into the root schema ahead of Phase-1 validation — every `default` declared here is OPERATIVE (Doc 06 §3.1 stage 4 merges it into the model on every boot), so a key whose ABSENCE carries meaning (permit_join_duration: absent ⇒ no join window, M9.4-PJ) declares none. All options default sensibly: the adapter runs correctly with zero configuration (INV-CE-02).",
+  "$comment": "Integration config schema for the integrations.zigbee section (Doc 08 §9). Shipped at M9.3; since PKG-SEC-2 the composition root supplies it to HomeSynapseCore.registerIntegrationSchema BEFORE start(), so it composes into the root schema ahead of Phase-1 validation — every `default` declared here is OPERATIVE (Doc 06 §3.1 stage 4 merges it into the model on every boot). AMD-102 (CONFIG-ERROR-1): `permit_join_duration` (IGNORED since PJ-2) and `availability.*` (no reader since J1, IR-122) removed; a configuration carrying them fails the boot naming the key (additionalProperties is false and an unknown key is an ERROR). All options default sensibly: the adapter runs correctly with zero configuration (INV-CE-02).",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -23,12 +23,6 @@
       "maximum": 26,
       "description": "Network channel. Auto-selected via energy scan on first run; channels 11/15/20 preferred, 21-26 fallback-only (Aqara/Xiaomi incompatibilities)."
     },
-    "permit_join_duration": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 254,
-      "description": "IGNORED since PJ-2: the pairing window opens only by POST /api/v1/integrations/{id}/permit-join; a value here logs one WARN (zigbee.permit_join_key_ignored) at adapter start and opens nothing. Kept in the schema so a configuration carrying it still validates (additionalProperties is false); scheduled for removal."
-    },
     "adopt_devices": {
       "type": "array",
       "items": {"type": "string"},
@@ -40,26 +34,6 @@
       "maximum": 300,
       "default": 30,
       "description": "Coordinator watchdog ping interval."
-    },
-    "availability": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "mains_timeout_minutes": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 60,
-          "default": 10,
-          "description": "Active ping after this many minutes of silence (mains-powered devices)."
-        },
-        "battery_timeout_hours": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 168,
-          "default": 25,
-          "description": "Passive offline timeout for battery-powered sleepy devices."
-        }
-      }
     },
     "topology_scan_interval_hours": {
       "type": "integer",

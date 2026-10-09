@@ -38,8 +38,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * Tests for {@link StandardConfigurationService} — the load path:
  * the Doc 06 §3.1 pipeline (parse, migrate, default-merge, validate,
- * model construction), DP-2 startup error handling (ERROR reverts to the
- * schema default, FATAL aborts), the AMD-67 migration-trigger semantics
+ * model construction), the AMD-102 startup error model (an ERROR — a value
+ * error or an unknown key — fails the load naming every path; nothing
+ * reverts; FATAL aborts), the AMD-67 migration-trigger semantics
  * pinned by {@link ConfigMigratorChainTest}, AMD-66 §2.4 listener
  * registration, the AMD-70 {@code config.validation_completed}
  * publish path (DIAGNOSTIC, SYSTEM origin, null eventTime, system subject,
@@ -170,6 +171,23 @@ class StandardConfigurationServiceTest {
                 .filter(ConfigErrorEvent.class::isInstance)
                 .map(ConfigErrorEvent.class::cast)
                 .toList();
+    }
+
+    /**
+     * C-4 (AMD-102): no production arm emits WARNING any more — {@code classify}
+     * has three arms and the unknown-key arm became ERROR — so a WARNING-only pass
+     * is injected through the constructor's {@link ConfigValidator} seam: the real
+     * validator's issues plus ONE WARNING.
+     */
+    private static ConfigValidator warningAppendingValidator() {
+        ConfigValidator real = new JsonSchemaCompositeValidator();
+        return (parsedConfig, composedSchemaJson) -> {
+            List<ConfigIssue> issues =
+                    new ArrayList<>(real.validate(parsedConfig, composedSchemaJson));
+            issues.add(new ConfigIssue(Severity.WARNING, "event_bus.queue_capacity",
+                    "near the recommended minimum", 1, null, null));
+            return List.copyOf(issues);
+        };
     }
 
     /** Listener stub for registration tests; classification is M6.4. */
@@ -390,35 +408,50 @@ class StandardConfigurationServiceTest {
         }
 
         @Test
-        @DisplayName("ERROR issue reverts the key to its schema default (degraded-but-functional)")
-        void errorRevertsKeyToDefault() throws Exception {
+        @DisplayName("an ERROR issue fails the load naming its path; nothing reverts and no "
+                + "model is activated (AMD-102)")
+        void errorFailsTheLoadNamingItsPath() throws Exception {
             writeRoot("""
                     event_bus:
                       queue_capacity: -5
                     """);
+            StandardConfigurationService svc = service();
 
-            ConfigModel model = service().load();
+            assertThatThrownBy(svc::load)
+                    .isInstanceOf(ConfigurationLoadException.class)
+                    .hasMessageContaining("event_bus.queue_capacity");
 
-            assertThat(model.sections().get("event_bus").values())
-                    .containsEntry("queue_capacity", 1024);
+            assertThatThrownBy(svc::getCurrentModel)
+                    .as("no model activated — the active-model read still refuses")
+                    .isInstanceOf(IllegalStateException.class);
             ConfigValidationCompletedEvent event = publishedEvent();
             assertThat(event.issueCount()).isEqualTo(1);
             assertThat(event.severityCounts()).containsEntry("ERROR", 1);
         }
 
         @Test
-        @DisplayName("WARNING issue leaves the value untouched and load succeeds")
-        void warningKeepsValue() throws Exception {
+        @DisplayName("a WARNING-only pass activates normally — no throw, no config_error, "
+                + "issues=1 in the validation event (the WARNING injected through the "
+                + "ConfigValidator seam: no production arm emits one after AMD-102)")
+        void warningOnlyPassActivates() throws Exception {
             writeRoot("""
                     event_bus:
-                      qeue_capacity: 64
+                      queue_capacity: 64
                     """);
+            StandardConfigurationService svc = new StandardConfigurationService(
+                    configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry(1, 0),
+                    warningAppendingValidator(), List.of(), List.of(),
+                    noSecrets(), key -> null);
 
-            ConfigModel model = service().load();
+            ConfigModel model = svc.load();
 
             assertThat(model.sections().get("event_bus").values())
-                    .containsEntry("qeue_capacity", 64);
-            assertThat(publishedEvent().severityCounts()).containsEntry("WARNING", 1);
+                    .containsEntry("queue_capacity", 64);
+            assertThat(svc.getCurrentModel()).isSameAs(model);
+            ConfigValidationCompletedEvent event = publishedEvent();
+            assertThat(event.issueCount()).isEqualTo(1);
+            assertThat(event.severityCounts()).containsEntry("WARNING", 1);
+            assertThat(configErrorEvents()).isEmpty();
         }
 
         @Test
@@ -677,7 +710,8 @@ class StandardConfigurationServiceTest {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // DP-10: per-ERROR config_error startup publication (M6.4, R1)
+    // DP-10: per-ERROR config_error startup publication (M6.4, R1) — since
+    // AMD-102 an ERROR pass ends in a throw; the events go out BEFORE it
     // ──────────────────────────────────────────────────────────────────
 
     @Nested
@@ -690,16 +724,19 @@ class StandardConfigurationServiceTest {
         }
 
         @Test
-        @DisplayName("load with 2 ERROR + 1 WARNING publishes exactly 2 config_error events")
-        void oneEventPerErrorIssue() throws Exception {
+        @DisplayName("a load with 2 ERROR publishes exactly 2 config_error events and then "
+                + "throws naming both paths (AMD-102: an ERROR pass publishes before the throw)")
+        void oneEventPerErrorIssue_thenTheThrow() throws Exception {
             writeRoot("""
                     event_bus:
                       queue_capacity: -5
                       dispatch_mode: bogus
-                      qeue_capacity: 9
                     """);
 
-            service().load();
+            assertThatThrownBy(() -> service().load())
+                    .isInstanceOf(ConfigurationLoadException.class)
+                    .hasMessageContaining("event_bus.queue_capacity")
+                    .hasMessageContaining("event_bus.dispatch_mode");
 
             List<ConfigErrorEvent> events = configErrorEvents();
             assertThat(events).hasSize(2);
@@ -718,11 +755,12 @@ class StandardConfigurationServiceTest {
         }
 
         @Test
-        @DisplayName("config_error drafts carry the DP-9 metadata")
+        @DisplayName("config_error drafts carry the DP-9 metadata (published before the throw)")
         void errorEventsCarryRuledMetadata() throws Exception {
             writeRoot("event_bus:\n  queue_capacity: -5\n");
 
-            service().load();
+            assertThatThrownBy(() -> service().load())
+                    .isInstanceOf(ConfigurationLoadException.class);
 
             EventDraft draft = publisher.rootDrafts.stream()
                     .filter(d -> EventTypes.CONFIG_ERROR.equals(d.eventType()))
@@ -757,7 +795,8 @@ class StandardConfigurationServiceTest {
                     .isInstanceOf(ConfigurationLoadException.class);
 
             // The ERROR row publishes; the FATAL row itself does not
-            // (config_error is the §4.5 revert-to-default diagnostic).
+            // (config_error is the §4.5 per-ERROR diagnostic — informational
+            // since AMD-102, nothing is applied).
             List<ConfigErrorEvent> events = configErrorEvents();
             assertThat(events).hasSize(1);
             assertThat(events.get(0).path()).isEqualTo("event_bus.queue_capacity");
@@ -777,7 +816,9 @@ class StandardConfigurationServiceTest {
             // ERROR on a key whose schema declares no default.
             writeRoot("security:\n  api_token: 123\n");
 
-            svc.load();
+            assertThatThrownBy(svc::load)
+                    .isInstanceOf(ConfigurationLoadException.class)
+                    .hasMessageContaining("security.api_token");
 
             List<ConfigErrorEvent> events = configErrorEvents();
             assertThat(events).hasSize(1);
@@ -808,7 +849,9 @@ class StandardConfigurationServiceTest {
                     noSecrets(), key -> null);
             writeRoot("vault:\n  api_secret: 123\n");
 
-            svc.load();
+            assertThatThrownBy(svc::load)
+                    .isInstanceOf(ConfigurationLoadException.class)
+                    .hasMessageContaining("vault.api_secret");
 
             List<ConfigErrorEvent> events = configErrorEvents();
             assertThat(events).hasSize(1);

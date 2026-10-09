@@ -26,6 +26,7 @@ import java.nio.file.attribute.FileTime;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -565,17 +566,25 @@ class StandardConfigurationServiceReloadTest {
         }
 
         @Test
-        @DisplayName("ReloadResult.issues carries WARNINGs only and the event's issueCount reflects them")
+        @DisplayName("ReloadResult.issues carries WARNINGs only and the event's issueCount reflects "
+                + "them (the WARNING injected through the ConfigValidator seam — since AMD-102 an "
+                + "unknown key is an ERROR and would reject the candidate)")
         void warningsSurviveInResultAndEvent() throws Exception {
             writeRoot("event_bus:\n  queue_capacity: 64\n");
-            StandardConfigurationService svc = service();
+            ConfigValidator real = new JsonSchemaCompositeValidator();
+            ConfigValidator warningAppending = (parsedConfig, composedSchemaJson) -> {
+                List<ConfigIssue> issues = new ArrayList<>(
+                        real.validate(parsedConfig, composedSchemaJson));
+                issues.add(new ConfigIssue(Severity.WARNING, "event_bus.queue_capacity",
+                        "near the recommended minimum", 1, null, null));
+                return List.copyOf(issues);
+            };
+            StandardConfigurationService svc = new StandardConfigurationService(
+                    configDir, 1, 0, FIXED_CLOCK, SYSTEM_ID, publisher, registry(),
+                    warningAppending, List.of(), List.of(), noSecrets(), key -> null);
             svc.load();
 
-            writeRoot("""
-                    event_bus:
-                      queue_capacity: 128
-                      qeue_capacity: 9
-                    """);
+            writeRoot("event_bus:\n  queue_capacity: 128\n");
             ReloadResult result = svc.reload();
 
             assertThat(result.issues()).hasSize(1);

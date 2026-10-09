@@ -237,6 +237,40 @@ class ZigbeeKeyEstablishmentTest {
     }
 
     @Test
+    @DisplayName("T11d (IR-126, CONFIG-ERROR-1 Z-2): an UN-scoped open CLEARS the scope — a "
+            + "scoped open for P, then an un-scoped open, then the all-zeros 0x009B failure is "
+            + "the WARN alone (no transient_key_expired); a scoped open for P again restores "
+            + "the INFO with scope=P")
+    void unScopedOpen_clearsTheScope_scopedOpenRestoresIt() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::formationHandler);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp);
+        adapter.openPairingWindow(new PairingWindowRequest(60, "recover", "test",
+                "0x00124b0012345678"));
+        adapter.openPairingWindow(new PairingWindowRequest(60, "pair", "test", null));
+
+        deliver(adapter, keyEstablishmentCallback(0L,
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT));
+
+        assertThat(ingestionMessages(Level.WARN, "zigbee.key_establishment_failed"))
+                .as("the WARN is byte-unchanged — the designed arm, never guessed").hasSize(1);
+        assertThat(adapterMessages(Level.INFO, "zigbee.transient_key_expired"))
+                .as("the un-scoped open cleared the scope: nothing to attribute the expiry to")
+                .isEmpty();
+
+        adapter.openPairingWindow(new PairingWindowRequest(60, "recover", "test",
+                "0x00124b0012345678"));
+        deliver(adapter, keyEstablishmentCallback(0L,
+                EzspCoordinatorProtocol.KEY_STATUS_TC_REQUESTER_VERIFY_KEY_TIMEOUT));
+
+        assertThat(ingestionMessages(Level.WARN, "zigbee.key_establishment_failed")).hasSize(2);
+        assertThat(adapterMessages(Level.INFO, "zigbee.transient_key_expired"))
+                .as("a scoped open sets the scope again — the INFO returns with it")
+                .containsExactly("zigbee.transient_key_expired: partner=0x0000000000000000 "
+                        + "scope=" + PARTNER_HEX);
+    }
+
+    @Test
     @DisplayName("a malformed (short) payload is dropped without INFO or WARN")
     void malformedPayload_droppedSilently() throws Exception {
         FakeNcp ncp = new FakeNcp();
@@ -644,8 +678,9 @@ class ZigbeeKeyEstablishmentTest {
                 frames.add(extendedResponse(seq, FRAME_NOP, new byte[0]));
                 yield frames;
             }
-            // J2b T11: the scoped open's enablement (the ZigbeePermitJoinTest arms). No
-            // close is ever reached in this class — no 0x006B arm, by design.
+            // J2b T11: the scoped open's enablement (the ZigbeePermitJoinTest arms).
+            // T11d (IR-126) opens three windows, so the superseded close's three acts are
+            // reached: 0x006B answers with its status-less response (arrival is success).
             case EzspCoordinatorProtocol.FRAME_SET_POLICY ->
                     List.of(extendedResponse(seq, EzspCoordinatorProtocol.FRAME_SET_POLICY,
                             new byte[] {0x00}));
@@ -653,6 +688,10 @@ class ZigbeeKeyEstablishmentTest {
                     List.of(extendedResponse(seq,
                             EzspCoordinatorProtocol.FRAME_IMPORT_TRANSIENT_KEY,
                             new byte[] {0x00, 0x00, 0x00, 0x00}));
+            case EzspCoordinatorProtocol.FRAME_CLEAR_TRANSIENT_LINK_KEYS ->
+                    List.of(extendedResponse(seq,
+                            EzspCoordinatorProtocol.FRAME_CLEAR_TRANSIENT_LINK_KEYS,
+                            new byte[0]));
             case FRAME_NETWORK_INIT, FRAME_PERMIT_JOINING,
                     FRAME_SET_INITIAL_SECURITY_STATE ->
                     List.of(extendedResponse(seq, frameIdOf(command),

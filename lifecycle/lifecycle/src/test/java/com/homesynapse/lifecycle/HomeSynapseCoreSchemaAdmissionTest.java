@@ -7,10 +7,12 @@ package com.homesynapse.lifecycle;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 
+import com.homesynapse.config.ConfigurationLoadException;
 import com.homesynapse.integration.zigbee.ZigbeeIntegrationFactory;
 import com.homesynapse.platform.identity.HomeId;
 import com.homesynapse.platform.identity.Ulid;
@@ -49,6 +51,13 @@ import java.util.regex.Pattern;
  * {@code HomeSynapseCore} logger). Config's boot events ride the deferred
  * publisher and are dropped before Phase 2, so the log line is the only Phase-1
  * validation evidence a test can read.</p>
+ *
+ * <p>CONFIG-ERROR-1 (AMD-102, 2026-10-09): an unknown key is an ERROR and any ERROR
+ * fails the boot naming every path — T2/T3 pin the failure (the per-issue line is
+ * emitted BEFORE the gate, so {@link #configurationIssues()} still reads it on a
+ * failed boot, while the exception message names the paths); T1b is THE PI FIXTURE
+ * (L-1): the Pi's key tree loads with {@code issues=0} — the deploy card's
+ * boot-line twin (AMD-102 R-E).</p>
  *
  * <p>Time is injected via {@code Clock.fixed} (§4c — non-app module test code;
  * the {@link LifecycleWiringTest} harness). The composition root's schema queue
@@ -125,7 +134,6 @@ final class HomeSynapseCoreSchemaAdmissionTest {
                 integrations:
                   zigbee:
                     channel: 15
-                    permit_join_duration: 60
                 """);
         core = newCore(tempDir);
         core.registerIntegrationSchema(ZIGBEE, ZIGBEE_FRAGMENT);
@@ -139,39 +147,74 @@ final class HomeSynapseCoreSchemaAdmissionTest {
         Map<String, Object> zigbee = zigbeeSection();
         assertThat(zigbee)
                 .containsEntry("channel", 15)
-                .containsEntry("permit_join_duration", 60)
                 // Doc 06 §3.1 stage 4: the fragment's declared defaults merge in for absent keys.
                 .containsEntry("watchdog_interval_seconds", 30)
                 .containsEntry("telemetry_threshold_seconds", 10);
     }
 
     @Test
-    @DisplayName("T1b: the measured deployment layout — homesynapse.yaml with "
-            + "`zigbee: !include integrations/zigbee.yaml` (AMD-71) — loads with ZERO issues")
-    void includeLayout_preStartFragment_zeroIssues(@TempDir Path tempDir) throws Exception {
-        writeInclude(tempDir, "zigbee.yaml", "permit_join_duration: 60\n");
+    @DisplayName("T1b (L-1, THE PI FIXTURE): the measured deployment layout — homesynapse.yaml "
+            + "with `zigbee: !include integrations/zigbee.yaml` (AMD-71) and the Pi's automation "
+            + "block; zigbee.yaml with serial_port, channel, adopt_devices — loads with ZERO "
+            + "issues (the deploy card's `Configuration loaded: … issues=0` twin, AMD-102 R-E)")
+    void piKeyTree_includeLayout_zeroIssues(@TempDir Path tempDir) throws Exception {
+        // The Pi's key tree read 2026-10-09 (_scratch/v101/pi_config_keys.txt +
+        // pi_zigbee_yaml.txt), generic values: one automation whose actions alternate
+        // a command (target, command, parameters) and a delay (duration).
+        writeInclude(tempDir, "zigbee.yaml", """
+                serial_port: /dev/ttyUSB0
+                channel: 15
+                adopt_devices:
+                  - "0x00124B0012345678"
+                """);
         writeRoot(tempDir, """
                 integrations:
                   zigbee: !include integrations/zigbee.yaml
+                automation:
+                  automations:
+                    - name: "pi fixture"
+                      triggers:
+                        - type: state_change
+                          entity_ref: "01JAAAAAAAAAAAAAAAAAAAAAAB"
+                          attribute: occupied
+                          to: "true"
+                      actions:
+                        - type: command
+                          target: {entity_ref: "01JAAAAAAAAAAAAAAAAAAAAAAC"}
+                          command: turn_on
+                          parameters: {}
+                        - type: delay
+                          duration: PT1S
                 """);
         core = newCore(tempDir);
         core.registerIntegrationSchema(ZIGBEE, ZIGBEE_FRAGMENT);
 
         core.start();
 
-        assertThat(configurationIssues()).isEmpty();
-        assertThat(zigbeeSection()).containsEntry("permit_join_duration", 60);
+        assertThat(configurationIssues())
+                .as("issues=0 — every key the Pi writes is declared and valid")
+                .isEmpty();
+        assertThat(core.currentPhase()).isEqualTo(LifecyclePhase.RUNNING);
+        assertThat(zigbeeSection())
+                .containsEntry("serial_port", "/dev/ttyUSB0")
+                .containsEntry("channel", 15)
+                .containsEntry("adopt_devices", List.of("0x00124B0012345678"))
+                .doesNotContainKey("permit_join_duration")
+                .doesNotContainKey("availability");
+        assertThat(core.automationRegistry().getBySlug("pi_fixture"))
+                .as("the Pi-shaped automation loads (the deep validation accepts the shape)")
+                .isPresent();
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // T2 — root strictness kept (Doc 06 §3.6 WARNING tier; contract 1)
+    // T2 — root strictness kept; since AMD-102 an unknown key FAILS the boot (L-2)
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
-    @DisplayName("T2: an unknown integration type AND an unknown top-level key still WARN "
-            + "(additionalProperties:false kept at the root and at integrations); the known "
-            + "zigbee block is clean; the boot succeeds")
-    void unknownKeys_stillWarn_rootStrictnessKept(@TempDir Path tempDir) throws Exception {
+    @DisplayName("T2 (L-2): an unknown integration type AND an unknown top-level key FAIL the "
+            + "boot naming BOTH dotted paths (AMD-102: additionalProperties is ERROR at the root "
+            + "and at integrations); the known zigbee block is clean")
+    void unknownKeys_failTheBoot_namingBothPaths(@TempDir Path tempDir) throws Exception {
         writeRoot(tempDir, """
                 bogus_top_level: 1
                 integrations:
@@ -183,28 +226,34 @@ final class HomeSynapseCoreSchemaAdmissionTest {
         core = newCore(tempDir);
         core.registerIntegrationSchema(ZIGBEE, ZIGBEE_FRAGMENT);
 
-        core.start();
+        Throwable fatal = catchThrowable(core::start);
 
+        assertThat(fatal)
+                .as("the boot refuses, naming every path (AMD-102 R-A/R-B)")
+                .isInstanceOf(ConfigurationLoadException.class)
+                .hasMessageContaining("integrations.notatype")
+                .hasMessageContaining("bogus_top_level");
+        assertThat(core.currentPhase()).isEqualTo(LifecyclePhase.STOPPED);
         List<String> issues = configurationIssues();
-        assertThat(issues).as("exactly the two unknown-key WARNINGs").hasSize(2);
+        assertThat(issues).as("exactly the two unknown-key ERRORs, logged before the gate")
+                .hasSize(2);
         assertThat(issues).anySatisfy(line -> assertThat(line)
-                .startsWith("Configuration issue [WARNING] at 'integrations.notatype'"));
+                .startsWith("Configuration issue [ERROR] at 'integrations.notatype'"));
         assertThat(issues).anySatisfy(line -> assertThat(line)
-                .startsWith("Configuration issue [WARNING] at 'bogus_top_level'"));
+                .startsWith("Configuration issue [ERROR] at 'bogus_top_level'"));
         assertThat(issues).noneMatch(line -> line.contains("'integrations.zigbee"));
-        // WARNING never alters a value and never fails the boot (§3.6).
-        assertThat(core.currentPhase()).isEqualTo(LifecyclePhase.RUNNING);
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // T3 — a range violation is CAUGHT at Phase 1 (today: invisible behind "unknown")
+    // T3 — a removed key FAILS the boot naming it (AMD-102 R-D; L-3)
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
-    @DisplayName("T3: integrations.zigbee.permit_join_duration: 999 reports an ERROR at Phase-1 "
-            + "validation (the fragment's maximum 254 — §3.6 ERROR tier), the boot continues, and "
-            + "the key is REMOVED (no schema default ⇒ absent ⇒ the adapter opens no window)")
-    void permitJoinDurationOutOfRange_errorsAtPhaseOne_keyReverts(@TempDir Path tempDir)
+    @DisplayName("T3 (L-3): integrations.zigbee.permit_join_duration: 999 — a key the fragment "
+            + "no longer declares (REMOVED, AMD-102 R-D) — FAILS the boot naming "
+            + "integrations.zigbee.permit_join_duration (the additionalProperties ERROR, not a "
+            + "range error); nothing reverts, nothing starts")
+    void permitJoinDuration_undeclared_failsTheBootNamingThePath(@TempDir Path tempDir)
             throws Exception {
         writeRoot(tempDir, """
                 integrations:
@@ -214,18 +263,45 @@ final class HomeSynapseCoreSchemaAdmissionTest {
         core = newCore(tempDir);
         core.registerIntegrationSchema(ZIGBEE, ZIGBEE_FRAGMENT);
 
-        core.start();
+        Throwable fatal = catchThrowable(core::start);
 
-        // §3.6 at startup: ERROR reverts the key and the process starts (exit 0, warning logged).
-        assertThat(core.currentPhase()).isEqualTo(LifecyclePhase.RUNNING);
+        assertThat(fatal)
+                .isInstanceOf(ConfigurationLoadException.class)
+                .hasMessageContaining("integrations.zigbee.permit_join_duration");
+        assertThat(core.currentPhase()).isEqualTo(LifecyclePhase.STOPPED);
         List<String> issues = configurationIssues();
         assertThat(issues).hasSize(1);
-        assertThat(issues.get(0)).startsWith(
-                "Configuration issue [ERROR] at 'integrations.zigbee.permit_join_duration'");
-        // The M9.4-PJ law survives composition: the fragment declares NO default for this
-        // key (PKG-SEC-2), so the §3.6 revert REMOVES it — absent ⇒ no join window — rather
-        // than substituting a value that would open the door on a misconfigured boot.
-        assertThat(zigbeeSection()).doesNotContainKey("permit_join_duration");
+        assertThat(issues.get(0))
+                .startsWith("Configuration issue [ERROR] at "
+                        + "'integrations.zigbee.permit_join_duration'")
+                .contains("'permit_join_duration' is not defined in the schema");
+    }
+
+    @Test
+    @DisplayName("T3b (L-3): an availability block (mains_timeout_minutes — IR-122, REMOVED) "
+            + "FAILS the boot naming integrations.zigbee.availability")
+    void availabilityBlock_undeclared_failsTheBootNamingThePath(@TempDir Path tempDir)
+            throws Exception {
+        writeRoot(tempDir, """
+                integrations:
+                  zigbee:
+                    availability:
+                      mains_timeout_minutes: 10
+                """);
+        core = newCore(tempDir);
+        core.registerIntegrationSchema(ZIGBEE, ZIGBEE_FRAGMENT);
+
+        Throwable fatal = catchThrowable(core::start);
+
+        assertThat(fatal)
+                .isInstanceOf(ConfigurationLoadException.class)
+                .hasMessageContaining("integrations.zigbee.availability");
+        assertThat(core.currentPhase()).isEqualTo(LifecyclePhase.STOPPED);
+        List<String> issues = configurationIssues();
+        assertThat(issues).hasSize(1);
+        assertThat(issues.get(0))
+                .startsWith("Configuration issue [ERROR] at 'integrations.zigbee.availability'")
+                .contains("'availability' is not defined in the schema");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -250,9 +326,13 @@ final class HomeSynapseCoreSchemaAdmissionTest {
                         + "EMPTY properties node)")
                 .isTrue();
         assertThat(INTEGRATIONS_EMPTY.matcher(composed).find()).isFalse();
+        // L-4 (AMD-102 R-D / IR-122): the cache carries NEITHER removed key; the 254
+        // maximum left with permit_join_duration (the channel's 26 remains).
         assertThat(composed)
-                .contains("\"permit_join_duration\"")
-                .containsPattern("\"maximum\"\\s*:\\s*254");
+                .doesNotContain("\"permit_join_duration\"")
+                .doesNotContain("\"availability\"")
+                .doesNotContainPattern("\"maximum\"\\s*:\\s*254")
+                .containsPattern("\"maximum\"\\s*:\\s*26");
         assertThat(composed).isEqualTo(core.schemaRegistry().getComposedSchema());
     }
 
@@ -328,8 +408,8 @@ final class HomeSynapseCoreSchemaAdmissionTest {
 
     @Test
     @DisplayName("T7: an EMPTY integrations.zigbee block validates to the fragment's defaults — "
-            + "and permit_join_duration stays ABSENT (the M9.4-PJ law: absent ⇒ the window never "
-            + "opens; a schema default would turn operative at Phase-1 composition)")
+            + "and permit_join_duration stays ABSENT (REMOVED, AMD-102: never declared, never "
+            + "merged; the M9.4-PJ law holds by construction), availability likewise (IR-122)")
     void emptyZigbeeBlock_validatesToDefaults_permitJoinStaysAbsent(@TempDir Path tempDir)
             throws Exception {
         writeRoot(tempDir, """
@@ -456,11 +536,10 @@ final class HomeSynapseCoreSchemaAdmissionTest {
                 .containsEntry("watchdog_interval_seconds", 30)
                 .containsEntry("topology_scan_interval_hours", 0)
                 .containsEntry("telemetry_threshold_seconds", 10)
-                .doesNotContainKey("permit_join_duration");
-        assertThat(zigbee.get("availability")).isInstanceOf(Map.class);
-        Map<?, ?> availability = (Map<?, ?>) zigbee.get("availability");
-        assertThat(availability.get("mains_timeout_minutes")).isEqualTo(10);
-        assertThat(availability.get("battery_timeout_hours")).isEqualTo(25);
+                .doesNotContainKey("permit_join_duration")
+                // IR-122 (AMD-102 R-D): the availability object left the fragment with its
+                // two defaults — nothing merges under that key any more.
+                .doesNotContainKey("availability");
         Map<?, ?> routeHealth = (Map<?, ?>) zigbee.get("route_health");
         assertThat(routeHealth.get("failure_threshold")).isEqualTo(3);
     }

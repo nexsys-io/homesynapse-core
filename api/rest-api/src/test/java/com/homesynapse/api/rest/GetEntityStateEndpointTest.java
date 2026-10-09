@@ -10,6 +10,7 @@ import com.homesynapse.value.AttributeValue;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.state.Availability;
+import com.homesynapse.state.EntityLink;
 import com.homesynapse.state.EntityState;
 
 import java.time.Clock;
@@ -66,9 +67,13 @@ final class GetEntityStateEndpointTest {
         assertThat(ctx.statusSet).isEqualTo(200);
         @SuppressWarnings("unchecked")
         Map<String, Object> body = (Map<String, Object>) ctx.body;
-        EntityState returned = (EntityState) body.get("data");
-        assertThat(returned.attributes()).containsKey("brightness");
-        assertThat(returned.attributes().get("brightness")).isNull();
+        // IR-132 (CONFIG-ERROR-1): data is the renderer's map; attributes pass through
+        // as the object they are — the null-valued entry survives untouched.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) body.get("data");
+        assertThat(data.get("attributes")).isSameAs(attrs);
+        assertThat(attrs).containsKey("brightness");
+        assertThat(attrs.get("brightness")).isNull();
     }
 
     @Test
@@ -115,13 +120,17 @@ final class GetEntityStateEndpointTest {
 
         @SuppressWarnings("unchecked")
         Map<String, Object> body = (Map<String, Object>) ctx.body;
-        EntityState returned = (EntityState) body.get("data");
-        assertThat(returned.stale()).isTrue();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) body.get("data");
+        assertThat(data)
+                .containsEntry("stale", true)
+                .containsEntry("staleAfter", "2026-05-22T11:00:00Z");
     }
 
     @Test
-    @DisplayName("J1 T9: the full record in data carries availabilityReason, lastSeenAt and "
-            + "link exactly as the query service produced them — nulls included")
+    @DisplayName("J1 T9 (as IR-132 renders it): data carries availabilityReason, lastSeenAt and "
+            + "link exactly as the query service produced them — nulls included, present as "
+            + "JSON null keys")
     void dataCarriesTheAvailabilityDetail_nullsIncluded() {
         Instant seen = Instant.parse("2026-10-03T12:00:00Z");
         EntityState dark = new EntityState(EntityId.of(Ulid.parse(VALID_ULID)),
@@ -138,10 +147,70 @@ final class GetEntityStateEndpointTest {
 
         @SuppressWarnings("unchecked")
         Map<String, Object> body = (Map<String, Object>) ctx.body;
-        EntityState returned = (EntityState) body.get("data");
-        assertThat(returned).isSameAs(dark);
-        assertThat(returned.availabilityReason()).isEqualTo("silence_timeout");
-        assertThat(returned.lastSeenAt()).isEqualTo(seen);
-        assertThat(returned.link()).as("no reading carried — a value, not an error").isNull();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) body.get("data");
+        assertThat(data)
+                .containsEntry("availabilityReason", "silence_timeout")
+                .containsEntry("lastSeenAt", "2026-10-03T12:00:00Z")
+                .containsEntry("staleAfter", null)
+                .containsEntry("link", null);
+        assertThat(data.get("link")).as("no reading carried — a value, not an error").isNull();
+    }
+
+    @Test
+    @DisplayName("IR-132 (CONFIG-ERROR-1 R-1): /entities/{id}/state renders every instant "
+            + "Instant.toString() — lastChanged, lastUpdated, lastReported, staleAfter, "
+            + "lastSeenAt and link.at are ISO-8601 UTC strings Instant.parse accepts (the BC8 "
+            + "float 1791423298.1036468 is gone); the record's key order is kept")
+    void everyInstantRendersIso8601_keyOrderKept() {
+        Instant changed = Instant.parse("2026-10-08T02:00:58.784419723Z");
+        Instant updated = Instant.parse("2026-10-08T02:01:00Z");
+        Instant reported = Instant.parse("2026-10-08T02:01:30.5Z");
+        Instant staleAfter = Instant.parse("2026-10-08T02:21:30.5Z");
+        Instant seen = Instant.parse("2026-10-08T02:00:58.103646800Z");
+        EntityLink link = new EntityLink(255, -40, Instant.parse("2026-10-08T02:00:58.103646800Z"));
+        EntityState state = new EntityState(EntityId.of(Ulid.parse(VALID_ULID)),
+                Map.<String, AttributeValue>of(), Availability.AVAILABLE, 4L,
+                changed, updated, reported, staleAfter, false,
+                "first_contact", seen, link);
+        FakeStateQueryService qs = new FakeStateQueryService()
+                .withViewPosition(11L)
+                .put(state);
+        GetEntityStateEndpoint endpoint =
+                new GetEntityStateEndpoint(qs, qs::getViewPosition, FIXED_CLOCK);
+        RecordingEndpointContext ctx = new RecordingEndpointContext()
+                .withPathParam("entityId", VALID_ULID);
+
+        endpoint.apply(ctx);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = (Map<String, Object>) ctx.body;
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) body.get("data");
+        assertThat(data.keySet()).containsExactly("entityId", "attributes", "availability",
+                "stateVersion", "lastChanged", "lastUpdated", "lastReported", "staleAfter",
+                "stale", "availabilityReason", "lastSeenAt", "link");
+        assertThat(data)
+                .containsEntry("entityId", VALID_ULID)
+                .containsEntry("availability", "AVAILABLE")
+                .containsEntry("stateVersion", 4L)
+                .containsEntry("stale", false)
+                .containsEntry("availabilityReason", "first_contact");
+        assertThat(data.get("lastChanged")).isInstanceOf(String.class);
+        assertThat(data.get("lastUpdated")).isInstanceOf(String.class);
+        assertThat(data.get("lastReported")).isInstanceOf(String.class);
+        assertThat(data.get("staleAfter")).isInstanceOf(String.class);
+        assertThat(data.get("lastSeenAt")).isInstanceOf(String.class);
+        assertThat(Instant.parse((String) data.get("lastChanged"))).isEqualTo(changed);
+        assertThat(Instant.parse((String) data.get("lastUpdated"))).isEqualTo(updated);
+        assertThat(Instant.parse((String) data.get("lastReported"))).isEqualTo(reported);
+        assertThat(Instant.parse((String) data.get("staleAfter"))).isEqualTo(staleAfter);
+        assertThat(Instant.parse((String) data.get("lastSeenAt"))).isEqualTo(seen);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> linkJson = (Map<String, Object>) data.get("link");
+        assertThat(linkJson.keySet()).containsExactly("lqi", "rssiDbm", "at");
+        assertThat(linkJson).containsEntry("lqi", 255).containsEntry("rssiDbm", -40);
+        assertThat(linkJson.get("at")).isInstanceOf(String.class);
+        assertThat(Instant.parse((String) linkJson.get("at"))).isEqualTo(link.at());
     }
 }

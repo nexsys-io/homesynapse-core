@@ -14,9 +14,10 @@ package com.homesynapse.config;
  * <ul>
  *   <li>{@link #FATAL} — the configuration is unusable; startup is aborted or
  *       the reload candidate is rejected entirely.</li>
- *   <li>{@link #ERROR} — the specific key is invalid; the system reverts it to
- *       the JSON Schema default and continues. On reload, ERROR issues cause
- *       the entire candidate to be rejected (stricter than startup).</li>
+ *   <li>{@link #ERROR} — the specific key is invalid, or is a key the composed
+ *       schema does not declare; at startup the load fails naming every such
+ *       path (AMD-102), on reload the entire candidate is rejected — the two
+ *       paths agree, only what is preserved differs.</li>
  *   <li>{@link #WARNING} — informational; the value is accepted but may cause
  *       suboptimal behaviour (e.g., a retention period below the recommended
  *       minimum).</li>
@@ -34,8 +35,9 @@ public enum Severity {
     FATAL,
 
     /**
-     * A specific key fails schema validation. On startup, the key reverts to
-     * its schema default. On reload, the entire candidate is rejected.
+     * A specific key fails schema validation, or is a key the composed schema
+     * does not declare. On startup the load fails naming the path (AMD-102).
+     * On reload, the entire candidate is rejected.
      */
     ERROR,
 
