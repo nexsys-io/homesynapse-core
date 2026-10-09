@@ -69,6 +69,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code ZigbeeConfigAcceptedAdoptionTest} production-ladder idiom). Report
  * frames ride the nop keepalive into the ingestion drain; the timeout legs
  * live entirely on the injected {@link TestClock}.
+ *
+ * <p><strong>AVAIL-SHAPE (IR-137/IR-138):</strong> a mains device is named dark
+ * after TWO consecutive unanswered probes (one per cycle), never one; a mains
+ * device whose cached endpoints carry a metering cluster waits for its reporting
+ * contract's maximum plus the 60-s floor before the first probe; and the
+ * per-probe line prints at INFO one cycle after the probe, after that cycle's
+ * drain, with the {@code seen_during_probe} discriminator.
  */
 @DisplayName("ZigbeeIntegrationAdapter — availability-ALIVE wiring (M9.6-AVAIL)")
 class ZigbeeAvailabilityWiringTest {
@@ -93,6 +100,9 @@ class ZigbeeAvailabilityWiringTest {
     /** J1 T11: a battery device (PowerSource 0x03) whose endpoint lists 0x0B04 → power_meter. */
     private static final long METERING_IEEE = 0x00124B00BEEF0001L;
     private static final int METERING_NWK = 0x5A5A;
+    /** AVAIL-SHAPE W-3: a mains plug (PowerSource 0x01) whose endpoint lists 0x0B04 + 0x0702. */
+    private static final long PLUG_IEEE = 0x8CF681FFFE2E0001L;
+    private static final int PLUG_NWK = 0x4D21;
 
     private static final String REPORTER_LISTED = "0x00124b0012345678";
 
@@ -114,6 +124,13 @@ class ZigbeeAvailabilityWiringTest {
     private final Deque<byte[]> riders = new ArrayDeque<>();
     /** When set, the scripted NCP accepts the availability ping but never replies. */
     private boolean pingSilent;
+    /**
+     * AVAIL-SHAPE W-1b: when set, the scripted NCP delivers this incoming frame (a
+     * report FROM the probed device) during the availability ping's exchange — the
+     * real protocol parks it as a non-matching callback for the next drain — and
+     * still withholds the ping reply. Consumed by the first ping it rides.
+     */
+    private byte[] frameDuringProbe;
     /** Every ZCL tsn the scripted NCP consumed (kept distinct per reply). */
     private int scriptTsnSalt;
 
@@ -319,8 +336,9 @@ class ZigbeeAvailabilityWiringTest {
 
     @Test
     @DisplayName("T-1: a seeded mains device with STALE persisted evidence and zero "
-            + "post-boot frames is pinged on the FIRST cycle; no answer ⇒ offline "
-            + "CRITICAL — UNAVAILABLE within one evaluation window from boot")
+            + "post-boot frames is pinged on the FIRST cycle and again on the second; "
+            + "no answer twice (AVAIL-SHAPE K = 2) ⇒ offline CRITICAL — UNAVAILABLE "
+            + "within one evaluation window from boot")
     void seededStaleMains_deadDevice_offlineAtFirstCycle() throws Exception {
         FakeNcp ncp = new FakeNcp();
         ncp.onEzspCommand(this::scriptedNcp);
@@ -345,6 +363,13 @@ class ZigbeeAvailabilityWiringTest {
                 .as("persisted staleness makes the seeded device a candidate at "
                         + "the first cycle — the seed entered it into tracking")
                 .isEqualTo(1);
+        assertThat(entityAvailability())
+                .as("AVAIL-SHAPE K = 2: one unanswered probe is not a verdict")
+                .isEmpty();
+
+        restarted.runCycleOnce();   // the second probe — still past the floor, still AVAILABLE
+
+        assertThat(pingUnicasts(restartNcp, MAINS_NWK)).isEqualTo(2);
         List<EventEnvelope> events = entityAvailability();
         assertThat(events)
                 .as("the DP-2 floor: the timeout verdict rides the normal "
@@ -367,12 +392,18 @@ class ZigbeeAvailabilityWiringTest {
                         + "a seed-originated timeout verdict")
                 .containsExactly("zigbee.availability_changed: device="
                         + new IEEEAddress(MAINS_IEEE) + " available=false");
+        // AVAIL-SHAPE: each probe's line prints ONE CYCLE later, after the drain
+        // (the discriminator needs it); this third cycle prints the second probe's
+        // line and probes nothing — the device is UNAVAILABLE.
+        restarted.runCycleOnce();
+        assertThat(pingUnicasts(restartNcp, MAINS_NWK)).isEqualTo(2);
         assertThat(adapterMessages("zigbee.availability_ping"))
-                .as("DP-5(b): the per-ping instrument — the arm F-14's "
-                        + "instruments could not see")
-                .singleElement().asString()
-                .contains("device=" + new IEEEAddress(MAINS_IEEE))
-                .contains("outcome=timeout");
+                .as("DP-5(b): the per-probe instrument — the arm F-14's "
+                        + "instruments could not see; two probes, two lines")
+                .hasSize(2)
+                .allSatisfy(line -> assertThat(line)
+                        .contains("device=" + new IEEEAddress(MAINS_IEEE))
+                        .contains("outcome=timeout"));
     }
 
     @Test
@@ -506,7 +537,14 @@ class ZigbeeAvailabilityWiringTest {
                         + "ALIVE): the device is a candidate immediately")
                 .isEqualTo(1);
         assertThat(entityAvailability())
-                .as("the dead device converges to offline at the first cycle")
+                .as("AVAIL-SHAPE K = 2: the first miss publishes nothing")
+                .isEmpty();
+
+        restarted.runCycleOnce();   // unknown recency stays infinitely stale: probed again
+
+        assertThat(pingUnicasts(restartNcp, MAINS_NWK)).isEqualTo(2);
+        assertThat(entityAvailability())
+                .as("the dead device converges to offline at the second miss")
                 .hasSize(1);
         assertThat(((AvailabilityChangedEvent) entityAvailability().get(0)
                 .payload()).newStatus()).isEqualTo("offline");
@@ -604,14 +642,15 @@ class ZigbeeAvailabilityWiringTest {
         assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).count())
                 .as("a successful ping is evidence, not a transition")
                 .isZero();
-        assertThat(adapterMessages("zigbee.availability_ping"))
-                .singleElement().asString().contains("outcome=ok");
 
         // The success refreshed the silence clock: no re-ping inside a fresh
-        // 60-s window (IR-121; was 10 min), then one once it lapses.
+        // 60-s window (IR-121; was 10 min), then one once it lapses. AVAIL-SHAPE:
+        // the probe's line prints at this next cycle's sweep, after its drain.
         clock.advance(Duration.ofSeconds(30));
         restarted.runCycleOnce();
         assertThat(pingUnicasts(restartNcp, MAINS_NWK)).isEqualTo(1);
+        assertThat(adapterMessages("zigbee.availability_ping"))
+                .singleElement().asString().contains("outcome=ok");
         clock.advance(Duration.ofSeconds(31));
         restarted.runCycleOnce();
         assertThat(pingUnicasts(restartNcp, MAINS_NWK)).isEqualTo(2);
@@ -695,8 +734,8 @@ class ZigbeeAvailabilityWiringTest {
 
     @Test
     @DisplayName("mains ping-timeout: 60 s of silence (IR-121; this test advances 11 min) "
-            + "sends ONE Basic read; no "
-            + "response ⇒ PING_TIMEOUT ⇒ offline CRITICAL — a dead mains device no "
+            + "sends ONE Basic read per cycle; two unanswered (AVAIL-SHAPE K = 2) ⇒ "
+            + "PING_TIMEOUT ⇒ offline CRITICAL — a dead mains device no "
             + "longer stays ALIVE forever; the next report honestly recovers it")
     void mainsPingTimeout_offlineCritical_thenRecovers() throws Exception {
         FakeNcp ncp = new FakeNcp();
@@ -713,6 +752,13 @@ class ZigbeeAvailabilityWiringTest {
         assertThat(pingUnicasts(ncp, MAINS_NWK))
                 .as("exactly one availability ping went out")
                 .isEqualTo(1);
+        assertThat(entityAvailability())
+                .as("AVAIL-SHAPE K = 2: the first unanswered probe publishes nothing")
+                .hasSize(1);
+
+        adapter.runCycleOnce();   // the second probe, one cycle later
+
+        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(2);
         List<EventEnvelope> events = entityAvailability();
         assertThat(events).hasSize(2);
         AvailabilityChangedEvent offline =
@@ -726,7 +772,7 @@ class ZigbeeAvailabilityWiringTest {
 
         // An offline device is no longer a ping candidate — no ping spam.
         adapter.runCycleOnce();
-        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(1);
+        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(2);
 
         // Recovery honesty: the device talking again is the online edge.
         pingSilent = false;
@@ -775,6 +821,151 @@ class ZigbeeAvailabilityWiringTest {
         assertThat(entityAvailability()).hasSize(1);
     }
 
+    // ── AVAIL-SHAPE (IR-137/IR-138): the probe at INFO · the contract limit · K = 2 ──
+
+    @Test
+    @DisplayName("AVAIL-SHAPE W-1: the per-probe line prints at INFO ONE CYCLE after the probe "
+            + "(after that cycle's drain) with nwk, ep, outcome, rttMs and seen_during_probe — "
+            + "a silent device reads outcome=timeout rttMs=5000 seen_during_probe=false")
+    void probeLine_atInfo_oneCycleAfterTheDrain_silentDevice() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, mainsInterview());
+        deliverReport(adapter, MAINS_NWK, 11, 0x0006, onOffReport(1, true));
+        captureAdapterLog(Level.INFO);
+
+        pingSilent = true;
+        clock.advance(Duration.ofSeconds(61));
+        adapter.runCycleOnce();
+
+        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(1);
+        assertThat(adapterMessages("zigbee.availability_ping"))
+                .as("the discriminator cannot be read at the exchange's return — the "
+                        + "exchange parks every non-matching callback; the line waits "
+                        + "for the next drain")
+                .isEmpty();
+
+        adapter.runCycleOnce();
+
+        assertThat(adapterMessages("zigbee.availability_ping"))
+                .as("the first probe's line, at INFO, after the drain that could have "
+                        + "ingested a parked frame")
+                .singleElement().asString()
+                .startsWith("zigbee.availability_ping: device="
+                        + new IEEEAddress(MAINS_IEEE))
+                .contains(" nwk=0x22FE ")
+                .contains(" ep=11 ")
+                .contains(" outcome=timeout ")
+                .contains(" rttMs=5000 ")
+                .endsWith(" seen_during_probe=false");
+    }
+
+    @Test
+    @DisplayName("AVAIL-SHAPE W-1b: a frame from the device PARKED during the probe's exchange "
+            + "is ingested at the next drain — the deferred line reads seen_during_probe=true, "
+            + "the miss count is reset (the frame is evidence) and the device is not a "
+            + "candidate in that cycle; two fresh misses, not one, then name it dark")
+    void probeLine_seenDuringProbe_frameParkedDuringTheExchange() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, mainsInterview());
+        deliverReport(adapter, MAINS_NWK, 11, 0x0006, onOffReport(1, true));
+        captureAdapterLog(Level.INFO);
+
+        pingSilent = true;
+        frameDuringProbe = incomingMessage(EzspCoordinatorProtocol.HA_PROFILE_ID,
+                0x0006, 11, MAINS_NWK, onOffReport(2, false));
+        clock.advance(Duration.ofSeconds(61));
+        adapter.runCycleOnce();   // the probe: the frame parks, the reply never comes
+
+        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(1);
+        assertThat(entityAvailability())
+                .as("one miss is not a verdict (K = 2)")
+                .hasSize(1);
+
+        adapter.runCycleOnce();   // the drain ingests the parked frame; the line prints
+
+        assertThat(adapterMessages("zigbee.availability_ping"))
+                .singleElement().asString()
+                .contains(" outcome=timeout ")
+                .endsWith(" seen_during_probe=true");
+        assertThat(pingUnicasts(ncp, MAINS_NWK))
+                .as("the frame refreshed the silence clock: no candidate this cycle")
+                .isEqualTo(1);
+        assertThat(entityAvailability())
+                .as("the device never left AVAILABLE — the frame confirms, no edge")
+                .hasSize(1);
+
+        // The parked frame also reset the miss count: it takes TWO fresh misses.
+        clock.advance(Duration.ofSeconds(61));
+        adapter.runCycleOnce();
+        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(2);
+        assertThat(entityAvailability()).hasSize(1);
+        adapter.runCycleOnce();
+        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(3);
+        assertThat(entityAvailability())
+                .as("the second consecutive miss names it dark")
+                .hasSize(2);
+        assertThat(((AvailabilityChangedEvent) entityAvailability().get(1).payload())
+                .reason()).isEqualTo("ping_timeout");
+    }
+
+    @Test
+    @DisplayName("AVAIL-SHAPE W-3 (the metering fixture): a mains plug whose cached endpoint "
+            + "lists 0x0B04 takes the contract limit — 11 min of silence sends NO probe "
+            + "(660 s = ActivePower's 600-s maximum + the 60-s floor, strict), 11 min 1 s "
+            + "sends one; two unanswered probes ⇒ offline reason=ping_timeout")
+    void meteringPlug_contractLimit_660s_twoMissesNameDark() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adoptDirect(adapter, meteringMainsInterview());
+        deliverReport(adapter, PLUG_NWK, 1, 0x0006, onOffReport(1, true));
+        List<EventEnvelope> online = entityAvailability();
+        assertThat(online).isNotEmpty();
+        assertThat(online).allSatisfy(e -> assertThat(
+                ((AvailabilityChangedEvent) e.payload()).newStatus()).isEqualTo("online"));
+        int adopted = online.size();
+
+        pingSilent = true;
+        clock.advance(Duration.ofMinutes(11));
+        adapter.runCycleOnce();
+
+        assertThat(pingUnicasts(ncp, PLUG_NWK))
+                .as("660 s of silence is the contract kept — SOAK-NIGHT-1's 621-s gap "
+                        + "lives inside it; the floor is not yet spent")
+                .isZero();
+        assertThat(entityAvailability()).hasSize(adopted);
+
+        clock.advance(Duration.ofSeconds(1));
+        adapter.runCycleOnce();
+
+        assertThat(pingUnicasts(ncp, PLUG_NWK))
+                .as("661 s > 600 + 60: the probe is due")
+                .isEqualTo(1);
+        assertThat(entityAvailability())
+                .as("K = 2: the first miss is not a verdict")
+                .hasSize(adopted);
+
+        adapter.runCycleOnce();
+
+        assertThat(pingUnicasts(ncp, PLUG_NWK)).isEqualTo(2);
+        List<EventEnvelope> offline = entityAvailability().stream()
+                .filter(e -> "offline".equals(
+                        ((AvailabilityChangedEvent) e.payload()).newStatus()))
+                .toList();
+        assertThat(offline).hasSize(adopted);
+        assertThat(offline).allSatisfy(e -> {
+            assertThat(((AvailabilityChangedEvent) e.payload()).reason())
+                    .isEqualTo("ping_timeout");
+            assertThat(e.priority()).isEqualTo(EventPriority.CRITICAL);
+        });
+        assertThat(new EntityId(offline.get(0).subjectRef().id()))
+                .isIn(adoptedEntityIds(PLUG_IEEE));
+    }
+
     // ── J1 (LINK-READ-2 + IR-121): the v2 payload and the declared silence limit ──
 
     @Test
@@ -807,10 +998,16 @@ class ZigbeeAvailabilityWiringTest {
         pingSilent = true;
         clock.advance(Duration.ofSeconds(61));
         adapter.runCycleOnce();
+        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(1);
+        assertThat(entityAvailability())
+                .as("AVAIL-SHAPE K = 2: the first unanswered probe is not the verdict")
+                .hasSize(1);
+        adapter.runCycleOnce();
+        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(2);
 
         List<EventEnvelope> events = entityAvailability();
         assertThat(events)
-                .as("61 s silent + one unanswered ping = named dark inside 90 s")
+                .as("61 s silent + two unanswered probes = named dark inside 90 s (71 s)")
                 .hasSize(2);
         EventEnvelope offline = events.get(1);
         assertThat(offline.schemaVersion()).isEqualTo(2);
@@ -1183,6 +1380,21 @@ class ZigbeeAvailabilityWiringTest {
     }
 
     /**
+     * AVAIL-SHAPE W-3: the Gen4 plug's shape (mains, PowerSource 0x01; EP 1 0x010A
+     * with 0x0006 + 0x0702 + 0x0B04), adopted with NO profile — the configurator's
+     * walk finds ActivePower's 600-s maximum, so the device's silence-before-probe
+     * is 600 + 60 s, not the floor ({@code b-metered}: the metering rows decide).
+     */
+    private static InterviewResult meteringMainsInterview() {
+        return new InterviewResult(new IEEEAddress(PLUG_IEEE), PLUG_NWK,
+                new NodeDescriptor(1, 0x100B, 82, 142),
+                List.of(new EndpointDescriptor(1, 0x0104, 0x010A,
+                        List.of(0x0000, 0x0003, 0x0004, 0x0005, 0x0006, 0x0702, 0x0B04),
+                        List.of())),
+                "HomeSynapse Fixture", "MAINS-PLUG-METER", 1, InterviewStatus.COMPLETE);
+    }
+
+    /**
      * Adoption without the announce/interview walk: the cache learns the record
      * (NWK index + powerSource — the DP-2 lookup source), the slice proposes and
      * adopts. No frame has fed the tracker yet — the device sits UNKNOWN.
@@ -1484,6 +1696,12 @@ class ZigbeeAvailabilityWiringTest {
             int tsn = message[1] & 0xFF;
             if (message.length == 5) {
                 // The availability ping: one attribute id (0x0000).
+                if (frameDuringProbe != null) {
+                    // AVAIL-SHAPE W-1b: the device speaks DURING the probe's
+                    // window — the exchange parks this frame for the drain.
+                    frames.add(frameDuringProbe);
+                    frameDuringProbe = null;
+                }
                 if (!pingSilent) {
                     frames.add(incomingMessage(
                             EzspCoordinatorProtocol.HA_PROFILE_ID, 0x0000,

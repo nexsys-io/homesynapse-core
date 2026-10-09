@@ -43,6 +43,7 @@ import java.time.Instant;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -184,6 +185,24 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
      * the honest {@code PING_TIMEOUT} verdict, never an exception.
      */
     static final long AVAILABILITY_PING_TIMEOUT_MILLIS = 5_000;
+
+    /**
+     * AVAIL-SHAPE (IR-138; the word {@code AVAIL-LIMIT: b-metered}, D-v100-9):
+     * which configured rows define a mains device's reporting contract for its
+     * silence-before-probe. {@code true} — only the METERING rows (0x0B04 /
+     * 0x0702) count: the Shelly Gen4 plugs (ActivePower 600 s) and the TR3 wait
+     * their contract + the 60-s floor (660 s); the S31 Lite (OnOff only) and
+     * every contract-less device keep the floor. {@code false} would be plain
+     * {@code b} — every configured cluster, the S31 at 3,600 + 60 s. The night
+     * indicted one class on one kind of traffic (the metering rows' chatter
+     * and their ceiling); the devices the measurement cleared stay on the fast
+     * floor. Both arms are tested ({@code ReportingConfiguratorTest} C-1/C-2)
+     * so the one-word switch stays cheap. The caveat: a CLUSTER-shaped rule for
+     * a DEVICE-shaped fact (does this device answer the Basic read?) — the
+     * successor is PROBE-ANSWERED-1, a per-device flag learned from the INFO
+     * line of {@link #evaluateAvailabilityTimeouts}.
+     */
+    static final boolean MAINS_CONTRACT_METERING_ONLY = true;
 
     /**
      * J1 (LINK-READ-2): {@code availability_changed} publishes at schema version
@@ -460,6 +479,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
                 ieee -> cache.device(ieee)
                         .map(ZigbeeDeviceRecord::powerSource).orElse(0),
                 this::expectedSilenceFor,
+                this::mainsContractFor,
                 availabilitySeed,
                 availabilityPublisher);
         long fromSidecar = availabilitySeed.values().stream()
@@ -746,26 +766,108 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
      * marks a mains device offline). The ping result is genuine
      * device-originated evidence and is the ONLY {@code recordCommandResult}
      * caller (DP-7: the dispatch path's boolean is NCP acceptance, not device
-     * evidence — wiring it would fabricate liveness).
+     * evidence — wiring it would fabricate liveness). AVAIL-SHAPE: the tracker
+     * names dark after {@code PROBE_MISSES_TO_DARK} consecutive misses — a
+     * missed device stays a candidate, so the next cycle probes it again; and
+     * each probe's line prints at the top of the NEXT sweep, after that
+     * cycle's drain ({@link #logDrainedProbes}). A device whose line is still
+     * owed is snapshotted normally — no special case.
      */
     private void evaluateAvailabilityTimeouts() {
+        logDrainedProbes();
         for (IEEEAddress candidate : availabilityTracker.evaluateTimeouts()) {
             Instant pingStart = clock.instant();
-            PingOutcome outcome = pingBasic(candidate);
+            Probe probe = pingBasic(candidate);
             Instant pingEnd = clock.instant();
-            // WU-AVAIL-SEED DP-5(b): the per-ping instrument — the arm F-14's
-            // instruments could not see. rtt derives from the injected clock.
-            log.debug("zigbee.availability_ping: device={} outcome={} rttMs={}",
-                    candidate, outcome.token,
-                    Duration.between(pingStart, pingEnd).toMillis());
-            if (outcome == PingOutcome.OK) {
+            // WU-AVAIL-SEED DP-5(b) → AVAIL-SHAPE (IR-137): the per-probe
+            // instrument waits for the next drain — its discriminator cannot be
+            // read at the exchange's return. rtt derives from the injected clock.
+            probesAwaitingDrain.put(candidate.value(), new PendingProbe(pingStart,
+                    pingEnd, probe.outcome(), probe.nwk(), probe.endpoint()));
+            if (probe.outcome() == PingOutcome.OK) {
                 // A ping reply is device-originated evidence (DP-4).
                 cache.recordEvidence(candidate, pingEnd);
             }
             availabilityTracker.recordCommandResult(candidate,
-                    outcome == PingOutcome.OK, pingEnd);
+                    probe.outcome() == PingOutcome.OK, pingEnd);
         }
     }
+
+    /**
+     * AVAIL-SHAPE (IR-137): the per-probe instrument, ONE CYCLE after the probe.
+     * {@code zclGlobalExchange} waits in {@code awaitIncomingLocked}, which
+     * parks every non-matching callback for the ingestion drain, so at the
+     * exchange's return nothing of the device's own traffic has been ingested
+     * and the tracker's last-seen is unchanged — a line printed there would
+     * read {@code seen_during_probe=false} always. Printed here instead, at the
+     * top of the sweep {@code runCycleOnce} runs AFTER {@code processCycle()}
+     * (one {@link #PRODUCTION_CYCLE_MILLIS} 50-ms cycle later), the field is
+     * whether the tracker's last-seen moved past the probe's start:
+     * {@code true} means a frame from this device was parked during the probe
+     * and ingested at the drain — the device is reachable, its reply was not
+     * matched; that frame also reset the miss count and the device is no
+     * longer a candidate; {@code false} means it was silent for the whole
+     * window (on an {@code ok} probe the reply itself is the evidence, so the
+     * field reads {@code true} whenever the reply took longer than the clock's
+     * grain). {@code nwk} is the four-hex network address the exchange used
+     * and {@code ep} the endpoint it chose; the ERROR arm (no record / unknown
+     * address — no exchange) prints {@code -} for both. INFO: ≤ 10 probes per
+     * minute at the run fleet by the floor's derivation, a few per night in
+     * practice. Lines owed at {@code close()} are not printed.
+     */
+    private void logDrainedProbes() {
+        for (Map.Entry<Long, PendingProbe> entry : probesAwaitingDrain.entrySet()) {
+            IEEEAddress device = new IEEEAddress(entry.getKey());
+            PendingProbe probe = entry.getValue();
+            boolean seenDuringProbe = availabilityTracker.lastSeen(device)
+                    .map(seen -> seen.isAfter(probe.start()))
+                    .orElse(false);
+            log.info("zigbee.availability_ping: device={} nwk={} ep={} outcome={} "
+                            + "rttMs={} seen_during_probe={}",
+                    device, probeTarget(probe.nwk(), "0x%04X"),
+                    probeTarget(probe.endpoint(), "%d"), probe.outcome().token,
+                    Duration.between(probe.start(), probe.end()).toMillis(),
+                    seenDuringProbe);
+        }
+        probesAwaitingDrain.clear();
+    }
+
+    /** A probe line's target field: {@code -} on the ERROR arm, else formatted. */
+    private static String probeTarget(int value, String format) {
+        return value == NO_PROBE_TARGET ? NO_PROBE_TARGET_FIELD
+                : String.format(Locale.ROOT, format, value);
+    }
+
+    /**
+     * AVAIL-SHAPE: what one probe used — the outcome and the network address /
+     * endpoint the exchange addressed ({@link #NO_PROBE_TARGET} on the ERROR
+     * arm, where no exchange was made).
+     */
+    private record Probe(PingOutcome outcome, int nwk, int endpoint) {
+
+        /** The ERROR arm: no record or no address, so no exchange and no target. */
+        static Probe unreachable() {
+            return new Probe(PingOutcome.ERROR, NO_PROBE_TARGET, NO_PROBE_TARGET);
+        }
+    }
+
+    /**
+     * AVAIL-SHAPE (IR-137): a probe whose line is still owed — it prints at the
+     * top of the next sweep, after that cycle's drain ({@link #logDrainedProbes}).
+     */
+    private record PendingProbe(Instant start, Instant end, PingOutcome outcome,
+            int nwk, int endpoint) { }
+
+    /** The ERROR arm's nwk / endpoint value — nothing was addressed. */
+    private static final int NO_PROBE_TARGET = -1;
+    /** What the probe line prints for a target the ERROR arm never had. */
+    private static final String NO_PROBE_TARGET_FIELD = "-";
+    /**
+     * AVAIL-SHAPE: the probes owed a line, by IEEE value in probe order —
+     * drained at the top of every sweep; a device is probed at most once per
+     * sweep, so no entry is ever overwritten. Run-thread only, like the cycle.
+     */
+    private final Map<Long, PendingProbe> probesAwaitingDrain = new LinkedHashMap<>();
 
     /**
      * IR-121: a device's declared silence limit — the SMALLEST expected report
@@ -786,6 +888,29 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
             }
         }
         return Optional.ofNullable(smallest);
+    }
+
+    /**
+     * AVAIL-SHAPE (IR-138): a mains device's reporting contract — the smallest
+     * effective maximum across the rows {@code configureDevice} drove on it,
+     * re-walked as a pure function from the cached record's endpoints and its
+     * matched profile (through {@link #deviceProfile}), under the word
+     * {@link #MAINS_CONTRACT_METERING_ONLY}. Nothing in memory carries the
+     * drive's outcome after a restart (the boot re-link drives no reporting —
+     * IR-139), so the contract is derived, never read from the posture facts;
+     * a device whose posture was never verified receives it all the same.
+     * Empty for an uninterviewed record (no endpoints) or a device with no
+     * configured row. Read at every evaluation on the run thread, OUTSIDE the
+     * tracker's lock (LTD-11); a throw reaches the tracker's per-cycle WARN arm.
+     */
+    private Optional<Duration> mainsContractFor(IEEEAddress device) {
+        Optional<ZigbeeDeviceRecord> record = cache.device(device);
+        if (reporting == null || record.isEmpty()
+                || record.get().endpoints() == null) {
+            return Optional.empty();
+        }
+        return reporting.contractMaxIntervalFor(record.get().endpoints(),
+                deviceProfile(device).orElse(null), MAINS_CONTRACT_METERING_ONLY);
     }
 
     /** The DP-5(b) per-ping outcome vocabulary ({@code ok|timeout|error}). */
@@ -809,20 +934,23 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
      * and re-edges). Every non-OK outcome records {@code responded=false}. An
      * {@link EzspCommandTimeoutException} (the NCP itself not answering)
      * propagates to the production loop's existing watchdog arm — coordinator
-     * trouble is never device evidence.
+     * trouble is never device evidence. AVAIL-SHAPE: the result carries the
+     * network address and the endpoint the exchange used, for the probe line.
      */
-    private PingOutcome pingBasic(IEEEAddress device) {
+    private Probe pingBasic(IEEEAddress device) {
         Optional<ZigbeeDeviceRecord> record = cache.device(device);
         if (record.isEmpty() || record.get().networkAddress()
                 == ZigbeeDeviceCache.NETWORK_ADDRESS_UNKNOWN) {
-            return PingOutcome.ERROR;
+            return Probe.unreachable();
         }
-        return protocol.zclGlobalExchange(record.get().networkAddress(),
-                firstApplicationEndpoint(record.get()), 0x0000,
+        int nwk = record.get().networkAddress();
+        int endpoint = firstApplicationEndpoint(record.get());
+        boolean answered = protocol.zclGlobalExchange(nwk, endpoint, 0x0000,
                 ZclCodec.COMMAND_READ_ATTRIBUTES, new byte[] {0x00, 0x00},
                 ZclCodec.COMMAND_READ_ATTRIBUTES_RESPONSE,
-                AVAILABILITY_PING_TIMEOUT_MILLIS).isPresent()
-                        ? PingOutcome.OK : PingOutcome.TIMEOUT;
+                AVAILABILITY_PING_TIMEOUT_MILLIS).isPresent();
+        return new Probe(answered ? PingOutcome.OK : PingOutcome.TIMEOUT, nwk,
+                endpoint);
     }
 
     /**

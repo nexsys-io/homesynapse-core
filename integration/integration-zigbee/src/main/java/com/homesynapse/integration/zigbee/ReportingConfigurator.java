@@ -7,6 +7,7 @@ package com.homesynapse.integration.zigbee;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -208,6 +209,74 @@ final class ReportingConfigurator {
     List<ReportingPostureFact> configureDevice(IEEEAddress device,
             List<EndpointDescriptor> endpoints, DeviceProfile profile) {
         return drive(device, endpoints, profile, false);
+    }
+
+    /**
+     * AVAIL-SHAPE (IR-138) — the contract WITHOUT the wire: the smallest
+     * effective maximum reporting interval across exactly the rows
+     * {@link #configureDevice} would drive on these endpoints, as a
+     * {@link Duration}; nothing is sent and nothing is read. The walk mirrors
+     * {@link #drive}: a profile that skips {@code configure_reporting} drives
+     * no row (empty); per endpoint, per input cluster, the {@code DEFAULTS} or
+     * {@code METERING_ROWS} row with the profile's override applied by the same
+     * two paths ({@link #effectiveRow} for a default row; the metering
+     * override's intervals as {@link #configureMetering} applies them); the
+     * IAS Zone arm has no row and contributes nothing. Two intentional
+     * divergences: (i) a metering cluster counts REGARDLESS of the R3
+     * formatting read — its maximum depends on the override only, never on the
+     * formatting, so an unreadable-formatting plug still takes its contract;
+     * (ii) a row whose effective maximum is {@code 0xFFFF} (reporting off) is
+     * SKIPPED though the drive sends it as-is — a limit rule, not a mirror.
+     *
+     * @param endpoints the device's cached application endpoints, never {@code null}
+     * @param profile the matched device profile; {@code null} when none
+     * @param meteringOnly {@code true} to count only the metering rows
+     *        (0x0B04 / 0x0702); {@code false} to count every configured cluster
+     * @return the smallest effective maximum, or empty when no row would be driven
+     */
+    Optional<Duration> contractMaxIntervalFor(List<EndpointDescriptor> endpoints,
+            DeviceProfile profile, boolean meteringOnly) {
+        Objects.requireNonNull(endpoints, "endpoints");
+        // Mirrors drive()'s skip test: a skip-profile device receives NO
+        // commands, so no row is its contract.
+        boolean skipConfiguration = profile != null
+                && profile.interviewSkips() != null
+                && profile.interviewSkips().contains(SKIP_CONFIGURE_REPORTING);
+        if (skipConfiguration) {
+            return Optional.empty();
+        }
+        Integer smallest = null;
+        for (EndpointDescriptor endpoint : endpoints) {
+            for (int clusterId : endpoint.inputClusters()) {
+                if (clusterId == IasZoneHandler.CLUSTER_ID) {
+                    continue;   // the IAS arm has no row: the CIE write is not reporting
+                }
+                DefaultRow row = DEFAULTS.get(clusterId);
+                MeteringRow meteringRow = METERING_ROWS.get(clusterId);
+                int maxInterval;
+                if (meteringRow != null) {
+                    // The metering override's intervals, as configureMetering
+                    // applies them — the formatting read never moves the MAX.
+                    ReportingOverride override = profile == null
+                            || profile.reportingOverrides() == null ? null
+                            : profile.reportingOverrides().get(clusterId);
+                    maxInterval = override == null ? meteringRow.maxInterval()
+                            : override.maxInterval();
+                } else if (row != null && !meteringOnly) {
+                    maxInterval = effectiveRow(row, clusterId, profile).maxInterval();
+                } else {
+                    continue;
+                }
+                if (maxInterval == REPORTING_OFF_MAX_INTERVAL) {
+                    continue;   // reporting off: no report is ever due from this row
+                }
+                if (smallest == null || maxInterval < smallest) {
+                    smallest = maxInterval;
+                }
+            }
+        }
+        return smallest == null ? Optional.empty()
+                : Optional.of(Duration.ofSeconds(smallest));
     }
 
     /**

@@ -35,7 +35,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * regime (IR-121: 60 s since J1, was 10 min). J1 adds the per-device silence
  * limit (the declared expected report interval through the injected lookup;
  * empty → 25 h) and the listener's snapshot of reason, last-seen and the last
- * link reading (LINK-READ-2).
+ * link reading (LINK-READ-2). AVAIL-SHAPE (IR-137/IR-138) adds the mains
+ * contract lookup — the configured reporting maximum PLUS the 60-s floor as a
+ * mains device's silence-before-probe, the floor alone where there is none —
+ * and the K = 2 probe backstop ({@code PROBE_MISSES_TO_DARK}).
  */
 class StandardAvailabilityTrackerTest {
 
@@ -91,9 +94,22 @@ class StandardAvailabilityTrackerTest {
     private void createTracker(
             Map<Long, StandardAvailabilityTracker.Seed> persisted,
             Function<IEEEAddress, Optional<Duration>> expectedSilenceLookup) {
+        createTracker(persisted, expectedSilenceLookup, device -> Optional.empty());
+    }
+
+    /**
+     * AVAIL-SHAPE (IR-138): the tracker with all three lookups — the mains
+     * contract lookup yields the device's configured reporting maximum, empty
+     * where the Core configured none (the 60-s floor alone applies).
+     */
+    private void createTracker(
+            Map<Long, StandardAvailabilityTracker.Seed> persisted,
+            Function<IEEEAddress, Optional<Duration>> expectedSilenceLookup,
+            Function<IEEEAddress, Optional<Duration>> mainsContractLookup) {
         tracker = new StandardAvailabilityTracker(clock,
                 device -> powerSources.getOrDefault(device.value(), 0),
                 expectedSilenceLookup,
+                mainsContractLookup,
                 persisted,
                 (device, instant, available, reason, lastSeen, lastLink, lastLinkAt) -> {
                     transitions.add(device.toHexString() + ":" + available);
@@ -106,6 +122,11 @@ class StandardAvailabilityTrackerTest {
     private static StandardAvailabilityTracker.Seed seed(Boolean available,
             Instant lastEvidenceAt) {
         return new StandardAvailabilityTracker.Seed(available, lastEvidenceAt);
+    }
+
+    /** A mains-contract lookup answering {@code seconds} for every device. */
+    private static Function<IEEEAddress, Optional<Duration>> contractOf(long seconds) {
+        return device -> Optional.of(Duration.ofSeconds(seconds));
     }
 
     @Test
@@ -212,8 +233,9 @@ class StandardAvailabilityTrackerTest {
 
         clock.advance(Duration.ofSeconds(2));
         assertThat(tracker.evaluateTimeouts())
-                .as("61 s of silence makes a mains device a ping candidate — named "
-                        + "dark inside D-v94-25's 90 s once the 5-s ping lapses")
+                .as("61 s of silence makes a contract-less mains device a ping candidate — "
+                        + "named dark inside D-v94-25's 90 s once two 5-s probes lapse "
+                        + "(AVAIL-SHAPE: 70.05 s)")
                 .containsExactly(MAINS_DEVICE);
         assertThat(tracker.isAvailable(MAINS_DEVICE))
                 .as("candidacy is not a verdict — the ping decides")
@@ -429,7 +451,10 @@ class StandardAvailabilityTrackerTest {
     }
 
     @Test
-    @DisplayName("a failed command result after repeated failures marks unavailable via PING_TIMEOUT")
+    @DisplayName("AVAIL-SHAPE U-3: a failed command result after repeated failures marks "
+            + "unavailable via PING_TIMEOUT — the FIRST miss leaves the device AVAILABLE, its "
+            + "reason unchanged and the listener silent; the SECOND (PROBE_MISSES_TO_DARK = 2) "
+            + "names it dark with ONE transition")
     void failedPingMarksUnavailable() {
         createTracker(Map.of());
         tracker.recordFrame(MAINS_DEVICE, clock.instant(), ANY_LINK);
@@ -437,9 +462,20 @@ class StandardAvailabilityTrackerTest {
 
         tracker.recordCommandResult(MAINS_DEVICE, false, clock.instant());
 
+        assertThat(StandardAvailabilityTracker.PROBE_MISSES_TO_DARK).isEqualTo(2);
+        assertThat(tracker.isAvailable(MAINS_DEVICE))
+                .as("one miss is a lost frame or a lost reply, never a verdict (K = 2)")
+                .isTrue();
+        assertThat(tracker.lastReason(MAINS_DEVICE))
+                .isEqualTo(AvailabilityReason.FIRST_CONTACT);
+        assertThat(transitions).isEmpty();
+
+        tracker.recordCommandResult(MAINS_DEVICE, false, clock.instant());
+
         assertThat(tracker.isAvailable(MAINS_DEVICE)).isFalse();
         assertThat(tracker.lastReason(MAINS_DEVICE))
                 .isEqualTo(AvailabilityReason.PING_TIMEOUT);
+        assertThat(transitions).containsExactly(MAINS_DEVICE.toHexString() + ":false");
     }
 
     @Test
@@ -452,6 +488,195 @@ class StandardAvailabilityTrackerTest {
         assertThat(tracker.isAvailable(MAINS_DEVICE)).isTrue();
         assertThat(tracker.lastReason(MAINS_DEVICE))
                 .isEqualTo(AvailabilityReason.PING_SUCCESS);
+    }
+
+    // ── AVAIL-SHAPE (IR-137/IR-138): the contract-derived mains limit + K = 2 ──
+    // A mains device's silence-before-probe is the reporting CONTRACT the Core
+    // configured on it (its smallest effective maximum, through the injected
+    // lookup) PLUS the 60-s floor — the floor alone where there is none. Two
+    // consecutive probe misses name dark; a frame or a reply resets the count.
+
+    @Test
+    @DisplayName("AVAIL-SHAPE U-1 (the 70-s fixture): a mains device whose contract is 600 s "
+            + "is NOT a ping candidate at 70 s, nor at 600 s (the report due); at 661 s "
+            + "(contract + the 60-s floor, strict) it is — and still AVAILABLE")
+    void mainsContract_600s_notACandidateAt70s_candidateAt661s() {
+        createTracker(Map.of(), device -> Optional.empty(), contractOf(600));
+        tracker.recordFrame(MAINS_DEVICE, clock.instant(), ANY_LINK);
+        transitions.clear();
+
+        clock.advance(Duration.ofSeconds(70));
+        assertThat(tracker.evaluateTimeouts())
+                .as("70 s of silence under a 600-s contract is a plug keeping its "
+                        + "contract — SOAK-NIGHT-1's five flaps")
+                .isEmpty();
+        assertThat(tracker.isAvailable(MAINS_DEVICE)).isTrue();
+
+        clock.advance(Duration.ofSeconds(530));
+        assertThat(tracker.evaluateTimeouts())
+                .as("600 s: the report is due, the floor is not yet spent")
+                .isEmpty();
+
+        clock.advance(Duration.ofSeconds(61));
+        assertThat(tracker.evaluateTimeouts())
+                .as("661 s > 600 + 60: the probe is due")
+                .containsExactly(MAINS_DEVICE);
+        assertThat(tracker.isAvailable(MAINS_DEVICE))
+                .as("candidacy is not a verdict — the probes decide")
+                .isTrue();
+        assertThat(transitions).isEmpty();
+    }
+
+    @Test
+    @DisplayName("AVAIL-SHAPE U-2: the floor is ADDED to the contract, never maxed — a 30-s "
+            + "contract makes the limit 90 s: not a candidate at 90 s, a candidate at 91 s; "
+            + "a device with an EMPTY contract keeps the 60-s floor alone")
+    void mainsContract_floorIsAdded_30sContractNamesAt91s() {
+        Map<Long, Optional<Duration>> contracts = new HashMap<>();
+        contracts.put(MAINS_DEVICE.value(), Optional.of(Duration.ofSeconds(30)));
+        createTracker(Map.of(), device -> Optional.empty(),
+                device -> contracts.getOrDefault(device.value(), Optional.empty()));
+        tracker.recordFrame(MAINS_DEVICE, clock.instant(), ANY_LINK);
+        tracker.recordFrame(THREE_PHASE_DEVICE, clock.instant(), ANY_LINK);
+        transitions.clear();
+
+        clock.advance(Duration.ofSeconds(90));
+        assertThat(tracker.evaluateTimeouts())
+                .as("90 s = 30 + 60 exactly — the strict compare holds the boundary; the "
+                        + "contract-less device is past its 60-s floor")
+                .containsExactly(THREE_PHASE_DEVICE);
+
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(tracker.evaluateTimeouts())
+                .as("91 s > 30 + 60: both are due")
+                .containsExactlyInAnyOrder(MAINS_DEVICE, THREE_PHASE_DEVICE);
+        assertThat(transitions).isEmpty();
+    }
+
+    @Test
+    @DisplayName("AVAIL-SHAPE U-2b: a mains-contract lookup that THROWS falls to the 60-s floor "
+            + "for that cycle and logs zigbee.availability_limit_lookup_failed once per device "
+            + "per cycle — never a stuck cycle, never a verdict from a failed read")
+    void throwingMainsContractLookup_fallsToTheFloor_andWarns() {
+        Logger logger = (Logger) LoggerFactory.getLogger(StandardAvailabilityTracker.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            createTracker(Map.of(), device -> Optional.empty(), device -> {
+                throw new IllegalStateException("cache unavailable");
+            });
+            tracker.recordFrame(MAINS_DEVICE, clock.instant(), ANY_LINK);
+            transitions.clear();
+
+            clock.advance(Duration.ofSeconds(59));
+            assertThat(tracker.evaluateTimeouts()).isEmpty();
+            clock.advance(Duration.ofSeconds(2));
+            assertThat(tracker.evaluateTimeouts())
+                    .as("the failed lookup reads as no contract: the floor applies")
+                    .containsExactly(MAINS_DEVICE);
+
+            List<String> warnings = appender.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .filter(m -> m.startsWith("zigbee.availability_limit_lookup_failed:"))
+                    .toList();
+            assertThat(warnings)
+                    .as("one WARN per device per evaluation cycle — two cycles")
+                    .hasSize(2);
+            assertThat(warnings.get(0))
+                    .contains("device=" + MAINS_DEVICE)
+                    .contains("the 60-s floor")
+                    .contains("cache unavailable");
+        } finally {
+            logger.detachAppender(appender);
+        }
+    }
+
+    @Test
+    @DisplayName("AVAIL-SHAPE U-4: a frame between two misses RESETS the count — miss, frame, "
+            + "miss leaves the device AVAILABLE; a second consecutive miss then names it dark")
+    void probeMiss_thenFrame_thenMiss_staysAvailable() {
+        createTracker(Map.of());
+        tracker.recordFrame(MAINS_DEVICE, clock.instant(), ANY_LINK);
+        transitions.clear();
+
+        tracker.recordCommandResult(MAINS_DEVICE, false, clock.instant());
+        clock.advance(Duration.ofSeconds(5));
+        tracker.recordFrame(MAINS_DEVICE, clock.instant(), ANY_LINK);
+        tracker.recordCommandResult(MAINS_DEVICE, false, clock.instant());
+
+        assertThat(tracker.isAvailable(MAINS_DEVICE))
+                .as("the frame reset the count: the second miss is a first miss again")
+                .isTrue();
+        assertThat(tracker.lastReason(MAINS_DEVICE))
+                .isEqualTo(AvailabilityReason.FIRST_CONTACT);
+        assertThat(transitions).isEmpty();
+
+        tracker.recordCommandResult(MAINS_DEVICE, false, clock.instant());
+
+        assertThat(tracker.isAvailable(MAINS_DEVICE)).isFalse();
+        assertThat(tracker.lastReason(MAINS_DEVICE))
+                .isEqualTo(AvailabilityReason.PING_TIMEOUT);
+        assertThat(transitions).containsExactly(MAINS_DEVICE.toHexString() + ":false");
+    }
+
+    @Test
+    @DisplayName("AVAIL-SHAPE U-4b: a miss then a reply — the device stays AVAILABLE and the "
+            + "count is back at 0: the next single miss does not transition, the one after "
+            + "does (AVAILABLE → AVAILABLE is no edge, so the reason keeps the edging one)")
+    void probeMiss_thenSuccess_resetsTheCount() {
+        createTracker(Map.of());
+        tracker.recordFrame(MAINS_DEVICE, clock.instant(), ANY_LINK);
+        transitions.clear();
+
+        tracker.recordCommandResult(MAINS_DEVICE, false, clock.instant());
+        tracker.recordCommandResult(MAINS_DEVICE, true, clock.instant());
+
+        assertThat(tracker.isAvailable(MAINS_DEVICE)).isTrue();
+        assertThat(tracker.isEvidencedAvailable(MAINS_DEVICE))
+                .as("a reply is this-process evidence")
+                .isTrue();
+        assertThat(tracker.lastReason(MAINS_DEVICE))
+                .as("no edge: the reason is the transition's, and none happened (J1's "
+                        + "contract — the v2 event mirrors lastReason)")
+                .isEqualTo(AvailabilityReason.FIRST_CONTACT);
+        assertThat(transitions).isEmpty();
+
+        tracker.recordCommandResult(MAINS_DEVICE, false, clock.instant());
+        assertThat(tracker.isAvailable(MAINS_DEVICE))
+                .as("the reply zeroed the count: this miss is the first")
+                .isTrue();
+
+        tracker.recordCommandResult(MAINS_DEVICE, false, clock.instant());
+        assertThat(tracker.isAvailable(MAINS_DEVICE)).isFalse();
+        assertThat(tracker.lastReason(MAINS_DEVICE))
+                .isEqualTo(AvailabilityReason.PING_TIMEOUT);
+        assertThat(transitions).containsExactly(MAINS_DEVICE.toHexString() + ":false");
+    }
+
+    @Test
+    @DisplayName("AVAIL-SHAPE U-5: a seeded-stale mains entry is still a candidate at the FIRST "
+            + "evaluation, and its first miss does not transition — the seed's count starts "
+            + "at 0 and the next cycle probes it again")
+    void seededStaleMains_firstMissDoesNotTransition() {
+        createTracker(Map.of(MAINS_DEVICE.value(),
+                seed(true, clock.instant().minus(Duration.ofHours(3)))));
+
+        assertThat(tracker.evaluateTimeouts()).containsExactly(MAINS_DEVICE);
+        tracker.recordCommandResult(MAINS_DEVICE, false, clock.instant());
+
+        assertThat(tracker.isAvailable(MAINS_DEVICE)).isTrue();
+        assertThat(transitions).isEmpty();
+        assertThat(tracker.evaluateTimeouts())
+                .as("still past its limit and still AVAILABLE: the next cycle probes again")
+                .containsExactly(MAINS_DEVICE);
+
+        tracker.recordCommandResult(MAINS_DEVICE, false, clock.instant());
+
+        assertThat(tracker.isAvailable(MAINS_DEVICE)).isFalse();
+        assertThat(tracker.lastReason(MAINS_DEVICE))
+                .isEqualTo(AvailabilityReason.PING_TIMEOUT);
+        assertThat(transitions).containsExactly(MAINS_DEVICE.toHexString() + ":false");
     }
 
     // ── WU-AVAIL-SEED DP-1: the sidecar seed enters devices into tracking ──

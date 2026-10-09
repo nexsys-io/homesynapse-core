@@ -13,6 +13,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -813,5 +814,105 @@ class ReportingConfiguratorTest {
 
         assertThat(cached.filledFrom(read)).isEqualTo(new MeteringFormatting(
                 1, 100, 1, 10, 0, 0, 1, 1_000, 0x00));
+    }
+
+    // ── AVAIL-SHAPE (IR-138): the contract walk without the wire ─────────────
+    // contractMaxIntervalFor re-walks EXACTLY the rows configureDevice would
+    // drive — the same skip-profile test, the same two override paths, a
+    // reporting-off row excluded — and returns the SMALLEST effective maximum,
+    // sending nothing and reading nothing. The adapter hands it to the tracker
+    // as a mains device's reporting contract.
+
+    @Test
+    @DisplayName("AVAIL-SHAPE C-1: a plug's endpoint (0x0006 + 0x0B04 + 0x0702), no profile → "
+            + "600 s under BOTH flags (ActivePower's maximum is the smallest row) — and "
+            + "nothing is sent")
+    void contractWalk_plug_600sUnderBothFlags() {
+        List<EndpointDescriptor> plug = List.of(endpoint(0x0006, 0x0B04, 0x0702));
+
+        assertThat(configurator.contractMaxIntervalFor(plug, null, false))
+                .contains(Duration.ofSeconds(600));
+        assertThat(configurator.contractMaxIntervalFor(plug, null, true))
+                .contains(Duration.ofSeconds(600));
+        assertThat(ops.calls)
+                .as("a pure walk: no bind, no configure, no read-back, no formatting read")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("AVAIL-SHAPE C-2: an OnOff-only endpoint → 3,600 s under meteringOnly=false "
+            + "(plain `b`), EMPTY under true (`b-metered`: only 0x0B04 / 0x0702 count)")
+    void contractWalk_onOffOnly_3600sOrEmptyByFlag() {
+        List<EndpointDescriptor> onOff = List.of(endpoint(0x0006));
+
+        assertThat(configurator.contractMaxIntervalFor(onOff, null, false))
+                .contains(Duration.ofSeconds(3600));
+        assertThat(configurator.contractMaxIntervalFor(onOff, null, true)).isEmpty();
+        assertThat(ops.calls).isEmpty();
+    }
+
+    @Test
+    @DisplayName("AVAIL-SHAPE C-3: a skip-configure profile → EMPTY (no row is driven); a "
+            + "profile override on 0x0B04 (max 300) → 300 s; an override turning 0x0B04's "
+            + "reporting OFF (0xFFFF) is SKIPPED → the next-smallest row (0x0702's 3,600 s), "
+            + "or EMPTY when it was the only row")
+    void contractWalk_skipProfile_override_andReportingOffRows() {
+        List<EndpointDescriptor> plug = List.of(endpoint(0x0006, 0x0B04, 0x0702));
+        DeviceProfile skip = new DeviceProfile("aqara", Set.of(
+                new ExactModel("LUMI", "lumi.plug")),
+                DeviceCategory.MIXED_CUSTOM, null, null, "xiaomi_ff01",
+                Set.of("configure_reporting"), null, null, null);
+        DeviceProfile override = new DeviceProfile("p", Set.of(
+                new ExactModel("Acme", "Meter")),
+                DeviceCategory.MINOR_QUIRKS, null,
+                Map.of(0x0B04, new ReportingOverride(0x0B04, 10, 300, 7)),
+                null, null, null, null, null);
+        DeviceProfile off = new DeviceProfile("p", Set.of(
+                new ExactModel("Acme", "Meter")),
+                DeviceCategory.MINOR_QUIRKS, null,
+                Map.of(0x0B04, new ReportingOverride(0x0B04, 0, 0xFFFF, 0)),
+                null, null, null, null, null);
+
+        assertThat(configurator.contractMaxIntervalFor(plug, skip, false)).isEmpty();
+        assertThat(configurator.contractMaxIntervalFor(plug, skip, true)).isEmpty();
+        assertThat(configurator.contractMaxIntervalFor(plug, override, true))
+                .contains(Duration.ofSeconds(300));
+        assertThat(configurator.contractMaxIntervalFor(plug, off, true))
+                .as("0x0B04 reports nothing: 0x0702's 3,600 s is the contract")
+                .contains(Duration.ofSeconds(3600));
+        assertThat(configurator.contractMaxIntervalFor(
+                List.of(endpoint(0x0006, 0x0B04)), off, true))
+                .as("the only metering row is off: no contract")
+                .isEmpty();
+        assertThat(ops.calls).isEmpty();
+    }
+
+    @Test
+    @DisplayName("AVAIL-SHAPE C-3b: a default-row override (0x0006 max 120) rides effectiveRow "
+            + "under meteringOnly=false and is invisible under true; IAS Zone (0x0500) and an "
+            + "unknown cluster (0xFC21) contribute nothing; across two endpoints the SMALLEST "
+            + "effective maximum wins")
+    void contractWalk_defaultOverride_noRowClusters_smallestAcrossEndpoints() {
+        DeviceProfile onOffOverride = new DeviceProfile("p", Set.of(
+                new ExactModel("Acme", "Plug")),
+                DeviceCategory.MINOR_QUIRKS, null,
+                Map.of(0x0006, new ReportingOverride(0x0006, 0, 120, 0)),
+                null, null, null, null, null);
+        List<EndpointDescriptor> plug = List.of(endpoint(0x0006, 0x0B04));
+
+        assertThat(configurator.contractMaxIntervalFor(plug, onOffOverride, false))
+                .contains(Duration.ofSeconds(120));
+        assertThat(configurator.contractMaxIntervalFor(plug, onOffOverride, true))
+                .contains(Duration.ofSeconds(600));
+        assertThat(configurator.contractMaxIntervalFor(
+                List.of(endpoint(0x0500, 0xFC21)), null, false)).isEmpty();
+
+        EndpointDescriptor first = new EndpointDescriptor(1, 0x0104, 0x010A,
+                List.of(0x0006), List.of());
+        EndpointDescriptor second = new EndpointDescriptor(2, 0x0104, 0x010A,
+                List.of(0x0B04), List.of());
+        assertThat(configurator.contractMaxIntervalFor(List.of(first, second), null, false))
+                .contains(Duration.ofSeconds(600));
+        assertThat(ops.calls).isEmpty();
     }
 }

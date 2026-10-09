@@ -108,10 +108,14 @@ final class AvailabilityBootTruthIT {
                 .isEqualTo(Availability.AVAILABLE);
 
         // One mains evaluation window elapses with total silence. The cycle
-        // evaluates the seeded device, pings it once, gets nothing, and the
-        // PING_TIMEOUT verdict rides the normal publish → projection → read
-        // path for the relinked entity.
+        // evaluates the seeded device and pings it; the next cycle pings it
+        // again (AVAIL-SHAPE: PROBE_MISSES_TO_DARK = 2 — one lost reply is
+        // never a verdict); the second unanswered probe's PING_TIMEOUT verdict
+        // rides the normal publish → projection → read path for the relinked
+        // entity. The Hue rig lists no metering cluster, so its limit is the
+        // 60-s floor alone (`b-metered`) — 11 min is far past it.
         rig.clock().advance(Duration.ofMinutes(11));
+        rig.deliverAndCycle();
         rig.deliverAndCycle();
 
         awaitServed(Availability.UNAVAILABLE,
@@ -121,7 +125,8 @@ final class AvailabilityBootTruthIT {
     @Test
     @DisplayName("J1 (LINK-READ-2 + IR-121, a non-gate pin): a dead mains device is SERVED "
             + "UNAVAILABLE with availabilityReason=ping_timeout and lastSeenAt = its last frame, "
-            + "inside the simulated 90 s — 61 s of silence, one unanswered ping, the next cycle")
+            + "inside the simulated 90 s — 61 s of silence, two unanswered probes (AVAIL-SHAPE "
+            + "K = 2), the next cycle (a device with no metering contract — the floor class)")
     void deadMainsDevice_namedDarkWithReasonAndLastSeen_insideNinetySeconds(
             @TempDir Path tempDir) throws Exception {
         boot(tempDir);
@@ -137,11 +142,14 @@ final class AvailabilityBootTruthIT {
         assertThat(alive.availabilityReason()).isEqualTo("first_contact");
         assertThat(alive.lastSeenAt()).isEqualTo(announceAt);
 
-        // The device dies; 61 s of silence makes it a ping candidate (60 s, strict), the
-        // one Basic read goes unanswered, and the PING_TIMEOUT verdict rides publish →
-        // projection → read with the reason and the last-seen instant on it.
+        // The device dies; 61 s of silence makes it a ping candidate (the 60-s floor,
+        // strict — the Hue lists no metering cluster, so no contract widens it), two
+        // Basic reads on two cycles go unanswered (K = 2; each lapses its 5-s deadline
+        // on the rig's clock), and the PING_TIMEOUT verdict rides publish → projection
+        // → read with the reason and the last-seen instant on it: 61 + 5 + 5 = 71 s.
         rig.silence(ZigbeeHardwareFreeRig.HUE_IEEE);
         rig.clock().advance(Duration.ofSeconds(61));
+        rig.deliverAndCycle();
         rig.deliverAndCycle();
 
         awaitServed(Availability.UNAVAILABLE, "named dark inside D-v94-25's 90 s");
@@ -151,7 +159,9 @@ final class AvailabilityBootTruthIT {
                 .as("the last evidence instant — the announce frame, never the verdict")
                 .isEqualTo(announceAt);
         assertThat(Duration.between(announceAt, rig.clock().instant()))
-                .as("the simulated naming time stays inside the 90-s acceptance")
+                .as("the simulated naming time stays inside the 90-s acceptance — the "
+                        + "floor class's word survives K = 2 (70.05 s derived; 71 s here, "
+                        + "the rig advancing each probe's full 5-s deadline)")
                 .isLessThanOrEqualTo(Duration.ofSeconds(90));
     }
 

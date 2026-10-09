@@ -25,9 +25,12 @@ import java.util.function.ToIntFunction;
  * restart rule): power-source-aware silence timeouts — a non-mains device goes
  * unavailable passively after its silence limit (IR-121: the smallest expected
  * report interval its entities' capabilities declare, through the injected
- * lookup; 25 h when none declares); mains devices become PING CANDIDATES after
- * {@link #MAINS_PING_SILENCE} = 60 s (the active ping is the M9.4 ZCL read;
- * silence alone never marks a mains device offline).
+ * lookup; 25 h when none declares); mains devices become PING CANDIDATES past
+ * their reporting CONTRACT's maximum + {@link #MAINS_PING_SILENCE} = 60 s where
+ * the Core configured one (AVAIL-SHAPE, IR-138 — the contract through the
+ * injected lookup), past the 60-s floor alone otherwise (the active probe is
+ * the M9.4 ZCL read; silence alone never marks a mains device offline, and
+ * {@link #PROBE_MISSES_TO_DARK} consecutive unanswered probes do).
  *
  * <p><strong>Power posture (M9.4b §6.10 N-5):</strong> classification is
  * fail-conservative — a device gets the battery posture UNLESS its ZCL Basic
@@ -53,22 +56,58 @@ import java.util.function.ToIntFunction;
 final class StandardAvailabilityTracker implements AvailabilityTracker {
 
     /**
-     * Mains-powered silence before an active ping is due (Doc 08 §9). IR-121
+     * The mains silence FLOOR before an active probe is due (Doc 08 §9). IR-121
      * (J1): 60 s, from D-v94-25's acceptance — a mains device named dark in
-     * ≤ 90 s. THE DERIVATION: the probe is ONE ZCL Basic read per silent mains
-     * device per interval (≤ 10 reads/min on the ten-device run fleet), each
-     * bounded by {@code ZigbeeIntegrationAdapter.AVAILABILITY_PING_TIMEOUT_MILLIS}
-     * = 5 s; the worst-case naming time for ONE device is 60 s of silence + the
-     * 5-s deadline + one 50-ms cycle = 65.05 s (under 90 s). The pings are
-     * SEQUENTIAL on the run thread, so N simultaneously silent mains devices
-     * name the last one at 60 + 5·N + 0.05 s — 85.05 s at the run fleet's five
-     * (the two G4s, the S31, the Hue, the TR3): the acceptance holds for N ≤ 5.
-     * The radio cost is measured at R6 and this constant moves only on that
-     * measurement (Z2M probes at 10 min; ours is a product number). A constant
-     * by design, like {@link #LINK_SUMMARY_PERIOD}: the run's fleet is fixed.
-     * Pre-J1 this was 10 min.
+     * ≤ 90 s. AVAIL-SHAPE (IR-138; the word {@code AVAIL-LIMIT: b-metered},
+     * D-v100-9): a mains device's silence-before-probe is the reporting
+     * CONTRACT the Core configured on it PLUS this floor; the floor alone where
+     * it has no contract. THE DERIVATION (law #34): SOAK-NIGHT-1 named five
+     * plugs dark in ten hours that were never gone, each at +65.1 s of silence
+     * (this floor + the probe's full 5-s deadline), each undone by the plug's
+     * own next report 69–73 s after the previous one — the plug class reports
+     * on change under an {@code ActivePower} contract whose maximum the Core
+     * wrote as 600 s and the device accepted at readback
+     * ({@code ReportingConfigurator}'s metering rows); the night's 621-s
+     * silence was that contract kept. The floor is ADDED, never maxed: a
+     * report due exactly at the contract's maximum gets a whole floor to
+     * arrive before the probe (the 65-vs-69-s race, at the contract's scale).
+     * The probe is ONE ZCL Basic read per silent mains device per cycle (≤ 10
+     * reads/min on the ten-device run fleet), each bounded by
+     * {@code ZigbeeIntegrationAdapter.AVAILABILITY_PING_TIMEOUT_MILLIS} = 5 s,
+     * and {@link #PROBE_MISSES_TO_DARK} consecutive misses name dark.
+     *
+     * <p>THE AMENDED ACCEPTANCE (D-v94-25 → D-v100-9): a mains device with a
+     * reporting contract is named dark inside its contract + this floor + K
+     * probes (the Shelly Gen4 plugs and the TR3: 660 + 2 × 5 s + one 50-ms
+     * cycle = 670.05 s); a mains device with no contract inside 60 s + K probes
+     * = 70.05 s, where the ≤ 90-s word survives. The probes are SEQUENTIAL on
+     * the run thread, so N simultaneously silent contract-less devices name
+     * the last one at 60 + 2·5·N + 0.05 s: the acceptance holds for N ≤ 2 —
+     * the run fleet's floor class (the S31 and the Hue). REFUTABLE-BY: when
+     * IR-137's INFO reading shows a class ANSWERS the probe, that class returns
+     * to the floor regime by one line (the fast naming the probe was designed
+     * for); the contract regime is the standing shape for a class that does
+     * not answer. The radio cost is measured at R6 and this constant moves only
+     * on that measurement (Z2M probes at 10 min; ours is a product number). A
+     * constant by design, like {@link #LINK_SUMMARY_PERIOD}: the run's fleet
+     * is fixed. Pre-J1 this was 10 min.
      */
     static final Duration MAINS_PING_SILENCE = Duration.ofSeconds(60);
+    /**
+     * AVAIL-SHAPE (IR-137): consecutive unanswered probes before a mains device
+     * is named dark — the backstop for a lost frame plus a lost reply. A miss is
+     * counted in {@link #recordCommandResult} under the lock; the count is reset
+     * inside {@link #transition} by any positive record (a frame, a reply) and
+     * by the dark verdict that spends it; it is per process, never persisted
+     * (DP-1: a persisted miss is not this-process evidence). Between the misses
+     * the device stays AVAILABLE and past its limit, so the next cycle's sweep
+     * snapshots it again and the second probe fires one cycle later. The naming
+     * time for a dead device is its limit + K × the 5-s deadline + (K − 1) × the
+     * 50-ms cycle. No new log token: two consecutive {@code outcome=timeout}
+     * lines followed by {@code zigbee.availability_link … available=false} IS
+     * the record.
+     */
+    static final int PROBE_MISSES_TO_DARK = 2;
     /**
      * The non-mains fallback window (Doc 08 §9): a device whose entities declare
      * no expected report interval is named dark after 25 h of silence. IR-121:
@@ -176,11 +215,17 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
          */
         LinkReading lastLink;
         Instant lastLinkAt;
+        /**
+         * AVAIL-SHAPE: consecutive probe misses since the last positive record
+         * — read and written under the lock only; zero after every transition.
+         */
+        int probeMisses;
     }
 
     private final Clock clock;
     private final ToIntFunction<IEEEAddress> powerSourceLookup;
     private final Function<IEEEAddress, Optional<Duration>> expectedSilenceLookup;
+    private final Function<IEEEAddress, Optional<Duration>> mainsContractLookup;
     private final TransitionListener listener;
     private final ReentrantLock lock = new ReentrantLock();
     private final Map<Long, DeviceState> states = new HashMap<>();
@@ -199,6 +244,15 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
      *        capability declared later takes effect without a restart; a throw
      *        is caught per device per cycle (WARN) and reads as empty; applied
      *        OUTSIDE the lock; never {@code null}
+     * @param mainsContractLookup AVAIL-SHAPE (IR-138): resolves the reporting
+     *        CONTRACT the Core configured on a mains device — the smallest
+     *        effective maximum interval across its configured rows, re-walked
+     *        from the cached record (nothing in memory carries the drive's
+     *        outcome at boot, IR-139); the device's silence-before-probe is that
+     *        maximum PLUS {@link #MAINS_PING_SILENCE}; empty → the floor alone;
+     *        read at EVERY evaluation; a throw is caught per device per cycle
+     *        (WARN) and reads as empty; applied OUTSIDE the lock; never
+     *        {@code null}
      * @param persistedSeed the per-device seed by IEEE value (the cache
      *        sidecar — availability + evidence recency), never {@code null};
      *        entry values never {@code null}, their components may be
@@ -207,6 +261,7 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
     StandardAvailabilityTracker(Clock clock,
             ToIntFunction<IEEEAddress> powerSourceLookup,
             Function<IEEEAddress, Optional<Duration>> expectedSilenceLookup,
+            Function<IEEEAddress, Optional<Duration>> mainsContractLookup,
             Map<Long, Seed> persistedSeed,
             TransitionListener listener) {
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -214,6 +269,8 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
                 Objects.requireNonNull(powerSourceLookup, "powerSourceLookup");
         this.expectedSilenceLookup =
                 Objects.requireNonNull(expectedSilenceLookup, "expectedSilenceLookup");
+        this.mainsContractLookup =
+                Objects.requireNonNull(mainsContractLookup, "mainsContractLookup");
         this.listener = Objects.requireNonNull(listener, "listener");
         Objects.requireNonNull(persistedSeed, "persistedSeed");
         // M-1: carry the pre-restart state forward SILENTLY — no transitions
@@ -303,7 +360,23 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
         if (success) {
             transition(device, timestamp, true, AvailabilityReason.PING_SUCCESS,
                     null);
-        } else {
+            return;
+        }
+        // AVAIL-SHAPE: a miss is COUNTED, never judged alone — K consecutive
+        // misses name dark (the backstop for a lost frame + a lost reply). An
+        // untracked device gets its state here, as transition() would give it.
+        // Between the misses the device stays AVAILABLE and past its limit, so
+        // the next cycle's sweep snapshots it again and the next probe fires.
+        int misses;
+        lock.lock();
+        try {
+            DeviceState state = states.computeIfAbsent(device.value(),
+                    key -> new DeviceState());
+            misses = ++state.probeMisses;
+        } finally {
+            lock.unlock();
+        }
+        if (misses >= PROBE_MISSES_TO_DARK) {
             transition(device, timestamp, false, AvailabilityReason.PING_TIMEOUT,
                     null);
         }
@@ -359,14 +432,17 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
      * Evaluates silence timeouts (called each ingestion cycle): a non-mains
      * device past its silence limit — the declared expected report interval
      * through the injected lookup, else 25 h (IR-121) — transitions to
-     * unavailable; mains devices past {@link #MAINS_PING_SILENCE} (60 s) are
-     * returned as ping candidates for the M9.4 active-ping path.
+     * unavailable; mains devices past their silence-before-probe — the
+     * reporting contract's maximum + {@link #MAINS_PING_SILENCE} through the
+     * injected contract lookup, else the 60-s floor alone (AVAIL-SHAPE,
+     * IR-138) — are returned as ping candidates for the M9.4 active-ping path.
      *
-     * <p>Two phases (LTD-11: never a registry call under the lock): the
-     * per-device snapshot {@code (device, lastSeen)} is taken UNDER the lock
-     * and released; BOTH lookups (power source, declared interval) then run
-     * OUTSIDE it, the compare follows, and {@link #transition} fires — itself
-     * outside the lock, as before.
+     * <p>Two phases (LTD-11: never a registry or cache call under the lock):
+     * the per-device snapshot {@code (device, lastSeen)} is taken UNDER the
+     * lock and released; ALL lookups (the power source, then the declared
+     * interval for non-mains or the contract for mains) run OUTSIDE it, the
+     * compare follows, and {@link #transition} fires — itself outside the
+     * lock, as before.
      *
      * <p>DP-1: seeded entries are evaluated too — AVAILABLE and seeded-UNKNOWN
      * states both (an UNKNOWN entry can only come from the seed; live
@@ -406,7 +482,7 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
             // window: the declared limit, else the 25 h battery-conservative one.
             if (isMainsPowered(powerSourceLookup.applyAsInt(snapshot.device()))) {
                 if (unknownRecency
-                        || silence.compareTo(MAINS_PING_SILENCE) > 0) {
+                        || silence.compareTo(mainsSilenceLimitFor(snapshot.device())) > 0) {
                     pingCandidates.add(snapshot.device());
                 }
             } else if (unknownRecency
@@ -423,18 +499,40 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
 
     /**
      * IR-121: the non-mains silence limit — the declared expected report
-     * interval the lookup yields, else the 25 h window. A lookup failure is
-     * logged once per device per cycle ({@code zigbee.availability_limit_lookup_failed})
-     * and reads as the 25 h arm: never a stuck cycle, never a verdict from a
-     * failed read. Called outside the lock.
+     * interval the lookup yields, else the 25 h window. Called outside the lock.
      */
     private Duration silenceLimitFor(IEEEAddress device) {
+        return limitThrough(expectedSilenceLookup, device, Duration.ZERO,
+                BATTERY_OFFLINE_SILENCE, "the 25 h window");
+    }
+
+    /**
+     * AVAIL-SHAPE (IR-138): the mains silence-before-probe — the reporting
+     * contract's maximum the lookup yields PLUS {@link #MAINS_PING_SILENCE}
+     * (a report due exactly at the maximum gets a whole floor to arrive before
+     * the probe), else the floor alone. Called outside the lock.
+     */
+    private Duration mainsSilenceLimitFor(IEEEAddress device) {
+        return limitThrough(mainsContractLookup, device, MAINS_PING_SILENCE,
+                MAINS_PING_SILENCE, "the 60-s floor");
+    }
+
+    /**
+     * The one lookup helper both arms share: the value the lookup yields plus
+     * {@code added}, else {@code fallback}. A lookup failure is logged once per
+     * device per cycle ({@code zigbee.availability_limit_lookup_failed}, naming
+     * the fallback that applies) and reads as the fallback: never a stuck
+     * cycle, never a verdict from a failed read. Called outside the lock.
+     */
+    private static Duration limitThrough(
+            Function<IEEEAddress, Optional<Duration>> lookup, IEEEAddress device,
+            Duration added, Duration fallback, String fallbackName) {
         try {
-            return expectedSilenceLookup.apply(device).orElse(BATTERY_OFFLINE_SILENCE);
+            return lookup.apply(device).map(limit -> limit.plus(added)).orElse(fallback);
         } catch (RuntimeException failure) {
-            log.warn("zigbee.availability_limit_lookup_failed: device={} — the 25 h "
-                    + "window applies this cycle: {}", device, failure.getMessage());
-            return BATTERY_OFFLINE_SILENCE;
+            log.warn("zigbee.availability_limit_lookup_failed: device={} — {} applies "
+                    + "this cycle: {}", device, fallbackName, failure.getMessage());
+            return fallback;
         }
     }
 
@@ -493,6 +591,11 @@ final class StandardAvailabilityTracker implements AvailabilityTracker {
                 // the seeded-stale mark clears here.
                 state.evidenced = true;
             }
+            // AVAIL-SHAPE: every record through here closes the miss run — a
+            // positive one by evidence (the device spoke: a frame parked during
+            // a probe's own window resets it at the drain), a timeout verdict
+            // because the count has been spent. Under the lock, never elsewhere.
+            state.probeMisses = 0;
             if (state.state == target) {
                 changed = false;
             } else {
