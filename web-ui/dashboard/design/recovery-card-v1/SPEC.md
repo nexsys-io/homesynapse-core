@@ -140,6 +140,12 @@ Every string the card shows, in Register C (no self-reference — neither the pr
 | `recovery.l2.signal` | Signal at the last frame: LQI {lqi}, {rssi} dBm, at {absoluteTime}. | L2 (S2+) | 0.0 | 14 |
 | `recovery.l2.window` | Window for {ieee}: opened {opensAt}, closes {closesAt}. | L2, window open | −1.6 | 11 |
 | `recovery.l2.notRecorded` | Not recorded. | L2 null arm | frag. | 2 |
+| `recovery.state.notResponding.noTime.label` | Not responding (asked twice, no answer) | L1 label (null arm) | 4.4 | 6 |
+| `recovery.state.notResponding.bare.noTime.label` | Not responding | L1 label (S1 degraded · R4 · reason `leave`; null arm) | frag. | 2 |
+| `recovery.state.notResponding.line.noTime` | Asked twice; nothing came back. | L1 line (null arm) | −0.5 | 3 |
+| `recovery.state.left.line.noTime` | This device left the network. | L1 line (reason `leave`; null arm) | 2.9 | 5 |
+
+Amended 2026-10-10 (HERO-U2b-r1; the v103 intake): the four null-arm keys §3 names in words; 63 rows.
 
 ## §8 Accessibility
 

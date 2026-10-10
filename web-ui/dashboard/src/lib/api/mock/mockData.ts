@@ -48,13 +48,28 @@ export const meta = (): ResponseMeta => ({ viewPosition: nextVp(), timestamp: ne
  * motion has never reported (`lastReported: null`). `lastReported` here mirrors
  * the same entity's A3 state below (one home, one clock); the device ids are
  * ULID strings (LTD-04) — the token that correlates a row with `device_adopted`. */
+/* v1.1.6 (J1 LINK-READ-2; HERO-U2b R1): every row carries the THREE dark-device keys PRESENT, as a J1
+ * hub serves them — a value where the story has one, JSON null elsewhere, never absent — and NOT always
+ * populated (H8): the front door carries all three null beside AVAILABLE and a moving lastReported
+ * (IR-133's healthy device — the common case on the real df2bc62 wire, 7 of 10 rows). The six reason
+ * tokens, LOWER-CASED as the wire writes them, each explain the flag they sit beside (a transition INTO
+ * it): the living-room lamp is the R2 Quiet edge (AVAILABLE · ping_success · lastSeenAt AFTER
+ * lastReported — the IR-112 class: answers when asked, sends no reports); the garage plug is R3 (dark by
+ * ping_timeout, last heard 47 min ago); the bedroom motion is R4-dark (a passive sensor by
+ * silence_timeout, nothing on record); the shed bulb left the network (leave; its link null — the nulls
+ * are independent); the utility-room contact is UNKNOWN (no availability event on record — the fifth state). lastSeenAt moves on a TRANSITION, so it is older than lastReported on a healthy row;
+ * `link.at` is the frame it read. Mock values in the wire's SHAPE — not a capture. */
 export const entities: EntitySummary[] = [
-  { entityId: 'ent_hallway_motion', availability: 'AVAILABLE', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5D7', lastReported: iso(0.5) },
-  { entityId: 'ent_hallway_light', availability: 'AVAILABLE', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5D9', lastReported: iso(1) },
-  { entityId: 'ent_livingroom_lamp', availability: 'AVAILABLE', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5E1', lastReported: iso(120) },
-  { entityId: 'ent_frontdoor_contact', availability: 'AVAILABLE', stale: false, deviceId: null, lastReported: iso(240) },
-  { entityId: 'ent_kitchen_light', availability: 'AVAILABLE', stale: true, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5E3', lastReported: iso(190) },
-  { entityId: 'ent_bedroom_motion', availability: 'UNAVAILABLE', stale: false, deviceId: null, lastReported: null },
+  { entityId: 'ent_hallway_motion', availability: 'AVAILABLE', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5D7', lastReported: iso(0.5), availabilityReason: 'frame_received', lastSeenAt: iso(480), link: { lqi: 212, rssiDbm: -47, at: iso(480) } },
+  { entityId: 'ent_hallway_light', availability: 'AVAILABLE', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5D9', lastReported: iso(1), availabilityReason: 'first_contact', lastSeenAt: iso(2880), link: { lqi: 248, rssiDbm: -38, at: iso(2880) } },
+  { entityId: 'ent_livingroom_lamp', availability: 'AVAILABLE', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5E1', lastReported: iso(120), availabilityReason: 'ping_success', lastSeenAt: iso(11), link: { lqi: 170, rssiDbm: -64, at: iso(11) } },
+  { entityId: 'ent_frontdoor_contact', availability: 'AVAILABLE', stale: false, deviceId: null, lastReported: iso(240), availabilityReason: null, lastSeenAt: null, link: null },
+  { entityId: 'ent_kitchen_light', availability: 'AVAILABLE', stale: true, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5E3', lastReported: iso(190), availabilityReason: 'frame_received', lastSeenAt: iso(1500), link: { lqi: 182, rssiDbm: -61, at: iso(1500) } },
+  { entityId: 'ent_bedroom_motion', availability: 'UNAVAILABLE', stale: false, deviceId: null, lastReported: null, availabilityReason: 'silence_timeout', lastSeenAt: null, link: null },
+  { entityId: 'ent_garage_plug', availability: 'UNAVAILABLE', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5E5', lastReported: iso(58), availabilityReason: 'ping_timeout', lastSeenAt: iso(47), link: { lqi: 96, rssiDbm: -83, at: iso(47) } },
+  { entityId: 'ent_shed_bulb', availability: 'UNAVAILABLE', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5E7', lastReported: iso(4330), availabilityReason: 'leave', lastSeenAt: iso(4320), link: null },
+  // UNKNOWN: adopted, no availability event on record yet (StateProjection.java:1115) — honest after a restart; every J1 key null by construction.
+  { entityId: 'ent_utility_contact', availability: 'UNKNOWN', stale: false, deviceId: '01M0H4A2Q8Z3N5R7T9V1X3B5E9', lastReported: null, availabilityReason: null, lastSeenAt: null, link: null },
 ];
 
 const entityLabels: Record<string, string> = {
@@ -64,6 +79,9 @@ const entityLabels: Record<string, string> = {
   ent_frontdoor_contact: 'Front Door',
   ent_kitchen_light: 'Kitchen Light',
   ent_bedroom_motion: 'Bedroom Motion',
+  ent_garage_plug: 'Garage Plug',
+  ent_shed_bulb: 'Shed Bulb',
+  ent_utility_contact: 'Utility Room Door',
 };
 export const labelFor = (id: string) => entityLabels[id] ?? id;
 

@@ -339,6 +339,87 @@ const en = {
   "explain.replaying.body": "This takes a moment. Explanations appear as the log is replayed.",
   // explain.loading.*
   "explain.loading": "Loading this run…",
+  /* ---- HERO-U2b R2 (2026-10-09): the recovery card's copy — SPEC §7, all 59 keyed rows, verbatim
+   * (design/recovery-card-v1/SPEC.md §7; extracted by script, not typed). Register C (Q1 ruled (a)): no
+   * product name, no `{{NAME}}`, no "we"; never blames, never celebrates. Slots are {braces}; callers fill
+   * them (format.ts fillSlots). Test-locked by i18n.test.ts. Rows 1–2 of the build render the `state.*`,
+   * `contract.fallback`, `a11y.state/expand/collapse` and `l2.*` rows; the `act.*`, `a11y.countdown/closed`
+   * and `l2.window` rows are row 3's (the act — Q3 (b), a later lane) and the S3 rows (`quiet.line`,
+   * `contract.metered/floor/passive/answersNoReports`, `l2.lastAsked/outcome.*`) wait for AVAIL-API-1 —
+   * present in the catalog so the SPEC is the catalog, unconsumed until their rows land. */
+  // recovery.state.*
+  "recovery.state.reporting.label": "Reporting",
+  "recovery.state.reporting.line": "Last report {time}.",
+  "recovery.state.quiet.label": "Quiet since {time} (asked, answered)",
+  "recovery.state.quiet.line": "No report since {time}. Asked at {askedTime}; it answered.",
+  "recovery.state.quiet.line.edge": "No report since {time}. It answered when asked at {heardTime}.",
+  "recovery.state.notResponding.label": "Not responding since {time} (asked twice, no answer)",
+  "recovery.state.notResponding.line": "Asked twice; nothing came back. Last heard {time}.",
+  "recovery.state.notResponding.bare.label": "Not responding since {time}",
+  "recovery.state.notResponding.bare.line": "Last report {time}. Whether it has been asked since is not shown here yet.",
+  "recovery.state.left.line": "This device left the network. Last heard {time}.",
+  "recovery.state.passive.reporting.label": "Reporting",
+  "recovery.state.passive.quiet.label": "Quiet since {time}",
+  "recovery.state.passive.quiet.line": "No report since {time}. This device is never asked.",
+  "recovery.state.passive.notResponding.label": "Not responding since {time}",
+  "recovery.state.passive.notResponding.line": "Nothing has arrived for longer than this device usually goes. It is never asked.",
+  "recovery.state.unasked.label": "Not heard from since startup (not asked)",
+  "recovery.state.unasked.line": "Nothing from this device since startup. It has not been asked yet.",
+  "recovery.state.unasked.lastReport": "Last report on record: {time}.",
+  "recovery.state.unasked.noReport": "No report on record.",
+  "recovery.state.unrecognized.label": "Recorded as “{value}”",
+  "recovery.state.unrecognized.line": "This status is not one the dashboard knows yet. Shown as recorded.",
+  // recovery.contract.*
+  "recovery.contract.metered": "This {kind} reports at least every {reportMinutes} minutes. After {askMinutes} minutes of silence it is asked.",
+  "recovery.contract.floor": "This {kind} reports at least every minute. After one minute of silence it is asked.",
+  "recovery.contract.passive": "This {kind} reports when something changes. It is never asked.",
+  "recovery.contract.fallback": "If this device goes quiet for a while, it is asked. How long is not shown here yet.",
+  "recovery.contract.answersNoReports": "It answers when asked but sends no reports. A window will not change that. Unplugging it and plugging it back in is the next thing to try.",
+  // recovery.act.*
+  "recovery.act.button": "Open a window for this device",
+  "recovery.act.before": "A window of about {maxMinutes} minutes lets this device rejoin. Only this device can join through it.",
+  "recovery.act.noDevice": "No device is on record for this entity, so no window can be opened for it.",
+  "recovery.act.open": "Window open — {remaining} left. Only this device can join.",
+  "recovery.act.closing": "The window closes on its own.",
+  "recovery.act.gesture.title": "At the device:",
+  "recovery.act.gesture.sensorListens": "Nothing to press. After losing power, this sensor looks for an open window on its own.",
+  "recovery.act.gesture.lampResets": "This lamp rejoins after a reset. Its reset steps are not on record yet.",
+  "recovery.act.gesture.none": "The steps for this device are not on record yet.",
+  "recovery.act.cue.close": "If nothing happens, try again with the device nearer the hub.",
+  "recovery.act.rejected": "Another device tried to join and was turned away. The window is still open for this device — {remaining} left.",
+  "recovery.act.rejoined": "It is back. Reporting since {time}.",
+  "recovery.act.closedNothing": "The window closed and this device did not join. Check that it has power, then open a window again.",
+  "recovery.act.error.title": "The window could not be opened.",
+  "recovery.act.error.notRunning": "The radio is not running right now.",
+  "recovery.act.error.busy": "A window is already open. Wait for it to close, then try again.",
+  "recovery.act.error.generic": "The request did not go through. Nothing was changed.",
+  "recovery.act.error.retry": "Try again",
+  // recovery.a11y.*
+  "recovery.a11y.state": "{deviceName}: {stateLabel}.",
+  "recovery.a11y.countdown": "{remaining} left in the window.",
+  "recovery.a11y.closed": "The window has closed.",
+  "recovery.a11y.expand": "Show details",
+  "recovery.a11y.collapse": "Hide details",
+  // recovery.l2.*
+  "recovery.l2.lastReport": "Last report: {absoluteTime}",
+  "recovery.l2.lastHeard": "Last heard: {absoluteTime}",
+  "recovery.l2.lastAsked": "Last asked: {absoluteTime} — {outcome}",
+  "recovery.l2.outcome.ok": "answered",
+  "recovery.l2.outcome.timeout": "no answer",
+  "recovery.l2.outcome.error": "could not ask",
+  "recovery.l2.reason": "Recorded reason: {reason}",
+  "recovery.l2.signal": "Signal at the last frame: LQI {lqi}, {rssi} dBm, at {absoluteTime}.",
+  "recovery.l2.window": "Window for {ieee}: opened {opensAt}, closes {closesAt}.",
+  "recovery.l2.notRecorded": "Not recorded.",
+  /* [AMEND] HERO-U2b R2 — three null-arm rows SPEC §3 names in words but §7 does not key (filed for the hub's
+   * §7 amendment in the HERO-U2b return §3): a dark row whose instants are BOTH null has no `since` to say, so
+   * the label is the §7 label minus its `since {time}` clause (SPEC §3 R3 S1's own null arm: "Not responding"
+   * with "No report on record."), and a line whose `Last heard {time}.` clause cannot be said keeps its first
+   * sentence alone. The words are the SPEC's; only the keys are this lane's. */
+  "recovery.state.notResponding.noTime.label": "Not responding (asked twice, no answer)",
+  "recovery.state.notResponding.bare.noTime.label": "Not responding",
+  "recovery.state.notResponding.line.noTime": "Asked twice; nothing came back.",
+  "recovery.state.left.line.noTime": "This device left the network.",
 } as const;
 
 type Messages = typeof en;

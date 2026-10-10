@@ -483,3 +483,112 @@ describe('FE-115 D4 — the four lint-reach rows are in the catalog, verbatim', 
     }
   });
 });
+
+/*
+ * HERO-U2b R2 (2026-10-09) — the recovery card's strings live behind t() under the SPEC §7 keys
+ * (design/recovery-card-v1/SPEC.md §7 — 59 rows, extracted by script, not typed; the charter's "61" is the
+ * table's count misread, filed in the return), and Register C binds them (Q1 ruled (a)): no product name, no
+ * `{{NAME}}` (the token appears in no card string by design — it is the shell's), no "we". Four [AMEND] rows
+ * carry SPEC §3's null-arm words that §7 does not key (the label minus its since clause; a line's first
+ * sentence) — filed for the hub's §7 amendment. RED at HEAD: none of the keys exists in the catalog.
+ */
+const SPEC7_RECOVERY_KEYS = {
+  "recovery.state.reporting.label": "Reporting",
+  "recovery.state.reporting.line": "Last report {time}.",
+  "recovery.state.quiet.label": "Quiet since {time} (asked, answered)",
+  "recovery.state.quiet.line": "No report since {time}. Asked at {askedTime}; it answered.",
+  "recovery.state.quiet.line.edge": "No report since {time}. It answered when asked at {heardTime}.",
+  "recovery.state.notResponding.label": "Not responding since {time} (asked twice, no answer)",
+  "recovery.state.notResponding.line": "Asked twice; nothing came back. Last heard {time}.",
+  "recovery.state.notResponding.bare.label": "Not responding since {time}",
+  "recovery.state.notResponding.bare.line": "Last report {time}. Whether it has been asked since is not shown here yet.",
+  "recovery.state.left.line": "This device left the network. Last heard {time}.",
+  "recovery.state.passive.reporting.label": "Reporting",
+  "recovery.state.passive.quiet.label": "Quiet since {time}",
+  "recovery.state.passive.quiet.line": "No report since {time}. This device is never asked.",
+  "recovery.state.passive.notResponding.label": "Not responding since {time}",
+  "recovery.state.passive.notResponding.line": "Nothing has arrived for longer than this device usually goes. It is never asked.",
+  "recovery.state.unasked.label": "Not heard from since startup (not asked)",
+  "recovery.state.unasked.line": "Nothing from this device since startup. It has not been asked yet.",
+  "recovery.state.unasked.lastReport": "Last report on record: {time}.",
+  "recovery.state.unasked.noReport": "No report on record.",
+  "recovery.state.unrecognized.label": "Recorded as “{value}”",
+  "recovery.state.unrecognized.line": "This status is not one the dashboard knows yet. Shown as recorded.",
+  "recovery.contract.metered": "This {kind} reports at least every {reportMinutes} minutes. After {askMinutes} minutes of silence it is asked.",
+  "recovery.contract.floor": "This {kind} reports at least every minute. After one minute of silence it is asked.",
+  "recovery.contract.passive": "This {kind} reports when something changes. It is never asked.",
+  "recovery.contract.fallback": "If this device goes quiet for a while, it is asked. How long is not shown here yet.",
+  "recovery.contract.answersNoReports": "It answers when asked but sends no reports. A window will not change that. Unplugging it and plugging it back in is the next thing to try.",
+  "recovery.act.button": "Open a window for this device",
+  "recovery.act.before": "A window of about {maxMinutes} minutes lets this device rejoin. Only this device can join through it.",
+  "recovery.act.noDevice": "No device is on record for this entity, so no window can be opened for it.",
+  "recovery.act.open": "Window open — {remaining} left. Only this device can join.",
+  "recovery.act.closing": "The window closes on its own.",
+  "recovery.act.gesture.title": "At the device:",
+  "recovery.act.gesture.sensorListens": "Nothing to press. After losing power, this sensor looks for an open window on its own.",
+  "recovery.act.gesture.lampResets": "This lamp rejoins after a reset. Its reset steps are not on record yet.",
+  "recovery.act.gesture.none": "The steps for this device are not on record yet.",
+  "recovery.act.cue.close": "If nothing happens, try again with the device nearer the hub.",
+  "recovery.act.rejected": "Another device tried to join and was turned away. The window is still open for this device — {remaining} left.",
+  "recovery.act.rejoined": "It is back. Reporting since {time}.",
+  "recovery.act.closedNothing": "The window closed and this device did not join. Check that it has power, then open a window again.",
+  "recovery.act.error.title": "The window could not be opened.",
+  "recovery.act.error.notRunning": "The radio is not running right now.",
+  "recovery.act.error.busy": "A window is already open. Wait for it to close, then try again.",
+  "recovery.act.error.generic": "The request did not go through. Nothing was changed.",
+  "recovery.act.error.retry": "Try again",
+  "recovery.a11y.state": "{deviceName}: {stateLabel}.",
+  "recovery.a11y.countdown": "{remaining} left in the window.",
+  "recovery.a11y.closed": "The window has closed.",
+  "recovery.a11y.expand": "Show details",
+  "recovery.a11y.collapse": "Hide details",
+  "recovery.l2.lastReport": "Last report: {absoluteTime}",
+  "recovery.l2.lastHeard": "Last heard: {absoluteTime}",
+  "recovery.l2.lastAsked": "Last asked: {absoluteTime} — {outcome}",
+  "recovery.l2.outcome.ok": "answered",
+  "recovery.l2.outcome.timeout": "no answer",
+  "recovery.l2.outcome.error": "could not ask",
+  "recovery.l2.reason": "Recorded reason: {reason}",
+  "recovery.l2.signal": "Signal at the last frame: LQI {lqi}, {rssi} dBm, at {absoluteTime}.",
+  "recovery.l2.window": "Window for {ieee}: opened {opensAt}, closes {closesAt}.",
+  "recovery.l2.notRecorded": "Not recorded.",
+} as const;
+const SPEC7_RECOVERY_AMEND_KEYS = {
+  "recovery.state.notResponding.noTime.label": "Not responding (asked twice, no answer)",
+  "recovery.state.notResponding.bare.noTime.label": "Not responding",
+  "recovery.state.notResponding.line.noTime": "Asked twice; nothing came back.",
+  "recovery.state.left.line.noTime": "This device left the network.",
+} as const;
+
+describe('HERO-U2b R2 — the recovery card\'s §7 copy table is the catalog (59 rows + 4 [AMEND] null-arm rows)', () => {
+  it('carries all 59 §7 keys with the SPEC strings, verbatim', () => {
+    expect(Object.keys(SPEC7_RECOVERY_KEYS).length).toBe(59);
+    for (const [k, s] of Object.entries(SPEC7_RECOVERY_KEYS)) expect(t(k as MessageKey), k).toBe(s);
+  });
+  it('carries the four [AMEND] rows — SPEC §3\'s own null-arm words, each a §7 label or line with a clause removed, never new words', () => {
+    for (const [k, s] of Object.entries(SPEC7_RECOVERY_AMEND_KEYS)) expect(t(k as MessageKey), k).toBe(s);
+    expect(t('recovery.state.notResponding.label' as MessageKey)).toBe(`Not responding since {time} ${t('recovery.state.notResponding.noTime.label' as MessageKey).slice('Not responding '.length)}`);
+    expect(t('recovery.state.notResponding.line' as MessageKey)).toMatch(new RegExp('^' + t('recovery.state.notResponding.line.noTime' as MessageKey).replace(/[.;]/g, '\\$&')));
+    expect(t('recovery.state.left.line' as MessageKey).startsWith(t('recovery.state.left.line.noTime' as MessageKey))).toBe(true);
+    expect(t('recovery.state.notResponding.bare.label' as MessageKey).startsWith(t('recovery.state.notResponding.bare.noTime.label' as MessageKey))).toBe(true);
+  });
+  it('Register C on every recovery.* string: no product name, no `{{NAME}}`, no "we" — and never the words "offline" or "stale" (SPEC §2, §6 B)', () => {
+    const keys = Object.keys({ ...SPEC7_RECOVERY_KEYS, ...SPEC7_RECOVERY_AMEND_KEYS });
+    expect(keys.every((k) => k.startsWith('recovery.'))).toBe(true);
+    for (const k of keys) {
+      const s = t(k as MessageKey) ?? '';
+      expect(s, k).not.toContain(BRAND.productName);
+      expect(s, k).not.toContain('{{NAME}}');
+      expect(s, k).not.toMatch(/\bwe\b/i);
+      expect(s, k).not.toMatch(/\boffline\b/i);
+      expect(s, k).not.toMatch(/\bstale\b/i);
+    }
+  });
+  it('the SPEC §10 sentences\' fixed parts are the catalog\'s, word for word (S1/S2 forms)', () => {
+    expect(t('recovery.state.reporting.label' as MessageKey)).toBe('Reporting');
+    expect(t('recovery.state.notResponding.line' as MessageKey)).toBe('Asked twice; nothing came back. Last heard {time}.');
+    expect(t('recovery.state.unasked.label' as MessageKey)).toBe('Not heard from since startup (not asked)');
+    expect(t('recovery.state.unasked.line' as MessageKey)).toBe('Nothing from this device since startup. It has not been asked yet.');
+    expect(t('recovery.state.passive.notResponding.line' as MessageKey)).toBe('Nothing has arrived for longer than this device usually goes. It is never asked.');
+  });
+});

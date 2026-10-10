@@ -128,3 +128,109 @@ describe('the deviceId line renders presence only (absence renders absence)', ()
     expect(text).not.toContain('undefined');
   });
 });
+
+/* ---- HERO-U2b R2 (2026-10-09) — the Devices row and detail swap to the recovery card (SPEC §2 surface 1–2;
+ * §6 B: the "Stale" pill moves off the row's state onto the reading it describes — never a card word).
+ * The Status cell renders the §3 decision for the row's stage (S1 on a pre-J1 row; S2 when the keys are
+ * present); the old "Available / Offline / Not determined yet" vocabulary is gone from the list. RED at HEAD:
+ * DevicesView.tsx:81–:82 renders availabilityMeta's pill ("Available"); :90 renders the Stale pill INSTEAD of
+ * the stamp; the drawer (:151, :159–:161) renders the availability pill + the evidence prose. ---- */
+import { fireEvent } from '@testing-library/preact';
+import { clockTimeWithDate } from '../lib/format';
+import type { EntityState } from '../lib/api/contract';
+
+const NOW_ISO = new Date().toISOString();
+const SEEN_OLD = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
+const statusCell = (container: Element, rowIndex = 0): HTMLElement => {
+  const cells = container.querySelectorAll(`tbody tr:nth-child(${rowIndex + 1}) td`);
+  const cell = cells[1] as HTMLElement | undefined;
+  if (!cell) throw new Error('no Status cell rendered');
+  return cell;
+};
+
+describe('HERO-U2b — the device row\'s Status cell is the recovery card (dense), per the row\'s stage', () => {
+  it('S1 (a pre-J1 row): AVAILABLE → "Reporting" with the age; UNAVAILABLE → the degraded "Not responding since {t}" (no parenthesis); UNKNOWN → the fifth state', async () => {
+    const { container } = await renderList([
+      { ...base, lastReported: NOW_ISO },
+      { entityId: 'ent_b', availability: 'UNAVAILABLE', stale: false, lastReported: REPORTED },
+      { entityId: 'ent_c', availability: 'UNKNOWN', stale: false, lastReported: null },
+    ]);
+    expect(statusCell(container, 0).textContent).toContain('Reporting');
+    expect(statusCell(container, 0).textContent).toContain('Last report just now.');
+    expect(statusCell(container, 1).textContent).toContain(`Not responding since ${clockTimeWithDate(REPORTED)}`);
+    expect(statusCell(container, 1).textContent).not.toContain('(asked twice'); // the probe clause is a claim S1 cannot make
+    expect(statusCell(container, 1).textContent).toContain('Whether it has been asked since is not shown here yet.');
+    expect(statusCell(container, 2).textContent).toContain('Not heard from since startup (not asked)');
+    expect(statusCell(container, 2).textContent).toContain('No report on record.');
+    const text = container.textContent ?? '';
+    for (const old of ['Available', 'Offline', 'Not determined yet']) expect(text).not.toContain(old);
+  });
+  it('S2 (the J1 keys present): ping_timeout → the full label; silence_timeout → the passive dark row; the version-1 null row → the fifth state; the IR-133 null row → Reporting', async () => {
+    const { container } = await renderList([
+      { entityId: 'ent_plug', availability: 'UNAVAILABLE', stale: false, deviceId: DEVICE_ULID, lastReported: REPORTED, availabilityReason: 'ping_timeout', lastSeenAt: SEEN_OLD, link: { lqi: 96, rssiDbm: -83, at: SEEN_OLD } },
+      { entityId: 'ent_sensor', availability: 'UNAVAILABLE', stale: false, deviceId: null, lastReported: REPORTED, availabilityReason: 'silence_timeout', lastSeenAt: SEEN_OLD, link: null },
+      { entityId: 'ent_hue', availability: 'UNAVAILABLE', stale: false, deviceId: null, lastReported: '2026-07-19T00:49:15.787079Z', availabilityReason: null, lastSeenAt: null, link: null },
+      { entityId: 'ent_ok', availability: 'AVAILABLE', stale: false, deviceId: null, lastReported: NOW_ISO, availabilityReason: null, lastSeenAt: null, link: null },
+    ]);
+    expect(statusCell(container, 0).textContent).toContain(`Not responding since ${clockTimeWithDate(SEEN_OLD)} (asked twice, no answer)`);
+    expect(statusCell(container, 0).textContent).toContain('Asked twice; nothing came back.');
+    expect(statusCell(container, 1).textContent).toContain(`Not responding since ${clockTimeWithDate(SEEN_OLD)}`);
+    expect(statusCell(container, 1).textContent).toContain('It is never asked.');
+    expect(statusCell(container, 2).textContent).toContain('Not heard from since startup (not asked)');
+    expect(statusCell(container, 3).textContent).toContain('Reporting');
+    expect(statusCell(container, 3).textContent).toContain('Last report just now.');
+    expect(container.textContent).not.toMatch(/\b(null|undefined)\b/);
+  });
+  it('the row carries no contract sentence and no L2 (dense): the card\'s details live on the device page', async () => {
+    const { container } = await renderList([{ ...base, lastReported: NOW_ISO }]);
+    expect(statusCell(container).querySelector('details')).toBeNull();
+    expect(statusCell(container).textContent).not.toContain('If this device goes quiet');
+  });
+});
+
+describe('HERO-U2b — SPEC §6 B: "Stale" is about the READING and sits in the Reading cell beside the stamp, never in the Status cell', () => {
+  it('a stale row shows its date-qualified stamp AND the Stale pill in the Reading cell; the Status cell (the card) never says "stale"', async () => {
+    const { container } = await renderList([{ ...base, stale: true, deviceId: DEVICE_ULID, lastReported: REPORTED }]);
+    const reading = readingCell(container);
+    expect(reading.textContent).toContain('Stale');
+    expect(reading.textContent).toContain(clockTimeWithDate(REPORTED)); // the stamp is no longer hidden behind the pill
+    expect(statusCell(container).textContent).not.toMatch(/\bstale\b/i);
+  });
+  it('a stale row with no report time keeps the honest em-dash beside the pill', async () => {
+    const { container } = await renderList([{ ...base, stale: true }]);
+    const reading = readingCell(container);
+    expect(reading.textContent).toContain('—');
+    expect(reading.textContent).toContain('Stale');
+  });
+});
+
+describe('HERO-U2b — the entity detail renders the full card from the list row; the evidence prose and the availability pill are gone', () => {
+  const stateOf = (entityId: string): EntityState => ({
+    entityId,
+    availability: 'UNAVAILABLE',
+    attributes: { power: { t: 'BOOL', v: true } },
+    stateVersion: 3,
+    lastChanged: REPORTED,
+    lastUpdated: REPORTED,
+    lastReported: REPORTED,
+    stale: true,
+    staleAfter: null,
+  });
+  it('clicking a dark row opens the drawer with the card (label, line, L2 "Show details") — "Offline — last heard from" is not rendered; "Stale reading" stays beside the values', async () => {
+    vi.spyOn(api, 'getEntityState').mockResolvedValue({ data: stateOf('ent_plug'), meta } as never);
+    const { container } = await renderList([
+      { entityId: 'ent_plug', name: 'Kitchen Plug', availability: 'UNAVAILABLE', stale: true, deviceId: DEVICE_ULID, lastReported: REPORTED, availabilityReason: 'ping_timeout', lastSeenAt: SEEN_OLD, link: { lqi: 96, rssiDbm: -83, at: SEEN_OLD } },
+    ]);
+    fireEvent.click(container.querySelector('tbody tr')!);
+    await act(async () => {});
+    const text = container.textContent ?? '';
+    expect(text).toContain(`Kitchen Plug: Not responding since ${clockTimeWithDate(SEEN_OLD)} (asked twice, no answer).`); // the a11y sentence
+    expect(text).toContain('Show details');
+    expect(text).toContain(`Last heard: ${clockTimeWithDate(SEEN_OLD)}`);
+    expect(text).not.toContain('last heard from');
+    expect(text).not.toContain('Offline');
+    expect(text).not.toContain('Devices are rechecked every few minutes');
+    expect(text).toContain('Stale reading'); // SPEC §6 B: the reading's pill stays with the values (DevicesView.tsx:152)
+    expect(text).toContain('Last reported'); // the kv row stays
+  });
+});

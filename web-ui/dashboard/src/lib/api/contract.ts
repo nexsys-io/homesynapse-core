@@ -11,7 +11,30 @@
  *   B-class = FROZEN-UNBUILT (mock to these shapes; Core implements TO them).
  */
 
-export const CONTRACT_VERSION = 'v1.1.5-2026-09-19' as const;
+export const CONTRACT_VERSION = 'v1.1.6-2026-10-09' as const;
+/* v1.1.6 (J1 LINK-READ-2 — the dark-device line; landed core-side 2026-10-03 on main, on the Pi's wire at
+ * df2bc62; the FE mirror is HERO-U2b, 2026-10-09 — the pin's date is the mirror's. The freeze doc's stamp is
+ * the hub's docs row and may lag this pin; filed in the HERO-U2b return §3). The same four-constraint law.
+ * THREE ADDITIVE keys on ONE read, zero changes to any existing field/casing/nesting/order — each APPENDED
+ * after `lastReported` in the wire's order (ListEntitiesEndpoint.java:213–:216, `summarise`):
+ *   - A1 `entities[].availabilityReason: string | null` — WHY the availability last moved: the tracker's
+ *     AvailabilityReason name LOWER-CASED (`reason.name().toLowerCase(Locale.ROOT)`,
+ *     ZigbeeIntegrationAdapter.java:2081): first_contact · ping_success · frame_received · ping_timeout ·
+ *     silence_timeout · leave today — an OPEN vocabulary to this mirror (`string`, never a union; a token it
+ *     does not know renders in L2 as recorded and changes no row). JSON null until the device's first
+ *     availability transition (IR-133 — the healthy mains device's common case) or for a version-1 event.
+ *   - A1 `entities[].lastSeenAt: string | null` — WHEN the device was last heard, as the projection holds
+ *     it: `Instant.toString()` (ISO-8601 UTC, nanos when present); NEVER epoch seconds — parse only via
+ *     format.parseInstant. It moves on an availability TRANSITION, not on every frame (the real df2bc62 row
+ *     carries a lastSeenAt two days OLDER than its lastReported); null when the projection holds none.
+ *   - A1 `entities[].link: {lqi: number, rssiDbm: number, at: string} | null` — HOW the link read at that
+ *     frame (`linkJson`: all three fields written, `at` an Instant.toString()); null when none.
+ * EVERY new key is PRESENT in every J1 payload — JSON null when the projection holds no value, never
+ * absent. A pre-J1 hub omits them (lawful): the mirror marks them OPTIONAL and the validators enforce the
+ * TRI-STATE (absent passes · null passes · a present key must be typed; a present `link` must be the
+ * three-field object). VERIFIED on a REAL body (H8): `fixtures/wire-2026-10-09-entities-j1-row.ts` is one
+ * row of Nick's `~/bench.sh entities` capture at df2bc62 (the VALUE arm; the null arm is on the same wire).
+ * No AVAIL-API-1 key is read by this mirror. */
 /* v1.1.5 (Nick's `EXPLAIN: three`, the THIRD bump; landed core-side 2026-09-14 EXPLAIN-114c at e56f555; the
  * freeze doc's stamp is v1.1.5; the FE mirror is FE-115, 2026-09-19 — the pin's date is the mirror's). The same
  * four-constraint law. ONE ADDITIVE key on ONE read, zero changes to any existing field/casing/nesting/order:
@@ -249,6 +272,21 @@ export interface EntitySummary {
    *  `Instant.toString()` (ISO-8601 UTC, nanos when present), or null when no report
    *  is on record. NEVER epoch seconds — parse only via format.parseInstant. */
   lastReported?: string | null;
+  /** v1.1.6 ADDITIVE (J1 LINK-READ-2; HERO-U2b): WHY the availability last moved — the
+   *  AvailabilityReason name LOWER-CASED on the wire (`ping_timeout`, `silence_timeout`,
+   *  `frame_received`, …), an OPEN vocabulary: `string`, never an enum in this type.
+   *  OPTIONAL = absent on a pre-J1 hub (render absence); present-null = "nothing on
+   *  record" (null until the first transition — IR-133 — or a version-1 event). */
+  availabilityReason?: string | null;
+  /** v1.1.6 ADDITIVE (J1): WHEN the device was last heard, `Instant.toString()`
+   *  (ISO-8601 UTC, nanos when present) — moves on an availability TRANSITION, not on
+   *  every frame. NEVER epoch seconds — parse only via format.parseInstant. OPTIONAL =
+   *  pre-J1 hub; present-null = nothing on record. */
+  lastSeenAt?: string | null;
+  /** v1.1.6 ADDITIVE (J1): HOW the link read at the last frame — `linkJson`'s three
+   *  fields, all present when the object is: `lqi` and `rssiDbm` numbers, `at` an
+   *  `Instant.toString()`. OPTIONAL = pre-J1 hub; present-null = nothing on record. */
+  link?: { lqi: number; rssiDbm: number; at: string } | null;
 }
 
 /** A2 — GET /api/v1/entities/{id} (hot-path detail). Optional `name` per C8. */

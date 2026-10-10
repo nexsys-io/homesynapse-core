@@ -141,7 +141,7 @@ describe('the TypeScript mirror declares conditions[].definition optional-nullab
     expect(children.length).toBe(2);
     // D0: the pin has five homes (contract.ts · contract.test.ts · v113-additive.test.ts · v114-additive.test.ts ·
     // scripts/contract-check.mjs); this file asserts the value through the module, not a sixth literal home.
-    expect(CONTRACT_VERSION).toMatch(/^v1\.1\.5-/);
+    expect(CONTRACT_VERSION).toMatch(/^v1\.1\.6-/);
   });
 });
 

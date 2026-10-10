@@ -21,12 +21,16 @@ import {
   UNRESOLVED_REF_PHRASE,
   UNRESOLVED_REF_PILL,
 } from '../lib/format';
-import { useRefResolver, type RefResolver } from '../lib/registry';
+import { useMemo } from 'preact/hooks';
+import { fetchRegistryCensus, makeRefResolver, UNVERIFIED_RESOLVER, type RefResolver } from '../lib/registry';
+import { recoveryRow } from '../lib/recovery';
 import { MODE_GLYPHS } from '../lib/verdicts';
 import { t, type MessageKey } from '../lib/i18n';
 import { Page, Card } from '../components/layout';
 import { Resource } from '../components/Resource';
 import { StatusPill } from '../components/StatusPill';
+import { RecoveryCard } from '../components/RecoveryCard';
+import type { EntitySummary } from '../lib/api/contract';
 import styles from './WhyNotView.module.css';
 
 /** v1.1.3 (FE-113 / CG-1): the trigger's entity, rendered THROUGH the registry
@@ -172,7 +176,17 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
   const state = useApi(() => api.getNonFiring(automationId));
   // v1.1.3: the registry census for the trigger ref (the same one-poll-loop read the
   // causal chain uses); 'unverified' until it is in — nothing is accused without it.
-  const resolveRef = useRefResolver();
+  // HERO-U2b R2: the SAME census is the recovery card's join (SPEC §2 surface 3) — one read, two uses.
+  const census = useApi(fetchRegistryCensus);
+  const resolveRef: RefResolver = useMemo(() => {
+    if (census.status !== 'ok' || !census.data) return UNVERIFIED_RESOLVER;
+    return makeRefResolver(census.data.entities, census.data.complete);
+  }, [census.status, census.data]);
+  /** The watched entity's registry row, when the census holds it (SPEC §2: `triggerRef.id` joins the A1 row). */
+  const watchedRow = (ref: SubjectRef | null | undefined): EntitySummary | null => {
+    if (!ref || census.status !== 'ok' || !census.data) return null;
+    return census.data.entities.find((e) => e.entityId === ref.id) ?? null;
+  };
   return (
     <Page title={t('explain.whyNot.title')} meta={state.meta}>
       <p style={{ marginTop: 'calc(-1 * var(--hs-space-2))' }}>
@@ -214,6 +228,20 @@ function WhyNotDetail({ automationId }: { automationId: string }) {
                           <TriggerEntity subjectRef={nf.triggerRef} resolveRef={resolveRef} />
                         </span>
                       ) : null}
+                      {/* HERO-U2b R2 (SPEC §2 surface 3): when the verdict is NEVER_TRIGGERED and the watched
+                          entity's registry row is DARK (UNAVAILABLE, or the fifth state), the recovery card
+                          renders under "Watching" — "why didn't it fire" ends in the dark device. A reporting
+                          row, a dangling / null / absent ref or another verdict render nothing here. */}
+                      {(() => {
+                        if (nf.verdict !== 'NEVER_TRIGGERED') return null;
+                        const row = watchedRow(nf.triggerRef);
+                        if (!row || !recoveryRow(row).dark) return null;
+                        return (
+                          <div style={{ marginTop: 'var(--hs-space-3)' }}>
+                            <RecoveryCard row={row} name={refLabel(row.entityId, resolveRef(row.entityId))} />
+                          </div>
+                        );
+                      })()}
                     </dd>
                   </div>
                   {/* OBSERVED LIVE NULLABILITY (2026-08-16, §4.5): the wire serves

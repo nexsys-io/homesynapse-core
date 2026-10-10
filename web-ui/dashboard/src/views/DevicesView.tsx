@@ -1,16 +1,23 @@
 /*
  * DevicesView — A1 list -> A2/A3 detail drawer. LIVE against the real A-class
- * endpoints. Shows availability, freshness, and the typed attribute values.
+ * endpoints. Shows the recovery card, freshness, and the typed attribute values.
  * Display names: the v1.1 contract carries an OPTIONAL entity `name` (additive C8) —
  * prefer it when Core sends it; fall back to the humanized entityId (displayName).
+ *
+ * HERO-U2b R2 (2026-10-09; design/recovery-card-v1/SPEC.md §2 surfaces 1–2, §6 B): the
+ * row's Status cell and the detail's head ARE the recovery card — the §3 state line
+ * replaces the "Available / Offline / Not determined yet" pill and the
+ * availabilityEvidence prose. The card reads the A1 row (the only read carrying the J1
+ * keys), so the drawer is keyed by entity id and looks the live row up on every poll.
+ * `stale` is a fact about a READING, not the device: the row's "Stale" pill moved off
+ * the state and onto the Reading cell beside the stamp it describes; the detail's
+ * "Stale reading" pill stays beside the values (:152's home). The card never says it.
  */
 import { useState } from 'preact/hooks';
 import { api } from '../lib/api';
 import type { EntitySummary } from '../lib/api/contract';
 import { useApi } from '../lib/poll';
 import {
-  availabilityEvidence,
-  availabilityMeta,
   attrValue,
   brightnessDisplay,
   displayName,
@@ -25,12 +32,15 @@ import { Page, Card } from '../components/layout';
 import { DataTable } from '../components/DataTable';
 import { Resource } from '../components/Resource';
 import { StatusPill } from '../components/StatusPill';
+import { RecoveryCard } from '../components/RecoveryCard';
 import { Drawer } from '../components/Drawer';
 import { Loading, ErrorState, EmptyState } from '../components/feedback';
 
 export function DevicesView() {
   const state = useApi(() => api.listEntities({ sort: 'ASC' }));
-  const [selected, setSelected] = useState<{ entityId: string; name?: string } | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The drawer's row is the LIVE list row (refetched on every viewPosition change), not a click-time snapshot.
+  const selected = selectedId !== null && state.status === 'ok' ? state.data?.find((r) => r.entityId === selectedId) ?? null : null;
 
   return (
     <Page title="Devices" lede={t('devices.lede')} meta={state.meta}>
@@ -40,7 +50,7 @@ export function DevicesView() {
             <DataTable<EntitySummary>
               rows={rows}
               rowKey={(r) => r.entityId}
-              onActivate={(r) => setSelected({ entityId: r.entityId, name: r.name })}
+              onActivate={(r) => setSelectedId(r.entityId)}
               emptyLabel="No devices paired yet."
               columns={[
                 {
@@ -75,20 +85,19 @@ export function DevicesView() {
                 {
                   key: 'status',
                   header: 'Status',
-                  render: (r) => {
-                    // G2 honesty: the flag is what the system last CONCLUDED —
-                    // the title says so (AVAILABLE is never a live-contact claim).
-                    const a = availabilityMeta(r.availability);
-                    return <StatusPill tone={a.tone} label={a.label} title={a.help} />;
-                  },
+                  // HERO-U2b R2: the recovery card, dense (L1 only — the label with its instant and the line;
+                  // the contract sentence and L2 live on the device page). The decision is lib/recovery.ts's
+                  // for the row's stage; the flag alone was never a live-contact claim, and the card says what
+                  // the system last concluded in the three words (SPEC §1).
+                  render: (r) => <RecoveryCard row={r} name={displayName(r)} dense />,
                 },
                 {
                   key: 'fresh',
                   header: 'Reading',
                   render: (r) => {
-                    if (r.stale) {
-                      return <StatusPill tone="warn" label="Stale" title="This reading may be out of date." size="sm" />;
-                    }
+                    // SPEC §6 B (HERO-U2b): "Stale" is about the READING — it sits beside the stamp it
+                    // describes, and no longer hides the stamp (or stands in for the device's state).
+                    const stale = r.stale ? <StatusPill tone="warn" label="Stale" title="This reading may be out of date." size="sm" /> : null;
                     // §10-I (FE-HONEST-1): a list row with NO report time makes no
                     // freshness claim ("Current" with no evidence was a lie by
                     // omission). v1.1.3 (FE-113 / CG-3) splits that into the TRI-STATE
@@ -99,21 +108,23 @@ export function DevicesView() {
                     //                 record for this entity: em-dash + ITS OWN title;
                     //   PRESENT-string → the date-qualified stamp (lastReportedCell —
                     //                 the ONE lawful instant parse; never 1970).
-                    if (!('lastReported' in r)) {
-                      return (
-                        <span style={{ color: 'var(--hs-text-muted)' }} title={LIST_FRESHNESS_NO_CLAIM_TITLE}>
-                          —
-                        </span>
-                      );
-                    }
-                    if (r.lastReported == null || r.lastReported === '') {
-                      return (
-                        <span style={{ color: 'var(--hs-text-muted)' }} title={LIST_FRESHNESS_NULL_TITLE}>
-                          —
-                        </span>
-                      );
-                    }
-                    return <span>{lastReportedCell(r.lastReported)}</span>;
+                    const stamp = !('lastReported' in r) ? (
+                      <span style={{ color: 'var(--hs-text-muted)' }} title={LIST_FRESHNESS_NO_CLAIM_TITLE}>
+                        —
+                      </span>
+                    ) : r.lastReported == null || r.lastReported === '' ? (
+                      <span style={{ color: 'var(--hs-text-muted)' }} title={LIST_FRESHNESS_NULL_TITLE}>
+                        —
+                      </span>
+                    ) : (
+                      <span>{lastReportedCell(r.lastReported)}</span>
+                    );
+                    return (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--hs-space-2)', flexWrap: 'wrap' }}>
+                        {stamp}
+                        {stale}
+                      </span>
+                    );
                   },
                 },
               ]}
@@ -122,21 +133,20 @@ export function DevicesView() {
         </Resource>
       </Card>
 
-      <Drawer open={selected !== null} title={selected ? displayName(selected) : ''} onClose={() => setSelected(null)}>
-        {selected ? <EntityDetail id={selected.entityId} /> : null}
+      <Drawer open={selectedId !== null} title={selected ? displayName(selected) : ''} onClose={() => setSelectedId(null)}>
+        {selectedId !== null ? <EntityDetail id={selectedId} row={selected} /> : null}
       </Drawer>
     </Page>
   );
 }
 
-function EntityDetail({ id }: { id: string }) {
+function EntityDetail({ id, row }: { id: string; row: EntitySummary | null }) {
   const state = useApi(() => api.getEntityState(id));
   if (state.status === 'loading') return <Loading />;
   if (state.status === 'error') return <ErrorState error={state.error} onRetry={state.reload} />;
   if (state.status !== 'ok' || !state.data) return <EmptyState title="No detail available." />;
 
   const s = state.data;
-  const a = availabilityMeta(s.availability);
   // Brightness: the % comes from Core's DERIVED `brightness_percent` data key —
   // never a client-side rescale of the canonical 0–254 level. When the derived
   // key is present, the raw level row is folded into it (shown as the detail).
@@ -144,21 +154,21 @@ function EntityDetail({ id }: { id: string }) {
   const attrs = Object.entries(s.attributes).filter(
     ([k]) => !(bright && (k === 'brightness' || k === 'brightness_percent')),
   );
+  // HERO-U2b R2 (SPEC §2 surface 2): the card sits under the name, above the attributes, and reads the A1 row
+  // (the J1 keys live there). If the list no longer carries the row (it left the registry between polls), the
+  // A3 state's four mirror keys render the S1 form — never a blank head.
+  const cardRow: EntitySummary = row ?? { entityId: s.entityId, name: s.name, availability: s.availability, stale: s.stale, lastReported: s.lastReported };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--hs-space-4)' }}>
-      <div style={{ display: 'flex', gap: 'var(--hs-space-2)', alignItems: 'center' }}>
-        <StatusPill tone={a.tone} label={a.label} title={a.help} />
-        {s.stale ? <StatusPill tone="warn" label="Stale reading" size="sm" /> : null}
-      </div>
+      <RecoveryCard row={cardRow} name={displayName(cardRow)} />
 
-      {/* Availability is EVIDENCE WITH AGE — the flag alone can outlive reality
-          (a rehydrated "Available" can persist while the device is off-network
-          until the next recheck), and UNKNOWN after a restart is honest, not a
-          fault. Always pair the flag with when the device was last heard from. */}
-      <p style={{ color: 'var(--hs-text-muted)', fontSize: 'var(--hs-text-sm)', margin: 0 }} role="status">
-        {availabilityEvidence(s.availability, s.lastReported)}
-      </p>
+      {/* SPEC §6 B: the reading's own freshness word stays with the values it describes. */}
+      {s.stale ? (
+        <div style={{ display: 'flex', gap: 'var(--hs-space-2)', alignItems: 'center' }}>
+          <StatusPill tone="warn" label="Stale reading" size="sm" title="This reading may be out of date." />
+        </div>
+      ) : null}
 
       <dl class="kv">
         {attrs.length === 0 && !bright ? (

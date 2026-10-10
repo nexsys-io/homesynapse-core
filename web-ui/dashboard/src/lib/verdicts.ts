@@ -331,6 +331,29 @@ export const MODE_GLYPHS: Record<ActionMode, string> = {
   'not-recorded': 'M3.5 7h2M6.5 7h2M9.5 7h2', // dotted line — nothing on record
 };
 
+/** HERO-U2b R2 (SPEC §8): a glyph for the recovery card's pill — one 14×14 stroke path, plus an
+ *  optional second path drawn DASHED (`stroke-dasharray`) for the dotted clock. */
+export interface RecoveryGlyph {
+  d: string;
+  dashed?: string;
+}
+/** The recovery card's five rows, each a DISTINCT shape beside its label (design/recovery-card-v1/SPEC.md §8;
+ *  the paths are states.html's, byte for byte). The shape half of the never-hue-alone law: R3 and R4's dark
+ *  rows share the error hue, R2 and R4's quiet share warn — the glyph and the parenthesis carry the class.
+ *  R5's question mark is distinct from R3's two outgoing arrows BY CONSTRUCTION (asked twice, no answer vs
+ *  not asked), which §10's seventh check reads with the colour covered. The open-vocabulary arm reuses
+ *  MODE_GLYPHS['not-recorded'] (the same dotted line). `passiveReporting` (the listening dot) is S3's — the
+ *  passive class is not on today's wire, so AVAILABLE renders R1's pulse until AVAIL-API-1. */
+export const RECOVERY_GLYPHS = {
+  reporting: { d: 'M1.5 7h2.5l1.5-3 2 6 1.5-3h3.5' }, // R1 — the pulse (a report arriving)
+  quiet: { d: 'M2.5 4.5h7M7.5 2.5l2 2-2 2M11.5 9.5h-7M6.5 7.5l-2 2 2 2' }, // R2 — two opposed arrows (asked, answered)
+  notResponding: { d: 'M2.5 4h7M7.5 2l2 2-2 2M2.5 10h7M7.5 8l2 2-2 2' }, // R3 — two outgoing arrows, nothing returning
+  passiveReporting: { d: 'M7 7h.05M4 4a4.2 4.2 0 0 0 0 6M10 4a4.2 4.2 0 0 1 0 6' }, // R4 — the listening dot (S3)
+  passiveNotResponding: { d: 'M7 4.6V7l1.8 1.1', dashed: 'M7 2.5a4.5 4.5 0 1 0 0 9a4.5 4.5 0 1 0 0-9' }, // R4 dark — the dotted clock
+  unasked: { d: 'M5 5.3a2 2 0 1 1 2.9 1.8C7.2 7.5 7 7.9 7 8.7M7 11h.05' }, // R5 — a question mark (not asked, not known)
+  unrecognized: { d: MODE_GLYPHS['not-recorded'] }, // the open vocabulary — the dotted line
+} as const satisfies Record<string, RecoveryGlyph>;
+
 export interface ActionVerdict {
   mode: ActionMode;
   /** Distinct per mode (the label half of the never-hue-alone law). */

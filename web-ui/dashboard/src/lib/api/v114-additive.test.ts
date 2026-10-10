@@ -237,6 +237,6 @@ describe('the TypeScript mirror declares the seven keys optional-nullable and th
     expect([settled, nulls, pre, keyed, keyedNull, fired, disabled, auto, autoNull].length).toBe(9);
     // D0: the three pins move together (contract.ts · contract.test.ts · scripts/contract-check.mjs) — plus the
     // v113-additive.test.ts pin the FE-NULL-1 lane added (four homes, one value).
-    expect(CONTRACT_VERSION).toBe('v1.1.5-2026-09-19');
+    expect(CONTRACT_VERSION).toBe('v1.1.6-2026-10-09');
   });
 });

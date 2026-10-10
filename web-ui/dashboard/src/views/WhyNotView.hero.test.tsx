@@ -267,3 +267,63 @@ describe('FE-114 D3 — FIRED_CONFIRMED renders as a confirmed run, not as a ver
     expect(text).not.toContain('Ran and confirmed');
   });
 });
+
+/* ---- HERO-U2b R2 (2026-10-09) — SPEC §2 surface 3: when the verdict is NEVER_TRIGGERED, the wire names the
+ * watched entity (`triggerRef`) and that entity's registry row is DARK (UNAVAILABLE, or the fifth state), the
+ * recovery card renders under "Watching" — so "why didn't it fire" ends in the dark device. A reporting row,
+ * a dangling ref, a null/absent ref or another verdict render no card. The join is the registry census this
+ * view already fetches (one poll loop). RED at HEAD: WhyNotView.tsx:211–:216 renders the Watching line alone. ---- */
+import { clockTimeWithDate as cwd } from '../lib/format';
+import type { EntitySummary } from '../lib/api/contract';
+
+const SEEN_OLD = new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString();
+const REPORTED_OLD = new Date(Date.now() - 3 * 24 * 60 * 60_000).toISOString();
+const PLUG_ID = '01KX1PB9AAB4VB3E10BD477TV3';
+const darkPlug: EntitySummary = { entityId: PLUG_ID, name: 'Kitchen Plug', availability: 'UNAVAILABLE', stale: false, deviceId: '01KX1PB9A5931A8G0F0X03QXT2', lastReported: REPORTED_OLD, availabilityReason: 'ping_timeout', lastSeenAt: SEEN_OLD, link: { lqi: 96, rssiDbm: -83, at: SEEN_OLD } };
+const okPlug: EntitySummary = { ...darkPlug, availability: 'AVAILABLE', lastReported: new Date().toISOString(), availabilityReason: 'frame_received' };
+
+async function renderWatching(rows: EntitySummary[], over: Partial<NonFiringExplanation> = {}) {
+  vi.spyOn(api, 'listEntities').mockResolvedValue({ data: rows, meta: { viewPosition: 1, timestamp: new Date().toISOString() } } as never);
+  vi.spyOn(api, 'getNonFiring').mockResolvedValue({
+    data: nf({ verdict: 'NEVER_TRIGGERED', lastEvaluation: null, triggerRef: { type: 'entity', id: PLUG_ID }, ...over }),
+    meta: { viewPosition: 1, timestamp: new Date().toISOString() },
+  } as never);
+  const u = render(<WhyNotView automationId="auto_x" />);
+  await act(async () => {});
+  await act(async () => {});
+  return u.container;
+}
+
+describe('HERO-U2b — the why-not card ends in the dark device: the recovery card under "Watching"', () => {
+  it('NEVER_TRIGGERED + a dark joined row → the card renders with the row\'s label and line, named for the watched entity', async () => {
+    const container = await renderWatching([darkPlug]);
+    const text = container.textContent ?? '';
+    expect(text).toContain('Watching: ');
+    expect(text).toContain(`Not responding since ${cwd(SEEN_OLD)} (asked twice, no answer)`);
+    expect(text).toContain('Asked twice; nothing came back.');
+    expect(text).toContain(`Kitchen Plug: Not responding since ${cwd(SEEN_OLD)} (asked twice, no answer).`);
+    expect(container.querySelector('[data-row="notResponding"]')).toBeTruthy();
+    expect(text).not.toContain('Open a window'); // the act is row 3's
+  });
+  it('the fifth state joins too (UNKNOWN / the version-1 null row) — "not asked" is the different fact the person can say', async () => {
+    const container = await renderWatching([{ ...darkPlug, availability: 'UNAVAILABLE', availabilityReason: null, lastSeenAt: null, link: null }]);
+    expect(container.textContent).toContain('Not heard from since startup (not asked)');
+    expect(container.querySelector('[data-row="unasked"]')).toBeTruthy();
+  });
+  it('a REPORTING joined row renders no card — the Watching line alone (nothing to recover)', async () => {
+    const container = await renderWatching([okPlug]);
+    expect(container.querySelector('[data-row]')).toBeNull();
+    expect(container.textContent).toContain('Watching: ');
+  });
+  it('a dangling ref (not in a complete census), a null ref, or another verdict renders no card', async () => {
+    const dangling = await renderWatching([{ ...okPlug, entityId: 'someone_else' }]);
+    expect(dangling.querySelector('[data-row]')).toBeNull();
+    expect(dangling.textContent).toContain('not in this hub’s registry'); // the §10-J loud render stands
+    cleanup();
+    const nullRef = await renderWatching([darkPlug], { triggerRef: null });
+    expect(nullRef.querySelector('[data-row]')).toBeNull();
+    cleanup();
+    const other = await renderWatching([darkPlug], { verdict: 'CONDITION_NOT_MET', lastRelevantRunId: 'run_1' } as Partial<NonFiringExplanation>);
+    expect(other.querySelector('[data-row]')).toBeNull();
+  });
+});

@@ -1101,7 +1101,60 @@ function buildLegacyHub(): MockDataset {
     delete n.definitionKey;
   }
   for (const a of d.automations) delete a.definitionKey;
+  // HERO-U2b R2 (v1.1.6): a pre-J1 hub omits the three dark-device keys too — the ABSENT arm of
+  // availabilityReason / lastSeenAt / link (SPEC §3's S1 column) stays reachable from this one scenario.
+  for (const e of d.entities) {
+    delete e.availabilityReason;
+    delete e.lastSeenAt;
+    delete e.link;
+  }
   return d;
+}
+
+/* HERO-U2b R2 (2026-10-09) — `recovery-states`: ONE J1 hub (every row carries the three v1.1.6 keys PRESENT) with a
+ * row per S2 cell of the recovery card's state table (design/recovery-card-v1/SPEC.md §3), so SPEC §10's acceptance
+ * script can be read off the Devices page by hand: R1 (the IR-133 null row — the healthy plug the real df2bc62 wire
+ * shows 7 times — and a frame_received row), R2 on its ONLY sayable edge (ping_success with lastSeenAt AFTER
+ * lastReported — the IR-112 Hue class), R3 by ping_timeout (the SPEC §10 kitchen plug, dark since 6:52), R3 by
+ * `leave`, R4's dark row by silence_timeout (the hallway sensor), R5 twice — the version-1 null row (UNAVAILABLE ·
+ * null · null, the capture's data[0]) and UNKNOWN — and a reason token this build does not know (the open
+ * vocabulary: R3's degraded form with the token in L2). Names are fixtures, not claims; instants are relative to
+ * now. The S1 column is `legacy-hub`'s (the keys stripped). The act's rows (R3 · R4 dark · R5) render the card
+ * only — the act is row 3's. */
+function buildRecoveryStates(): MockDataset {
+  const mk = (
+    entityId: string,
+    name: string,
+    availability: EntitySummary['availability'] | string,
+    lastReported: string | null,
+    availabilityReason: string | null,
+    lastSeenAt: string | null,
+    link: EntitySummary['link'] = null,
+    deviceId: string | null = `01M0H4A2Q8Z3N5R7T9V1X3${entityId.slice(-4).toUpperCase().padStart(4, 'B')}`,
+  ): EntitySummary =>
+    ({ entityId, name, availability, stale: false, deviceId, lastReported, availabilityReason, lastSeenAt, link }) as EntitySummary;
+  const at = (minAgo: number) => ({ at: iso(minAgo) });
+  const entities: EntitySummary[] = [
+    // R1 — the IR-133 healthy device: the common case (all three null, a moving lastReported)
+    mk('ent_rs_pantry_plug', 'Pantry Plug', 'AVAILABLE', iso(2), null, null, null),
+    // R1 — a frame reason; lastSeenAt is the last TRANSITION, older than the report
+    mk('ent_rs_desk_lamp', 'Desk Lamp', 'AVAILABLE', iso(1), 'frame_received', iso(600), { lqi: 236, rssiDbm: -41, ...at(600) }),
+    // R2 — the ping_success EDGE: answered when asked 11 min ago, no report for 2 h (the Hue class, IR-112)
+    mk('ent_rs_livingroom_lamp', 'Living Room Lamp', 'AVAILABLE', iso(120), 'ping_success', iso(11), { lqi: 170, rssiDbm: -64, ...at(11) }),
+    // R3 — asked twice, no answer; last heard 38 min ago (the SPEC §10 kitchen plug)
+    mk('ent_rs_kitchen_plug', 'Kitchen Plug', 'UNAVAILABLE', iso(49), 'ping_timeout', iso(38), { lqi: 96, rssiDbm: -83, ...at(38) }),
+    // R3 by `leave` — nobody asked it; the bare label with the left line
+    mk('ent_rs_shed_bulb', 'Shed Bulb', 'UNAVAILABLE', iso(4330), 'leave', iso(4320), null),
+    // R4 dark — the passive sensor by silence_timeout (the SPEC §10 hallway sensor)
+    mk('ent_rs_hallway_sensor', 'Hallway Sensor', 'UNAVAILABLE', iso(1510), 'silence_timeout', iso(1500), { lqi: 144, rssiDbm: -72, ...at(1500) }),
+    // R5 — the version-1 event: seeded dark, never asked (the real capture's data[0] shape — a months-old last report)
+    mk('ent_rs_porch_lamp', 'Porch Lamp', 'UNAVAILABLE', iso(60 * 24 * 83), null, null, null),
+    // R5 — UNKNOWN: no availability event on record (StateProjection.java:1115), no report either
+    mk('ent_rs_new_contact', 'Back Door', 'UNKNOWN', null, null, null, null, null),
+    // the open vocabulary — a reason token this build does not know, beside UNAVAILABLE: R3's degraded form, the token in L2
+    mk('ent_rs_garage_opener', 'Garage Opener', 'UNAVAILABLE', iso(200), 'some_future_reason', iso(190), { lqi: 120, rssiDbm: -77, ...at(190) }),
+  ];
+  return { ...defaultDataset, entities, entityDetail: {}, entityState: {} };
 }
 
 /* FE-115 D2 — `v115-keys`: one DevPanel scenario per key STATE, so every sentence FE-114 (EXPLAIN-6 · 8 · 9) and
@@ -1192,7 +1245,8 @@ export const SCENARIOS: Scenario[] = [
   { id: 'hero-states', label: 'The hero, every state', group: 'Story', blurb: 'SPEC §3 on today’s wire: one run per headline row the emitter can produce — each outcome, the silent skip, the era skeleton, a skipped / failed / cancelled / interrupted run, a replaced command — with the wire’s nulls as they are (no firing value; no verdict row beside Confirmed).', build: buildHeroStates },
   { id: 'dangling-ref', label: 'Dangling ref (loud)', group: 'Story', blurb: 'The R-4 custody-clone class: a run whose entity refs are not in this hub’s registry — rendered loud on the chain, never paraphrased away.', build: buildDanglingRef },
   { id: 'v115-keys', label: 'v1.1.4 / v1.1.5 keys', group: 'Story', blurb: 'One run per condition-definition kind (state · numeric · time · and · or · not · zone, a nested one), a null definition and an unknown kind; a confirmed step with its confirmedAt and a held one without; a DISABLED with its disabledAt and a FIRED_CONFIRMED — every FE-114 / FE-115 sentence one click away.', build: buildV115Keys },
-  { id: 'legacy-hub', label: 'Legacy hub (pre-v1.1.4)', group: 'Story', blurb: 'The default home as a v1.1.3 hub serves it — no definitionKey, no condition definition, no settledAt / confirmedAt, no disabledAt: the ABSENT arm of every v1.1.4 / v1.1.5 key stays reachable.', build: buildLegacyHub },
+  { id: 'legacy-hub', label: 'Legacy hub (pre-v1.1.4)', group: 'Story', blurb: 'The default home as a v1.1.3 hub serves it — no definitionKey, no condition definition, no settledAt / confirmedAt, no disabledAt, no availabilityReason / lastSeenAt / link: the ABSENT arm of every v1.1.4 / v1.1.5 / v1.1.6 key stays reachable.', build: buildLegacyHub },
+  { id: 'recovery-states', label: 'The recovery card, every state', group: 'Story', blurb: 'SPEC §3 on the J1 wire: one device per row — Reporting (the healthy all-null row and a frame), Quiet on its one sayable edge, Not responding by ping_timeout and by leave, the passive sensor dark by silence_timeout, the fifth state twice (the version-1 null row and UNKNOWN), and a reason this build does not know. Read SPEC §10 off the Devices page.', build: buildRecoveryStates },
   { id: 'live-fleet', label: 'Live fleet mirror', group: 'Story', blurb: 'One entity per deployed device class with canonical attribute keys — including brightness level 0–254 plus the hub-derived percent.', build: buildLiveFleet },
   { id: 'all-origins', label: 'All event origins', group: 'Story', blurb: 'Automation, device, you, external, and the honest UNKNOWN.', build: buildAllOrigins },
   { id: 'large', label: 'Large (300 runs · 500 events)', group: 'Scale', blurb: 'Forces list virtualization + a render budget.', build: buildLarge },

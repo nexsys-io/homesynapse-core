@@ -11,6 +11,9 @@
   border: 1px solid transparent;
 }
 .sm { font-size: 11px; padding: 1px 6px; }
+/* HERO-U2b R2: a sentence-length label (the recovery card's L1) wraps instead of overflowing its cell. */
+.wrap { white-space: normal; align-items: flex-start; }
+.wrap .glyph { margin-top: 0.2em; }
 
 .glyph { width: 12px; height: 12px; flex: none; }
 

@@ -19,7 +19,11 @@ const SHAPES = 'src/lib/api/shapes.ts';
 // 2026-09-19): ONE ADDITIVE key on ONE read — causal-chain conditions[].definition (object-or-null, recursive
 // through children). The pin has FIVE homes now (contract.ts · contract.test.ts · v113-additive.test.ts ·
 // v114-additive.test.ts · this file) — they move together (FE-115 D0).
-const EXPECTED_VERSION = 'v1.1.5-2026-09-19';
+// v1.1.6 (LINK-READ-2; landed core-side 2026-10-03 J1 df2bc62; the FE mirror is HERO-U2b, 2026-10-09): THREE
+// ADDITIVE optional-nullable keys on ONE read — A1 entities[].availabilityReason · lastSeenAt · link. The literal
+// homes stay FIVE (contract.ts · contract.test.ts · v113-additive.test.ts · v114-additive.test.ts · this file);
+// v115-additive.test.ts and v116-additive.test.ts assert the pin by pattern. They move together (HERO-U2b-r1).
+const EXPECTED_VERSION = 'v1.1.6-2026-10-09';
 // v1.1.1: the ratified problem-type URI prefix (Doc 09 §3.8 / ProblemType.TYPE_URI_PREFIX).
 const EXPECTED_PROBLEM_PREFIX = 'https://homesynapse.local/problems/';
 const REQUIRED = [

@@ -126,6 +126,17 @@ function conditionDefinition(v: unknown, path: string, depth = 1): void {
 function isBool(v: unknown, path: string): asserts v is boolean {
   if (typeof v !== 'boolean') throw new ContractError(`${path}: expected boolean, got ${typeof v}`);
 }
+/** The v1.1.6 `link` reading — OBJECT-or-null, linkJson's three keys ALL PRESENT
+ *  (ListEntitiesEndpoint.linkJson writes every one; a missing key is drift, never
+ *  "optional"): `lqi` and `rssiDbm` numbers (an LQI/RSSI STRING is drift — the wire never
+ *  quotes them), `at` an Instant.toString() (a number is the epoch-seconds class). */
+function linkOrNull(v: unknown, path: string): void {
+  if (v === null) return;
+  if (!isObj(v)) throw new ContractError(`${path}: expected {lqi, rssiDbm, at} or null, got ${Array.isArray(v) ? 'array' : typeof v}`);
+  isNum(req(v, 'lqi', path), `${path}.lqi`);
+  isNum(req(v, 'rssiDbm', path), `${path}.rssiDbm`);
+  isStr(req(v, 'at', path), `${path}.at`);
+}
 
 function meta(v: unknown, path: string) {
   if (!isObj(v)) throw new ContractError(`${path}: meta must be object`);
@@ -158,6 +169,16 @@ export const validators: Record<EndpointId, Validator> = {
       // (ISO-8601) — a number on the wire is the epoch-seconds misread class, FAIL it.
       if ('deviceId' in e) strOrNull(e.deviceId, `${p}.deviceId`);
       if ('lastReported' in e) strOrNull(e.lastReported, `${p}.lastReported`);
+      // v1.1.6 ADDITIVE (J1 LINK-READ-2; HERO-U2b R1): the same tri-state on the three
+      // dark-device keys — absent is lawful (a pre-J1 hub); PRESENT must be typed-or-null.
+      // `availabilityReason` is an OPEN lower-cased vocabulary: any string passes, the
+      // validator never closes it (and never case-normalizes). `lastSeenAt` is an
+      // `Instant.toString()` — a number is the epoch-seconds misread class, FAIL it.
+      // `link` present must be linkJson's three-field object (numbers + an ISO string),
+      // or null — a missing field is drift, never "optional".
+      if ('availabilityReason' in e) strOrNull(e.availabilityReason, `${p}.availabilityReason`);
+      if ('lastSeenAt' in e) strOrNull(e.lastSeenAt, `${p}.lastSeenAt`);
+      if ('link' in e) linkOrNull(e.link, `${p}.link`);
     });
     meta(req(b, 'meta', 'A1'), 'A1.meta');
   },

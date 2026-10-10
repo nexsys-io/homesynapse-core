@@ -1,0 +1,54 @@
+/* RecoveryCard (HERO-U2b R2) — SPEC §9: existing tokens only, no new token (the SPEC requests none).
+   The pill carries the state (StatusPill's tone classes: ok · warn · error · unknown on their -bg pairs —
+   AA in both themes, SPEC §8); the line beneath is secondary text; L2 is the sunk mono register hero-v1
+   uses (secondary text on the sunk surface — never muted-on-sunk, the one pair the card avoids in dark). */
+.card { display: flex; flex-direction: column; gap: var(--hs-space-2); min-width: 0; }
+.dense { gap: var(--hs-space-1); }
+
+.headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--hs-space-2);
+  font-size: var(--hs-text-base);
+  font-weight: var(--hs-weight-medium);
+  line-height: var(--hs-leading-normal);
+  color: var(--hs-text);
+}
+/* The state pill swaps tone when the row changes on a later read (the rejoin): eased, and — under
+   prefers-reduced-motion — swapped with no fade (SPEC §8). Nothing else on the card moves. */
+.headline > * { transition: color var(--hs-dur) var(--hs-ease), background-color var(--hs-dur) var(--hs-ease); }
+@media (prefers-reduced-motion: reduce) {
+  .headline > * { transition: none; animation: none; }
+}
+
+.line {
+  margin: 0;
+  color: var(--hs-text-secondary);
+  font-size: var(--hs-text-sm);
+  line-height: var(--hs-leading-relaxed);
+  max-width: 64ch;
+}
+.dense .line { font-size: var(--hs-text-xs); line-height: var(--hs-leading-normal); }
+
+/* L2 — one expand away. The <summary> is the only focus stop the card adds (SPEC §8 focus order). */
+.l2 { margin: 0; }
+.summary {
+  cursor: pointer;
+  font-size: var(--hs-text-xs);
+  color: var(--hs-text-secondary);
+  list-style: revert;
+}
+.summary:focus-visible { outline: 2px solid var(--hs-focus-ring); outline-offset: 2px; }
+.facts {
+  margin: var(--hs-space-2) 0 0;
+  padding: var(--hs-space-2) var(--hs-space-3);
+  list-style: none;
+  display: grid;
+  gap: var(--hs-space-1);
+  background: var(--hs-surface-sunk);
+  border-radius: var(--hs-radius-sm);
+  font-family: var(--hs-font-mono, monospace);
+  font-size: var(--hs-text-xs);
+  color: var(--hs-text-secondary);
+}

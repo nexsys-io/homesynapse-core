@@ -16,6 +16,9 @@ import { ThemeToggle } from './components/ThemeToggle';
 import { AuthGate } from './components/AuthGate';
 import { StatusPill } from './components/StatusPill';
 import { Loading, EmptyState, ErrorState, OfflineState, ReplayingBanner } from './components/feedback';
+import { RecoveryCard } from './components/RecoveryCard';
+import { recoveryRow } from './lib/recovery';
+import { displayName } from './lib/format';
 import { causalChains } from './lib/api/mock/mockData';
 import { SCENARIOS } from './lib/api/mock/scenarios';
 
@@ -125,5 +128,58 @@ describe('HERO-1b B5 — the hero is legible without the marker shapes', () => {
     const { container } = render(<CausalChain chain={causalChains['run_eh_001']!} />);
     expect(container.querySelector('ol')!.getAttribute('aria-label')).toBe('Step-by-step explanation, from trigger to outcome');
     expect(await violations(container)).toEqual([]);
+  });
+});
+
+/* ---- HERO-U2b R2 (2026-10-09) — SPEC §8: the recovery card in every state the `recovery-states` scenario reaches
+ * (shape + label on every state, the glyph aria-hidden, `recovery.a11y.state` as visually-hidden text, ONE polite
+ * role="status" region per card, the L2 <summary> as the only added focus stop) has no axe violations in a
+ * labelled list, and R3 beside R5 reads differently with the colour covered (the verb and the shape). RED at HEAD:
+ * the component does not exist. ---- */
+describe('HERO-U2b — the recovery card is legible without its colours and passes axe in every state', () => {
+  const rows = SCENARIOS.find((s) => s.id === 'recovery-states')!.build().entities;
+  const srText = (el: Element) => Array.from(el.querySelectorAll('.sr-only')).map((n) => n.textContent).join(' | ');
+
+  it('every scenario row rendered as a full card: no axe violations; each card carries its hidden sentence and a polite status region', async () => {
+    const { container } = render(
+      <ul aria-label="Devices">
+        {rows.map((r) => (
+          <li key={r.entityId}><RecoveryCard row={r} name={displayName(r)} /></li>
+        ))}
+      </ul>,
+    );
+    expect(await violations(container)).toEqual([]);
+    const cards = Array.from(container.querySelectorAll('[data-row]'));
+    expect(cards.length).toBe(rows.length);
+    for (const [i, c] of cards.entries()) {
+      const d = recoveryRow(rows[i]!);
+      expect(srText(c)).toContain(`${displayName(rows[i]!)}: ${d.label}.`);
+      const region = c.querySelector('[role="status"]')!;
+      expect(region.getAttribute('aria-live')).toBe('polite');
+      expect(region.textContent).toBe('');
+      expect(c.querySelector('svg')!.getAttribute('aria-hidden')).toBe('true');
+    }
+  });
+  it('dense cards (the device row) pass too, and add no focus stop', async () => {
+    const { container } = render(
+      <ul aria-label="Devices">
+        {rows.map((r) => (
+          <li key={r.entityId}><RecoveryCard row={r} name={displayName(r)} dense /></li>
+        ))}
+      </ul>,
+    );
+    expect(await violations(container)).toEqual([]);
+    expect(container.querySelector('summary, button, a, [tabindex]')).toBeNull();
+  });
+  it('R3 beside R5 with the colour covered: the labels differ in their verb ("no answer" vs "not asked") and the glyph paths differ', () => {
+    const r3 = rows.find((r) => recoveryRow(r).form === 'full')!;
+    const r5 = rows.find((r) => recoveryRow(r).key === 'unasked')!;
+    const { container } = render(<div><RecoveryCard row={r3} name="A" /><RecoveryCard row={r5} name="B" /></div>);
+    const [a, b] = Array.from(container.querySelectorAll('[data-row]'));
+    expect(a!.textContent).toContain('no answer');
+    expect(a!.textContent).not.toContain('not asked');
+    expect(b!.textContent).toContain('not asked');
+    expect(b!.textContent).not.toContain('no answer');
+    expect(a!.querySelector('svg path')!.getAttribute('d')).not.toBe(b!.querySelector('svg path')!.getAttribute('d'));
   });
 });

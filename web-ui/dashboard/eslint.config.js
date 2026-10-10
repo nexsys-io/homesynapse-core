@@ -29,7 +29,9 @@ export default tseslint.config(
   },
   {
     /* HERO-1d D0 (2026-09-13) — the literal lint (IR-8's instrument): no hero SENTENCE lives outside
-     * src/lib/i18n.ts. Scoped to the six hero SOURCE files only — never the tests, never the catalog.
+     * src/lib/i18n.ts. Scoped to EIGHT SOURCE files only — the six hero files plus the recovery card's two
+     * (HERO-U2b-r1, 2026-10-10, widens the six below to eight per SPEC §11 row 2; both read 0 under the rule;
+     * DevicesView.tsx stays out until its 10 HEAD literals are keyed) — never the tests, never the catalog.
      * FE-114 D4 (2026-09-14, IR-12 — the pattern's reach): a "sentence" is now a capitalised run of TWO
      * or more words (apostrophes ' and ’ inside a word; , ; : — - tolerated between words) in a JSX text
      * node, a template-literal quasi (or a capitalised word adjacent to `${` at either end of a quasi),
@@ -46,6 +48,8 @@ export default tseslint.config(
       'src/views/RunsView.tsx',
       'src/views/RunChainView.tsx',
       'src/components/Resource.tsx',
+      'src/components/RecoveryCard.tsx',
+      'src/lib/recovery.ts',
     ],
     rules: {
       'no-restricted-syntax': [
