@@ -202,9 +202,15 @@ final class ListEntitiesEndpointTest {
 
         // The LinkedHashMap order IS the wire order: the v1.1 base first, the two v1.1.3 keys
         // appended, then J1's three (the additive path; the frozen keys' order unchanged).
+        // AVAIL-API-1 (v1.1.7): the eleven recovery-card keys follow the frozen eight (null
+        // here: the pre-AVAIL-API-1 constructor renders no projection).
         assertThat(rows(ctx).get(0).keySet())
                 .containsExactly("entityId", "availability", "stale", "deviceId", "lastReported",
-                        "availabilityReason", "lastSeenAt", "link");
+                        "availabilityReason", "lastSeenAt", "link",
+                        "probeAnsweredAt", "probeWindowStart", "probesAnswered", "probesMissed",
+                        "availabilityClass", "reportIntervalSeconds", "silenceLimitSeconds",
+                        "missesToDark", "recordIntervalSeconds", "recordDueBy",
+                        "recordOverdueSince");
     }
 
     @Test

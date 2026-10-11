@@ -4,15 +4,21 @@
  */
 package com.homesynapse.api.rest;
 
+import com.homesynapse.device.Entity;
+import com.homesynapse.device.EntityRegistry;
+import com.homesynapse.device.InMemoryEntityRegistry;
+import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.platform.identity.EntityId;
 import com.homesynapse.platform.identity.Ulid;
 import com.homesynapse.state.EntityState;
+import com.homesynapse.state.RecoveryCardQueryService;
 import com.homesynapse.state.StateQueryService;
 
 import io.javalin.http.Context;
 import io.javalin.http.Handler;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -66,14 +72,27 @@ import java.util.function.LongSupplier;
  *
  * <p>Stateless — same threading discipline as {@link ListEntitiesEndpoint}.</p>
  *
- * @see RestFilters#installEntityQueryEndpoints(Object, StateQueryService, com.homesynapse.device.EntityRegistry, LongSupplier, java.time.Clock)
+ * @see RestFilters#installEntityQueryEndpoints(Object, StateQueryService, com.homesynapse.device.EntityRegistry, LongSupplier, RecoveryCardQueryService, java.time.Clock)
  * @see EndpointContext
  */
 final class GetEntityEndpoint implements Handler {
 
     private final StateQueryService queryService;
     private final LongSupplier viewPositionSupplier;
+    private final EntityRegistry entityRegistry;
+    private final RecoveryCardQueryService recoveryCards;
     private final Clock clock;
+
+    /**
+     * The pre-AVAIL-API-1 shape (test-facing): no registry, no recovery-card projection —
+     * every v1.1.7 key renders {@code null}, {@code meta.recoveryViewPosition} null.
+     */
+    GetEntityEndpoint(StateQueryService queryService,
+                      LongSupplier viewPositionSupplier,
+                      Clock clock) {
+        this(queryService, viewPositionSupplier, new InMemoryEntityRegistry(),
+                RecoveryCardQueryService.notLive(), clock);
+    }
 
     /**
      * Constructs a new handler.
@@ -82,14 +101,22 @@ final class GetEntityEndpoint implements Handler {
      *                             never {@code null}
      * @param viewPositionSupplier supplier for the projection's current
      *                             cursor position; never {@code null}
+     * @param entityRegistry       the LIVE entity registry the owning device is read
+     *                             from (v1.1.7, AVAIL-API-1); never {@code null}
+     * @param recoveryCards        the recovery-card read interface (AVAIL-API-1);
+     *                             never {@code null}
      * @param clock                injected clock; never {@code null}
      */
     GetEntityEndpoint(StateQueryService queryService,
                       LongSupplier viewPositionSupplier,
+                      EntityRegistry entityRegistry,
+                      RecoveryCardQueryService recoveryCards,
                       Clock clock) {
         this.queryService = Objects.requireNonNull(queryService, "queryService");
         this.viewPositionSupplier =
                 Objects.requireNonNull(viewPositionSupplier, "viewPositionSupplier");
+        this.entityRegistry = Objects.requireNonNull(entityRegistry, "entityRegistry");
+        this.recoveryCards = Objects.requireNonNull(recoveryCards, "recoveryCards");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
@@ -123,12 +150,18 @@ final class GetEntityEndpoint implements Handler {
         }
 
         long viewPosition = viewPositionSupplier.getAsLong();
-        Map<String, Object> meta = new LinkedHashMap<>(2);
+        Instant now = clock.instant();
+        Map<String, Object> meta = new LinkedHashMap<>(3);
         meta.put("viewPosition", viewPosition);
-        meta.put("timestamp", clock.instant().toString());
+        meta.put("timestamp", now.toString());
+        // v1.1.7 (AVAIL-API-1): the recovery-card projection's position, null while not LIVE.
+        meta.put("recoveryViewPosition", EntityStateJson.recoveryViewPosition(recoveryCards));
 
+        // v1.1.7 (AVAIL-API-1, AMD-103 §3): the owning device from the LIVE registry (the
+        // list read's CG-2 reading) feeds the eleven recovery-card keys after the frozen ones.
+        DeviceId deviceId = entityRegistry.findEntity(entityId).map(Entity::deviceId).orElse(null);
         Map<String, Object> body = new LinkedHashMap<>(2);
-        body.put("data", EntityStateJson.render(maybeState.get()));
+        body.put("data", EntityStateJson.render(maybeState.get(), deviceId, recoveryCards, now));
         body.put("meta", meta);
 
         ctx.status(200);

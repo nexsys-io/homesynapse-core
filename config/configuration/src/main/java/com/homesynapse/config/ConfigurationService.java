@@ -22,10 +22,12 @@ import java.util.Optional;
  *
  * <h2>Startup vs. Reload Error Handling (Doc 06 §3.6)</h2>
  *
- * <p>On startup ({@link #load()}), {@link Severity#ERROR} issues cause the
- * offending key to revert to its JSON Schema default — the system starts
- * with degraded but functional configuration. {@link Severity#FATAL} issues
- * abort startup with a {@link ConfigurationLoadException}.</p>
+ * <p>On startup ({@link #load()}), an issue at {@link Severity#ERROR} — an invalid
+ * value, or a key the composed schema does not declare — or at
+ * {@link Severity#FATAL} FAILS the load with a {@link ConfigurationLoadException}
+ * naming the offending path (AMD-102 R-B; CONFIG-ERROR-1, IR-143): the system never
+ * starts on a configuration it would have had to repair by reverting a key to its
+ * default. {@link Severity#WARNING} has no producer today.</p>
  *
  * <p>On reload ({@link #reload()}), both {@link Severity#FATAL} and
  * {@link Severity#ERROR} issues cause the entire candidate to be rejected

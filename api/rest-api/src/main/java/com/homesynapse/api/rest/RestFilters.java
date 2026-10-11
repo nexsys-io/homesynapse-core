@@ -11,6 +11,7 @@ import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.EventStore;
 import com.homesynapse.event.bus.EventBus;
 import com.homesynapse.state.ReadinessSource;
+import com.homesynapse.state.RecoveryCardQueryService;
 import com.homesynapse.state.StateQueryService;
 
 import io.javalin.Javalin;
@@ -186,20 +187,26 @@ public final class RestFilters {
                                                    StateQueryService queryService,
                                                    EntityRegistry entityRegistry,
                                                    LongSupplier viewPositionSupplier,
+                                                   RecoveryCardQueryService recoveryCards,
                                                    Clock clock) {
         Objects.requireNonNull(javalinApp, "javalinApp");
         Objects.requireNonNull(queryService, "queryService");
         Objects.requireNonNull(entityRegistry, "entityRegistry");
         Objects.requireNonNull(viewPositionSupplier, "viewPositionSupplier");
+        Objects.requireNonNull(recoveryCards, "recoveryCards");
         Objects.requireNonNull(clock, "clock");
         Javalin app = (Javalin) javalinApp;
+        // AVAIL-API-1 (v1.1.7): the recovery-card read interface rides into the three reads
+        // beside the state query service; the owning device is the registry's reading.
         app.get("/api/v1/entities",
                 new ListEntitiesEndpoint(queryService, entityRegistry, viewPositionSupplier,
-                        clock));
+                        recoveryCards, clock));
         app.get("/api/v1/entities/{entityId}",
-                new GetEntityEndpoint(queryService, viewPositionSupplier, clock));
+                new GetEntityEndpoint(queryService, viewPositionSupplier, entityRegistry,
+                        recoveryCards, clock));
         app.get("/api/v1/entities/{entityId}/state",
-                new GetEntityStateEndpoint(queryService, viewPositionSupplier, clock));
+                new GetEntityStateEndpoint(queryService, viewPositionSupplier, entityRegistry,
+                        recoveryCards, clock));
     }
 
     /**

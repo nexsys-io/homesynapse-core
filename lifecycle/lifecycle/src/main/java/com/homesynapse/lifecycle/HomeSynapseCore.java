@@ -89,6 +89,8 @@ import com.homesynapse.state.DerivedPublishGate;
 import com.homesynapse.state.ProjectionAdvancer;
 import com.homesynapse.state.ProjectionId;
 import com.homesynapse.state.ReadinessSource;
+import com.homesynapse.state.RecoveryCardProjection;
+import com.homesynapse.state.RecoveryCardQueryService;
 import com.homesynapse.state.RegistryStalenessResolver;
 import com.homesynapse.state.StalenessConfig;
 import com.homesynapse.state.StalenessThresholdResolver;
@@ -299,6 +301,8 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     private DerivedWriteRateLimit rateLimit;
     private ProjectionAdvancer projectionAdvancer;
     private StateProjection stateProjection;
+    /** AVAIL-API-1 (AMD-103 R-F): the recovery-card projection; not LIVE after a failed catch-up. */
+    private RecoveryCardProjection recoveryCardProjection;
     private QueueSaturationHealthCheck healthCheck;
     private SharedScheduler scheduler;
     private StateQueryService stateQueryService;
@@ -684,6 +688,29 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         // its threshold resolves — the two replays run in series, never concurrently.
         awaitRegistryProjectionLive();
         eventBus.subscribeRuntime(projectionInfo, stateProjection);
+
+        // Step 3.2b — the recovery-card projection (AVAIL-API-1; AMD-103 R-F, path (b)): the
+        // type-scoped catch-up REGISTRY-COLD-1 built for the registry, reused for the three
+        // availability types — AFTER the registry is LIVE (the entity -> device mapping is
+        // the registry's; awaited above) and BEFORE the state projection's gate. Durable and
+        // coupled (AMD-45 §2.2): a persisted checkpoint restores the view and SKIPS the
+        // catch-up, so it runs ONCE; otherwise (1) H, (2) the three cursors merged up to H,
+        // (3) the coupled checkpoint at H, (4) subscribeRuntime — the bus replays only the
+        // rows after H. A failed catch-up is a null card, never a failed boot: logged once
+        // in bootRecoveryCard, the projection left not LIVE and NOT subscribed.
+        this.recoveryCardProjection = new RecoveryCardProjection(
+                persistenceFactory.viewCheckpointStore(),
+                persistenceFactory.atomicCheckpointSink(),   // the coupled write, one key
+                () -> entityRegistry,
+                clock);
+        if (bootRecoveryCard(recoveryCardProjection, store)) {
+            eventBus.subscribeRuntime(
+                    new SubscriberInfo(RecoveryCardProjection.SUBSCRIBER_ID,
+                            RecoveryCardProjection.subscriptionFilter(),
+                            true,   // coalesceExempt: every record delivered (AMD-103 D10)
+                            true),  // atomicCheckpoint: the projection writes the coupled one
+                    recoveryCardProjection);
+        }
 
         Consumer<HealthSignal> healthSignalHandler = signal -> {
             switch (signal.level()) {
@@ -1086,7 +1113,8 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             RestFilters.installHealthEndpoint(app, this);
             RestFilters.installReadinessGate(app, this);
             RestFilters.installEntityQueryEndpoints(
-                    app, stateQueryService, entityRegistry, stateProjection::cursorPosition, clock);
+                    app, stateQueryService, entityRegistry, stateProjection::cursorPosition,
+                    recoveryCardProjection, clock);
             // M7.5c-a: the /internal/* reads carry the frozen {data, meta} envelope
             // (v1.1.1 §A4/§A5, DRIFT-1). The log head (eventStore::latestPosition)
             // feeds the frozen A4 lagEvents; PROJECTION_VERSION is the same constant
@@ -1213,6 +1241,47 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
     public StateQueryService stateQueryService() {
         requireStarted();
         return stateQueryService;
+    }
+
+    /**
+     * @return the recovery-card read interface (AVAIL-API-1, AMD-103 R-F) — not LIVE after a
+     *         failed catch-up, so every v1.1.7 key reads null
+     * @throws IllegalStateException if {@link #start()} has not been called
+     */
+    public RecoveryCardQueryService recoveryCardQueryService() {
+        requireStarted();
+        return recoveryCardProjection;
+    }
+
+    /**
+     * AVAIL-API-1 (AMD-103 R-F; §4.5 (5)): restores the recovery-card view from its coupled
+     * checkpoint, else catches up from the type index. A failed catch-up is caught HERE —
+     * logged once as {@code recovery_card.catchup_failed}, the projection left not LIVE (the
+     * v1.1.7 keys null) and NOT subscribed — and never fails the boot. An unreadable
+     * checkpoint (a foreign or corrupt view blob) is logged as
+     * {@code recovery_card.checkpoint_unreadable} and falls back to the catch-up, which
+     * rewrites it. Package-private and static so the boot IT drives the arm with a store
+     * that throws, as REGISTRY-COLD-1's K-2 modeled the bus.
+     *
+     * @param projection the projection to boot
+     * @param store      the event store the catch-up reads
+     * @return {@code true} when the projection is ready to subscribe
+     */
+    static boolean bootRecoveryCard(RecoveryCardProjection projection, EventStore store) {
+        try {
+            if (projection.restoreFromCheckpoint()) {
+                return true;
+            }
+        } catch (RuntimeException unreadable) {
+            LOG.warn("recovery_card.checkpoint_unreadable: {}", unreadable.toString());
+        }
+        try {
+            projection.catchUp(store);
+            return true;
+        } catch (RuntimeException failure) {
+            LOG.warn("recovery_card.catchup_failed: {}", failure.toString());
+            return false;
+        }
     }
 
     @Override
@@ -1361,6 +1430,7 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
             if (eventBus != null) {
                 // Reverse registration order: integration router (Phase 6, registered last)
                 // -> ledger (3.4c) -> dispatch (3.4b) -> automation (3.4) -> projection (3.2)
+                // -> recovery-card projection (3.2b, AVAIL-API-1) -> projection (3.2)
                 // -> registry projection (3.1, AMD-99).
                 // unsubscribe(...) closes each runtime's per-subscriber read connection — the
                 // pending_command_ledger's is the M7.3-reverted leak; the M9.1 router holds
@@ -1372,6 +1442,13 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
                 eventBus.unsubscribe(PendingCommandLedgerAssembly.SUBSCRIBER_ID);
                 eventBus.unsubscribe(CommandDispatchAssembly.SUBSCRIBER_ID);
                 eventBus.unsubscribe(AUTOMATION_SUBSCRIBER_ID);
+                // AVAIL-API-1: the recovery-card projection registered after the state
+                // projection (Step 3.2b) and before the automation engine; a subscriber
+                // left registered keeps its read connection and its VT past the executor
+                // shutdown (bus.delivery_anomaly LIVE_READ_FAILED) -- the paired teardown.
+                if (recoveryCardProjection != null) {
+                    eventBus.unsubscribe(RecoveryCardProjection.SUBSCRIBER_ID);
+                }
                 eventBus.unsubscribe(PROJECTION_SUBSCRIBER_ID);
                 // The registry projection (AMD-99) registered FIRST (Step 3.1),
                 // so its teardown closes the reverse chain (paired teardown; the

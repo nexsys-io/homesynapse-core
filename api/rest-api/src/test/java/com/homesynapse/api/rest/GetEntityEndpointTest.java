@@ -193,9 +193,14 @@ final class GetEntityEndpointTest {
         Map<String, Object> body = (Map<String, Object>) ctx.body;
         @SuppressWarnings("unchecked")
         Map<String, Object> data = (Map<String, Object>) body.get("data");
+        // AVAIL-API-1 (v1.1.7): the twelve frozen keys keep their order; the eleven recovery-card
+        // keys follow them (null here: the pre-AVAIL-API-1 constructor renders no projection).
         assertThat(data.keySet()).containsExactly("entityId", "attributes", "availability",
                 "stateVersion", "lastChanged", "lastUpdated", "lastReported", "staleAfter",
-                "stale", "availabilityReason", "lastSeenAt", "link");
+                "stale", "availabilityReason", "lastSeenAt", "link",
+                "probeAnsweredAt", "probeWindowStart", "probesAnswered", "probesMissed",
+                "availabilityClass", "reportIntervalSeconds", "silenceLimitSeconds",
+                "missesToDark", "recordIntervalSeconds", "recordDueBy", "recordOverdueSince");
         assertThat(data)
                 .containsEntry("entityId", VALID_ULID)
                 .containsEntry("availability", "AVAILABLE")

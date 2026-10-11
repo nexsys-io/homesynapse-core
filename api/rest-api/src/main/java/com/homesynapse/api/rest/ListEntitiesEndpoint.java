@@ -9,6 +9,7 @@ import com.homesynapse.device.EntityRegistry;
 import com.homesynapse.platform.identity.DeviceId;
 import com.homesynapse.state.EntityLink;
 import com.homesynapse.state.EntityState;
+import com.homesynapse.state.RecoveryCardQueryService;
 import com.homesynapse.state.StateQueryService;
 import com.homesynapse.state.StateSnapshot;
 
@@ -16,6 +17,7 @@ import io.javalin.http.Context;
 import io.javalin.http.Handler;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -71,6 +73,14 @@ import java.util.function.LongSupplier;
  * </ul>
  * <p>The C8 optional {@code name} is NOT populated here (Core does not populate it today).</p>
  *
+ * <h2>v1.1.7 additive keys (AVAIL-API-1, AMD-103 §3 — 2026-10-11)</h2>
+ *
+ * <p>The eleven recovery-card keys ({@link EntityStateJson#RECOVERY_KEYS}) are APPENDED to
+ * every row after {@code link}, beside {@code availability} and never under it, for the row's
+ * owning device — null while the recovery-card projection is not LIVE (the tri-state law);
+ * {@code meta.recoveryViewPosition} (that projection's position, null while not LIVE) is
+ * appended after {@code timestamp}. The v1.1.6 bytes are unchanged.</p>
+ *
  * <h2>Behavioural contract</h2>
  *
  * <p>Pulls a fully-consistent {@link StateSnapshot} from
@@ -100,7 +110,7 @@ import java.util.function.LongSupplier;
  * (single-{@code long} read). Safe to call from any number of Jetty
  * worker threads concurrently.</p>
  *
- * @see RestFilters#installEntityQueryEndpoints(Object, StateQueryService, EntityRegistry, LongSupplier, java.time.Clock)
+ * @see RestFilters#installEntityQueryEndpoints(Object, StateQueryService, EntityRegistry, LongSupplier, RecoveryCardQueryService, java.time.Clock)
  * @see EndpointContext
  */
 final class ListEntitiesEndpoint implements Handler {
@@ -117,7 +127,20 @@ final class ListEntitiesEndpoint implements Handler {
     private final StateQueryService queryService;
     private final EntityRegistry entityRegistry;
     private final LongSupplier viewPositionSupplier;
+    private final RecoveryCardQueryService recoveryCards;
     private final Clock clock;
+
+    /**
+     * The pre-AVAIL-API-1 shape (test-facing): no recovery-card projection — every v1.1.7
+     * key renders {@code null}, {@code meta.recoveryViewPosition} null.
+     */
+    ListEntitiesEndpoint(StateQueryService queryService,
+                         EntityRegistry entityRegistry,
+                         LongSupplier viewPositionSupplier,
+                         Clock clock) {
+        this(queryService, entityRegistry, viewPositionSupplier, RecoveryCardQueryService.notLive(),
+                clock);
+    }
 
     /**
      * Constructs a new handler over the given collaborators.
@@ -131,6 +154,9 @@ final class ListEntitiesEndpoint implements Handler {
      *                             never {@code null}
      * @param viewPositionSupplier supplier for the projection's current
      *                             cursor position; never {@code null}
+     * @param recoveryCards        the recovery-card read interface (AVAIL-API-1) —
+     *                             the v1.1.7 keys and {@code meta.recoveryViewPosition};
+     *                             never {@code null}
      * @param clock                injected clock for response timestamps
      *                             (DEC-M3-09 / {@code NO_DIRECT_TIME_ACCESS});
      *                             never {@code null}
@@ -138,11 +164,13 @@ final class ListEntitiesEndpoint implements Handler {
     ListEntitiesEndpoint(StateQueryService queryService,
                          EntityRegistry entityRegistry,
                          LongSupplier viewPositionSupplier,
+                         RecoveryCardQueryService recoveryCards,
                          Clock clock) {
         this.queryService = Objects.requireNonNull(queryService, "queryService");
         this.entityRegistry = Objects.requireNonNull(entityRegistry, "entityRegistry");
         this.viewPositionSupplier =
                 Objects.requireNonNull(viewPositionSupplier, "viewPositionSupplier");
+        this.recoveryCards = Objects.requireNonNull(recoveryCards, "recoveryCards");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
@@ -163,6 +191,7 @@ final class ListEntitiesEndpoint implements Handler {
 
         StateSnapshot snapshot = queryService.getSnapshot();
         long viewPosition = viewPositionSupplier.getAsLong();
+        Instant now = clock.instant();
 
         Comparator<EntityState> comparator = Comparator.comparing(
                 e -> e.entityId().toString());
@@ -174,11 +203,13 @@ final class ListEntitiesEndpoint implements Handler {
         snapshot.states().values().stream()
                 .sorted(comparator)
                 .limit(limit)
-                .forEach(state -> summaries.add(summarise(state)));
+                .forEach(state -> summaries.add(summarise(state, now)));
 
-        Map<String, Object> meta = new LinkedHashMap<>(2);
+        Map<String, Object> meta = new LinkedHashMap<>(3);
         meta.put("viewPosition", viewPosition);
-        meta.put("timestamp", clock.instant().toString());
+        meta.put("timestamp", now.toString());
+        // v1.1.7 (AVAIL-API-1): the recovery-card projection's position, null while not LIVE.
+        meta.put("recoveryViewPosition", EntityStateJson.recoveryViewPosition(recoveryCards));
 
         Map<String, Object> body = new LinkedHashMap<>(2);
         body.put("data", summaries);
@@ -189,18 +220,18 @@ final class ListEntitiesEndpoint implements Handler {
         ctx.json(body);
     }
 
-    private Map<String, Object> summarise(EntityState state) {
-        Map<String, Object> summary = new LinkedHashMap<>(8);
+    private Map<String, Object> summarise(EntityState state, Instant now) {
+        Map<String, Object> summary = new LinkedHashMap<>(20);
         summary.put("entityId", state.entityId().toString());
         summary.put("availability", state.availability().name());
         summary.put("stale", state.stale());
         // v1.1.3 (CG-2): the owning device from the LIVE registry — a ULID string (LTD-04) or
         // JSON null (absent from the registry, or a helper entity with no device). A registry
         // exception is NOT caught here: it would be a projection defect (today's 500 path).
-        summary.put("deviceId", entityRegistry.findEntity(state.entityId())
+        DeviceId deviceId = entityRegistry.findEntity(state.entityId())
                 .map(Entity::deviceId)
-                .map(DeviceId::toString)
-                .orElse(null));
+                .orElse(null);
+        summary.put("deviceId", deviceId == null ? null : deviceId.toString());
         // v1.1.3 (CG-3): the projection's last state_reported instant, ISO-8601 UTC (the same
         // rendering as meta.timestamp), or JSON null when the projection holds none.
         summary.put("lastReported",
@@ -214,6 +245,9 @@ final class ListEntitiesEndpoint implements Handler {
         summary.put("lastSeenAt",
                 state.lastSeenAt() == null ? null : state.lastSeenAt().toString());
         summary.put("link", state.link() == null ? null : linkJson(state.link()));
+        // v1.1.7 (AVAIL-API-1, AMD-103 §3): the recovery-card keys for the owning device,
+        // appended after the frozen keys; null while the projection is not LIVE.
+        EntityStateJson.appendRecoveryKeys(summary, state, deviceId, recoveryCards, now);
         return summary;
     }
 
