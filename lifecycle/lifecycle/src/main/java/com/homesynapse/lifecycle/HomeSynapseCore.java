@@ -1511,35 +1511,26 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
      * automation definitions bind entity refs. Since IR-61b, Step 3.2 also calls
      * it before the state projection subscribes (IR-83), so this Step 3.3 call
      * returns on its first poll.
+     *
+     * <p>REGISTRY-COLD-1 unit 2 (IR-148): the wait is {@link RegistryGate}'s -- it
+     * fails only when the replay STOPS MOVING (no checkpoint or mode change for
+     * ~30 s), never after a fixed 30 s. A replay that keeps paging is progress:
+     * the bus writes the checkpoint every 200 matching events or 2 s (AMD-38).
+     * The outer bound is the packaged unit's start timeout, not this gate.</p>
      */
     private void awaitRegistryProjectionLive() {
-        final int maxPolls = 1_500; // ~30s at 20ms
-        for (int i = 0; i < maxPolls; i++) {
-            if (registryProjectionMode() == SubscriberMode.LIVE) {
-                return;
-            }
-            try {
-                Thread.sleep(20L);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException(
-                        "interrupted while awaiting registry-projection LIVE", e);
-            }
-        }
-        throw new IllegalStateException(
-                "registry projection did not reach LIVE within ~30s during startup");
+        RegistryGate.awaitLive(this::registryProjectionSnapshot,
+                RegistryGate.DEFAULT_STALL_POLLS, RegistryGate::sleep);
     }
 
-    private SubscriberMode registryProjectionMode() {
+    private Optional<SubscriberSnapshot> registryProjectionSnapshot() {
         if (eventBus == null) {
-            return SubscriberMode.COLD;
+            return Optional.empty();
         }
         return eventBus.subscribers().stream()
                 .filter(s -> RegistryProjectionSubscriber.SUBSCRIBER_ID
                         .equals(s.subscriberId()))
-                .findFirst()
-                .map(SubscriberSnapshot::mode)
-                .orElse(SubscriberMode.COLD);
+                .findFirst();
     }
 
     private String buildHealthStatusLine() {
