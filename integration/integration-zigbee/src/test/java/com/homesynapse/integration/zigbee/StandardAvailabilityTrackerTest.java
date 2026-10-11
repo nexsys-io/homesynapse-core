@@ -7,6 +7,7 @@ package com.homesynapse.integration.zigbee;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.homesynapse.event.AvailabilityContractDeclaredEvent;
 import com.homesynapse.test.TestClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -20,6 +21,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -107,14 +109,34 @@ class StandardAvailabilityTrackerTest {
             Function<IEEEAddress, Optional<Duration>> expectedSilenceLookup,
             Function<IEEEAddress, Optional<Duration>> mainsContractLookup) {
         tracker = new StandardAvailabilityTracker(clock,
+                // AVAIL-API-1: the monotonic source — derived from the test clock here.
+                () -> TimeUnit.MILLISECONDS.toNanos(clock.millis()),
                 device -> powerSources.getOrDefault(device.value(), 0),
                 expectedSilenceLookup,
                 mainsContractLookup,
                 persisted,
-                (device, instant, available, reason, lastSeen, lastLink, lastLinkAt) -> {
-                    transitions.add(device.toHexString() + ":" + available);
-                    observed.add(new Observed(device, instant, available, reason,
-                            lastSeen, lastLink, lastLinkAt));
+                new StandardAvailabilityTracker.TransitionListener() {
+                    @Override
+                    public void onTransition(IEEEAddress device, Instant instant,
+                            boolean available, AvailabilityReason reason, Instant lastSeen,
+                            LinkReading lastLink, Instant lastLinkAt) {
+                        transitions.add(device.toHexString() + ":" + available);
+                        observed.add(new Observed(device, instant, available, reason,
+                                lastSeen, lastLink, lastLinkAt));
+                    }
+
+                    @Override
+                    public void onProbeRecord(IEEEAddress device, Instant at,
+                            Instant windowStart, int answered, int missed,
+                            LinkReading lastLink, Instant lastLinkAt) {
+                        // AVAIL-API-1: StandardAvailabilityTrackerProbeRecordTest's sink.
+                    }
+
+                    @Override
+                    public void onContractDeclared(IEEEAddress device, Instant at,
+                            AvailabilityContractDeclaredEvent contract) {
+                        // AVAIL-API-1: StandardAvailabilityTrackerContractTest's sink.
+                    }
                 });
     }
 

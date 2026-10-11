@@ -102,6 +102,12 @@ final class EventCategoryMapping {
                         List.of(EventCategory.DEVICE_STATE, EventCategory.DEVICE_HEALTH)),
                 Map.entry(EventTypes.AVAILABILITY_CHANGED,
                         List.of(EventCategory.DEVICE_HEALTH)),
+                // AVAIL-API-1 (AMD-103 R-A): the availability record under the scope every
+                // persisted availability_changed already carries
+                Map.entry(EventTypes.PROBE_ANSWERED,
+                        List.of(EventCategory.DEVICE_HEALTH)),
+                Map.entry(EventTypes.AVAILABILITY_CONTRACT_DECLARED,
+                        List.of(EventCategory.DEVICE_HEALTH)),
 
                 // ─── Automation lifecycle ─────────────────────────────────────
                 Map.entry(EventTypes.AUTOMATION_TRIGGERED,

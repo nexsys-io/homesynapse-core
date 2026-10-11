@@ -1,5 +1,7 @@
 # homesynapse-app — `com.homesynapse.app` — Scaffold — Assembly apex, manual DI wiring, all requires non-transitive, no exports
 
+> **AVAIL-API-1 (2026-10-11; AMD-103 R-B; T-A): `Main` hands `System::nanoTime` to the Zigbee factory beside the `Clock` — the five-argument `ZigbeeIntegrationFactory(deviceRegistry, registryProjection, dataDirectory, clock, monotonicNanos)` — as the availability tracker's monotonic source (the `probe_answered` record interval and the contract refresh are measured on it). The one `System.nanoTime` call in production code, in the whitelisted assembly package (`HomeSynapseArchRules.NO_DIRECT_TIME_ACCESS`); no module carries it and no `module-info` changes.**
+
 ## Purpose
 
 The homesynapse-app module is the application assembly point — the apex of the entire HomeSynapse Core dependency graph. It wires all subsystem modules together into a running system, provides the process entry point (`Main.main()`), and defines process exit codes (`ExitCode`) for deterministic diagnosis of fatal startup failures. This module depends on every other module but no other module depends on it. It exports no packages and has no downstream consumers.

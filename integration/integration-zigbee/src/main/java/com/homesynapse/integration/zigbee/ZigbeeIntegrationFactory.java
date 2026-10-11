@@ -23,7 +23,9 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 /**
@@ -36,7 +38,9 @@ import java.util.function.Supplier;
  * injected per the M9.3 R4 seam, NOT an {@code IntegrationContext} component), the
  * adapter data directory (the {@code zigbee-devices.json} home), and the injected
  * {@link Clock} (NO_DIRECT_TIME_ACCESS — the frozen 12-component context carries
- * no clock).
+ * no clock) and, beside it, the tracker's monotonic source (AVAIL-API-1, AMD-103 R-B:
+ * the composition root's {@code System::nanoTime}; the four-argument form derives it
+ * from the clock for the bench and the tests).
  *
  * <p><strong>The transport seam:</strong> the byte-channel supplier is
  * package-private-injectable so the hardware-free gates run the REAL adapter code
@@ -57,6 +61,7 @@ public final class ZigbeeIntegrationFactory implements ZigbeeAdapterFactory {
     private final Supplier<RegistryProjection> registryProjection;
     private final Path dataDirectory;
     private final Clock clock;
+    private final LongSupplier monotonicNanos;
     private final Function<Object, SerialByteChannel> channelOpener;
     private volatile ZigbeeIntegrationAdapter lastCreated;
 
@@ -82,22 +87,58 @@ public final class ZigbeeIntegrationFactory implements ZigbeeAdapterFactory {
     public ZigbeeIntegrationFactory(Supplier<DeviceRegistry> deviceRegistry,
             Supplier<RegistryProjection> registryProjection,
             Path dataDirectory, Clock clock) {
-        this(deviceRegistry, registryProjection, dataDirectory, clock, null);
+        this(deviceRegistry, registryProjection, dataDirectory, clock, monotonicFrom(clock),
+                null);
+    }
+
+    /**
+     * Creates the production factory with the composition root's monotonic source
+     * (AVAIL-API-1, AMD-103 R-B): the tracker measures its record interval and contract
+     * refresh on it; {@code Main} hands {@code System::nanoTime}, the one call the arch
+     * rule allows ({@code com.homesynapse.app} is whitelisted).
+     *
+     * @param deviceRegistry as the four-argument form
+     * @param registryProjection as the four-argument form
+     * @param dataDirectory as the four-argument form
+     * @param clock the injected time source, never {@code null}
+     * @param monotonicNanos the monotonic source in nanoseconds, never {@code null}
+     */
+    public ZigbeeIntegrationFactory(Supplier<DeviceRegistry> deviceRegistry,
+            Supplier<RegistryProjection> registryProjection,
+            Path dataDirectory, Clock clock, LongSupplier monotonicNanos) {
+        this(deviceRegistry, registryProjection, dataDirectory, clock, monotonicNanos, null);
     }
 
     /**
      * The transport-injectable seam (bench/test): the channel supplier replaces the
-     * real serial port — the E2E gates substitute the scripted NCP here.
+     * real serial port — the E2E gates substitute the scripted NCP here; the
+     * monotonic source derives from the clock.
      */
     ZigbeeIntegrationFactory(Supplier<DeviceRegistry> deviceRegistry,
             Supplier<RegistryProjection> registryProjection, Path dataDirectory,
             Clock clock, Function<Object, SerialByteChannel> channelOpener) {
+        this(deviceRegistry, registryProjection, dataDirectory, clock, monotonicFrom(clock),
+                channelOpener);
+    }
+
+    /** The canonical constructor: every wiring input, the transport seam included. */
+    ZigbeeIntegrationFactory(Supplier<DeviceRegistry> deviceRegistry,
+            Supplier<RegistryProjection> registryProjection, Path dataDirectory,
+            Clock clock, LongSupplier monotonicNanos,
+            Function<Object, SerialByteChannel> channelOpener) {
         this.deviceRegistry = Objects.requireNonNull(deviceRegistry, "deviceRegistry");
         this.registryProjection = Objects.requireNonNull(registryProjection,
                 "registryProjection");
         this.dataDirectory = Objects.requireNonNull(dataDirectory, "dataDirectory");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.monotonicNanos = Objects.requireNonNull(monotonicNanos, "monotonicNanos");
         this.channelOpener = channelOpener;
+    }
+
+    /** The bench/test default for the monotonic source: the injected clock's millis as nanos. */
+    private static LongSupplier monotonicFrom(Clock clock) {
+        Objects.requireNonNull(clock, "clock");
+        return () -> TimeUnit.MILLISECONDS.toNanos(clock.millis());
     }
 
     /**
@@ -163,16 +204,20 @@ public final class ZigbeeIntegrationFactory implements ZigbeeAdapterFactory {
         // Driven mode (injected channel — the rig) vs production mode (§5.1): the
         // real enumerator + jSerialComm channel opener bind HERE, keeping
         // jSerialComm types interior to this module (D-M92-1).
+        // AVAIL-API-1: the monotonic source rides the clock's seam into the adapter's
+        // canonical constructor on both paths (the real-path canonicalizer binds).
         ZigbeeIntegrationAdapter adapter = channelOpener != null
                 ? new ZigbeeIntegrationAdapter(
-                        context, registry, projection, dataDirectory, clock,
-                        channelOpener)
+                        context, registry, projection, dataDirectory, clock, monotonicNanos,
+                        channelOpener, null, null, PortLocator.realPathCanonicalizer())
                 : new ZigbeeIntegrationAdapter(
-                        context, registry, projection, dataDirectory, clock, null,
+                        context, registry, projection, dataDirectory, clock, monotonicNanos,
+                        null,
                         new JSerialCommPortEnumerator(),
                         candidate -> JSerialCommByteChannel.open(
                                 com.fazecast.jSerialComm.SerialPort.getCommPort(
-                                        candidate.systemPath())));
+                                        candidate.systemPath())),
+                        PortLocator.realPathCanonicalizer());
         lastCreated = adapter;
         return adapter;
     }

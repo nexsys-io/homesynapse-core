@@ -12,7 +12,7 @@ import java.util.List;
  *
  * <p>This class defines all core event type string constants referenced by
  * {@link EventEnvelope#eventType()} and the {@link EventType} annotation values on
- * the 43 core payload records. Each constant uses UPPER_SNAKE_CASE names with
+ * the 45 core payload records. Each constant uses UPPER_SNAKE_CASE names with
  * lower_snake_case string values for consistency with the taxonomy defined in
  * Doc 01 §4.3.
  *
@@ -27,7 +27,7 @@ import java.util.List;
  * shared across all HomeSynapse deployments.
  *
  * <p><strong>Core production event class manifest (M3.6c):</strong>
- * {@link #CORE_PRODUCTION_EVENT_CLASSES} is the canonical, ordered list of the 43 core
+ * {@link #CORE_PRODUCTION_EVENT_CLASSES} is the canonical, ordered list of the 45 core
  * {@link DomainEvent} payload record classes that ship with HomeSynapse Core. The composition
  * root aggregates this list with the per-module manifests contributed by other modules
  * (currently {@code IntegrationEvents.LIFECYCLE_EVENT_CLASSES} in
@@ -114,6 +114,19 @@ public final class EventTypes {
 
 	/** Event issued when a device's availability status changes. */
 	public static final String AVAILABILITY_CHANGED = "availability_changed";
+
+	/**
+	 * Event issued by an integration's availability tracker as the sampled record of an
+	 * answered liveness probe — DEVICE-subject; DIAGNOSTIC, elevated to NORMAL when the
+	 * record's window holds a miss (AMD-103 R-A, R-B; AVAIL-API-1).
+	 */
+	public static final String PROBE_ANSWERED = "probe_answered";
+
+	/**
+	 * Event issued by an integration's availability tracker declaring the liveness policy
+	 * it applies to a device — DEVICE-subject, NORMAL (AMD-103 R-A, R-C; AVAIL-API-1).
+	 */
+	public static final String AVAILABILITY_CONTRACT_DECLARED = "availability_contract_declared";
 
 	// ========== Device and Entity Profile ==========
 
@@ -338,7 +351,7 @@ public final class EventTypes {
 	// ========== Core Production Event Class Manifest (M3.6c, DECIDE-04) ==========
 
 	/**
-	 * Canonical, ordered list of the 43 core {@link DomainEvent} payload record classes
+	 * Canonical, ordered list of the 45 core {@link DomainEvent} payload record classes
 	 * that ship with HomeSynapse Core. Every entry carries an {@link EventType} annotation
 	 * whose value is one of the string constants above and which is registered with the
 	 * {@code EventTypeRegistry} at startup.
@@ -413,5 +426,8 @@ public final class EventTypes {
 					AutomationConflictDetectedEvent.class,
 					// M9.5-DUR registries-as-projections slice (AMD-99)
 					DeviceRegisteredEvent.class,
-					EntityRegisteredEvent.class);
+					EntityRegisteredEvent.class,
+					// AVAIL-API-1 availability-record slice (AMD-103 R-A, R-E)
+					ProbeAnsweredEvent.class,
+					AvailabilityContractDeclaredEvent.class);
 }

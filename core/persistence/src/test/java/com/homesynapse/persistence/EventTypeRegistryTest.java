@@ -26,11 +26,11 @@ import org.junit.jupiter.api.Test;
 class EventTypeRegistryTest {
 
     @Test
-    @DisplayName("constructor registers all 43 core event classes")
+    @DisplayName("constructor registers all 45 core event classes")
     void construct_withValidClasses_registersAll() {
         EventTypeRegistry registry = new EventTypeRegistry(AllEventClasses.CORE_EVENTS);
 
-        assertThat(registry.size()).isEqualTo(43);
+        assertThat(registry.size()).isEqualTo(45);
         for (Class<? extends DomainEvent> cls : AllEventClasses.CORE_EVENTS) {
             assertThat(registry.typeFor(cls)).isPresent();
             String typeString = registry.typeFor(cls).orElseThrow();
@@ -39,11 +39,11 @@ class EventTypeRegistryTest {
     }
 
     @Test
-    @DisplayName("constructor registers all 58 core + integration classes (J2: + join_rejected)")
+    @DisplayName("constructor registers all 60 core + integration classes (AVAIL-API-1: + the two availability records)")
     void construct_withCoreAndIntegration_registersAll() {
         EventTypeRegistry registry = new EventTypeRegistry(AllEventClasses.ALL_EVENTS);
 
-        assertThat(registry.size()).isEqualTo(58);   // J2: + join_rejected
+        assertThat(registry.size()).isEqualTo(60);   // AVAIL-API-1: + probe_answered, + availability_contract_declared
     }
 
     @Test
@@ -128,7 +128,7 @@ class EventTypeRegistryTest {
 
         Set<String> types = registry.registeredTypes();
 
-        assertThat(types).hasSize(43);
+        assertThat(types).hasSize(45);
         assertThatThrownBy(() -> types.add("new_type"))
                 .isInstanceOf(UnsupportedOperationException.class);
     }

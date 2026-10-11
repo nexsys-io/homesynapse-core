@@ -16,9 +16,13 @@ import com.homesynapse.device.InMemoryDeviceRegistry;
 import com.homesynapse.device.InMemoryEntityRegistry;
 import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.event.AvailabilityChangedEvent;
+import com.homesynapse.event.AvailabilityContractDeclaredEvent;
 import com.homesynapse.event.EventEnvelope;
+import com.homesynapse.event.EventOrigin;
 import com.homesynapse.event.EventPriority;
 import com.homesynapse.event.EventTypes;
+import com.homesynapse.event.ProbeAnsweredEvent;
+import com.homesynapse.event.SubjectRef;
 import com.homesynapse.event.SubjectType;
 import com.homesynapse.integration.CommandEnvelope;
 import com.homesynapse.integration.HealthReporter;
@@ -654,6 +658,120 @@ class ZigbeeAvailabilityWiringTest {
         clock.advance(Duration.ofSeconds(31));
         restarted.runCycleOnce();
         assertThat(pingUnicasts(restartNcp, MAINS_NWK)).isEqualTo(2);
+    }
+
+    // ── AVAIL-API-1 E-5 (AMD-103 R-A/R-B/R-C): the DEVICE-subject drafts ────────
+
+    @Test
+    @DisplayName("AVAIL-API-1 E-5: the adapter publishes ONE availability_contract_declared per "
+            + "declaration — DEVICE-subject, NORMAL, schema 1; the mains light with no metering "
+            + "row reads mains-floor (60 s, asked, recorded hourly); an unchanged evaluation "
+            + "publishes nothing more")
+    void contractDeclared_oneDeviceSubjectDraft_normal() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        ZigbeeAdoptionSlice.AdoptedDevice adopted = adoptDirect(adapter, mainsInterview());
+        captureAdapterLog(Level.INFO);
+
+        deliverReport(adapter, MAINS_NWK, 11, 0x0006, onOffReport(1, true));
+        adapter.runCycleOnce();
+
+        List<EventEnvelope> contracts =
+                publisher.ofType(EventTypes.AVAILABILITY_CONTRACT_DECLARED).toList();
+        assertThat(contracts).hasSize(1);
+        EventEnvelope envelope = contracts.get(0);
+        assertThat(envelope.subjectRef()).isEqualTo(SubjectRef.device(adopted.deviceId()));
+        assertThat(envelope.priority()).isEqualTo(EventPriority.NORMAL);
+        assertThat(envelope.schemaVersion()).isEqualTo(1);
+        assertThat(envelope.origin()).isEqualTo(EventOrigin.INTEGRATION);
+        assertThat(envelope.payload()).isEqualTo(
+                new AvailabilityContractDeclaredEvent("mains-floor", null, 60, 2, 3600));
+        assertThat(adapterMessages("zigbee.availability_contract_declared"))
+                .containsExactly("zigbee.availability_contract_declared: device="
+                        + new IEEEAddress(MAINS_IEEE) + " class=mains-floor");
+
+        adapter.runCycleOnce();
+
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CONTRACT_DECLARED).count())
+                .as("an unchanged evaluation declares nothing")
+                .isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("AVAIL-API-1 E-5: the first answered probe publishes ONE probe_answered — "
+            + "DEVICE-subject, DIAGNOSTIC when the window holds no miss; answered=1 missed=0, "
+            + "the window opening at the tracker's start; the INFO line beside it")
+    void probeAnswered_firstAnswer_deviceSubject_diagnostic() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        Instant trackerStart = clock.instant();
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        ZigbeeAdoptionSlice.AdoptedDevice adopted = adoptDirect(adapter, mainsInterview());
+        deliverReport(adapter, MAINS_NWK, 11, 0x0006, onOffReport(1, true));
+        captureAdapterLog(Level.INFO);
+
+        clock.advance(Duration.ofSeconds(61));
+        adapter.runCycleOnce();   // the probe goes out; the scripted NCP answers
+
+        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(1);
+        List<EventEnvelope> records = publisher.ofType(EventTypes.PROBE_ANSWERED).toList();
+        assertThat(records).hasSize(1);
+        EventEnvelope envelope = records.get(0);
+        assertThat(envelope.subjectRef()).isEqualTo(SubjectRef.device(adopted.deviceId()));
+        assertThat(envelope.priority())
+                .as("no miss in the window: DIAGNOSTIC (R-A)")
+                .isEqualTo(EventPriority.DIAGNOSTIC);
+        assertThat(envelope.schemaVersion()).isEqualTo(1);
+        assertThat(envelope.origin()).isEqualTo(EventOrigin.INTEGRATION);
+        ProbeAnsweredEvent record = (ProbeAnsweredEvent) envelope.payload();
+        assertThat(record.answeredSinceLastRecord()).isEqualTo(1);
+        assertThat(record.missedSinceLastRecord()).isZero();
+        assertThat(record.windowStart()).isEqualTo(trackerStart);
+        assertThat(record.at()).isAfter(trackerStart).isEqualTo(envelope.eventTime());
+        assertThat(adapterMessages("zigbee.probe_answered"))
+                .containsExactly("zigbee.probe_answered: device=" + new IEEEAddress(MAINS_IEEE)
+                        + " answered=1 missed=0");
+        assertThat(publisher.ofType(EventTypes.AVAILABILITY_CHANGED).count())
+                .as("a successful ping is evidence, not a transition")
+                .isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("AVAIL-API-1 E-5: a miss then an answer — the opening record carries missed=1 "
+            + "and rides NORMAL (the one-level elevation, R-A); the miss alone publishes nothing")
+    void probeAnswered_afterAMiss_elevatedToNormal() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(this::scriptedNcp);
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        ZigbeeAdoptionSlice.AdoptedDevice adopted = adoptDirect(adapter, mainsInterview());
+        deliverReport(adapter, MAINS_NWK, 11, 0x0006, onOffReport(1, true));
+        captureAdapterLog(Level.INFO);
+
+        pingSilent = true;
+        clock.advance(Duration.ofSeconds(61));
+        adapter.runCycleOnce();   // miss #1: K = 2 — still AVAILABLE, still a candidate
+
+        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(1);
+        assertThat(publisher.ofType(EventTypes.PROBE_ANSWERED).count())
+                .as("a miss is never a record").isZero();
+
+        pingSilent = false;
+        adapter.runCycleOnce();   // the next sweep probes again; the answer opens the record
+
+        assertThat(pingUnicasts(ncp, MAINS_NWK)).isEqualTo(2);
+        List<EventEnvelope> records = publisher.ofType(EventTypes.PROBE_ANSWERED).toList();
+        assertThat(records).hasSize(1);
+        assertThat(records.get(0).subjectRef()).isEqualTo(SubjectRef.device(adopted.deviceId()));
+        assertThat(records.get(0).priority())
+                .as("the window holds a miss: elevated to NORMAL")
+                .isEqualTo(EventPriority.NORMAL);
+        ProbeAnsweredEvent record = (ProbeAnsweredEvent) records.get(0).payload();
+        assertThat(record.answeredSinceLastRecord()).isEqualTo(1);
+        assertThat(record.missedSinceLastRecord()).isEqualTo(1);
+        assertThat(adapterMessages("zigbee.probe_answered"))
+                .containsExactly("zigbee.probe_answered: device=" + new IEEEAddress(MAINS_IEEE)
+                        + " answered=1 missed=1");
     }
 
     @Test

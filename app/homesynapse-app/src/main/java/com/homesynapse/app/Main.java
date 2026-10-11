@@ -111,9 +111,12 @@ public final class Main {
         // factory list is a core ctor argument); create() runs during start()
         // Phase 6, after the holder is set and after Phase 3 built the projection.
         HomeSynapseCore[] coreRef = new HomeSynapseCore[1];
+        // AVAIL-API-1 (AMD-103 R-B): the tracker's monotonic source rides the clock's
+        // seam from here — the one System.nanoTime call, in the whitelisted assembly
+        // package (HomeSynapseArchRules.NO_DIRECT_TIME_ACCESS); no module carries it.
         ZigbeeIntegrationFactory zigbeeFactory = new ZigbeeIntegrationFactory(
                 () -> zigbeeDeviceRegistry, () -> coreRef[0].registryProjection(),
-                zigbeeDataDir, clock);
+                zigbeeDataDir, clock, System::nanoTime);
 
         // AB-4 boundary: the at-rest payload cipher goes LIVE — the ctor passes
         // the payloadCipher(configDir, clock) adapter, flipping

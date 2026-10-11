@@ -13,12 +13,14 @@ import com.homesynapse.device.RegistryEventMapper;
 import com.homesynapse.device.RegistryProjection;
 import com.homesynapse.device.StandardCapabilities;
 import com.homesynapse.event.AvailabilityChangedEvent;
+import com.homesynapse.event.AvailabilityContractDeclaredEvent;
 import com.homesynapse.event.DomainEvent;
 import com.homesynapse.event.EntityRegisteredEvent;
 import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventOrigin;
 import com.homesynapse.event.EventPriority;
 import com.homesynapse.event.EventTypes;
+import com.homesynapse.event.ProbeAnsweredEvent;
 import com.homesynapse.event.SequenceConflictException;
 import com.homesynapse.event.SubjectRef;
 import com.homesynapse.integration.CommandHandler;
@@ -54,9 +56,11 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
@@ -203,6 +207,14 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
     static final int AVAILABILITY_CHANGED_SCHEMA_VERSION = 2;
 
     /**
+     * AVAIL-API-1 (AMD-103): the schema version of the two availability records —
+     * {@code probe_answered} (R-B) and {@code availability_contract_declared} (R-C),
+     * both new at version 1, DEVICE-subject.
+     */
+    static final int PROBE_ANSWERED_SCHEMA_VERSION = 1;
+    static final int AVAILABILITY_CONTRACT_DECLARED_SCHEMA_VERSION = 1;
+
+    /**
      * J2b: {@code permit_join_opened} publishes at schema version 2 — PJ-2's seven
      * fields plus the nullable {@code scope}. Additive-nullable like J1's event: a v1
      * row decodes to the record with {@code scope == null}; a v2 row with a null scope
@@ -228,6 +240,14 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
     private final RegistryProjection registryProjection;
     private final Path dataDirectory;
     private final Clock clock;
+    /**
+     * AVAIL-API-1 (AMD-103 R-B): the monotonic source the tracker measures its record
+     * interval and contract refresh on — rides the {@code Clock}'s own seam from the
+     * composition root ({@code Main} hands {@code System::nanoTime}); the test-facing
+     * constructors derive it from the injected clock, so the arch rule keeps
+     * {@code System.nanoTime} out of this module.
+     */
+    private final LongSupplier monotonicNanos;
     private final Function<Object, SerialByteChannel> channelOpener;
     private final PortLocator.PortEnumerator portEnumerator;
     private final PortChannelOpener portChannelOpener;
@@ -348,11 +368,13 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
      * {@code portChannelOpener} select PRODUCTION mode (§5.1).
      * {@code pathCanonicalizer} feeds the identity capture and the pinned-only
      * reopen rule (tests inject pure maps; production binds
-     * {@link PortLocator#realPathCanonicalizer()}).
+     * {@link PortLocator#realPathCanonicalizer()}). AVAIL-API-1: {@code monotonicNanos}
+     * is the tracker's monotonic source (the composition root's {@code System::nanoTime}
+     * through the factory); every other constructor derives it from the clock.
      */
     ZigbeeIntegrationAdapter(IntegrationContext context, DeviceRegistry deviceRegistry,
             RegistryProjection registryProjection,
-            Path dataDirectory, Clock clock,
+            Path dataDirectory, Clock clock, LongSupplier monotonicNanos,
             Function<Object, SerialByteChannel> channelOpener,
             PortLocator.PortEnumerator portEnumerator,
             PortChannelOpener portChannelOpener,
@@ -362,10 +384,27 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         this.registryProjection = registryProjection;
         this.dataDirectory = dataDirectory;
         this.clock = clock;
+        this.monotonicNanos = Objects.requireNonNull(monotonicNanos, "monotonicNanos");
         this.channelOpener = channelOpener;
         this.portEnumerator = portEnumerator;
         this.portChannelOpener = portChannelOpener;
         this.pathCanonicalizer = pathCanonicalizer;
+    }
+
+    /**
+     * The M9.6-RO shape (the test-facing canonical constructor): the monotonic source
+     * derived from the injected clock, so the 18 test constructions stand (AVAIL-API-1).
+     */
+    ZigbeeIntegrationAdapter(IntegrationContext context, DeviceRegistry deviceRegistry,
+            RegistryProjection registryProjection,
+            Path dataDirectory, Clock clock,
+            Function<Object, SerialByteChannel> channelOpener,
+            PortLocator.PortEnumerator portEnumerator,
+            PortChannelOpener portChannelOpener,
+            UnaryOperator<String> pathCanonicalizer) {
+        this(context, deviceRegistry, registryProjection, dataDirectory, clock,
+                monotonicFrom(clock), channelOpener, portEnumerator, portChannelOpener,
+                pathCanonicalizer);
     }
 
     /** The pre-M9.6-RO production shape: the real-path canonicalizer binds. */
@@ -378,6 +417,17 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         this(context, deviceRegistry, registryProjection, dataDirectory, clock,
                 channelOpener, portEnumerator, portChannelOpener,
                 PortLocator.realPathCanonicalizer());
+    }
+
+    /**
+     * AVAIL-API-1: the test-facing default for the monotonic source — the injected
+     * clock's millis as nanos (a {@code TestClock} advances both together; the arch rule
+     * bans {@code System.nanoTime} here). Production never takes this path: the factory
+     * hands the composition root's source to the canonical constructor.
+     */
+    private static LongSupplier monotonicFrom(Clock clock) {
+        Objects.requireNonNull(clock, "clock");
+        return () -> TimeUnit.MILLISECONDS.toNanos(clock.millis());
     }
 
     /** The M9.4a driven-mode shape (the rig path) — behavior-identical. */
@@ -467,7 +517,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
                     persistedEvidence.get(ieee)));
         }
         availabilityPublisher = new EntityAvailabilityPublisher();
-        availabilityTracker = new StandardAvailabilityTracker(clock,
+        availabilityTracker = new StandardAvailabilityTracker(clock, monotonicNanos,
                 ieee -> cache.device(ieee)
                         .map(ZigbeeDeviceRecord::powerSource).orElse(0),
                 this::expectedSilenceFor,
@@ -1494,6 +1544,8 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
             ZigbeeAdoptionSlice.DiscoveryOutcome outcome, DeviceProfile profile) {
         if (outcome == ZigbeeAdoptionSlice.DiscoveryOutcome.LINKED) {
             driveReporting(interview, profile, true);
+            // AVAIL-API-1 (AMD-103 R-C): a re-interview declares the contract anew.
+            availabilityTracker.declareContract(interview.ieeeAddress());
             return;
         }
         if (!adoptAcceptList.contains(interview.ieeeAddress().value())) {
@@ -1508,6 +1560,10 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
                 interview.ieeeAddress());
         adoption.adopt(interview.ieeeAddress());
         driveReporting(interview, profile, false);
+        // AVAIL-API-1 (AMD-103 R-C): the interview's declaration — after the drive, so
+        // the cache record carries the PowerSource and the endpoints the class derives
+        // from; the contract is re-walked from the record, never read from the drive.
+        availabilityTracker.declareContract(interview.ieeeAddress());
     }
 
     /**
@@ -2027,6 +2083,71 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
             publishForEntities(device,
                     prior == null ? "unknown" : prior ? "online" : "offline",
                     available, reason, lastSeen, lastLink, lastLinkAt);
+        }
+
+        /**
+         * AVAIL-API-1 (AMD-103 R-B): the sampled record — ONE DEVICE-subject
+         * {@code probe_answered} per device (never per entity), DIAGNOSTIC,
+         * elevated one level to NORMAL when the window holds a miss (R-A). The
+         * tracker calls this AFTER its unlock with its snapshot in the arguments.
+         * The INFO line is BC10's evidence beside the store read. A device the
+         * slice has not adopted has no {@code DeviceId} and publishes nothing.
+         */
+        @Override
+        public void onProbeRecord(IEEEAddress device, Instant at, Instant windowStart,
+                int answered, int missed, LinkReading lastLink, Instant lastLinkAt) {
+            log.info("zigbee.probe_answered: device={} answered={} missed={}",
+                    device, answered, missed);
+            Optional<DeviceId> deviceId = adoption.deviceIdFor(device);
+            if (deviceId.isEmpty()) {
+                log.debug("zigbee.probe_record_unadopted: device={}", device);
+                return;
+            }
+            boolean reading = lastLink != null && lastLinkAt != null;
+            publishDeviceRecord(EventTypes.PROBE_ANSWERED, PROBE_ANSWERED_SCHEMA_VERSION,
+                    at, deviceId.get(),
+                    missed > 0 ? EventPriority.NORMAL : EventPriority.DIAGNOSTIC,
+                    new ProbeAnsweredEvent(at, windowStart, answered, missed,
+                            reading ? lastLink.lqi() : null,
+                            reading ? lastLink.rssiDbm() : null,
+                            reading ? lastLinkAt : null));
+        }
+
+        /**
+         * AVAIL-API-1 (AMD-103 R-C): ONE DEVICE-subject
+         * {@code availability_contract_declared} per declaration, NORMAL — at the
+         * tracker's start, at a (re-)interview, on a change, at the 30-day refresh.
+         */
+        @Override
+        public void onContractDeclared(IEEEAddress device, Instant at,
+                AvailabilityContractDeclaredEvent contract) {
+            log.info("zigbee.availability_contract_declared: device={} class={}",
+                    device, contract.availabilityClass());
+            Optional<DeviceId> deviceId = adoption.deviceIdFor(device);
+            if (deviceId.isEmpty()) {
+                log.debug("zigbee.contract_unadopted: device={}", device);
+                return;
+            }
+            publishDeviceRecord(EventTypes.AVAILABILITY_CONTRACT_DECLARED,
+                    AVAILABILITY_CONTRACT_DECLARED_SCHEMA_VERSION, at, deviceId.get(),
+                    EventPriority.NORMAL, contract);
+        }
+
+        /**
+         * The DEVICE-subject root publish both records share: the record's own
+         * instant as {@code eventTime}; a sequence conflict degrades to ONE WARN
+         * (the relink-precedent idiom — the next record re-renders the fact).
+         */
+        private void publishDeviceRecord(String eventType, int schemaVersion, Instant at,
+                DeviceId deviceId, EventPriority priority, DomainEvent payload) {
+            try {
+                context.eventPublisher().publishRoot(new EventDraft(eventType, schemaVersion,
+                        at, SubjectRef.device(deviceId), priority, EventOrigin.INTEGRATION,
+                        payload, null, null));
+            } catch (SequenceConflictException conflict) {
+                log.warn("zigbee.availability_record_publish_conflict: device={} type={}: {}",
+                        deviceId, eventType, conflict.getMessage());
+            }
         }
 
         /**
