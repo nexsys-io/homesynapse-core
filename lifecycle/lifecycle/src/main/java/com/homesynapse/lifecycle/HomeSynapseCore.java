@@ -613,19 +613,35 @@ public final class HomeSynapseCore implements SystemLifecycleManager, ReadinessS
         // AMD-99 / REG-INV-1: the registries are projections of the event log.
         // The projection is THE single apply path (every registry mutation flows
         // through it -- the REGISTRY_MUTATION_ONLY_VIA_PROJECTION rule enforces
-        // this); its bus subscriber rebuilds both registries by replaying the
-        // registration/removal events. Because the in-memory registries start
-        // empty every boot, the subscriber's checkpoint RESETS TO 0 BEFORE
-        // subscribeRuntime (the bus reads the checkpoint at registration; 0 means
-        // start-of-log per the CheckpointStore contract).
+        // this); its bus subscriber rebuilds both registries from the four
+        // registry event types, in log order. REGISTRY-COLD-1 (IR-148): the
+        // reset to 0 made every boot walk the whole log through the bus's page
+        // walk (1.65 M rows: unfinished at 44.8 s cold on the Pi). Four steps now:
+        //   (1) note the log's head H;
+        //   (2) rebuild from the four types through idx_events_type up to H, each
+        //       row through the same onEvent the bus calls;
+        //   (3) write H as the subscriber's checkpoint (was 0) -- durable at its
+        //       return, read by the bus on its own thread after (4);
+        //   (4) subscribe as before: the bus replays only the rows after H.
+        // No row is lost or doubled: one writer and AUTOINCREMENT, so no row <= H
+        // commits after H is read; the rebuild applies (0, H], the bus every row
+        // above H. A rebuild that throws never reaches (3): the boot fails here.
         this.registryProjection = new RegistryProjection(deviceRegistry, entityRegistry);
+        RegistryProjectionSubscriber registrySubscriber =
+                new RegistryProjectionSubscriber(registryProjection, deviceRegistry, entityRegistry);
+        EventStore store = persistenceFactory.eventStore();
+        long head = store.latestPosition();                                         // (1) H
+        Instant rebuildStart = clock.instant();
+        long rows = registrySubscriber.rebuildFromIndex(store, head);               // (2)
+        long skipped = registrySubscriber.skipped();                                 // (2b) 0 normally
         persistenceFactory.checkpointStore()
-                .writeCheckpoint(RegistryProjectionSubscriber.SUBSCRIBER_ID, 0L);
+                .writeCheckpoint(RegistryProjectionSubscriber.SUBSCRIBER_ID, head); // (3) H, not 0
+        LOG.info("registry.projection_rebuilt: rows={} head={} skipped={} ms={}", rows, head,
+                skipped, Duration.between(rebuildStart, clock.instant()).toMillis());
         eventBus.subscribeRuntime(
                 new SubscriberInfo(RegistryProjectionSubscriber.SUBSCRIBER_ID,
                         RegistryProjectionSubscriber.subscriptionFilter(), false),
-                new RegistryProjectionSubscriber(
-                        registryProjection, deviceRegistry, entityRegistry));
+                registrySubscriber);                                                // (4) as today
         recordSubsystem("device-model", LifecyclePhase.CORE_DOMAIN, deviceStart);
 
         // Step 3.2 — state store + projection (REPLAY → LIVE) + query service.

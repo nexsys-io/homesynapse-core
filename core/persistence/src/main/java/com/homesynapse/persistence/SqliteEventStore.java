@@ -209,9 +209,32 @@ final class SqliteEventStore implements EventPublisher, EventStore {
             SELECT_COLS + " WHERE correlation_id = ? "
                     + "ORDER BY global_position ASC";
 
-    private static final String SELECT_BY_TYPE_SQL =
-            SELECT_COLS + " WHERE event_type = ? AND global_position > ? "
+    /**
+     * The type read ({@link #readByType}): the registry's boot rebuild and the
+     * explanation service's type scans read through it.
+     *
+     * <p>{@code INDEXED BY idx_events_type} (REGISTRY-COLD-1, IR-148): the
+     * registry's boot rebuild reads its four types through these statements. A
+     * rowid walk — the plan IR-40 caught the shipped planner choosing for the
+     * sibling time-range read ({@code SELECT_BY_TIME_RANGE_SQL} below) — would
+     * turn the rebuild back into a whole-log walk while returning the same few
+     * hundred rows, which no count of returned rows can see. The hint makes the
+     * plan the index range whatever the bound page size or the table's size, and
+     * a dropped or renamed index fails loudly ({@code no such index}).
+     * Package-private so the plan test reads the exact SQL;
+     * {@link #HAS_MORE_FOR_TYPE_SQL} is the page's hasMore probe under the same
+     * hint.</p>
+     */
+    static final String SELECT_BY_TYPE_SQL =
+            SELECT_COLS
+                    + " INDEXED BY idx_events_type"
+                    + " WHERE event_type = ? AND global_position > ? "
                     + "ORDER BY global_position ASC LIMIT ?";
+
+    /** The type page's hasMore probe — the same index pin (REGISTRY-COLD-1, IR-148). */
+    static final String HAS_MORE_FOR_TYPE_SQL =
+            "SELECT 1 FROM events INDEXED BY idx_events_type"
+                    + " WHERE event_type = ? AND global_position > ? LIMIT 1";
 
     /**
      * Time range is evaluated against {@code COALESCE(event_time, ingest_time)}
@@ -767,9 +790,7 @@ final class SqliteEventStore implements EventPublisher, EventStore {
 
     private boolean hasMoreForTypeAfterPosition(String eventType, long lastGlobal) {
         return executeRead(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "SELECT 1 FROM events "
-                            + "WHERE event_type = ? AND global_position > ? LIMIT 1")) {
+            try (PreparedStatement ps = conn.prepareStatement(HAS_MORE_FOR_TYPE_SQL)) {
                 ps.setString(1, eventType);
                 ps.setLong(2, lastGlobal);
                 try (ResultSet rs = ps.executeQuery()) {
