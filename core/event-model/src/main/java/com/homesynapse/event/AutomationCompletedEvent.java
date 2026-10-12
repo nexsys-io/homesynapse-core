@@ -46,6 +46,13 @@ import com.homesynapse.platform.identity.Ulid;
  * @param abortReason   the abort cause (e.g. {@code "restart_mode"}, {@code "shutdown"},
  *                      {@code "interrupted_by_crash"}); {@code null} unless the Run was
  *                      aborted or interrupted (§6.6, §3.10)
+ * @param skippedUnavailable the number of command targets skipped for unavailability under
+ *                      {@code SKIP} policy across the Run (Doc 07 §3.9; IR-95); {@code >= 0};
+ *                      {@code 0} for Runs that issued every command, for
+ *                      {@code CONDITION_NOT_MET} and for {@code INTERRUPTED} (the crash
+ *                      re-derivation re-executes nothing, so the count is unknown and
+ *                      written {@code 0}). Appended LAST by J3 T-B (additive; JSON
+ *                      {@code skipped_unavailable}); a pre-J3 row reads {@code 0}
  * @see AutomationTriggeredEvent
  * @see DomainEvent
  * @see EventTypes#AUTOMATION_COMPLETED
@@ -58,7 +65,8 @@ public record AutomationCompletedEvent(
         int actionCount,
         int commandCount,
         String failureReason,
-        String abortReason
+        String abortReason,
+        int skippedUnavailable
 ) implements DomainEvent {
 
     /**
@@ -68,8 +76,9 @@ public record AutomationCompletedEvent(
      * @throws NullPointerException     if {@code runId} or {@code finalStatus} is
      *                                  {@code null}
      * @throws IllegalArgumentException if {@code finalStatus} is blank, or
-     *                                  {@code durationMs}, {@code actionCount}, or
-     *                                  {@code commandCount} is negative
+     *                                  {@code durationMs}, {@code actionCount},
+     *                                  {@code commandCount} or {@code skippedUnavailable} is
+     *                                  negative
      */
     public AutomationCompletedEvent {
         Objects.requireNonNull(runId, "runId must not be null");
@@ -85,6 +94,10 @@ public record AutomationCompletedEvent(
         }
         if (commandCount < 0) {
             throw new IllegalArgumentException("commandCount must be >= 0: " + commandCount);
+        }
+        if (skippedUnavailable < 0) {
+            throw new IllegalArgumentException(
+                    "skippedUnavailable must be >= 0: " + skippedUnavailable);
         }
     }
 }

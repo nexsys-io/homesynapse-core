@@ -312,6 +312,24 @@ class StandardRunManagerTest {
     }
 
     @Test
+    @DisplayName("J3 S-5 (IR-95): automation_completed carries the executor's skippedUnavailable "
+            + "beside the tally — a run whose only command target was skipped reads "
+            + "command_count 0, skipped_unavailable 1")
+    void completed_carriesSkippedUnavailable() throws Exception {
+        executor.tally(1, 0, 1);
+        AutomationDefinition auto = automation(automationId(), ConcurrencyMode.SINGLE, 1, 0);
+
+        initiate(auto, triggerEvent(), RunCausalChain.root());
+        manager.awaitQuiescence(AWAIT_MS);
+
+        AutomationCompletedEvent c = onlyCompleted();
+        assertThat(c.finalStatus()).isEqualTo("COMPLETED");
+        assertThat(c.actionCount()).isEqualTo(1);
+        assertThat(c.commandCount()).isZero();
+        assertThat(c.skippedUnavailable()).isEqualTo(1);
+    }
+
+    @Test
     @DisplayName("DP-A.3: the dedup claim precedes the gate — a duplicate raced during the gate is deduped")
     void dedupClaimedBeforeGate_reentrantDuplicateIsDeduped() throws Exception {
         AutomationDefinition auto = automation(automationId(), ConcurrencyMode.SINGLE, 1, 0);
@@ -674,6 +692,7 @@ class StandardRunManagerTest {
         private volatile String error = "action failed";
         private volatile int actionCount = 0;
         private volatile int commandCount = 0;
+        private volatile int skippedUnavailable = 0;
         private volatile CountDownLatch latch = new CountDownLatch(0);
 
         void block() {
@@ -691,8 +710,14 @@ class StandardRunManagerTest {
         }
 
         void tally(int actions, int commands) {
+            tally(actions, commands, 0);
+        }
+
+        /** J3 (IR-95): the tally with the unavailability skips the executor counted. */
+        void tally(int actions, int commands, int skipped) {
             this.actionCount = actions;
             this.commandCount = commands;
+            this.skippedUnavailable = skipped;
         }
 
         List<Ulid> executedOrder() {
@@ -716,7 +741,7 @@ class StandardRunManagerTest {
                     }
                 }
             }
-            return ActionExecutionResult.succeeded(actionCount, commandCount);
+            return ActionExecutionResult.succeeded(actionCount, commandCount, skippedUnavailable);
         }
     }
 

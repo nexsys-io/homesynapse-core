@@ -271,7 +271,7 @@ final class ByIdReadPageCountTest {
                 at);
         publishDerivedAt(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
                 new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null,
-                        null), corr, trigId, at);
+                        null, 0), corr, trigId, at);
         return runId;
     }
 

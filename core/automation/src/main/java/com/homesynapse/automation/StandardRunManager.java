@@ -283,7 +283,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
             statuses.put(runId, RunStatus.CONDITION_NOT_MET);
             publishTriggered(run);
             logHandoff(run, "condition_not_met", "none");
-            publishCompleted(run, RunStatus.CONDITION_NOT_MET, null, null, 0, 0);
+            publishCompleted(run, RunStatus.CONDITION_NOT_MET, null, null, 0, 0, 0);
             return Optional.of(runId);                              // a Run, but it consumed no slot
         }
 
@@ -390,7 +390,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
             // Re-derive the terminal completion from the log — never re-execute (§3.10).
             AutomationCompletedEvent payload = new AutomationCompletedEvent(
                     zombie.runId(), RunStatus.INTERRUPTED.name(), 0L, 0, 0, null,
-                    "interrupted_by_crash");
+                    "interrupted_by_crash", 0);
             publish(EventTypes.AUTOMATION_COMPLETED, payload, zombie.automationId(),
                     EventPriority.NORMAL, zombie.correlationId(), zombie.causationId(),
                     zombie.actorRef(), zombie.eventTime());
@@ -464,7 +464,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
                 runId, automationId, cause);
         publishTriggered(run);                 // before completed — keep the C1 pair
         logHandoff(run, "failed_closed", "none");
-        publishCompleted(run, RunStatus.FAILED, failureReason, null, 0, 0);
+        publishCompleted(run, RunStatus.FAILED, failureReason, null, 0, 0, 0);
         return Optional.of(runId);
     }
 
@@ -480,6 +480,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
             String abortReason = null;
             int actionCount = 0;
             int commandCount = 0;
+            int skippedUnavailable = 0;                             // J3 (IR-95)
             try {
                 if (Thread.currentThread().isInterrupted() || !activeRuns.containsKey(run.runId)) {
                     // Cancelled during the admission window before any action ran.
@@ -490,6 +491,7 @@ final class StandardRunManager implements RunManager, AutoCloseable {
                             run.resolvedActions, run.context, run.triggeringEvent);
                     actionCount = result.actionCount();
                     commandCount = result.commandCount();
+                    skippedUnavailable = result.skippedUnavailable();
                     if (Thread.currentThread().isInterrupted()) {
                         terminal = RunStatus.ABORTED;
                         abortReason = "restart_mode";
@@ -509,7 +511,8 @@ final class StandardRunManager implements RunManager, AutoCloseable {
                     failureReason = describe(ex);
                 }
             }
-            finalizeRun(run, terminal, failureReason, abortReason, actionCount, commandCount);
+            finalizeRun(run, terminal, failureReason, abortReason, actionCount, commandCount,
+                    skippedUnavailable);
         } finally {
             // Remove only after the terminal publish so awaitQuiescence observes it.
             liveRunThreads.remove(Thread.currentThread());
@@ -517,7 +520,8 @@ final class StandardRunManager implements RunManager, AutoCloseable {
     }
 
     private void finalizeRun(ActiveRun run, RunStatus terminal, String failureReason,
-                             String abortReason, int actionCount, int commandCount) {
+                             String abortReason, int actionCount, int commandCount,
+                             int skippedUnavailable) {
         AutomationId automationId = run.automation.automationId();
         boolean publishDisabled = false;
         int disableFailureCount = 0;
@@ -547,7 +551,8 @@ final class StandardRunManager implements RunManager, AutoCloseable {
         } finally {
             stateLock.unlock();
         }
-        publishCompleted(run, terminal, failureReason, abortReason, actionCount, commandCount);
+        publishCompleted(run, terminal, failureReason, abortReason, actionCount, commandCount,
+                skippedUnavailable);
         if (publishDisabled) {
             publishDisabledEvent(run, disableFailureCount, disableLastError, disableLastRunId);
         }
@@ -694,13 +699,19 @@ final class StandardRunManager implements RunManager, AutoCloseable {
                 run.eventTime);
     }
 
+    /**
+     * The terminal row. {@code skippedUnavailable} (J3, IR-95) is the executor's count of
+     * command targets skipped for unavailability under {@code SKIP}; the paths that execute
+     * nothing ({@code CONDITION_NOT_MET}, the failed-closed read) pass {@code 0}.
+     */
     private void publishCompleted(ActiveRun run, RunStatus terminal, String failureReason,
-                                  String abortReason, int actionCount, int commandCount) {
+                                  String abortReason, int actionCount, int commandCount,
+                                  int skippedUnavailable) {
         long durationMs = Math.max(0L,
                 Duration.between(run.startedAt, clock.instant()).toMillis());
         AutomationCompletedEvent payload = new AutomationCompletedEvent(
                 run.runId.value(), terminal.name(), durationMs, actionCount, commandCount,
-                failureReason, abortReason);
+                failureReason, abortReason, skippedUnavailable);
         publish(EventTypes.AUTOMATION_COMPLETED, payload, run.automation.automationId(),
                 EventPriority.NORMAL, run.correlationId, run.causationId, run.actorRef,
                 run.eventTime);

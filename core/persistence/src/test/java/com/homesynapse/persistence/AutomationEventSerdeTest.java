@@ -121,10 +121,10 @@ class AutomationEventSerdeTest {
     @DisplayName("automation_completed (row 2 reshape) round-trips, including null reasons")
     void completed() throws Exception {
         roundTrip(new com.homesynapse.event.AutomationCompletedEvent(
-                U1, "COMPLETED", 1234L, 2, 3, null, null),
+                U1, "COMPLETED", 1234L, 2, 3, null, null, 0),
                 com.homesynapse.event.AutomationCompletedEvent.class);
         roundTrip(new com.homesynapse.event.AutomationCompletedEvent(
-                U2, "FAILED", 500L, 1, 0, "device unreachable", null),
+                U2, "FAILED", 500L, 1, 0, "device unreachable", null, 0),
                 com.homesynapse.event.AutomationCompletedEvent.class);
     }
 

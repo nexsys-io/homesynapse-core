@@ -53,6 +53,8 @@ class StandardActionExecutorTest {
 
     private AutomationTestSupport.RecordingEventPublisher publisher;
     private AutomationTestSupport.StubStateQueryService stateQuery;
+    /** J3: the resolver as a field so a test can bind a second selector (S-3). */
+    private AutomationTestSupport.FakeSelectorResolver resolver;
     private StandardActionExecutor executor;
     private RunContext context;
     private EventEnvelope trigger;
@@ -60,8 +62,7 @@ class StandardActionExecutorTest {
     @BeforeEach
     void setUp() {
         publisher = new AutomationTestSupport.RecordingEventPublisher();
-        AutomationTestSupport.FakeSelectorResolver resolver =
-                new AutomationTestSupport.FakeSelectorResolver().bind(selector, Set.of(entity));
+        resolver = new AutomationTestSupport.FakeSelectorResolver().bind(selector, Set.of(entity));
         // The target entity carries the standard onOff capability (turn_on/turn_off:
         // default_timeout 5 s, IDEMPOTENT), so the producer resolves the capability-sourced
         // timeout + idempotency on command_issued.
@@ -263,6 +264,99 @@ class StandardActionExecutorTest {
                 (AutomationActionCompletedEvent) completed.get(0).payload();
         assertThat(payload.outcome()).isEqualTo("error");
         assertThat(payload.errorDetail()).isNotNull();
+    }
+
+    // ── J3 T-B (IR-95; SKIPVOC: count): a CommandAction that issues nothing completes `skipped` ──
+
+    @Test
+    @DisplayName("J3 S-1 (IR-95): one target UNAVAILABLE under SKIP — the action completes "
+            + "outcome=skipped with errorDetail null; no command_issued; commandCount 0; "
+            + "skippedUnavailable 1")
+    void commandAction_everyTargetSkipped_completesSkipped() {
+        stateQuery.setSnapshot(snapshotWith("off", Availability.UNAVAILABLE));
+        var action = new CommandAction(selector, "turn_on", Map.of(), UnavailablePolicy.SKIP);
+
+        ActionExecutionResult result = executor.execute(List.of(action), context, trigger);
+
+        assertThat(result.failed()).isFalse();
+        assertThat(result.actionCount()).isEqualTo(1);
+        assertThat(result.commandCount()).isZero();
+        assertThat(result.skippedUnavailable()).isEqualTo(1);
+        assertThat(publisher.ofType(EventTypes.COMMAND_ISSUED)).isEmpty();
+        AutomationActionCompletedEvent completed = onlyActionCompleted();
+        assertThat(completed.outcome()).isEqualTo("skipped");
+        assertThat(completed.errorDetail()).as("the reason lives in the counts and the log line")
+                .isNull();
+    }
+
+    @Test
+    @DisplayName("J3 S-2 (IR-95): a selector resolving to NO target — outcome=skipped; "
+            + "resolved 0 and skippedUnavailable 0; commandCount 0")
+    void commandAction_noTarget_completesSkipped() {
+        // Unbound in the fake resolver → resolves to nothing (the selector named no entity).
+        Selector none = new DirectRefSelector(AutomationTestSupport.entityId());
+        var action = new CommandAction(none, "turn_on", Map.of(), UnavailablePolicy.SKIP);
+
+        ActionExecutionResult result = executor.execute(List.of(action), context, trigger);
+
+        assertThat(result.actionCount()).isEqualTo(1);
+        assertThat(result.commandCount()).isZero();
+        assertThat(result.skippedUnavailable()).isZero();
+        assertThat(publisher.ofType(EventTypes.COMMAND_ISSUED)).isEmpty();
+        AutomationActionCompletedEvent completed = onlyActionCompleted();
+        assertThat(completed.outcome()).isEqualTo("skipped");
+        assertThat(completed.errorDetail()).isNull();
+    }
+
+    @Test
+    @DisplayName("J3 S-3 (IR-95): two targets, one available and one UNAVAILABLE under SKIP — "
+            + "outcome=success, ONE command_issued to the available one, commandCount 1, "
+            + "skippedUnavailable 1")
+    void commandAction_oneOfTwoSkipped_completesSuccess_countsTheSkip() {
+        EntityId dark = AutomationTestSupport.entityId();
+        Selector pair = new DirectRefSelector(dark);
+        resolver.bind(pair, Set.of(entity, dark));
+        stateQuery.setSnapshot(AutomationTestSupport.snapshot(Map.of(
+                entity, AutomationTestSupport.state(entity, Availability.AVAILABLE,
+                        Map.of("on_off", AutomationTestSupport.str("off"))),
+                dark, AutomationTestSupport.state(dark, Availability.UNAVAILABLE,
+                        Map.of("on_off", AutomationTestSupport.str("off"))))));
+        var action = new CommandAction(pair, "turn_on", Map.of(), UnavailablePolicy.SKIP);
+
+        ActionExecutionResult result = executor.execute(List.of(action), context, trigger);
+
+        assertThat(result.commandCount()).isEqualTo(1);
+        assertThat(result.skippedUnavailable()).isEqualTo(1);
+        List<EventEnvelope> issued = publisher.ofType(EventTypes.COMMAND_ISSUED);
+        assertThat(issued).hasSize(1);
+        assertThat(((CommandIssuedEvent) issued.get(0).payload()).targetEntityRef())
+                .isEqualTo(entity.value());
+        assertThat(onlyActionCompleted().outcome()).isEqualTo("success");
+    }
+
+    @Test
+    @DisplayName("J3 S-4 (IR-95): DelayAction then CommandAction with an available target — "
+            + "command_count means COMMANDS ISSUED (1), actionCount 2, skippedUnavailable 0; "
+            + "both steps success")
+    void delayThenCommand_pinsTheCommandCountMeaning() {
+        stateQuery.setSnapshot(snapshotWith("off", Availability.AVAILABLE));
+        var command = new CommandAction(selector, "turn_on", Map.of(), UnavailablePolicy.SKIP);
+
+        ActionExecutionResult result = executor.execute(
+                List.of(new DelayAction(Duration.ofMillis(1)), command), context, trigger);
+
+        assertThat(result.actionCount()).isEqualTo(2);
+        assertThat(result.commandCount()).isEqualTo(1);
+        assertThat(result.skippedUnavailable()).isZero();
+        assertThat(publisher.ofType(EventTypes.AUTOMATION_ACTION_COMPLETED))
+                .extracting(e -> ((AutomationActionCompletedEvent) e.payload()).outcome())
+                .isEqualTo(List.of("success", "success"));
+    }
+
+    private AutomationActionCompletedEvent onlyActionCompleted() {
+        List<EventEnvelope> completed = publisher.ofType(EventTypes.AUTOMATION_ACTION_COMPLETED);
+        assertThat(completed).hasSize(1);
+        return (AutomationActionCompletedEvent) completed.get(0).payload();
     }
 
     private StateSnapshot snapshotWith(String onOff, Availability availability) {

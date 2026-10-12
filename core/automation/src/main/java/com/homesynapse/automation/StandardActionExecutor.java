@@ -54,7 +54,13 @@ import org.slf4j.LoggerFactory;
  *       target</strong> — the substrate-native command hop (§1 D1 / AMD-95): the log is the
  *       single source of truth for dispatch, and the co-located {@code command_dispatch_service}
  *       subscriber consumes {@code command_issued} and routes it (M7.4a). The executor no longer
- *       dispatches in-process. Each emit counts toward the command tally.</li>
+ *       dispatches in-process. Each emit counts toward the command tally. J3 (IR-95,
+ *       {@code SKIPVOC: count}): a command action that issues NO command — every resolved
+ *       target skipped for unavailability under {@code SKIP}, or no target resolved —
+ *       completes {@code skipped}, never {@code success}; the targets skipped for
+ *       unavailability are tallied into {@link ActionExecutionResult#skippedUnavailable()}
+ *       (nested command actions under a branch included) and ONE INFO
+ *       {@code automation.action_skipped} names the two counts.</li>
  *   <li>{@link DelayAction} — {@code Thread.sleep(Duration)} on the VT (no carrier pinning).</li>
  *   <li>{@link WaitForAction} — poll the condition against a fresh snapshot until it holds or
  *       the timeout elapses (clock-driven, §4c); a timeout completes the action (not an
@@ -109,6 +115,31 @@ public final class StandardActionExecutor implements ActionExecutor {
 
     /** Poll cadence for {@link WaitForAction} when the action omits an explicit interval. */
     static final Duration DEFAULT_POLL_INTERVAL = Duration.ofMillis(500);
+
+    /**
+     * J3 (IR-95) — what one action's command issue amounted to: the commands ISSUED, the
+     * targets skipped for unavailability under {@link UnavailablePolicy#SKIP}, and the
+     * targets the selector RESOLVED. Returned by every {@link #applyAction} arm (the
+     * non-command arms yield {@link #NONE}), summed by {@link #applyBranch} so a nested
+     * command action's skips reach the Run's tally through the branch's return value, and
+     * accumulated by {@link #execute} in LOCALS — never a field: this executor is a
+     * stateless singleton shared by every Run and {@code execute} runs concurrently on
+     * virtual threads (a field accumulator would be a cross-run race on a persisted count).
+     *
+     * @param issued             the {@code command_issued} events emitted
+     * @param skippedUnavailable the targets {@code continue}d past under {@code SKIP}
+     * @param resolved           the targets the selector resolved (iterated)
+     */
+    record CommandIssue(int issued, int skippedUnavailable, int resolved) {
+
+        /** The non-command arms' issue: nothing resolved, issued or skipped. */
+        static final CommandIssue NONE = new CommandIssue(0, 0, 0);
+
+        CommandIssue plus(CommandIssue other) {
+            return new CommandIssue(issued + other.issued,
+                    skippedUnavailable + other.skippedUnavailable, resolved + other.resolved);
+        }
+    }
 
     private final EntityRegistry entityRegistry;
     private final SelectorResolver selectorResolver;
@@ -178,6 +209,7 @@ public final class StandardActionExecutor implements ActionExecutor {
         AutomationId automationId = context.automationId();
         int actionCount = 0;
         int commandCount = 0;
+        int skippedUnavailable = 0;                 // J3: the Run's SKIP count — a local, never a field
         for (int index = 0; index < actions.size(); index++) {
             ActionDefinition action = actions.get(index);
             // FIX-2b-ii (i), line D: the Run's first act per action, named before the row-5
@@ -188,41 +220,63 @@ public final class StandardActionExecutor implements ActionExecutor {
             publishStarted(automationId, context, index, action, topLevelTargets(action),
                     triggeringEvent);
             actionCount++;
+            CommandIssue issue;
             try {
-                commandCount += applyAction(action, context, triggeringEvent);
+                issue = applyAction(action, context, triggeringEvent);
             } catch (UnsupportedOperationException ex) {
                 throw ex;                                           // Tier 2 reserved — propagate (DP-C)
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();                 // restore — FSM finalizes ABORTED
                 publishCompleted(automationId, context, index, "skipped", null, triggeringEvent);
-                return ActionExecutionResult.succeeded(actionCount, commandCount);
+                return ActionExecutionResult.succeeded(actionCount, commandCount,
+                        skippedUnavailable);
             } catch (RuntimeException ex) {
                 String detail = describe(ex);                       // §6.2 fail-fast
                 publishCompleted(automationId, context, index, "error", detail, triggeringEvent);
-                return ActionExecutionResult.failed(actionCount, commandCount, detail);
+                return ActionExecutionResult.failed(actionCount, commandCount, skippedUnavailable,
+                        detail);
             }
-            publishCompleted(automationId, context, index, "success", null, triggeringEvent);
+            commandCount += issue.issued();
+            skippedUnavailable += issue.skippedUnavailable();
+            // J3 (IR-95, SKIPVOC: count): a command action that issued NOTHING completes
+            // `skipped` — every resolved target skipped for unavailability under SKIP, or no
+            // target resolved at all; the reason is readable from the two counts on the line
+            // (resolved=0 → no target; resolved=N skipped_unavailable=N → unavailable). Any
+            // other action, or a command action that issued at least one command, is
+            // `success`. errorDetail stays null for `skipped` (the payload's own rule).
+            if (action instanceof CommandAction && issue.issued() == 0) {
+                LOG.info("automation.action_skipped: runId={} automationId={} index={} "
+                                + "resolved={} skipped_unavailable={}",
+                        context.runId().value(), automationId, index, issue.resolved(),
+                        issue.skippedUnavailable());
+                publishCompleted(automationId, context, index, "skipped", null, triggeringEvent);
+            } else {
+                publishCompleted(automationId, context, index, "success", null, triggeringEvent);
+            }
         }
-        return ActionExecutionResult.succeeded(actionCount, commandCount);
+        return ActionExecutionResult.succeeded(actionCount, commandCount, skippedUnavailable);
     }
 
-    /** Performs one action's effect, returning the commands it issued. No row 5/6. */
-    private int applyAction(ActionDefinition action, RunContext context,
-                            EventEnvelope triggeringEvent) throws InterruptedException {
+    /**
+     * Performs one action's effect, returning what it issued, skipped and resolved (J3 —
+     * {@link CommandIssue#NONE} for every non-command arm). No row 5/6.
+     */
+    private CommandIssue applyAction(ActionDefinition action, RunContext context,
+                                     EventEnvelope triggeringEvent) throws InterruptedException {
         return switch (action) {
             case CommandAction command -> issueCommands(command, context, triggeringEvent);
             case DelayAction delay -> {
                 Thread.sleep(delay.duration());
-                yield 0;
+                yield CommandIssue.NONE;
             }
             case WaitForAction waitFor -> {
                 awaitCondition(waitFor);
-                yield 0;
+                yield CommandIssue.NONE;
             }
             case ConditionBranchAction branch -> applyBranch(branch, context, triggeringEvent);
             case EmitEventAction emit -> {
                 publishEmittedEvent(emit, context, triggeringEvent);
-                yield 0;
+                yield CommandIssue.NONE;
             }
             case ActivateSceneAction ignored ->
                     throw new UnsupportedOperationException("Tier 2 action reserved: ActivateSceneAction");
@@ -236,16 +290,22 @@ public final class StandardActionExecutor implements ActionExecutor {
     /**
      * Emits one {@code command_issued} per resolved, dispatchable target (§3.9 / §3.11; §1 D1).
      * Applies {@link UnavailablePolicy} per target, then publishes the frozen 5-component event;
-     * returns the number of commands issued.
+     * returns what was issued, what was skipped for unavailability under {@code SKIP} and what
+     * the selector resolved (J3, IR-95). {@code WARN} targets are neither skipped nor counted;
+     * {@code ERROR} throws as before.
      */
-    private int issueCommands(CommandAction action, RunContext context,
-                              EventEnvelope triggeringEvent) {
+    private CommandIssue issueCommands(CommandAction action, RunContext context,
+                                       EventEnvelope triggeringEvent) {
         AutomationId automationId = context.automationId();
         int issued = 0;
+        int skipped = 0;
+        int resolved = 0;
         for (EntityId target : selectorResolver.resolve(action.target())) {
+            resolved++;
             if (availabilityOf(target) == Availability.UNAVAILABLE) {
                 switch (action.onUnavailable()) {
                     case SKIP -> {
+                        skipped++;
                         continue;                                   // skip only this target (§3.9)
                     }
                     case ERROR -> throw new IllegalStateException(
@@ -258,7 +318,7 @@ public final class StandardActionExecutor implements ActionExecutor {
             emitCommandIssued(automationId, target, action, triggeringEvent);
             issued++;
         }
-        return issued;
+        return new CommandIssue(issued, skipped, resolved);
     }
 
     /**
@@ -327,15 +387,16 @@ public final class StandardActionExecutor implements ActionExecutor {
         return (json == null || json.isBlank()) ? EMPTY_PARAMETERS_JSON : json;
     }
 
-    private int applyBranch(ConditionBranchAction branch, RunContext context,
-                            EventEnvelope triggeringEvent) throws InterruptedException {
+    /** The SUM of the taken branch's issues — a nested command action's skips ride up (J3). */
+    private CommandIssue applyBranch(ConditionBranchAction branch, RunContext context,
+                                     EventEnvelope triggeringEvent) throws InterruptedException {
         boolean taken = conditionEvaluator.evaluate(branch.condition(), stateQuery.getSnapshot());
         List<ActionDefinition> chosen = taken ? branch.thenActions() : branch.elseActions();
-        int commands = 0;
+        CommandIssue issue = CommandIssue.NONE;
         for (ActionDefinition nested : chosen) {
-            commands += applyAction(nested, context, triggeringEvent);
+            issue = issue.plus(applyAction(nested, context, triggeringEvent));
         }
-        return commands;
+        return issue;
     }
 
     private void awaitCondition(WaitForAction action) throws InterruptedException {

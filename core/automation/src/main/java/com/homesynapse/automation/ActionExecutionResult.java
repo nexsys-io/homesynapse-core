@@ -25,19 +25,24 @@ import java.util.Objects;
  *                      failure); {@code >= 0}
  * @param commandCount  the number of commands dispatched across all command actions;
  *                      {@code >= 0}
+ * @param skippedUnavailable the number of command targets skipped for unavailability under
+ *                      {@link UnavailablePolicy#SKIP} across all command actions (J3, IR-95
+ *                      — nested ones under a branch included); {@code >= 0}; carried to
+ *                      {@code automation_completed.skippedUnavailable}
  * @param failureReason the §6.2 fail-fast reason; {@code null} when the sequence completed
  *                      (or was interrupted — the FSM detects an abort via the thread's
  *                      interrupt status, not this field)
  * @see ActionExecutor
  * @see RunManager
  */
-public record ActionExecutionResult(int actionCount, int commandCount, String failureReason) {
+public record ActionExecutionResult(int actionCount, int commandCount, int skippedUnavailable,
+                                    String failureReason) {
 
     /**
      * Validates non-negative counts. {@code failureReason} is nullable.
      *
-     * @throws IllegalArgumentException if {@code actionCount} or {@code commandCount} is
-     *                                  negative
+     * @throws IllegalArgumentException if {@code actionCount}, {@code commandCount} or
+     *                                  {@code skippedUnavailable} is negative
      */
     public ActionExecutionResult {
         if (actionCount < 0) {
@@ -46,17 +51,23 @@ public record ActionExecutionResult(int actionCount, int commandCount, String fa
         if (commandCount < 0) {
             throw new IllegalArgumentException("commandCount must be >= 0: " + commandCount);
         }
+        if (skippedUnavailable < 0) {
+            throw new IllegalArgumentException(
+                    "skippedUnavailable must be >= 0: " + skippedUnavailable);
+        }
     }
 
     /**
      * A successful tally (no §6.2 failure).
      *
-     * @param actionCount  the actions executed; {@code >= 0}
-     * @param commandCount the commands dispatched; {@code >= 0}
+     * @param actionCount        the actions executed; {@code >= 0}
+     * @param commandCount       the commands dispatched; {@code >= 0}
+     * @param skippedUnavailable the targets skipped for unavailability; {@code >= 0}
      * @return a result with {@code failureReason == null}, never {@code null}
      */
-    public static ActionExecutionResult succeeded(int actionCount, int commandCount) {
-        return new ActionExecutionResult(actionCount, commandCount, null);
+    public static ActionExecutionResult succeeded(int actionCount, int commandCount,
+                                                  int skippedUnavailable) {
+        return new ActionExecutionResult(actionCount, commandCount, skippedUnavailable, null);
     }
 
     /**
@@ -64,18 +75,21 @@ public record ActionExecutionResult(int actionCount, int commandCount, String fa
      *
      * @param actionCount   the actions attempted up to and including the failure; {@code >= 0}
      * @param commandCount  the commands dispatched before the failure; {@code >= 0}
+     * @param skippedUnavailable the targets skipped for unavailability before the failure;
+     *                      {@code >= 0}
      * @param failureReason the failure description, never {@code null} or blank
      * @return a result carrying the failure reason, never {@code null}
      * @throws NullPointerException     if {@code failureReason} is {@code null}
      * @throws IllegalArgumentException if {@code failureReason} is blank
      */
     public static ActionExecutionResult failed(int actionCount, int commandCount,
-                                               String failureReason) {
+                                               int skippedUnavailable, String failureReason) {
         Objects.requireNonNull(failureReason, "failureReason must not be null");
         if (failureReason.isBlank()) {
             throw new IllegalArgumentException("failureReason must not be blank");
         }
-        return new ActionExecutionResult(actionCount, commandCount, failureReason);
+        return new ActionExecutionResult(actionCount, commandCount, skippedUnavailable,
+                failureReason);
     }
 
     /**

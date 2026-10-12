@@ -398,6 +398,50 @@ class EventPayloadCodecTest {
     }
 
     @Nested
+    @DisplayName("automation_completed + skipped_unavailable (J3 T-B, IR-95): the eighth key, "
+            + "and the pre-J3 seven-key row through the production decode")
+    class AutomationCompletedSkippedUnavailable {
+
+        @Test
+        @DisplayName("C-1: the sample's skippedUnavailable=1 is written as the snake_case key "
+                + "skipped_unavailable and reads back equal")
+        void skippedUnavailable_writesTheSnakeCaseKey_andRoundTrips() throws Exception {
+            AutomationCompletedEvent event = TestEventSamples.automationCompleted();
+
+            byte[] bytes = codec.encode(event);
+            String json = new String(bytes, StandardCharsets.UTF_8);
+
+            assertThat(json).contains("\"skipped_unavailable\":1");
+            assertThat(json).doesNotContain("skippedUnavailable");
+            assertThat(codec.decode(EventTypes.AUTOMATION_COMPLETED, 1, bytes)).isEqualTo(event);
+        }
+
+        @Test
+        @DisplayName("C-2 (P-1): a pre-J3 row — the seven snake_case keys, skipped_unavailable "
+                + "ABSENT — decodes through EventPayloadCodec.decode to the record with "
+                + "skippedUnavailable 0, never a DegradedEvent")
+        void automationCompleted_oldSevenKeyShape_readsZero() {
+            // The pre-T-B wire shape: PersistenceObjectMapper's SNAKE_CASE keys for the seven
+            // components (the two nullable reasons written explicitly null here so the row is
+            // literally seven keys); the eighth key does not exist.
+            byte[] sevenKeys = ("{\"run_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\","
+                    + "\"final_status\":\"COMPLETED\",\"duration_ms\":1234,"
+                    + "\"action_count\":2,\"command_count\":3,"
+                    + "\"failure_reason\":null,\"abort_reason\":null}")
+                    .getBytes(StandardCharsets.UTF_8);
+
+            DomainEvent decoded = codec.decode(EventTypes.AUTOMATION_COMPLETED, 1, sevenKeys);
+
+            // A parse failure would surface as the DegradedEvent fallback (the "Decode fallback"
+            // WARN), never as a throw — the instance check IS the adjudication.
+            assertThat(decoded).isInstanceOf(AutomationCompletedEvent.class);
+            assertThat(((AutomationCompletedEvent) decoded).skippedUnavailable()).isZero();
+            assertThat(decoded).isEqualTo(new AutomationCompletedEvent(
+                    TestEventSamples.ULID_1, "COMPLETED", 1234L, 2, 3, null, null, 0));
+        }
+    }
+
+    @Nested
     @DisplayName("availability_changed v2 (J1): both directions through the tolerant decode")
     class AvailabilityChangedV2 {
 

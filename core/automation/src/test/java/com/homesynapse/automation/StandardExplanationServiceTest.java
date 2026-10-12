@@ -999,7 +999,7 @@ final class StandardExplanationServiceTest {
         RunId runId = new RunId(ulid());
         publishRoot(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
                 new AutomationCompletedEvent(runId.value(), finalStatus, 1234L, 1, 1,
-                        failureReason, null));
+                        failureReason, null, 0));
         return runId;
     }
 
@@ -1077,7 +1077,7 @@ final class StandardExplanationServiceTest {
                 new AutomationActionCompletedEvent(runId.value(), 0, "success", null), corr, trigId);
         publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
                 new AutomationCompletedEvent(runId.value(), finalStatus, 1234L, 1, 1, null,
-                        abortReason), corr, trigId);
+                        abortReason, 0), corr, trigId);
         return runId;
     }
 
@@ -1119,7 +1119,7 @@ final class StandardExplanationServiceTest {
         publishDerived(EventTypes.AUTOMATION_ACTION_COMPLETED, SubjectRef.automation(autoId),
                 new AutomationActionCompletedEvent(runId.value(), 0, "success", null), corr, trigId);
         publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
-                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null, 0),
                 corr, trigId);
         return runId;
     }
@@ -1129,7 +1129,7 @@ final class StandardExplanationServiceTest {
         RunId runId = new RunId(ulid());
         publishRoot(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
                 new AutomationCompletedEvent(runId.value(), "COMPLETED", durationMs, 1, 1,
-                        null, null));
+                        null, null, 0));
         return runId;
     }
 
@@ -1142,7 +1142,7 @@ final class StandardExplanationServiceTest {
         EventDraft draft = new EventDraft(EventTypes.AUTOMATION_COMPLETED, 1, null,
                 SubjectRef.automation(autoId), EventPriority.NORMAL, EventOrigin.AUTOMATION,
                 new AutomationCompletedEvent(runId.value(), "COMPLETED", durationMs, 1, 1,
-                        null, null), null, null);
+                        null, null, 0), null, null);
         try {
             store.publishRoot(draft);
         } catch (SequenceConflictException e) {
@@ -1199,7 +1199,7 @@ final class StandardExplanationServiceTest {
         publishDerived(EventTypes.AUTOMATION_ACTION_COMPLETED, SubjectRef.automation(autoId),
                 new AutomationActionCompletedEvent(runId.value(), 0, "success", null), corr, trigId);
         publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
-                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null, 0),
                 corr, trigId);
         return runId;
     }
@@ -1227,7 +1227,7 @@ final class StandardExplanationServiceTest {
         publishDerived(EventTypes.AUTOMATION_ACTION_COMPLETED, SubjectRef.automation(autoId),
                 new AutomationActionCompletedEvent(runId.value(), 0, "success", null), corr, trigId);
         publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
-                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null, 0),
                 corr, trigId);
         return runId;
     }
@@ -1252,7 +1252,7 @@ final class StandardExplanationServiceTest {
                 new AutomationActionCompletedEvent(runId.value(), 0, "skipped", "target unavailable"),
                 corr, trigId, completedTime);
         publishDerived(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
-                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 0, null, null),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 0, null, null, 0),
                 corr, trigId);
         return runId;
     }
@@ -1313,7 +1313,7 @@ final class StandardExplanationServiceTest {
                 new AutomationActionCompletedEvent(runId.value(), 0, "success", null), corr, trigId,
                 at);
         publishDerivedAt(EventTypes.AUTOMATION_COMPLETED, SubjectRef.automation(autoId),
-                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null),
+                new AutomationCompletedEvent(runId.value(), "COMPLETED", 1234L, 1, 1, null, null, 0),
                 corr, trigId, at);
         return runId;
     }
