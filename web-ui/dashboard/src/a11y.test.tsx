@@ -17,7 +17,7 @@ import { AuthGate } from './components/AuthGate';
 import { StatusPill } from './components/StatusPill';
 import { Loading, EmptyState, ErrorState, OfflineState, ReplayingBanner } from './components/feedback';
 import { RecoveryCard } from './components/RecoveryCard';
-import { recoveryRow } from './lib/recovery';
+import { recoveryRow, stageOf } from './lib/recovery';
 import { displayName } from './lib/format';
 import { causalChains } from './lib/api/mock/mockData';
 import { SCENARIOS } from './lib/api/mock/scenarios';
@@ -180,6 +180,50 @@ describe('HERO-U2b — the recovery card is legible without its colours and pass
     expect(a!.textContent).not.toContain('not asked');
     expect(b!.textContent).toContain('not asked');
     expect(b!.textContent).not.toContain('no answer');
+    expect(a!.querySelector('svg path')!.getAttribute('d')).not.toBe(b!.querySelector('svg path')!.getAttribute('d'));
+  });
+});
+
+/* ---- HERO-U3 (2026-10-11) — SPEC §8 at S3: every row of the `recovery-live` scenario (the v1.1.7 fleet, LIVE) rendered as a full
+ * card with its read's meta has no axe violations, and R5 beside R6 reads differently with the colour covered — SPEC §10's eighth
+ * sentence: "not asked" vs "No check recorded", a question mark vs an hourglass, one hue by design. RED at HEAD: no such
+ * scenario and no hourglass. ---- */
+describe('HERO-U3 — the S3 states pass axe; R5 beside R6 differ in words and shape with the colour covered', () => {
+  const ds = SCENARIOS.find((s) => s.id === 'recovery-live')?.build();
+  const meta = { viewPosition: 1, timestamp: new Date().toISOString(), recoveryViewPosition: ds?.recoveryViewPosition ?? null };
+
+  it('every LIVE row as a full card: no axe violations; every card at S3 with its hidden sentence and a silent polite region', async () => {
+    expect(ds).toBeTruthy();
+    const rows = ds!.entities;
+    const { container } = render(
+      <ul aria-label="Devices">
+        {rows.map((r) => (
+          <li key={r.entityId}><RecoveryCard row={r} name={displayName(r)} meta={meta} /></li>
+        ))}
+      </ul>,
+    );
+    expect(await violations(container)).toEqual([]);
+    const cards = Array.from(container.querySelectorAll('[data-row]'));
+    expect(cards.length).toBe(rows.length);
+    for (const c of cards) {
+      expect(c.getAttribute('data-stage')).toBe('S3');
+      expect(c.querySelector('[role="status"]')!.textContent).toBe('');
+      expect(c.querySelector('svg')!.getAttribute('aria-hidden')).toBe('true');
+    }
+  });
+  it('R5 beside R6 with the colour covered: "not asked" vs "No check recorded"; a question mark vs an hourglass; R5 offers the act\'s slot (dark), R6 does not', () => {
+    expect(ds).toBeTruthy();
+    const rows = ds!.entities;
+    const r5 = rows.find((r) => recoveryRow(r, stageOf(r, meta)).key === 'unasked')!;
+    const r6 = rows.find((r) => recoveryRow(r, stageOf(r, meta)).key === 'noCheckRecorded')!;
+    expect(recoveryRow(r5, stageOf(r5, meta)).dark).toBe(true);
+    expect(recoveryRow(r6, stageOf(r6, meta)).dark).toBe(false);
+    const { container } = render(<div><RecoveryCard row={r5} name="A" meta={meta} /><RecoveryCard row={r6} name="B" meta={meta} /></div>);
+    const [a, b] = Array.from(container.querySelectorAll('[data-row]'));
+    expect(a!.textContent).toContain('not asked');
+    expect(a!.textContent).not.toContain('No check recorded');
+    expect(b!.textContent).toContain('No check recorded');
+    expect(b!.textContent).not.toContain('not asked');
     expect(a!.querySelector('svg path')!.getAttribute('d')).not.toBe(b!.querySelector('svg path')!.getAttribute('d'));
   });
 });

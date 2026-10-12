@@ -13,6 +13,14 @@ import { RecoveryCard } from './RecoveryCard';
 import type { EntitySummary } from '../lib/api/contract';
 import { clockTimeWithDate } from '../lib/format';
 import { RECOVERY_GLYPHS } from '../lib/verdicts';
+import {
+  EMITTER_20261011_V117_META as EMITTER_META,
+  EMITTER_20261011_V117_NOT_LIVE_META as EMITTER_NOT_LIVE_META,
+  EMITTER_20261011_V117_NOT_LIVE_ROW as EMITTER_NOT_LIVE_ROW,
+  EMITTER_20261011_V117_OVERDUE_META as EMITTER_OVERDUE_META,
+  EMITTER_20261011_V117_OVERDUE_ROW as EMITTER_OVERDUE_ROW,
+  EMITTER_20261011_V117_ROW as EMITTER_ROW,
+} from '../lib/api/fixtures/emitter-2026-10-11-entities-v117-row';
 
 afterEach(cleanup);
 
@@ -132,5 +140,64 @@ describe('RecoveryCard — the polite status region', () => {
     expect(container.querySelector('[role="status"]')!.textContent).toBe('Kitchen Plug: Reporting.');
     rerender(<RecoveryCard row={plugBack} name="Kitchen Plug" now={NOW} />);
     expect(container.querySelector('[role="status"]')!.textContent).toBe(''); // once, not on every read
+  });
+});
+
+/* ---- HERO-U3 (2026-10-11) — the card on the v1.1.7 record: the `meta` prop carries the read's recoveryViewPosition into stageOf
+ * (a number → S3; null or absent → the S2 form — the not-LIVE rule). RED at HEAD (2a54145): the card takes no meta, so every
+ * render is S2 or S1; the byte-identity rows are GREEN at HEAD by construction and are the preservation fixtures (P3). ---- */
+describe('HERO-U3 — RecoveryCard on the v1.1.7 record (the read\'s meta decides the stage)', () => {
+  const eNow = Date.parse(EMITTER_META.timestamp);
+  const ec = (iso: string) => clockTimeWithDate(iso, eNow);
+  const RECORD_KEYS = ['probeAnsweredAt', 'probeWindowStart', 'probesAnswered', 'probesMissed', 'availabilityClass', 'reportIntervalSeconds', 'silenceLimitSeconds', 'missesToDark', 'recordIntervalSeconds', 'recordDueBy', 'recordOverdueSince'];
+  it('the emitter\'s LIVE row with its meta: data-stage S3 · Quiet with the recorded answer · the class sentence beneath · L2 lists the newest check, its window and the cadence', () => {
+    const { container } = render(<RecoveryCard row={EMITTER_ROW} meta={EMITTER_META} name="Kitchen Plug" now={eNow} />);
+    const card = container.querySelector('[data-row]')!;
+    expect(card.getAttribute('data-stage')).toBe('S3');
+    expect(card.getAttribute('data-row')).toBe('quiet');
+    expect(card.getAttribute('data-form')).toBe('recorded');
+    const text = container.textContent ?? '';
+    expect(text).toContain(`Quiet since ${ec('2026-10-11T11:00:00Z')} (asked, answered)`);
+    expect(text).toContain(`No report since ${ec('2026-10-11T11:00:00Z')}. It answered the newest check on record, at ${ec('2026-10-11T11:30:00Z')}.`);
+    expect(text).toContain('This device reports at least every 10 minutes. After 11 minutes of silence it is asked.');
+    const items = Array.from(container.querySelectorAll('details li')).map((li) => li.textContent);
+    expect(items).toContain(`Newest check on record: ${ec('2026-10-11T11:30:00Z')} — answered`);
+    expect(items).toContain(`Checks in that record: ${ec('2026-10-11T10:30:00Z')} to ${ec('2026-10-11T11:30:00Z')} — 55 answered, 1 missed`);
+    expect(items).toContain('Recording: one answered check per hour at most, plus one after each restart');
+    expect(sr(container)).toContain(`Kitchen Plug: Quiet since ${ec('2026-10-11T11:00:00Z')} (asked, answered).`);
+  });
+  it('R6 — the hourglass (states.html\'s path, aria-hidden), the unknown hue, R-G\'s words, "Newer check due by" in L2 — and no button (not known dark)', () => {
+    const now = Date.parse(EMITTER_OVERDUE_META.timestamp);
+    const { container } = render(<RecoveryCard row={EMITTER_OVERDUE_ROW} meta={EMITTER_OVERDUE_META} name="Kitchen Plug" now={now} />);
+    expect(container.querySelector('[data-row]')!.getAttribute('data-row')).toBe('noCheckRecorded');
+    const svg = container.querySelector('svg')!;
+    expect(svg.getAttribute('aria-hidden')).toBe('true');
+    expect(svg.querySelector('path')!.getAttribute('d')).toBe('M3.5 2h7M3.5 12h7M4.5 2l5 10M9.5 2l-5 10');
+    const pills = Array.from(container.querySelectorAll('[class*="pill"]'));
+    expect(pills.some((p) => /_unknown_/.test(p.className))).toBe(true);
+    const text = container.textContent ?? '';
+    expect(text).toContain(`No check recorded since ${clockTimeWithDate('2026-10-11T11:30:00Z', now)}`);
+    expect(text).toContain('A newer check was due by now. What the device is doing is not known.');
+    const items = Array.from(container.querySelectorAll('details li')).map((li) => li.textContent);
+    expect(items).toContain(`Newer check due by: ${clockTimeWithDate('2026-10-11T12:41:10.050Z', now)}`);
+    expect(container.querySelector('button')).toBeNull();
+  });
+  it('NOT LIVE — the emitter\'s not-LIVE row with its meta renders byte-identically to the same row with no v1.1.7 keys and no meta (the S2 form) [preservation]', () => {
+    const plain = Object.fromEntries(Object.entries(EMITTER_NOT_LIVE_ROW).filter(([k]) => !RECORD_KEYS.includes(k))) as unknown as EntitySummary;
+    const a = render(<RecoveryCard row={plain} name="Kitchen Plug" now={eNow} />).container.innerHTML;
+    cleanup();
+    const b = render(<RecoveryCard row={EMITTER_NOT_LIVE_ROW} meta={EMITTER_NOT_LIVE_META} name="Kitchen Plug" now={eNow} />).container.innerHTML;
+    expect(b).toBe(a);
+    expect(b).toContain('data-stage="S2"');
+  });
+  it('the v1.1.6 rows render byte-identically with no meta, a pre-v1.1.7 meta, a not-LIVE meta, or a LIVE meta (no v1.1.7 key on the row to read) — the v1.1.6 renders unchanged [preservation]', () => {
+    for (const r of [plugDark, plugBack, lampUnasked]) {
+      const base = render(<RecoveryCard row={r} name="Kitchen Plug" now={NOW} />).container.innerHTML;
+      cleanup();
+      for (const meta of [{ viewPosition: 1, timestamp: 'x' }, { viewPosition: 1, timestamp: 'x', recoveryViewPosition: null }, { viewPosition: 1, timestamp: 'x', recoveryViewPosition: 7 }]) {
+        expect(render(<RecoveryCard row={r} name="Kitchen Plug" now={NOW} meta={meta} />).container.innerHTML, JSON.stringify(meta)).toBe(base);
+        cleanup();
+      }
+    }
   });
 });

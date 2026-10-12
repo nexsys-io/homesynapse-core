@@ -32,6 +32,10 @@ import {
   UNRESOLVED_REF_PILL,
   verdictMeta,
   definitionSentence,
+  elapsedExceeds,
+  RECOVERY_KIND_FALLBACK,
+  recordIntervalWord,
+  wholeMinutes,
 } from './format';
 import type { ConditionDefinition } from './api/contract';
 import { causalChains } from './api/mock/mockData';
@@ -577,5 +581,33 @@ describe('FE-115 D4 — EMPTY_CHAIN_NOTE is the §7 row explain.chain.empty', ()
   it('equals its row, and the row is HEAD\'s literal character for character', () => {
     expect(EMPTY_CHAIN_NOTE).toBe(t('explain.chain.empty' as Parameters<typeof t>[0]));
     expect(EMPTY_CHAIN_NOTE).toBe('This run finished without recording any steps — no conditions were checked and no commands were sent.');
+  });
+});
+
+/* HERO-U3 (2026-10-11) — the recovery card's contract numbers are RENDERED here, never in lib/recovery.ts (the charter's R8:
+ * the card computes no bound): whole minutes from the record's seconds (SPEC §4: 660 s → "11 minutes"), the record cadence's
+ * word (SPEC §7: "hour" for 3600 s, else "{n} minutes"), the passive Quiet threshold (SPEC §3 R4 S3: the age past the declared
+ * interval), and §7's generic {kind}. RED at HEAD (2a54145): none of the four exists. */
+describe('HERO-U3 — format renders the contract record\'s seconds; it never makes a bound', () => {
+  it('wholeMinutes: 600 → 10 · 660 → 11 · 60 → 1 · 90 → 2 (rounded, SPEC §4) · 0 → 0; null / undefined / NaN / a negative / a non-number → null', () => {
+    expect([600, 660, 60, 90, 0, 3600].map(wholeMinutes)).toEqual([10, 11, 1, 2, 0, 60]);
+    for (const bad of [null, undefined, Number.NaN, -60, Number.POSITIVE_INFINITY]) expect(wholeMinutes(bad), String(bad)).toBeNull();
+  });
+  it('recordIntervalWord: 3600 → "hour" · 1800 → "30 minutes" · 7200 → "120 minutes"; under two minutes, null or undefined → null (no §7 form says it)', () => {
+    expect(recordIntervalWord(3600)).toBe('hour');
+    expect(recordIntervalWord(1800)).toBe('30 minutes');
+    expect(recordIntervalWord(7200)).toBe('120 minutes');
+    for (const none of [60, 30, 0, null, undefined]) expect(recordIntervalWord(none), String(none)).toBeNull();
+  });
+  it('elapsedExceeds: an age past the interval → true; within it → false; a null interval or an unreadable instant → null (not sayable, never a guess)', () => {
+    const now = Date.parse('2026-10-11T12:00:00Z');
+    expect(elapsedExceeds('2026-10-11T11:45:00Z', 600, now)).toBe(true);
+    expect(elapsedExceeds('2026-10-11T11:55:00Z', 600, now)).toBe(false);
+    expect(elapsedExceeds('2026-10-11T11:45:00Z', null, now)).toBeNull();
+    expect(elapsedExceeds(null, 600, now)).toBeNull();
+    expect(elapsedExceeds('not-a-time', 600, now)).toBeNull();
+  });
+  it('RECOVERY_KIND_FALLBACK is "device" — §7\'s generic {kind}: the entity reads carry no device class word', () => {
+    expect(RECOVERY_KIND_FALLBACK).toBe('device');
   });
 });

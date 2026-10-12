@@ -24,7 +24,7 @@ describe('brand token', () => {
  * RED at HEAD: none of the 140 keys exists in the catalog (i18n.ts:24–:44 carries
  * 13 keys; the one hero key, `hero.permanence`, carries the product name).
  */
-import { t, type MessageKey } from './i18n';
+import { messageKeys, t, type MessageKey } from './i18n';
 /** The 140 §7 keys, verbatim from SPEC.md:136–:275 (extracted by script, not typed) — minus the six FE-115 D3 retired
  *  (the list is now 134; the retired six are named in the §FE-115 D3 block at the end of this file). */
 const SPEC7_KEYS = [
@@ -491,12 +491,16 @@ describe('FE-115 D4 — the four lint-reach rows are in the catalog, verbatim', 
  * `{{NAME}}` (the token appears in no card string by design — it is the shell's), no "we". Four [AMEND] rows
  * carry SPEC §3's null-arm words that §7 does not key (the label minus its since clause; a line's first
  * sentence) — filed for the hub's §7 amendment. RED at HEAD: none of the keys exists in the catalog.
+ * HERO-U3 (2026-10-11): the object below is RE-EXTRACTED by script from SPEC.md §7 as amended by U2c (:89–:151 — 63 rows;
+ * the four null-arm rows :152–:155 stay in SPEC7_RECOVERY_AMEND_KEYS): 67 rows in all, the catalog's whole recovery.* set.
  */
 const SPEC7_RECOVERY_KEYS = {
   "recovery.state.reporting.label": "Reporting",
   "recovery.state.reporting.line": "Last report {time}.",
   "recovery.state.quiet.label": "Quiet since {time} (asked, answered)",
-  "recovery.state.quiet.line": "No report since {time}. Asked at {askedTime}; it answered.",
+  "recovery.state.quiet.line.recorded": "No report since {time}. It answered the newest check on record, at {checkedTime}.",
+  "recovery.state.quiet.noTime.label": "Quiet (asked, answered)",
+  "recovery.state.quiet.line.recorded.noReport": "No report on record. It answered the newest check on record, at {checkedTime}.",
   "recovery.state.quiet.line.edge": "No report since {time}. It answered when asked at {heardTime}.",
   "recovery.state.notResponding.label": "Not responding since {time} (asked twice, no answer)",
   "recovery.state.notResponding.line": "Asked twice; nothing came back. Last heard {time}.",
@@ -512,10 +516,12 @@ const SPEC7_RECOVERY_KEYS = {
   "recovery.state.unasked.line": "Nothing from this device since startup. It has not been asked yet.",
   "recovery.state.unasked.lastReport": "Last report on record: {time}.",
   "recovery.state.unasked.noReport": "No report on record.",
+  "recovery.state.noCheckRecorded.label": "No check recorded since {time}",
+  "recovery.state.noCheckRecorded.line": "A newer check was due by now. What the device is doing is not known.",
   "recovery.state.unrecognized.label": "Recorded as “{value}”",
   "recovery.state.unrecognized.line": "This status is not one the dashboard knows yet. Shown as recorded.",
   "recovery.contract.metered": "This {kind} reports at least every {reportMinutes} minutes. After {askMinutes} minutes of silence it is asked.",
-  "recovery.contract.floor": "This {kind} reports at least every minute. After one minute of silence it is asked.",
+  "recovery.contract.floor": "This {kind} has no report schedule on record. After one minute of silence it is asked.",
   "recovery.contract.passive": "This {kind} reports when something changes. It is never asked.",
   "recovery.contract.fallback": "If this device goes quiet for a while, it is asked. How long is not shown here yet.",
   "recovery.contract.answersNoReports": "It answers when asked but sends no reports. A window will not change that. Unplugging it and plugging it back in is the next thing to try.",
@@ -544,10 +550,10 @@ const SPEC7_RECOVERY_KEYS = {
   "recovery.a11y.collapse": "Hide details",
   "recovery.l2.lastReport": "Last report: {absoluteTime}",
   "recovery.l2.lastHeard": "Last heard: {absoluteTime}",
-  "recovery.l2.lastAsked": "Last asked: {absoluteTime} — {outcome}",
-  "recovery.l2.outcome.ok": "answered",
-  "recovery.l2.outcome.timeout": "no answer",
-  "recovery.l2.outcome.error": "could not ask",
+  "recovery.l2.lastRecordedCheck": "Newest check on record: {absoluteTime} — answered",
+  "recovery.l2.checkWindow": "Checks in that record: {windowStart} to {checkedTime} — {answered} answered, {missed} missed",
+  "recovery.l2.recordEvery": "Recording: one answered check per {recordInterval} at most, plus one after each restart",
+  "recovery.l2.dueBy": "Newer check due by: {absoluteTime}",
   "recovery.l2.reason": "Recorded reason: {reason}",
   "recovery.l2.signal": "Signal at the last frame: LQI {lqi}, {rssi} dBm, at {absoluteTime}.",
   "recovery.l2.window": "Window for {ieee}: opened {opensAt}, closes {closesAt}.",
@@ -560,9 +566,9 @@ const SPEC7_RECOVERY_AMEND_KEYS = {
   "recovery.state.left.line.noTime": "This device left the network.",
 } as const;
 
-describe('HERO-U2b R2 — the recovery card\'s §7 copy table is the catalog (59 rows + 4 [AMEND] null-arm rows)', () => {
-  it('carries all 59 §7 keys with the SPEC strings, verbatim', () => {
-    expect(Object.keys(SPEC7_RECOVERY_KEYS).length).toBe(59);
+describe('HERO-U2b R2 / HERO-U3 — the recovery card\'s §7 copy table is the catalog (63 rows + the 4 null-arm rows = SPEC §7\'s 67, as amended by U2c)', () => {
+  it('carries all 63 §7 keys with the SPEC strings, verbatim', () => {
+    expect(Object.keys(SPEC7_RECOVERY_KEYS).length).toBe(63);
     for (const [k, s] of Object.entries(SPEC7_RECOVERY_KEYS)) expect(t(k as MessageKey), k).toBe(s);
   });
   it('carries the four [AMEND] rows — SPEC §3\'s own null-arm words, each a §7 label or line with a clause removed, never new words', () => {
@@ -590,5 +596,57 @@ describe('HERO-U2b R2 — the recovery card\'s §7 copy table is the catalog (59
     expect(t('recovery.state.unasked.label' as MessageKey)).toBe('Not heard from since startup (not asked)');
     expect(t('recovery.state.unasked.line' as MessageKey)).toBe('Nothing from this device since startup. It has not been asked yet.');
     expect(t('recovery.state.passive.notResponding.line' as MessageKey)).toBe('Nothing has arrived for longer than this device usually goes. It is never asked.');
+  });
+});
+
+/*
+ * HERO-U3 (2026-10-11) — the catalog moves with SPEC §7's U2c amendment (design/recovery-card-v1/SPEC.md:159 — five rows
+ * retired with the keys (f) does not record, nine added, the floor sentence re-cut: 67 rows), and Register C binds the WHOLE
+ * recovery.* catalog, not a list: every key the catalog holds under `recovery.` is a SPEC §7 row (extracted by script from
+ * SPEC.md:89–:155, not typed) and none carries the product name, `{{NAME}}` or "we". RED at HEAD (2a54145): the nine rows
+ * are absent, the floor row is v1's, the five retired rows are present, and `messageKeys` does not exist.
+ */
+const SPEC7_U2C_ADDED = {
+  "recovery.state.quiet.line.recorded": "No report since {time}. It answered the newest check on record, at {checkedTime}.",
+  "recovery.state.quiet.noTime.label": "Quiet (asked, answered)",
+  "recovery.state.quiet.line.recorded.noReport": "No report on record. It answered the newest check on record, at {checkedTime}.",
+  "recovery.state.noCheckRecorded.label": "No check recorded since {time}",
+  "recovery.state.noCheckRecorded.line": "A newer check was due by now. What the device is doing is not known.",
+  "recovery.l2.lastRecordedCheck": "Newest check on record: {absoluteTime} — answered",
+  "recovery.l2.checkWindow": "Checks in that record: {windowStart} to {checkedTime} — {answered} answered, {missed} missed",
+  "recovery.l2.recordEvery": "Recording: one answered check per {recordInterval} at most, plus one after each restart",
+  "recovery.l2.dueBy": "Newer check due by: {absoluteTime}",
+} as const;
+const SPEC7_U2C_RETIRED = ['recovery.state.quiet.line', 'recovery.l2.lastAsked', 'recovery.l2.outcome.ok', 'recovery.l2.outcome.timeout', 'recovery.l2.outcome.error'] as const;
+
+describe('HERO-U3 — the recovery catalog is SPEC §7 as amended by U2c (67 rows), and Register C binds all of it', () => {
+  it('the nine U2c rows carry the SPEC strings, verbatim [RED at HEAD: absent]', () => {
+    expect(Object.keys(SPEC7_U2C_ADDED).length).toBe(9);
+    for (const [k, s] of Object.entries(SPEC7_U2C_ADDED)) expect(t(k as MessageKey), k).toBe(s);
+  });
+  it('the floor sentence is U2c\'s re-cut — no report schedule claimed for a class that has none [RED at HEAD: v1\'s "reports at least every minute"]', () => {
+    expect(t('recovery.contract.floor' as MessageKey)).toBe("This {kind} has no report schedule on record. After one minute of silence it is asked.");
+    expect(t('recovery.contract.floor' as MessageKey)).not.toContain('reports at least every minute');
+  });
+  it('the five retired rows are gone — (f) records answers only: no "Asked at", no "Last asked", no outcome words [RED at HEAD: present]', () => {
+    for (const k of SPEC7_U2C_RETIRED) expect(t(k as MessageKey), k).toBeUndefined();
+  });
+  it('the catalog\'s recovery.* key set IS SPEC §7\'s — 67 keys, no more, no fewer [RED at HEAD: no messageKeys export]', () => {
+    const catalog = messageKeys().filter((k) => k.startsWith('recovery.')).sort();
+    const spec = Object.keys({ ...SPEC7_RECOVERY_KEYS, ...SPEC7_RECOVERY_AMEND_KEYS }).sort();
+    expect(spec.length).toBe(67);
+    expect(catalog).toEqual(spec);
+  });
+  it('Register C over EVERY recovery.* string the catalog holds: no product name, no `{{NAME}}`, no "we"; never "offline" or "stale" [RED at HEAD on the export; the content is a guard — teeth by mutation]', () => {
+    const keys = messageKeys().filter((k) => k.startsWith('recovery.'));
+    expect(keys.length).toBe(67);
+    for (const k of keys) {
+      const s = t(k);
+      expect(s, k).not.toContain(BRAND.productName);
+      expect(s, k).not.toContain('{{NAME}}');
+      expect(s, k).not.toMatch(/\bwe\b/i);
+      expect(s, k).not.toMatch(/\boffline\b/i);
+      expect(s, k).not.toMatch(/\bstale\b/i);
+    }
   });
 });

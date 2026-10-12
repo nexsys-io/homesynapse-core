@@ -150,7 +150,7 @@ describe('the TypeScript mirror declares the three keys optional-nullable (addit
     expect([typed, nulled, pre].length).toBe(3);
     // D0: the pin's homes (contract.ts · contract.test.ts · v113 · v114 · v115 · this file · scripts/contract-check.mjs)
     // move together; this file asserts the value through the module.
-    expect(CONTRACT_VERSION).toMatch(/^v1\.1\.6-/);
+    expect(CONTRACT_VERSION).toMatch(/^v1\.1\.7-/);
   });
 });
 

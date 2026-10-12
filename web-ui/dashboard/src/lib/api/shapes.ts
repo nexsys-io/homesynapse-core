@@ -10,6 +10,8 @@
  */
 import {
   CONTRACT_VERSION,
+  RECOVERY_KEYS,
+  type RecoveryKey,
   type Availability,
   type Origin,
   type RunStatus,
@@ -138,10 +140,45 @@ function linkOrNull(v: unknown, path: string): void {
   isStr(req(v, 'at', path), `${path}.at`);
 }
 
+/** An int OR null — the v1.1.7 contract numbers (Java Integer on the wire: never a fraction, never quoted). */
+function intOrNull(v: unknown, path: string): void {
+  if (v !== null && !(typeof v === 'number' && Number.isInteger(v))) {
+    throw new ContractError(`${path}: expected an integer or null, got ${typeof v === 'number' ? String(v) : typeof v}`);
+  }
+}
+/** An int ≥ 0 OR null — the v1.1.7 window counts (FIELDS.md §3) and the recovery-card projection's position. */
+function countOrNull(v: unknown, path: string): void {
+  intOrNull(v, path);
+  if (typeof v === 'number' && v < 0) throw new ContractError(`${path}: expected a count ≥ 0, got ${v}`);
+}
+/** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): the eleven recovery-card keys under the TRI-STATE — absent passes (a pre-v1.1.7
+ *  hub); PRESENT must be typed-or-null: the four instants are Instant.toString() (a number is the epoch-seconds class); the two
+ *  window counts ints ≥ 0; the class an OPEN string vocabulary (any string passes — the renderer names three and falls back);
+ *  the four contract numbers ints. Read BY NAME, never by position (the wire appends them after `link`). */
+const RECOVERY_KEY_CHECK: Record<RecoveryKey, (v: unknown, path: string) => void> = {
+  probeAnsweredAt: strOrNull,
+  probeWindowStart: strOrNull,
+  probesAnswered: countOrNull,
+  probesMissed: countOrNull,
+  availabilityClass: strOrNull,
+  reportIntervalSeconds: intOrNull,
+  silenceLimitSeconds: intOrNull,
+  missesToDark: intOrNull,
+  recordIntervalSeconds: intOrNull,
+  recordDueBy: strOrNull,
+  recordOverdueSince: strOrNull,
+};
+function recoveryKeys(o: Record<string, unknown>, path: string): void {
+  for (const k of RECOVERY_KEYS) if (k in o) RECOVERY_KEY_CHECK[k](o[k], `${path}.${k}`);
+}
+
 function meta(v: unknown, path: string) {
   if (!isObj(v)) throw new ContractError(`${path}: meta must be object`);
   isNum(req(v, 'viewPosition', path), `${path}.viewPosition`);
   isStr(req(v, 'timestamp', path), `${path}.timestamp`);
+  // v1.1.7 ADDITIVE (AVAIL-API-1 T-B; I-14): the recovery-card projection's position, AFTER `timestamp` on the three entity
+  // reads — a long ≥ 0 while LIVE, null while not; absent on a pre-v1.1.7 hub and on every other read (the tri-state).
+  if ('recoveryViewPosition' in v) countOrNull(v.recoveryViewPosition, `${path}.recoveryViewPosition`);
 }
 function subjectRef(v: unknown, path: string) {
   if (!isObj(v)) throw new ContractError(`${path}: subjectRef must be object`);
@@ -179,6 +216,8 @@ export const validators: Record<EndpointId, Validator> = {
       if ('availabilityReason' in e) strOrNull(e.availabilityReason, `${p}.availabilityReason`);
       if ('lastSeenAt' in e) strOrNull(e.lastSeenAt, `${p}.lastSeenAt`);
       if ('link' in e) linkOrNull(e.link, `${p}.link`);
+      // v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): the eleven recovery-card keys after `link`, the same tri-state.
+      recoveryKeys(e, p);
     });
     meta(req(b, 'meta', 'A1'), 'A1.meta');
   },
@@ -190,6 +229,7 @@ export const validators: Record<EndpointId, Validator> = {
     optStr(d, 'name', 'A2.data');
     oneOf(req(d, 'availability', 'A2.data'), AVAILABILITY, 'A2.data.availability');
     if (!isObj(req(d, 'attributes', 'A2.data'))) throw new ContractError('A2.data.attributes must be object');
+    recoveryKeys(d, 'A2.data'); // v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3)
     meta(req(b, 'meta', 'A2'), 'A2.meta');
   },
   'A3:entityState': (b) => {
@@ -208,6 +248,7 @@ export const validators: Record<EndpointId, Validator> = {
     }
     isNum(req(d, 'stateVersion', 'A3.data'), 'A3.data.stateVersion');
     isBool(req(d, 'stale', 'A3.data'), 'A3.data.stale');
+    recoveryKeys(d, 'A3.data'); // v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3)
     meta(req(b, 'meta', 'A3'), 'A3.meta');
   },
   'A4:projection': (b) => {

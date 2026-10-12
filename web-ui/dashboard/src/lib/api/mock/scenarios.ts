@@ -33,6 +33,7 @@ import type {
   NonFiringVerdict,
   RunSummary,
 } from '../contract';
+import { RECOVERY_KEYS, type RecoveryKey } from '../contract';
 import * as base from './mockData';
 
 /** The full fixture bundle a scenario serves. Mirrors the endpoints in mockTransport. */
@@ -48,6 +49,10 @@ export interface MockDataset {
   causalChains: Record<string, CausalChain>;
   nonFiring: Record<string, NonFiringExplanation>;
   events: EventSummary[];
+  /** v1.1.7 (HERO-U3): the recovery-card projection's position the three entity reads carry in meta — a number while LIVE,
+   *  null while catching up; ABSENT on a pre-v1.1.7 hub (every scenario but the two recovery-record ones), so the mock
+   *  transport omits the meta key there. */
+  recoveryViewPosition?: number | null;
 }
 
 const now = Date.now();
@@ -1157,6 +1162,102 @@ function buildRecoveryStates(): MockDataset {
   return { ...defaultDataset, entities, entityDetail: {}, entityState: {} };
 }
 
+/* HERO-U3 R7 (2026-10-11) — `recovery-live` / `recovery-catching-up`: ONE v1.1.7 hub (AVAIL-API-1 T-B, core 2a54145) — every
+ * entity row carries the v1.1.6 triple AND the eleven recovery-card keys PRESENT, and the three entity reads' meta carries
+ * `recoveryViewPosition` — so SPEC §3's S3 column and its null arms read off the Devices page without the Pi (the Pi serves
+ * v1.1.7 only from BC10, Sat Oct 17; design/recovery-card-v1/states.html is the design, this is the build's demonstration).
+ * The fleet: a mains-metered plug whose newest recorded answer backs "Quiet" (a FULL record) · a metered plug Reporting beside
+ * an older answer · a mains-floor lamp with its contract and NO answer on record (the four probe* null) · a passive sensor
+ * (recordIntervalSeconds null — never asked; no declared interval, so Quiet is not sayable) · a plug past R-G's bound (R6:
+ * recordOverdueSince served, recordDueBy before the read) · a plug dark by ping_timeout beside a served past bound (R6 never
+ * fires on UNAVAILABLE) · the seeded-dark lamp (the fifth state at S3) · a plug LIVE with nothing recorded yet (every key
+ * null — not the same fact as not LIVE) · an entity with no device (UNKNOWN; every key null — the emitter's no-device arm).
+ * The contract records are R-C's as StandardAvailabilityTracker.contractOf declares them (:773–:786); recordDueBy and
+ * recordOverdueSince are the MOCK CORE's served values (fixed offsets from now), never computed by the dashboard.
+ * `recovery-catching-up` is the same fleet while the projection is not LIVE: every key null, recoveryViewPosition null —
+ * every card keeps its S2 form. Each row has an A3 record (the drawer's read) in the read's key order. Names are fixtures,
+ * not claims. */
+type RecoveryRecord = Pick<EntitySummary, RecoveryKey>;
+const NO_RECOVERY_RECORD = Object.fromEntries(RECOVERY_KEYS.map((k) => [k, null])) as RecoveryRecord;
+function recoveryFleet(): EntitySummary[] {
+  const metered = { availabilityClass: 'mains-metered', reportIntervalSeconds: 600, silenceLimitSeconds: 660, missesToDark: 2, recordIntervalSeconds: 3600 };
+  const floor = { availabilityClass: 'mains-floor', reportIntervalSeconds: null, silenceLimitSeconds: 60, missesToDark: 2, recordIntervalSeconds: 3600 };
+  const passive = { availabilityClass: 'passive', reportIntervalSeconds: null, silenceLimitSeconds: 90_000, missesToDark: 2, recordIntervalSeconds: null };
+  const answer = (atMin: number, spanMin: number, answered: number, missed: number) => ({
+    probeAnsweredAt: iso(atMin),
+    probeWindowStart: iso(atMin + spanMin),
+    probesAnswered: answered,
+    probesMissed: missed,
+  });
+  const bound = (dueMin: number, overdueMin: number | null) => ({ recordDueBy: iso(dueMin), recordOverdueSince: overdueMin === null ? null : iso(overdueMin) });
+  const link = (lqi: number, rssiDbm: number, minAgo: number) => ({ lqi, rssiDbm, at: iso(minAgo) });
+  const mk = (
+    entityId: string,
+    name: string,
+    availability: EntitySummary['availability'],
+    lastReported: string | null,
+    availabilityReason: string | null,
+    lastSeenAt: string | null,
+    l: EntitySummary['link'],
+    record: Partial<Record<RecoveryKey, unknown>>,
+    deviceId: string | null = `01M0H4A2Q8Z3N5R7T9V1X3${entityId.slice(-4).toUpperCase().padStart(4, 'B')}`,
+  ): EntitySummary =>
+    ({ entityId, name, availability, stale: false, deviceId, lastReported, availabilityReason, lastSeenAt, link: l, ...NO_RECOVERY_RECORD, ...record }) as EntitySummary;
+  return [
+    // R2 at S3 — Quiet on the record: no report for 52 min; it answered the newest check on record 9 min ago (a FULL record)
+    mk('ent_rl_kitchen_plug', 'Kitchen Plug', 'AVAILABLE', iso(52), 'frame_received', iso(52), link(200, -45, 52), { ...answer(9, 61, 6, 0), ...metered, ...bound(-62, null) }),
+    // R1 at S3 — Reporting with the metered sentence; its newest recorded answer is older than its last report
+    mk('ent_rl_desk_plug', 'Desk Plug', 'AVAILABLE', iso(2), null, null, null, { ...answer(40, 60, 1, 0), ...metered, ...bound(-69, null) }),
+    // R1 at S3 — the floor class: its contract on record, NO answer on record (the four probe* null)
+    mk('ent_rl_hall_lamp', 'Hall Lamp', 'AVAILABLE', iso(5), 'frame_received', iso(300), link(182, -61, 300), { ...floor, ...bound(-66, null) }),
+    // R4 at S3 — the passive sensor: never asked (recordIntervalSeconds null) and no declared interval → Reporting with the age
+    mk('ent_rl_hallway_sensor', 'Hallway Sensor', 'AVAILABLE', iso(40), 'first_contact', iso(4000), link(144, -72, 4000), { ...passive, ...bound(-1460, null) }),
+    // R6 — past R-G's bound: nothing newer than the answer 80 min ago; the core's due instant was 9 min ago
+    mk('ent_rl_porch_plug', 'Porch Plug', 'AVAILABLE', iso(95), 'frame_received', iso(95), link(120, -77, 95), { ...answer(80, 64, 2, 0), ...metered, ...bound(9, 80) }),
+    // R3 at S3 — asked twice, no answer; the core also serves a past bound, and R6 never fires on UNAVAILABLE
+    mk('ent_rl_garage_plug', 'Garage Plug', 'UNAVAILABLE', iso(190), 'ping_timeout', iso(180), link(96, -83, 180), { ...answer(200, 60, 3, 2), ...metered, ...bound(109, 180) }),
+    // R5 at S3 — the seeded-dark lamp: a version-1 transition (reason and lastSeenAt null), its floor contract on record
+    mk('ent_rl_porch_lamp', 'Porch Lamp', 'UNAVAILABLE', iso(60 * 24 * 83), null, null, null, { ...floor, ...bound(-30, null) }),
+    // LIVE with nothing recorded yet — every key null: the null arms (the fallback sentence; "Newest check on record: Not recorded.")
+    mk('ent_rl_spare_plug', 'Spare Plug', 'AVAILABLE', iso(3), null, null, null, {}),
+    // UNKNOWN with no device on record — every key null
+    mk('ent_rl_back_door', 'Back Door', 'UNKNOWN', null, null, null, null, {}, null),
+  ];
+}
+/** The A3 record of a fleet row (the drawer's read), in the read's key order: the frozen keys, v1.1.6's triple, the eleven. */
+function recoveryState(e: EntitySummary): EntityState {
+  return {
+    entityId: e.entityId,
+    attributes: {},
+    availability: e.availability,
+    stateVersion: 3,
+    lastChanged: e.lastReported ?? null,
+    lastUpdated: e.lastReported ?? null,
+    lastReported: e.lastReported ?? null,
+    staleAfter: null,
+    stale: false,
+    availabilityReason: e.availabilityReason ?? null,
+    lastSeenAt: e.lastSeenAt ?? null,
+    link: e.link ?? null,
+    ...Object.fromEntries(RECOVERY_KEYS.map((k) => [k, e[k] ?? null])),
+  } as EntityState;
+}
+function recoveryDataset(entities: EntitySummary[], recoveryViewPosition: number | null): MockDataset {
+  return {
+    ...defaultDataset,
+    entities,
+    entityDetail: {},
+    entityState: Object.fromEntries(entities.map((e) => [e.entityId, recoveryState(e)])),
+    recoveryViewPosition,
+  };
+}
+function buildRecoveryLive(): MockDataset {
+  return recoveryDataset(recoveryFleet(), 48_200);
+}
+function buildRecoveryCatchingUp(): MockDataset {
+  return recoveryDataset(recoveryFleet().map((e) => ({ ...e, ...NO_RECOVERY_RECORD })), null);
+}
+
 /* FE-115 D2 — `v115-keys`: one DevPanel scenario per key STATE, so every sentence FE-114 (EXPLAIN-6 · 8 · 9) and
  * FE-115 (EXPLAIN-4) render is reachable by hand: one run per condition-definition permit the emitter can produce
  * (ConditionDefinitionRenderer: state · numeric · time · and · or · not · zone), a run whose definition is null
@@ -1247,6 +1348,8 @@ export const SCENARIOS: Scenario[] = [
   { id: 'v115-keys', label: 'v1.1.4 / v1.1.5 keys', group: 'Story', blurb: 'One run per condition-definition kind (state · numeric · time · and · or · not · zone, a nested one), a null definition and an unknown kind; a confirmed step with its confirmedAt and a held one without; a DISABLED with its disabledAt and a FIRED_CONFIRMED — every FE-114 / FE-115 sentence one click away.', build: buildV115Keys },
   { id: 'legacy-hub', label: 'Legacy hub (pre-v1.1.4)', group: 'Story', blurb: 'The default home as a v1.1.3 hub serves it — no definitionKey, no condition definition, no settledAt / confirmedAt, no disabledAt, no availabilityReason / lastSeenAt / link: the ABSENT arm of every v1.1.4 / v1.1.5 / v1.1.6 key stays reachable.', build: buildLegacyHub },
   { id: 'recovery-states', label: 'The recovery card, every state', group: 'Story', blurb: 'SPEC §3 on the J1 wire: one device per row — Reporting (the healthy all-null row and a frame), Quiet on its one sayable edge, Not responding by ping_timeout and by leave, the passive sensor dark by silence_timeout, the fifth state twice (the version-1 null row and UNKNOWN), and a reason this build does not know. Read SPEC §10 off the Devices page.', build: buildRecoveryStates },
+  { id: 'recovery-live', label: 'Recovery card on the record (v1.1.7)', group: 'Story', blurb: 'SPEC §3\'s S3 column on a v1.1.7 hub, LIVE: Quiet from the newest recorded answer, Reporting with the class\'s contract sentence (metered · floor · passive), R6 “No check recorded since” past the core\'s bound, R3 beside a served bound, the fifth state, and a device with nothing recorded yet. Open a device for L2 — the newest check, its window, the cadence, “due by”.', build: buildRecoveryLive },
+  { id: 'recovery-catching-up', label: 'Recovery card, record catching up', group: 'Story', blurb: 'The same v1.1.7 fleet while the recovery-card projection is not LIVE: every record key null and recoveryViewPosition null — every card keeps its S2 form (the not-LIVE rule); the sixth cell never fires from a null.', build: buildRecoveryCatchingUp },
   { id: 'live-fleet', label: 'Live fleet mirror', group: 'Story', blurb: 'One entity per deployed device class with canonical attribute keys — including brightness level 0–254 plus the hub-derived percent.', build: buildLiveFleet },
   { id: 'all-origins', label: 'All event origins', group: 'Story', blurb: 'Automation, device, you, external, and the honest UNKNOWN.', build: buildAllOrigins },
   { id: 'large', label: 'Large (300 runs · 500 events)', group: 'Scale', blurb: 'Forces list virtualization + a render budget.', build: buildLarge },

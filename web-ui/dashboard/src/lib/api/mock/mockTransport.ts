@@ -8,6 +8,8 @@
 import type { RawRequest, RawResponse, Transport } from '../client';
 import {
   PROBLEM_TYPE_URI_PREFIX,
+  RECOVERY_KEYS,
+  type EntitySummary,
   type Envelope,
   type PaginationMeta,
   type ProblemDetail,
@@ -15,6 +17,7 @@ import {
   type ProjectionStatus,
 } from '../contract';
 import { getCondition, getDataset, getGeneration, latencyMs } from './mockState';
+import type { MockDataset } from './scenarios';
 
 let vp = 48_500;
 const meta = () => ({ viewPosition: ++vp, timestamp: new Date().toISOString() });
@@ -22,6 +25,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function envelope<T>(data: T, pagination?: PaginationMeta): Envelope<T> {
   return pagination ? { data, pagination, meta: meta() } : { data, meta: meta() };
+}
+/** v1.1.7 (HERO-U3 R7): the three entity reads' envelope — meta carries `recoveryViewPosition` AFTER `timestamp` (I-14) when
+ *  the active dataset is a v1.1.7 hub ('recoveryViewPosition' in it: a position while LIVE, null while catching up); a
+ *  pre-v1.1.7 dataset omits the key (the ABSENT arm). Every other read's meta is unchanged. */
+function entityEnvelope<T>(data: MockDataset, body: T, pagination?: PaginationMeta): Envelope<T> {
+  const env = envelope(body, pagination);
+  return 'recoveryViewPosition' in data ? { ...env, meta: { ...env.meta, recoveryViewPosition: data.recoveryViewPosition ?? null } } : env;
+}
+/** The v1.1.7 keys a list row carries, for the A2 detail the mock derives from it (the emitter appends them on all three reads). */
+function recoveryKeysOf(row: EntitySummary): Partial<EntitySummary> {
+  return Object.fromEntries(RECOVERY_KEYS.filter((k) => k in row).map((k) => [k, row[k]]));
 }
 function problem(p: ProblemDetail): RawResponse {
   return { status: p.status, headers: {}, body: p };
@@ -101,19 +115,19 @@ export function createMockTransport(getToken: () => string | null): Transport {
       const q = req.query ?? {};
 
       // ---- A-class ----
-      if (path === '/api/v1/entities') return respond(req, envelope(data.entities, listPagination(Number(q.limit) || 50)));
+      if (path === '/api/v1/entities') return respond(req, entityEnvelope(data, data.entities, listPagination(Number(q.limit) || 50)));
 
       let m = path.match(/^\/api\/v1\/entities\/([^/]+)\/state$/);
       if (m) {
         const s = data.entityState[decodeURIComponent(m[1]!)];
-        return s ? respond(req, envelope(s)) : notFound(`No state for entity ${m[1]}`);
+        return s ? respond(req, entityEnvelope(data, s)) : notFound(`No state for entity ${m[1]}`);
       }
       m = path.match(/^\/api\/v1\/entities\/([^/]+)$/);
       if (m) {
         const id = decodeURIComponent(m[1]!);
         const found = data.entities.find((e) => e.entityId === id);
-        const d = data.entityDetail[id] ?? (found ? { entityId: id, availability: found.availability, attributes: {} } : undefined);
-        return d ? respond(req, envelope(d)) : notFound(`No entity ${id}`);
+        const d = data.entityDetail[id] ?? (found ? { entityId: id, availability: found.availability, attributes: {}, ...recoveryKeysOf(found) } : undefined);
+        return d ? respond(req, entityEnvelope(data, d)) : notFound(`No entity ${id}`);
       }
       if (path === '/internal/projection') return respond(req, envelope(data.projection));
       if (path === '/internal/dlq') return respond(req, envelope(data.dlq));

@@ -33,6 +33,7 @@ import { DataTable } from '../components/DataTable';
 import { Resource } from '../components/Resource';
 import { StatusPill } from '../components/StatusPill';
 import { RecoveryCard } from '../components/RecoveryCard';
+import type { RecoveryMeta } from '../lib/recovery';
 import { Drawer } from '../components/Drawer';
 import { Loading, ErrorState, EmptyState } from '../components/feedback';
 
@@ -89,7 +90,8 @@ export function DevicesView() {
                   // the contract sentence and L2 live on the device page). The decision is lib/recovery.ts's
                   // for the row's stage; the flag alone was never a live-contact claim, and the card says what
                   // the system last concluded in the three words (SPEC §1).
-                  render: (r) => <RecoveryCard row={r} name={displayName(r)} dense />,
+                  // HERO-U3: the list read's meta rides beside its row — LIVE → S3; null / absent → the S2 form (the not-LIVE rule).
+                  render: (r) => <RecoveryCard row={r} name={displayName(r)} dense meta={state.meta} />,
                 },
                 {
                   key: 'fresh',
@@ -134,13 +136,13 @@ export function DevicesView() {
       </Card>
 
       <Drawer open={selectedId !== null} title={selected ? displayName(selected) : ''} onClose={() => setSelectedId(null)}>
-        {selectedId !== null ? <EntityDetail id={selectedId} row={selected} /> : null}
+        {selectedId !== null ? <EntityDetail id={selectedId} row={selected} meta={state.meta} /> : null}
       </Drawer>
     </Page>
   );
 }
 
-function EntityDetail({ id, row }: { id: string; row: EntitySummary | null }) {
+function EntityDetail({ id, row, meta }: { id: string; row: EntitySummary | null; meta?: RecoveryMeta }) {
   const state = useApi(() => api.getEntityState(id));
   if (state.status === 'loading') return <Loading />;
   if (state.status === 'error') return <ErrorState error={state.error} onRetry={state.reload} />;
@@ -161,7 +163,7 @@ function EntityDetail({ id, row }: { id: string; row: EntitySummary | null }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--hs-space-4)' }}>
-      <RecoveryCard row={cardRow} name={displayName(cardRow)} />
+      <RecoveryCard row={cardRow} name={displayName(cardRow)} meta={meta} />
 
       {/* SPEC §6 B: the reading's own freshness word stays with the values it describes. */}
       {s.stale ? (

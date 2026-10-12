@@ -344,14 +344,20 @@ const en = {
    * product name, no `{{NAME}}`, no "we"; never blames, never celebrates. Slots are {braces}; callers fill
    * them (format.ts fillSlots). Test-locked by i18n.test.ts. Rows 1–2 of the build render the `state.*`,
    * `contract.fallback`, `a11y.state/expand/collapse` and `l2.*` rows; the `act.*`, `a11y.countdown/closed`
-   * and `l2.window` rows are row 3's (the act — Q3 (b), a later lane) and the S3 rows (`quiet.line`,
-   * `contract.metered/floor/passive/answersNoReports`, `l2.lastAsked/outcome.*`) wait for AVAIL-API-1 —
-   * present in the catalog so the SPEC is the catalog, unconsumed until their rows land. */
+   * and `l2.window` rows are row 3's (the act — Q3 (b), a later lane) — present in the catalog so the SPEC is the
+   * catalog, unconsumed until their row lands.
+   * HERO-U3 (2026-10-11): the catalog moved with SPEC §7's U2c amendment (SPEC.md:159 — 5 rows retired with the keys
+   * (f) does not record: `state.quiet.line`, `l2.lastAsked`, `l2.outcome.*`; 9 added: `state.quiet.line.recorded` ·
+   * `.noTime.label` · `.line.recorded.noReport`, `state.noCheckRecorded.label` · `.line`, `l2.lastRecordedCheck` ·
+   * `.checkWindow` · `.recordEvery` · `.dueBy`; `contract.floor` re-cut) — 67 rows, extracted by script; the S3 rows
+   * render since HERO-U3 (`contract.answersNoReports` stays unconsumed: SPEC §3 names no rule for it — the return §3). */
   // recovery.state.*
   "recovery.state.reporting.label": "Reporting",
   "recovery.state.reporting.line": "Last report {time}.",
   "recovery.state.quiet.label": "Quiet since {time} (asked, answered)",
-  "recovery.state.quiet.line": "No report since {time}. Asked at {askedTime}; it answered.",
+  "recovery.state.quiet.line.recorded": "No report since {time}. It answered the newest check on record, at {checkedTime}.",
+  "recovery.state.quiet.noTime.label": "Quiet (asked, answered)",
+  "recovery.state.quiet.line.recorded.noReport": "No report on record. It answered the newest check on record, at {checkedTime}.",
   "recovery.state.quiet.line.edge": "No report since {time}. It answered when asked at {heardTime}.",
   "recovery.state.notResponding.label": "Not responding since {time} (asked twice, no answer)",
   "recovery.state.notResponding.line": "Asked twice; nothing came back. Last heard {time}.",
@@ -367,11 +373,13 @@ const en = {
   "recovery.state.unasked.line": "Nothing from this device since startup. It has not been asked yet.",
   "recovery.state.unasked.lastReport": "Last report on record: {time}.",
   "recovery.state.unasked.noReport": "No report on record.",
+  "recovery.state.noCheckRecorded.label": "No check recorded since {time}",
+  "recovery.state.noCheckRecorded.line": "A newer check was due by now. What the device is doing is not known.",
   "recovery.state.unrecognized.label": "Recorded as “{value}”",
   "recovery.state.unrecognized.line": "This status is not one the dashboard knows yet. Shown as recorded.",
   // recovery.contract.*
   "recovery.contract.metered": "This {kind} reports at least every {reportMinutes} minutes. After {askMinutes} minutes of silence it is asked.",
-  "recovery.contract.floor": "This {kind} reports at least every minute. After one minute of silence it is asked.",
+  "recovery.contract.floor": "This {kind} has no report schedule on record. After one minute of silence it is asked.",
   "recovery.contract.passive": "This {kind} reports when something changes. It is never asked.",
   "recovery.contract.fallback": "If this device goes quiet for a while, it is asked. How long is not shown here yet.",
   "recovery.contract.answersNoReports": "It answers when asked but sends no reports. A window will not change that. Unplugging it and plugging it back in is the next thing to try.",
@@ -403,10 +411,10 @@ const en = {
   // recovery.l2.*
   "recovery.l2.lastReport": "Last report: {absoluteTime}",
   "recovery.l2.lastHeard": "Last heard: {absoluteTime}",
-  "recovery.l2.lastAsked": "Last asked: {absoluteTime} — {outcome}",
-  "recovery.l2.outcome.ok": "answered",
-  "recovery.l2.outcome.timeout": "no answer",
-  "recovery.l2.outcome.error": "could not ask",
+  "recovery.l2.lastRecordedCheck": "Newest check on record: {absoluteTime} — answered",
+  "recovery.l2.checkWindow": "Checks in that record: {windowStart} to {checkedTime} — {answered} answered, {missed} missed",
+  "recovery.l2.recordEvery": "Recording: one answered check per {recordInterval} at most, plus one after each restart",
+  "recovery.l2.dueBy": "Newer check due by: {absoluteTime}",
   "recovery.l2.reason": "Recorded reason: {reason}",
   "recovery.l2.signal": "Signal at the last frame: LQI {lqi}, {rssi} dBm, at {absoluteTime}.",
   "recovery.l2.window": "Window for {ieee}: opened {opensAt}, closes {closesAt}.",
@@ -430,4 +438,9 @@ const catalogs: Record<typeof locale, Messages> = { en };
 /** Resolve a message key to text in the active locale. */
 export function t(key: MessageKey): string {
   return catalogs[locale][key];
+}
+
+/** Every key the active catalog holds (HERO-U3) — so a test can bind Register C to the whole `recovery.*` set, not a list. */
+export function messageKeys(): MessageKey[] {
+  return Object.keys(catalogs[locale]) as MessageKey[];
 }

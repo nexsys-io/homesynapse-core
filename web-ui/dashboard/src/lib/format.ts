@@ -174,6 +174,31 @@ export function clockTimeWithDate(isoOrNull: string | null | undefined, now = Da
   return `${time} on ${date}`;
 }
 
+/* ---- HERO-U3 (2026-10-11): the recovery card's contract numbers are RENDERED here — never in lib/recovery.ts (the card computes
+ * no bound; R-G's bound is the core's, SPEC §12 Q10 (a)). SPEC §7's slot types: `reportMinutes` / `askMinutes` = whole minutes
+ * from the record's seconds (660 s → 11, rounded for the household — SPEC §4); `recordInterval` = "hour" for 3600 s, else
+ * "{n} minutes"; `kind` = "plug" | "lamp" | "sensor" | "device". ---- */
+/** §7's generic {kind}: the entity reads carry no device class word, so the card never guesses "plug", "lamp" or "sensor". */
+export const RECOVERY_KIND_FALLBACK = 'device';
+/** Whole minutes from a record's seconds, rounded; null when the wire carried no usable number. */
+export function wholeMinutes(seconds: number | null | undefined): number | null {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return null;
+  return Math.round(seconds / 60);
+}
+/** The record cadence's word: "hour" for 3600 s, else "{n} minutes"; null when no §7 form says it (under two minutes, none). */
+export function recordIntervalWord(seconds: number | null | undefined): string | null {
+  if (seconds === 3600) return 'hour';
+  const minutes = wholeMinutes(seconds);
+  return minutes !== null && minutes >= 2 ? `${minutes} minutes` : null;
+}
+/** Whether more than `seconds` have passed since an instant — the passive Quiet threshold (SPEC §3 R4 S3, Q4 (a)); null when
+ *  either side is not sayable (an unreadable instant, no declared interval) — never a guess. */
+export function elapsedExceeds(isoOrNull: string | null | undefined, seconds: number | null | undefined, now = Date.now()): boolean | null {
+  const at = parseInstant(isoOrNull);
+  if (!at || typeof seconds !== 'number' || !Number.isFinite(seconds)) return null;
+  return now - at.getTime() > seconds * 1000;
+}
+
 /* ---- The Last-reported cell (FE-HONEST-1 — the §10-G/I store-truth law) ----
  * Three honest states, ONE parse (DX-20): a readable stamp renders date-qualified;
  * a stamp that is ON RECORD but unreadable says so (never "not recorded" — the

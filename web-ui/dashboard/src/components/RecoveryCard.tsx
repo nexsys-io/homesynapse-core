@@ -15,12 +15,16 @@
  * pattern). The pill swaps state with no fade under prefers-reduced-motion (the module's rule).
  *
  * NOT in this build: the act ("Open a window for this device" — row 3, Q3 (b)), the countdown, the gesture
- * card, the S3 sentences (row 4). The dark rows render label + line (+ R5's second line) and L2; the act's
- * slot is below the line, marked.
+ * card. The dark rows render label + line (+ R5's second line) and L2; the act's slot is below the line, marked.
+ *
+ * HERO-U3 (2026-10-11): the S3 sentences render on the LIVE record — the `meta` prop carries the read's
+ * `recoveryViewPosition` into stageOf (a number → S3; null or absent → the S2 form, the not-LIVE rule): the class's
+ * contract sentence beneath, R2 from the newest recorded answer, R4's passive rows, R6's hourglass with "Newer check due
+ * by" in L2, and L2's newest check, its window and the recording cadence.
  */
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { EntitySummary } from '../lib/api/contract';
-import { recoveryA11y, recoveryRow, stageOf } from '../lib/recovery';
+import { recoveryA11y, recoveryRow, stageOf, type RecoveryMeta } from '../lib/recovery';
 import { t } from '../lib/i18n';
 import { StatusPill } from './StatusPill';
 import styles from './RecoveryCard.module.css';
@@ -30,6 +34,7 @@ export function RecoveryCard({
   name,
   dense = false,
   now,
+  meta,
 }: {
   row: EntitySummary;
   /** The device's display name (format.displayName) — the a11y sentence's subject. */
@@ -38,8 +43,11 @@ export function RecoveryCard({
   dense?: boolean;
   /** Test seam — the instant "now" is measured from. */
   now?: number;
+  /** v1.1.7 (HERO-U3): the read's meta beside its row — a numeric recoveryViewPosition puts the row at S3 (the LIVE record);
+   *  null or absent keeps its S2 form (the not-LIVE rule). */
+  meta?: RecoveryMeta;
 }) {
-  const d = recoveryRow(row, stageOf(row), now);
+  const d = recoveryRow(row, stageOf(row, meta), now);
   const a11y = recoveryA11y(name, d);
   // L2's <summary> says one thing at a time ("Show details" / "Hide details") — the accessible name is the
   // visible word, not both.

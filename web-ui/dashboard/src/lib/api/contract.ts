@@ -11,7 +11,23 @@
  *   B-class = FROZEN-UNBUILT (mock to these shapes; Core implements TO them).
  */
 
-export const CONTRACT_VERSION = 'v1.1.6-2026-10-09' as const;
+export const CONTRACT_VERSION = 'v1.1.7-2026-10-11' as const;
+/* v1.1.7 (AVAIL-API-1 T-B — the recovery card on the record; landed core-side 2026-10-11 on main at 2a54145, CI green; the
+ * FE mirror is HERO-U3, 2026-10-11 — the pin's date is the day T-B landed. The Pi serves v1.1.6 until BC10 (Sat 2026-10-17),
+ * so no v1.1.7 capture exists yet). The same four-constraint law. ELEVEN ADDITIVE keys on THREE reads plus ONE meta key,
+ * zero changes to any existing field/casing/nesting/order:
+ *   - A1 entities[] · A2 data · A3 data: the eleven RecoveryCardKeys below, APPENDED after `link` in the wire's order
+ *     (EntityStateJson.java:62–:65 RECOVERY_KEYS, written by appendRecoveryKeys :124–:155 — the list's `summarise` and the
+ *     Get reads' `render` append them through the one method, so the three reads agree byte for byte). The A2 / A3 types
+ *     here mirror a SUBSET of those reads' keys (they never typed v1.1.6's triple); the validators read every key by NAME.
+ *   - meta.recoveryViewPosition: number | null — the recovery-card projection's position while LIVE, else null; APPENDED
+ *     AFTER `timestamp` (the AVAIL-API-1 return's I-14: meta's frozen bytes stand) on the three entity reads.
+ * EVERY new key is PRESENT on a v1.1.7 read — JSON null while the projection is not LIVE, with no record (the four probe*),
+ * with no contract (the five contract keys and R-G's two), never absent; a pre-v1.1.7 hub omits them (lawful): OPTIONAL
+ * here, the TRI-STATE in the validators. R-G's bound is the CORE's (`recordDueBy` / `recordOverdueSince` — StaleRecordBound,
+ * SPEC §12 Q10 (a)): the dashboard renders it and never computes it. `probeLink` is NOT on the wire (Q12 (a)). The fixture is
+ * the EMITTER's (fixtures/emitter-2026-10-11-entities-v117-row.ts — from EntityStateJsonV117Test.java at 2a54145; re-pinned
+ * against the Pi's wire at BC10): MIRRORED, not yet VERIFIED (H8). */
 /* v1.1.6 (J1 LINK-READ-2 — the dark-device line; landed core-side 2026-10-03 on main, on the Pi's wire at
  * df2bc62; the FE mirror is HERO-U2b, 2026-10-09 — the pin's date is the mirror's. The freeze doc's stamp is
  * the hub's docs row and may lag this pin; filed in the HERO-U2b return §3). The same four-constraint law.
@@ -135,6 +151,10 @@ export interface ResponseMeta {
   viewPosition: number;
   /** ISO-8601 server timestamp. */
   timestamp: string;
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): on the three entity reads only — the recovery-card projection's position
+   *  while it is LIVE, else null (catching up, or a failed catch-up: every record key is null then). APPENDED AFTER
+   *  `timestamp` (I-14). OPTIONAL = a pre-v1.1.7 hub (and every other read); null = not LIVE (the card keeps its S2 form). */
+  recoveryViewPosition?: number | null;
 }
 
 export interface PaginationMeta {
@@ -255,11 +275,54 @@ export interface TypedValue {
  * A. EXISTING contracts (consume live)
  * ========================================================================= */
 
+/** v1.1.7 (AVAIL-API-1 T-B; HERO-U3) — the eleven recovery-card keys, in the WIRE'S order (EntityStateJson.java:62–:65),
+ *  appended after `link` on A1 / A2 / A3. Each is OPTIONAL (a pre-v1.1.7 hub) and NULLABLE (not LIVE · no record · no
+ *  contract): present-null is "nothing on record". FIELDS.md §3 is the row of record; the emitter at 2a54145 named them. */
+export interface RecoveryCardKeys {
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): the newest probe_answered's reply instant, Instant.toString() — the last RECORDED answer (at most one per device per record interval, R-B); null = no record. */
+  probeAnsweredAt?: string | null;
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): that record's window start, Instant.toString() — "Checks in that record: {start} to {at}"; null with probeAnsweredAt. */
+  probeWindowStart?: string | null;
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): that ONE record's answered count (an int ≥ 0), never summed across records; null with probeAnsweredAt. */
+  probesAnswered?: number | null;
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): that ONE record's missed count (an int ≥ 0); null with probeAnsweredAt. */
+  probesMissed?: number | null;
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): the contract's class — mains-metered · mains-floor · passive today, an OPEN vocabulary (`string`, never a union here); null = no contract record. */
+  availabilityClass?: string | null;
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): seconds — the reporting contract's maximum (metered) or the declared interval (passive); null = none declared (every floor device). */
+  reportIntervalSeconds?: number | null;
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): seconds of silence after which the device is asked (mains) or named dark (passive); null = no contract. */
+  silenceLimitSeconds?: number | null;
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): unanswered asks that name a mains device dark — R3's "twice"; null = no contract. */
+  missesToDark?: number | null;
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): seconds between probe_answered records (3600 today); null = passive (never asked) or no contract. */
+  recordIntervalSeconds?: number | null;
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): R-G's due instant, Instant.toString(), COMPUTED BY THE CORE (StaleRecordBound, Q10 (a)) — L2 only; null = no contract. */
+  recordDueBy?: string | null;
+  /** v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): R-G's verdict — the newest evidence instant once the core's clock is past recordDueBy (V-6), else null; R6's {t}. */
+  recordOverdueSince?: string | null;
+}
+/** The eleven keys in the wire's order — the mirror of EntityStateJson.RECOVERY_KEYS (:62–:65); read by name, never by position. */
+export const RECOVERY_KEYS = [
+  'probeAnsweredAt',
+  'probeWindowStart',
+  'probesAnswered',
+  'probesMissed',
+  'availabilityClass',
+  'reportIntervalSeconds',
+  'silenceLimitSeconds',
+  'missesToDark',
+  'recordIntervalSeconds',
+  'recordDueBy',
+  'recordOverdueSince',
+] as const satisfies readonly (keyof RecoveryCardKeys)[];
+export type RecoveryKey = (typeof RECOVERY_KEYS)[number];
+
 /** A1 — GET /api/v1/entities (hot-path projection).
  *  `name` is the v1.1 ADDITIVE optional display name (freeze §A, 2026-06-26 C8):
  *  Core returns it when set, omits it when unset — clients tolerate absence and
  *  fall back to a humanized slug (format.displayName). */
-export interface EntitySummary {
+export interface EntitySummary extends RecoveryCardKeys {
   entityId: string;
   name?: string;
   availability: Availability;
@@ -287,19 +350,21 @@ export interface EntitySummary {
    *  fields, all present when the object is: `lqi` and `rssiDbm` numbers, `at` an
    *  `Instant.toString()`. OPTIONAL = pre-J1 hub; present-null = nothing on record. */
   link?: { lqi: number; rssiDbm: number; at: string } | null;
+  /* v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): the eleven RecoveryCardKeys (extended above) follow `link` on the wire. */
 }
 
 /** A2 — GET /api/v1/entities/{id} (hot-path detail). Optional `name` per C8. */
-export interface EntityDetail {
+export interface EntityDetail extends RecoveryCardKeys {
   entityId: string;
   name?: string;
   availability: Availability;
   attributes: Record<string, TypedValue>;
+  /* v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): the eleven RecoveryCardKeys (extended above), after the read's `link`. */
 }
 
 /** A3 — GET /api/v1/entities/{id}/state (full materialized EntityState, Doc 03 §4.1).
  *  Optional `name` per C8 (additive, tolerate absence). */
-export interface EntityState {
+export interface EntityState extends RecoveryCardKeys {
   entityId: string;
   name?: string;
   availability: Availability;
@@ -310,6 +375,7 @@ export interface EntityState {
   lastReported: string | null;
   stale: boolean;
   staleAfter: string | null;
+  /* v1.1.7 ADDITIVE (AVAIL-API-1 T-B; HERO-U3): the eleven RecoveryCardKeys (extended above), after the read's `link`. */
 }
 
 /** A4 — GET /internal/projection. Enveloped `{data, meta}` since M7.5c-a
