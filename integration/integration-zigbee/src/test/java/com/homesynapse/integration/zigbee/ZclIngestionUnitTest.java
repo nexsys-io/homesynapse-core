@@ -8,8 +8,11 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.homesynapse.event.CausalContext;
+import com.homesynapse.event.EventDraft;
 import com.homesynapse.event.EventEnvelope;
 import com.homesynapse.event.EventOrigin;
+import com.homesynapse.event.EventPublisher;
 import com.homesynapse.event.EventTypes;
 import com.homesynapse.event.StateReportedEvent;
 import com.homesynapse.event.SubjectType;
@@ -22,15 +25,20 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
+import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.ObjLongConsumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@link ZclIngestionUnit} tests: the drain → dedup → handler dispatch →
@@ -45,6 +53,8 @@ class ZclIngestionUnitTest {
 
     private static final IEEEAddress SNZB = new IEEEAddress(0x00124B0012345678L);
     private static final int SNZB_NWK = 0x6B9A;
+    /** One occupancy report (0x0406, attribute 0x0000 = 0x01) — the J3 guard tests' frame. */
+    private static final byte[] OCCUPANCY_REPORT = {0x18, 0x2A, 0x0A, 0x00, 0x00, 0x18, 0x01};
 
     private TestClock clock;
     private RecordingEventPublisher publisher;
@@ -69,6 +79,12 @@ class ZclIngestionUnitTest {
     private List<SinkCall> sinkCalls;
     private ZclIngestionUnit ingestion;
     private ListAppender<ILoggingEvent> logCapture;
+    /** J3: the resolver's nwk → IEEE view; SNZB alone until a test adds devices. */
+    private Map<Integer, IEEEAddress> resolvedDevices;
+    /** J3: the devices whose {@code onFrame} the listener stub refuses with a throw. */
+    private Set<Long> onFrameThrows;
+    /** J3: when set, the listener stub's {@code onJoinDenied} throws after recording. */
+    private boolean onJoinDeniedThrows;
 
     /** One write-through sink invocation (LEARN-PERSIST DP-LP-3). */
     private record SinkCall(IEEEAddress device, long zclId) { }
@@ -107,14 +123,16 @@ class ZclIngestionUnitTest {
         sendAccepted = true;
         resolverZoneType = ZoneType.MOTION;
         sinkCalls = new ArrayList<>();
+        resolvedDevices = new HashMap<>(Map.of(SNZB_NWK, SNZB));
+        onFrameThrows = new HashSet<>();
+        onJoinDeniedThrows = false;
 
         resolver =
                 new ZclIngestionUnit.DeviceResolver() {
                     @Override
                     public Optional<IEEEAddress> deviceForNetworkAddress(
                             int networkAddress) {
-                        return networkAddress == SNZB_NWK
-                                ? Optional.of(SNZB) : Optional.empty();
+                        return Optional.ofNullable(resolvedDevices.get(networkAddress));
                     }
 
                     @Override
@@ -141,6 +159,10 @@ class ZclIngestionUnitTest {
                             Optional<LinkReading> link) {
                         framesSeen.add(device);
                         linksSeen.add(link);
+                        if (onFrameThrows.contains(device.value())) {
+                            throw new IllegalStateException(
+                                    "injected: listener refused " + device);
+                        }
                     }
 
                     @Override
@@ -158,6 +180,10 @@ class ZclIngestionUnitTest {
                     public void onJoinDenied(IEEEAddress joiner, String status,
                             String decision) {
                         joinDenials.add(new JoinDenied(joiner, status, decision));
+                        if (onJoinDeniedThrows) {
+                            throw new IllegalStateException(
+                                    "injected: join-denied handler refused");
+                        }
                     }
 
                     @Override
@@ -1366,6 +1392,126 @@ class ZclIngestionUnitTest {
         return new EzspFrame(
                 EzspCoordinatorProtocol.FRAME_ZIGBEE_KEY_ESTABLISHMENT_HANDLER, true,
                 parameters);
+    }
+
+    // ── J3 (IR-46): the frame survives a handler throw ──────────────────────
+
+    @Test
+    @DisplayName("J3 Z-1 (IR-46): a listener throw on the SECOND of three devices drops that "
+            + "frame only — frames 1 and 3 publish, ONE WARN zigbee.ingestion_handler_failed "
+            + "names device 2 and its cluster, frameFailures() == 1, processCycle() returns")
+    void handlerThrow_dropsOneFrame_theOthersSurvive() {
+        IEEEAddress second = new IEEEAddress(0x00124B00000000B0L);
+        IEEEAddress third = new IEEEAddress(0x00124B00000000C0L);
+        resolvedDevices.put(0x10B0, second);
+        resolvedDevices.put(0x10C0, third);
+        EntityId thirdEntity = EntityId.of(UlidFactory.generate(clock));
+        entities.put(entityKey(second, 1), EntityId.of(UlidFactory.generate(clock)));
+        entities.put(entityKey(third, 1), thirdEntity);
+        onFrameThrows.add(second.value());
+        enqueueReport(SNZB_NWK, 1, 0x0406, OCCUPANCY_REPORT);
+        enqueueReport(0x10B0, 1, 0x0406, OCCUPANCY_REPORT);
+        enqueueReport(0x10C0, 1, 0x0406, OCCUPANCY_REPORT);
+
+        assertThatCode(ingestion::processCycle).doesNotThrowAnyException();
+
+        assertThat(publisher.published())
+                .as("frames 1 and 3 reached their handlers; frame 2 was dropped")
+                .extracting(envelope -> envelope.subjectRef().id())
+                .isEqualTo(List.of(entities.get(entityKey(SNZB, 1)).value(), thirdEntity.value()));
+        assertThat(framesSeen)
+                .as("the liveness feed saw all three — device 2's listener threw AFTER recording")
+                .isEqualTo(List.of(SNZB, second, third));
+        assertThat(ingestionMessages(Level.WARN, "zigbee.ingestion_handler_failed"))
+                .isEqualTo(List.of("zigbee.ingestion_handler_failed: device=0x00124B00000000B0 "
+                        + "cluster=0x406 failure=IllegalStateException: injected: listener "
+                        + "refused 0x00124B00000000B0"));
+        assertThat(ingestionMessages(Level.WARN, "zigbee.ingestion_frame_failed"))
+                .as("caught by the handler guard, never re-counted by the frame guard")
+                .isEmpty();
+        assertThat(ingestion.frameFailures()).isEqualTo(1);
+        assertThat(ingestion.framesSince(second))
+                .as("LINK-READ: the device talked — the per-device count is pre-guard")
+                .isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("J3 Z-2 (IR-46): the same (device, cluster) throwing on two cycles is WARN "
+            + "once, DEBUG the second time; frameFailures() == 2")
+    void handlerThrow_sameKeyOnTwoCycles_warnOnceThenDebug() {
+        onFrameThrows.add(SNZB.value());
+        Level previous = ingestionLogger().getLevel();
+        ingestionLogger().setLevel(Level.DEBUG);
+        try {
+            enqueueReport(SNZB_NWK, 1, 0x0406, OCCUPANCY_REPORT);
+            ingestion.processCycle();
+            enqueueReport(SNZB_NWK, 1, 0x0406, OCCUPANCY_REPORT);
+            ingestion.processCycle();
+        } finally {
+            ingestionLogger().setLevel(previous);
+        }
+
+        assertThat(ingestionMessages(Level.WARN, "zigbee.ingestion_handler_failed")).hasSize(1);
+        assertThat(ingestionMessages(Level.DEBUG, "zigbee.ingestion_handler_failed")).hasSize(1);
+        assertThat(ingestion.frameFailures()).isEqualTo(2);
+        assertThat(publisher.published())
+                .as("the throw precedes the handler — nothing published").isEmpty();
+    }
+
+    @Test
+    @DisplayName("J3 Z-3 (IR-46): a 0x0024 whose handler throws (onJoinDenied) is ONE WARN "
+            + "zigbee.ingestion_frame_failed: frameId=0x24 …; the next frame in the same drain "
+            + "is processed; frameFailures() == 1")
+    void frameHandlerThrow_dropsTheFrame_theNextFrameIsProcessed() {
+        onJoinDeniedThrows = true;
+        pendingFrames.add(trustCenterJoinFrame(SNZB.value(), SNZB_NWK,
+                EzspCoordinatorProtocol.DEVICE_UPDATE_UNSECURED_JOIN,
+                EzspCoordinatorProtocol.JOIN_DECISION_DENY_JOIN));
+        enqueueReport(SNZB_NWK, 1, 0x0406, OCCUPANCY_REPORT);
+
+        assertThatCode(ingestion::processCycle).doesNotThrowAnyException();
+
+        assertThat(joinDenials).as("the handler ran up to its throw").hasSize(1);
+        assertThat(ingestionMessages(Level.WARN, "zigbee.ingestion_frame_failed"))
+                .isEqualTo(List.of("zigbee.ingestion_frame_failed: frameId=0x24 "
+                        + "failure=IllegalStateException: injected: join-denied handler refused"));
+        assertThat(ingestionMessages(Level.WARN, "zigbee.ingestion_handler_failed")).isEmpty();
+        assertThat(publisher.published()).as("the next frame was processed")
+                .extracting(EventEnvelope::eventType)
+                .isEqualTo(List.of(EventTypes.STATE_REPORTED));
+        assertThat(ingestion.frameFailures()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("J3 Z-7 (REVIEW-J3 F-1 — the guards' boundary): a STORE failure — the write "
+            + "coordinator's RuntimeException(cause = SQLException) from publishRoot — propagates "
+            + "out of processCycle() UNCHANGED: no count, no handler line (the cycle arm's strike)")
+    void storeFailure_propagatesThroughBothGuards_uncounted() {
+        RuntimeException writeFailed =
+                new RuntimeException("write failed", new SQLException("disk I/O error"));
+        EventPublisher deadStore = new EventPublisher() {
+            @Override
+            public EventEnvelope publish(EventDraft draft, CausalContext cause) {
+                throw writeFailed;
+            }
+
+            @Override
+            public EventEnvelope publishRoot(EventDraft draft) {
+                throw writeFailed;
+            }
+        };
+        ZclIngestionUnit unit = new ZclIngestionUnit(() -> {
+            List<EzspFrame> drained = List.copyOf(pendingFrames);
+            pendingFrames.clear();
+            return drained;
+        }, resolver, listener, dedup, deadStore, clock, (frame, networkAddress) -> true);
+        enqueueReport(SNZB_NWK, 1, 0x0406, OCCUPANCY_REPORT);
+
+        assertThatThrownBy(unit::processCycle).isSameAs(writeFailed);
+
+        assertThat(unit.frameFailures()).isZero();
+        assertThat(ingestionMessages(Level.WARN, "zigbee.ingestion_handler_failed")).isEmpty();
+        assertThat(ingestionMessages(Level.WARN, "zigbee.ingestion_frame_failed")).isEmpty();
     }
 
     private static EzspFrame trustCenterJoinFrame(long ieee, int nwk, int status,

@@ -172,6 +172,18 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
     static final int KEEPALIVE_MISS_LIMIT = 3;
 
     /**
+     * J3 (IR-46) — consecutive failed production cycles before the loop stops
+     * surviving them and rethrows (the §4.2 cycle arm). DERIVATION: the loop
+     * already treats three consecutive keepalive misses as its liveness verdict
+     * ({@link #KEEPALIVE_MISS_LIMIT}); a failed cycle is judged by the same count.
+     * The fail-fast is reached at the third consecutive strike — at most three
+     * pump waits (≤ ~150 ms at {@link #PRODUCTION_CYCLE_MILLIS}) after the first,
+     * immediately on a hot loop that throws before the wait; the supervisor's
+     * backoff owns the rest. A cycle that completes resets the count.
+     */
+    static final int CYCLE_FAILURE_LIMIT = KEEPALIVE_MISS_LIMIT;
+
+    /**
      * The availability ping's exchange deadline (M9.6-AVAIL DP-4; chosen
      * constant matching the reporting binding's 5 s sleepy-tolerant window).
      * The ping is one ZCL Basic read on the run thread; a lapsed deadline is
@@ -334,6 +346,12 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
     private volatile long permitJoinEpoch;
     /** The epoch {@link #runCycleOnce()} last observed. Run-thread confined. */
     private long seenPermitJoinEpoch;
+    /**
+     * J3 (IR-46) — consecutive production cycles that ended in a {@link RuntimeException}
+     * (the {@link #productionLoop()} cycle arm); a cycle that completes resets it. Compared
+     * against {@link #CYCLE_FAILURE_LIMIT}. Run-thread confined.
+     */
+    private int consecutiveCycleFailures;
     /**
      * F-R4-1 (R-10 Row 10 (a)) — the once-per-(invocation, nwk) note for the
      * silent-rejoiner hook (H-ii) while the door is closed. Keyed by the 16-bit
@@ -1266,6 +1284,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
             publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, 1, new PermitJoinClosed(
                     context.integrationId(), context.integrationType(),
                     PermitJoinClosed.CAUSE_ELAPSED, open.opensAt(), open.closesAt()));
+            logWindowClosed(PermitJoinClosed.CAUSE_ELAPSED, open, open.closesAt());
         }
     }
 
@@ -1281,10 +1300,12 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         boolean stillOpen = now.isBefore(prior.closesAt());
         String cause = stillOpen ? PermitJoinClosed.CAUSE_SUPERSEDED
                 : PermitJoinClosed.CAUSE_ELAPSED;
+        Instant closedAt = stillOpen ? now : prior.closesAt();
         closeOnNcp(cause);
         publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, 1, new PermitJoinClosed(
                 context.integrationId(), context.integrationType(), cause,
-                prior.opensAt(), stillOpen ? now : prior.closesAt()));
+                prior.opensAt(), closedAt));
+        logWindowClosed(cause, prior, closedAt);
     }
 
     /**
@@ -1327,11 +1348,26 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
         PairingWindow open = currentWindow.getAndSet(null);
         if (open != null) {
             closeOnNcp(cause);   // J2b: the NCP's three acts before the record's close
+            Instant closedAt = clock.instant();   // J3: ONE reading — the row and the line agree
             publishWindowEvent(EventTypes.PERMIT_JOIN_CLOSED, 1, new PermitJoinClosed(
                     context.integrationId(), context.integrationType(), cause,
-                    open.opensAt(), clock.instant()));
+                    open.opensAt(), closedAt));
+            logWindowClosed(cause, open, closedAt);
         }
         permitJoinDeadline = null;
+    }
+
+    /**
+     * J3 (IR-119) — the close's log line beside its row, at EVERY closer (the cycle's
+     * elapsed close, the superseding open's close of the prior, the reopen's and the
+     * shutdown's {@link #closeWindow}): ONE INFO per close, as there is one row per
+     * close. {@code elapsed} is the window's REAL length from the SAME instant the row
+     * carries as {@code closedAt} (the open line's {@code duration=} is the REQUESTED
+     * length), so a log reader can see a window end without the store.
+     */
+    private void logWindowClosed(String cause, PairingWindow window, Instant closedAt) {
+        log.info("zigbee.permit_join_closed: cause={} elapsed={}s", cause,
+                Duration.between(window.opensAt(), closedAt).toSeconds());
     }
 
     /** {@link #close()}'s best-effort close: the record must never block the shutdown. */
@@ -1379,6 +1415,14 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
      * {@code zigbee.transport_closed_orderly} (INFO) and the loop exits; the watchdog
      * is never fed. Package-private: the §10-O scenario test drives the loop directly
      * over the scripted transport after the §5.1 ladder (the drive-seam pattern).</p>
+     *
+     * <p>J3 (IR-46) — the cycle arm: any other {@link RuntimeException} out of the try
+     * body (the pump, {@link #runCycleOnce()}, the keepalive) is a STRIKE, WARNed as
+     * {@code zigbee.cycle_failed}; the loop survives a transient one and rethrows the
+     * SAME object at {@link #CYCLE_FAILURE_LIMIT} consecutive strikes (ERROR
+     * {@code zigbee.cycle_failures_persist}) — {@code run()} then ends exactly as before
+     * J3 and the supervisor's restart is reached in ~150 ms, not never. A completed cycle
+     * resets the count; the two typed arms never feed it.</p>
      */
     void productionLoop() throws InterruptedException {
         while (stopSignal.getCount() > 0) {
@@ -1393,6 +1437,7 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
                                 protocol.keepaliveMisses());
                         watchdog.onAshLivenessLost();
                     }
+                    consecutiveCycleFailures = 0;   // J3: a completed cycle resets the strikes
                 } catch (TransportFailureException failure) {
                     if (closeRequested()) {
                         // FAILCHAN §10-O: close() counted the latch down and closed the
@@ -1415,6 +1460,23 @@ final class ZigbeeIntegrationAdapter implements ZigbeeAdapter, PairingWindowCont
                     }
                     log.warn("zigbee.cycle_command_timeout: {}", timeout.getMessage());
                     watchdog.onAshLivenessLost();
+                } catch (RuntimeException failure) {
+                    // J3 (IR-46) — the cycle arm, reaching the WHOLE try body (the pump,
+                    // the cycle, the keepalive): a throw is a STRIKE. The loop survives a
+                    // transient one; the third consecutive strike rethrows the SAME object
+                    // (the classifier is bare-instanceof) and run() ends exactly as it did
+                    // before J3 — the supervisor's restart is reached after ~150 ms, not
+                    // never. The two typed arms above feed the watchdog and never reach
+                    // this counter. Order: the count, the WARN, the limit, the rethrow.
+                    consecutiveCycleFailures++;
+                    log.warn("zigbee.cycle_failed: consecutive={} limit={} failure={}: {}",
+                            consecutiveCycleFailures, CYCLE_FAILURE_LIMIT,
+                            failure.getClass().getSimpleName(), failure.getMessage());
+                    if (consecutiveCycleFailures >= CYCLE_FAILURE_LIMIT) {
+                        log.error("zigbee.cycle_failures_persist: consecutive={} — the "
+                                + "supervisor owns recovery", consecutiveCycleFailures);
+                        throw failure;
+                    }
                 }
             } else {
                 watchdog.tick();

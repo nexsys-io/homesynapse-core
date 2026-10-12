@@ -477,6 +477,46 @@ class ZigbeePermitJoinTest {
     }
 
     @Test
+    @DisplayName("J3 Z-6a (IR-119): close() with an open window logs ONE INFO "
+            + "zigbee.permit_join_closed: cause=shutdown elapsed=7s — the elapsed from the SAME "
+            + "instant the row carries (the clock's 7-s advance); the row still ONE")
+    void close_withOpenWindow_logsTheCloseLineBesideTheRow() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> formationHandler(ncp, command));
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adapter.openPairingWindow(REQUEST);
+        clock.advance(Duration.ofSeconds(7));
+
+        adapter.close();
+
+        assertThat(messages(Level.INFO, "zigbee.permit_join_closed"))
+                .containsExactly("zigbee.permit_join_closed: cause=shutdown elapsed=7s");
+        assertThat(publisher.ofType(EventTypes.PERMIT_JOIN_CLOSED).toList())
+                .as("one line, one row").hasSize(1);
+    }
+
+    @Test
+    @DisplayName("J3 Z-6b (IR-119): the cycle's elapsed close logs ONE INFO "
+            + "zigbee.permit_join_closed: cause=elapsed elapsed=120s — the window's OWN end, as "
+            + "the row's closedAt is (never the cycle's clock); a second cycle logs nothing more")
+    void runCycleOnce_pastDeadline_logsTheCloseLineOnce() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> formationHandler(ncp, command));
+        ZigbeeIntegrationAdapter adapter = bootProduction(ncp, null);
+        adapter.openPairingWindow(REQUEST);
+        clock.advance(Duration.ofSeconds(WINDOW_SECONDS + 1));
+
+        adapter.runCycleOnce();
+        adapter.runCycleOnce();
+
+        assertThat(messages(Level.INFO, "zigbee.permit_join_closed"))
+                .containsExactly("zigbee.permit_join_closed: cause=elapsed elapsed="
+                        + WINDOW_SECONDS + "s");
+        assertThat(publisher.ofType(EventTypes.PERMIT_JOIN_CLOSED).toList())
+                .as("one line, one row").hasSize(1);
+    }
+
+    @Test
     @DisplayName("T4b: a second open while a window is open closes the prior FIRST with ONE "
             + "permit_join_closed(superseded, closedAt = now), then opens the new one — two "
             + "0x0022 frames, the enablement order repeated per open")

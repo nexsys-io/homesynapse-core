@@ -16,6 +16,7 @@ import com.homesynapse.platform.identity.EntityId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.time.Clock;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -51,6 +52,15 @@ import java.util.function.Supplier;
  * {@link IngestionListener#onRejoinCandidate(int, int)} before its skip — the
  * silent-rejoiner admission hook (H-ii); the adapter gates it on the
  * permit-join window and admits through the SAME announce path.
+ *
+ * <p>J3 (IR-46): a handler throw is DATA, not the end of the adapter.
+ * {@link #processCycle()} guards every drained frame and {@link #route}
+ * guards every resolved Home Automation frame's dispatch: a
+ * {@link RuntimeException} drops THAT frame (WARN once per key, DEBUG after;
+ * {@link #frameFailures()} counts it) and the drain continues with the next.
+ * The one exception is the store/I-O boundary — a cause chain carrying
+ * {@code java.sql.SQLException} or {@link IOException} is rethrown unchanged to
+ * the adapter's cycle arm (three strikes, then the supervisor's restart).
  *
  * <p>M9.4-TCJ §A.2, as AMENDED by F-R4-1: {@code trustCenterJoinHandler}
  * (0x0024) and {@code childJoinHandler} (0x0023) callbacks are routed to
@@ -238,6 +248,16 @@ final class ZclIngestionUnit {
     /** The coordinator's application endpoint (the adapter-wide EP-1 convention). */
     private static final int COORDINATOR_ENDPOINT = 1;
 
+    /**
+     * J3 (IR-46) — the store boundary's class name, matched up the hierarchy by NAME:
+     * this module does not read {@code java.sql} (persistence's {@code requires
+     * java.sql} is not transitive) and J3 adds no module edge.
+     */
+    private static final String SQL_EXCEPTION_CLASS_NAME = "java.sql.SQLException";
+
+    /** J3 (IR-46) — the cause-chain walk's bound; a malformed chain never spins the cycle. */
+    private static final int MAX_CAUSE_DEPTH = 32;
+
     private final Supplier<List<EzspFrame>> callbackDrain;
     private final DeviceResolver resolver;
     private final IngestionListener listener;
@@ -269,6 +289,16 @@ final class ZclIngestionUnit {
     // LINK-READ: the devices whose suspect last-hop pair was already named —
     // zigbee.link_reading_suspect fires once per device per process.
     private final Set<Long> linkSuspectNamed = new HashSet<>();
+    // J3 (IR-46): every frame a guard dropped, whichever guard caught it. Cycle-
+    // thread confined like the maps above; read by frameFailures() — the test's
+    // instrument and the link summary's future input (NOT printed on any existing
+    // line: the summary tokens are FROZEN).
+    private long frameFailures;
+    // J3 (IR-46): the faults already named — zigbee.ingestion_frame_failed fires
+    // once per (frameId, exception class), zigbee.ingestion_handler_failed once
+    // per (device, cluster); DEBUG after. Cycle-thread confined like the maps above.
+    private final Map<Integer, Set<Class<?>>> frameFailureNamed = new HashMap<>();
+    private final Map<Long, Set<Integer>> handlerFailureNamed = new HashMap<>();
 
     /**
      * Creates the ingestion unit with no persisted seed and a no-op learn sink
@@ -458,29 +488,53 @@ final class ZclIngestionUnit {
      * interview/reporting work touches the live NCP. The drain has exactly ONE
      * consumer (this loop) — the M9.4-TCJ join callbacks are routed HERE, never
      * through a second drain that would steal frames from ingestion.
+     *
+     * <p>J3 (IR-46) — the per-frame guard: each frame dispatches inside ONE
+     * {@code try}; a {@link RuntimeException} out of its handler drops THAT frame
+     * (WARN once per (frameId, class), DEBUG after; {@link #frameFailures()} counts
+     * it) and the drain CONTINUES — the rest of the batch is never lost. An
+     * {@code Error} is not caught. A store or I/O failure is rethrown unchanged
+     * ({@link #isStoreFailure}) — the adapter's cycle arm owns it.
      */
     void processCycle() {
         for (EzspFrame frame : callbackDrain.get()) {
-            int frameId = frame.frameId();
-            if (frameId == EzspCoordinatorProtocol.FRAME_TRUST_CENTER_JOIN_HANDLER) {
-                handleTrustCenterJoin(frame);
-                continue;
+            try {
+                dispatchFrame(frame);
+            } catch (RuntimeException failure) {
+                if (isStoreFailure(failure)) {
+                    throw failure;   // the cycle arm's strike, never a frame count
+                }
+                nameFrameFailureOnce(frame.frameId(), failure);
+                frameFailures++;
             }
-            if (frameId == EzspCoordinatorProtocol.FRAME_CHILD_JOIN_HANDLER) {
-                handleChildJoin(frame);
-                continue;
-            }
-            if (frameId == EzspCoordinatorProtocol
-                    .FRAME_ZIGBEE_KEY_ESTABLISHMENT_HANDLER) {
-                handleKeyEstablishment(frame);
-                continue;
-            }
-            if (frameId != EzspCoordinatorProtocol.FRAME_INCOMING_MESSAGE_HANDLER) {
-                continue;
-            }
-            EzspIncomingMessage.parse(frame.parameters())
-                    .ifPresent(this::route);
         }
+    }
+
+    /**
+     * One frame's dispatch by frame id — the body the per-frame guard wraps. The ZDO
+     * announce branch of {@link #route} returns before any sender is resolved, so a
+     * throw there is covered HERE and its line reads {@code frameId=0x45}.
+     */
+    private void dispatchFrame(EzspFrame frame) {
+        int frameId = frame.frameId();
+        if (frameId == EzspCoordinatorProtocol.FRAME_TRUST_CENTER_JOIN_HANDLER) {
+            handleTrustCenterJoin(frame);
+            return;
+        }
+        if (frameId == EzspCoordinatorProtocol.FRAME_CHILD_JOIN_HANDLER) {
+            handleChildJoin(frame);
+            return;
+        }
+        if (frameId == EzspCoordinatorProtocol
+                .FRAME_ZIGBEE_KEY_ESTABLISHMENT_HANDLER) {
+            handleKeyEstablishment(frame);
+            return;
+        }
+        if (frameId != EzspCoordinatorProtocol.FRAME_INCOMING_MESSAGE_HANDLER) {
+            return;
+        }
+        EzspIncomingMessage.parse(frame.parameters())
+                .ifPresent(this::route);
     }
 
     /**
@@ -654,15 +708,30 @@ final class ZclIngestionUnit {
             return;
         }
         IEEEAddress sender = device.get();
-        // LINK-READ: the per-device frame counter — one increment per Home
-        // Automation frame of a RESOLVED sender, PRE-dedup by the DP-3 rule
-        // the liveness feed below follows (the measured ×2 twin is still the
-        // device talking). Never a log line per frame: the count reaches the
-        // journal on the adapter's ten-minute summary line.
-        frameCounts.computeIfAbsent(sender.value(), key -> new LongAdder())
-                .increment();
-        listener.onFrame(sender, linkReadingOf(sender, message));
-        handleZcl(sender, message);
+        // J3 (IR-46) — the per-handler guard, AFTER the sender is resolved (an
+        // unknown sender above is a skip, never a failure): a throw out of the
+        // liveness feed or the cluster handler drops THIS frame (WARN once per
+        // (device, cluster), DEBUG after; counted) and returns — the next frame is
+        // unaffected and the per-frame guard never sees it (no double count, no
+        // double line). A store or I/O failure is rethrown unchanged to the cycle arm.
+        try {
+            // LINK-READ: the per-device frame counter — one increment per Home
+            // Automation frame of a RESOLVED sender, PRE-dedup by the DP-3 rule
+            // the liveness feed below follows (the measured ×2 twin is still the
+            // device talking; a frame whose handler throws is still the device
+            // talking). Never a log line per frame: the count reaches the
+            // journal on the adapter's ten-minute summary line.
+            frameCounts.computeIfAbsent(sender.value(), key -> new LongAdder())
+                    .increment();
+            listener.onFrame(sender, linkReadingOf(sender, message));
+            handleZcl(sender, message);
+        } catch (RuntimeException failure) {
+            if (isStoreFailure(failure)) {
+                throw failure;
+            }
+            nameHandlerFailureOnce(sender, message.clusterId(), failure);
+            frameFailures++;
+        }
     }
 
     /**
@@ -1046,5 +1115,87 @@ final class ZclIngestionUnit {
     private ZoneType effectiveZoneType(IEEEAddress device) {
         ZoneType learned = learnedZoneTypes.get(device.value());
         return learned != null ? learned : resolver.zoneTypeFor(device);
+    }
+
+    // ── J3 (IR-46): the guards' once-per-key lines and the store boundary ───
+
+    private void nameFrameFailureOnce(int frameId, RuntimeException failure) {
+        boolean first = frameFailureNamed
+                .computeIfAbsent(frameId, key -> new HashSet<>())
+                .add(failure.getClass());
+        if (first) {
+            log.warn("zigbee.ingestion_frame_failed: frameId=0x{} failure={}: {}",
+                    Integer.toHexString(frameId), failure.getClass().getSimpleName(),
+                    failure.getMessage());
+        } else {
+            log.debug("zigbee.ingestion_frame_failed: frameId=0x{} failure={}: {}",
+                    Integer.toHexString(frameId), failure.getClass().getSimpleName(),
+                    failure.getMessage());
+        }
+    }
+
+    private void nameHandlerFailureOnce(IEEEAddress device, int clusterId,
+            RuntimeException failure) {
+        boolean first = handlerFailureNamed
+                .computeIfAbsent(device.value(), key -> new HashSet<>())
+                .add(clusterId);
+        if (first) {
+            log.warn("zigbee.ingestion_handler_failed: device={} cluster=0x{} "
+                            + "failure={}: {}", device, Integer.toHexString(clusterId),
+                    failure.getClass().getSimpleName(), failure.getMessage());
+        } else {
+            log.debug("zigbee.ingestion_handler_failed: device={} cluster=0x{} "
+                            + "failure={}: {}", device, Integer.toHexString(clusterId),
+                    failure.getClass().getSimpleName(), failure.getMessage());
+        }
+    }
+
+    /**
+     * The guards' boundary (J3 §4.1; REVIEW-J3 F-1): a {@link RuntimeException} whose
+     * cause chain, walked to the root, carries a {@code java.sql.SQLException} or an
+     * {@link IOException} is a STORE or I/O failure, not a handler fault — both guards
+     * rethrow it unchanged (no line, no count) so it reaches the adapter's cycle arm and
+     * its three strikes; swallowed, a dead store would drop {@code state_reported} and
+     * {@code availability_changed} silently behind one WARN. The paths:
+     * {@link #publishStateReported} → the write coordinator's wrap
+     * ({@code SqliteEventStore.appendOnWriteThread}); the availability-transition
+     * publish under {@code IngestionListener.onFrame}. The one store failure with NO
+     * cause — the coordinator's {@code IllegalStateException} once shut down — occurs
+     * only during {@code close()}, when a dropped frame is the orderly consequence; it
+     * is a frame fault here (no message-sniffing).
+     *
+     * @param failure the caught exception, never {@code null}
+     * @return {@code true} when the chain carries a store or I/O failure
+     */
+    static boolean isStoreFailure(RuntimeException failure) {
+        Throwable cause = failure;
+        for (int depth = 0; cause != null && depth < MAX_CAUSE_DEPTH; depth++) {
+            if (cause instanceof IOException || isSqlException(cause.getClass())) {
+                return true;
+            }
+            cause = cause.getCause();
+        }
+        return false;
+    }
+
+    private static boolean isSqlException(Class<?> type) {
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            if (SQL_EXCEPTION_CLASS_NAME.equals(current.getName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * J3 (IR-46) — the frames dropped by the two ingestion guards since construction
+     * (a handler throw, a frame-handler throw); a store or I/O failure is never counted
+     * here (it is rethrown to the cycle arm). Cycle-thread confined; the test's
+     * instrument and the link summary's future input.
+     *
+     * @return the dropped-frame count, {@code >= 0}
+     */
+    long frameFailures() {
+        return frameFailures;
     }
 }

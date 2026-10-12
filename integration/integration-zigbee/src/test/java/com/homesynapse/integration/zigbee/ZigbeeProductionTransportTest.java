@@ -471,6 +471,90 @@ class ZigbeeProductionTransportTest {
         }
     }
 
+    // ── J3 (IR-46): the loop survives a transient cycle failure, fails fast on a persistent one ─
+
+    @Test
+    @DisplayName("J3 Z-4 (IR-46; P-2): a RuntimeException thrown inside the serial read reaches "
+            + "productionLoop() UNWRAPPED and is a strike, not the end of run() — two strikes "
+            + "(consecutive=1, consecutive=2 at WARN), then the orderly close exits the loop; "
+            + "no ERROR line, no transport_failed")
+    void cycleFailures_underTheLimit_theLoopSurvives() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> formationHandler(ncp, command));
+        ThrowInsideReadChannel channel = new ThrowInsideReadChannel(channelOver(ncp));
+        ZigbeeIntegrationAdapter adapter = adapterOver(channel);
+        bootLadder(adapter);
+        channel.throwOnNextReads(new IllegalStateException("injected"),
+                new IllegalStateException("injected"));
+        channel.closeInsideReadAfterThrows(adapter::close);
+
+        adapter.productionLoop();   // returns: two strikes, then the orderly close
+
+        assertThat(adapterMessages(Level.WARN, "zigbee.cycle_failed")).containsExactly(
+                "zigbee.cycle_failed: consecutive=1 limit=3 failure=IllegalStateException: injected",
+                "zigbee.cycle_failed: consecutive=2 limit=3 failure=IllegalStateException: injected");
+        assertThat(adapterMessages(Level.ERROR, "zigbee.cycle_failures_persist")).isEmpty();
+        assertThat(adapterMessages(Level.INFO, "zigbee.transport_closed_orderly")).hasSize(1);
+        assertThat(adapterMessages(Level.WARN, "zigbee.transport_failed"))
+                .as("a strike is never a transport failure").isEmpty();
+        assertThat(channel.thrown()).hasSize(2);
+        assertThat(channel.closedInsideRead()).isTrue();
+    }
+
+    @Test
+    @DisplayName("J3 Z-5 (IR-46): three consecutive strikes — the THIRD exception propagates out "
+            + "of productionLoop() as the SAME object (no wrap: the classifier is bare-instanceof) "
+            + "after ONE ERROR zigbee.cycle_failures_persist: consecutive=3; the limit IS the "
+            + "keepalive-miss limit")
+    void cycleFailures_atTheLimit_theThirdPropagatesUnwrapped() throws Exception {
+        FakeNcp ncp = new FakeNcp();
+        ncp.onEzspCommand(command -> formationHandler(ncp, command));
+        ThrowInsideReadChannel channel = new ThrowInsideReadChannel(channelOver(ncp));
+        ZigbeeIntegrationAdapter adapter = adapterOver(channel);
+        bootLadder(adapter);
+        IllegalStateException third = new IllegalStateException("injected #3");
+        channel.throwOnNextReads(new IllegalStateException("injected #1"),
+                new IllegalStateException("injected #2"), third);
+
+        try {
+            assertThatThrownBy(adapter::productionLoop).isSameAs(third);
+        } finally {
+            adapter.close();
+        }
+
+        assertThat(ZigbeeIntegrationAdapter.CYCLE_FAILURE_LIMIT)
+                .as("the derivation: a failed cycle is judged by the keepalive-miss count")
+                .isEqualTo(ZigbeeIntegrationAdapter.KEEPALIVE_MISS_LIMIT)
+                .isEqualTo(3);
+        List<String> strikes = adapterMessages(Level.WARN, "zigbee.cycle_failed");
+        assertThat(strikes).hasSize(3);
+        assertThat(strikes.get(2)).isEqualTo("zigbee.cycle_failed: consecutive=3 limit=3 "
+                + "failure=IllegalStateException: injected #3");
+        assertThat(adapterMessages(Level.ERROR, "zigbee.cycle_failures_persist")).containsExactly(
+                "zigbee.cycle_failures_persist: consecutive=3 — the supervisor owns recovery");
+        assertThat(channel.thrown()).hasSize(3);
+    }
+
+    /** The §5.1 ladder's adapter over ONE scripted channel (the Z-4/Z-5 rig). */
+    private ZigbeeIntegrationAdapter adapterOver(SerialByteChannel channel) {
+        return new ZigbeeIntegrationAdapter(context(null),
+                new InMemoryDeviceRegistry(),
+                new RegistryProjection(new InMemoryDeviceRegistry(),
+                        new InMemoryEntityRegistry()),
+                tempDir, clock, null,
+                () -> List.of(coordinatorCandidate()),
+                candidate -> channel);
+    }
+
+    /** The §5.1 ladder up to NETWORK_UP — where {@code run()} would enter the loop. */
+    private static void bootLadder(ZigbeeIntegrationAdapter adapter) throws Exception {
+        adapter.initialize();
+        adapter.bindTransport(adapter.resolvePort());
+        adapter.coordinatorProtocol().startSession();
+        adapter.resumeOrForm();
+        adapter.coordinatorProtocol().awaitNetworkUp();
+    }
+
     // ── scripted NCP handlers (v13 dialect) ─────────────────────────────────
 
     /** Formation-capable handler: scan + form + the NETWORK_UP callback. */
@@ -630,6 +714,83 @@ class ZigbeeProductionTransportTest {
         @Override
         public int read(byte[] buffer, long maxWaitMillis) {
             Runnable close = armed.getAndSet(null);
+            if (close != null) {
+                close.run();
+                closedInsideRead = true;
+                return -1;   // what a closed or yanked port returns
+            }
+            return delegate.read(buffer, maxWaitMillis);
+        }
+
+        @Override
+        public void write(byte[] data) {
+            delegate.write(data);
+        }
+
+        @Override
+        public void flushInput() {
+            delegate.flushInput();
+        }
+
+        @Override
+        public boolean isOpen() {
+            return delegate.isOpen();
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
+        }
+    }
+
+    // ── the J3 (IR-46) strike rig: a channel whose next reads throw, then close ─────
+
+    /**
+     * The sibling of {@link CloseInsideReadChannel} — P-2's instrument: a channel whose next
+     * reads THROW the scripted {@link RuntimeException}s in order and, once the script is
+     * exhausted, run the armed hook on the following read and fail it the way a closed port
+     * fails ({@code -1}). A throw inside the read reaches {@code productionLoop()}'s try body
+     * UNWRAPPED ({@code AshSession.pumpFrame} → {@code receive} →
+     * {@code EzspAshTransport.receiveDecoded}, which catches only {@code EzspFormatException}
+     * → {@code EzspCoordinatorProtocol.pumpInbound}), so a cycle failure is scripted with no
+     * production seam.
+     */
+    private static final class ThrowInsideReadChannel implements SerialByteChannel {
+
+        private final FakeSerialByteChannel delegate;
+        private final Deque<RuntimeException> scripted = new ArrayDeque<>();
+        private final List<RuntimeException> thrown = new ArrayList<>();
+        private final AtomicReference<Runnable> armedClose = new AtomicReference<>();
+        private boolean closedInsideRead;
+
+        private ThrowInsideReadChannel(FakeSerialByteChannel delegate) {
+            this.delegate = delegate;
+        }
+
+        void throwOnNextReads(RuntimeException... failures) {
+            scripted.addAll(List.of(failures));
+        }
+
+        void closeInsideReadAfterThrows(Runnable close) {
+            armedClose.set(close);
+        }
+
+        List<RuntimeException> thrown() {
+            return List.copyOf(thrown);
+        }
+
+        boolean closedInsideRead() {
+            return closedInsideRead;
+        }
+
+        @Override
+        public int read(byte[] buffer, long maxWaitMillis) {
+            RuntimeException next = scripted.poll();
+            if (next != null) {
+                thrown.add(next);
+                throw next;
+            }
+            Runnable close = armedClose.getAndSet(null);
             if (close != null) {
                 close.run();
                 closedInsideRead = true;
