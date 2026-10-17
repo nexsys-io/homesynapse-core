@@ -23,6 +23,7 @@ import { WIRE_20260820_NEVER_TRIGGERED_BENCH_HERO as AUG20 } from './wire-2026-0
 import { WIRE_20260919_H8A_ENTITIES as SEP19_ENTITIES } from './wire-2026-09-19-h8a-entities';
 import { WIRE_20260919_H8A_AUTOMATIONS as SEP19_AUTOMATIONS } from './wire-2026-09-19-h8a-automations';
 import { WIRE_20260919_H8A_NONFIRING_BENCH_HERO as SEP19 } from './wire-2026-09-19-h8a-nonfiring';
+import { WIRE_20261017_ENTITIES as OCT17_ENTITIES } from './wire-2026-10-17-entities'; // HERO-U4 R1 — the BC10 body
 import { createHash } from 'node:crypto';
 import { validateAgainstContract } from '../shapes';
 
@@ -315,5 +316,28 @@ describe('the non-firing wire is dialect-stable across THREE deployments (2026-0
     expect(compareCaptures(AUG20, dropped).keySetDiff).toContain('data.enabled');
     const flipped = { ...SEP19, data: { ...SEP19.data, noCommandsIssued: true } };
     expect(compareCaptures(AUG20, flipped).nullnessDiff).toEqual(['data.noCommandsIssued']);
+  });
+});
+
+/* ---- HERO-U4 R1 (2026-10-17) — THE BC10 REAL BODY (core 176adad; the first v1.1.7 capture) joins the real-payload fixtures (P3):
+ * A1 with ZERO ContractError, byte-complete and md5-identical to the record (_scratch/v111/bc10/wire-2026-10-17-entities_raw.json —
+ * 5,638 compact bytes + the shell's trailing LF = 5,639 B, md5 559ac60dc338068ad00313d57288115f). RED at HEAD: the fixture module
+ * does not exist. ---- */
+describe('HERO-U4 R1 — the BC10 real body (176adad) validates, byte-complete and md5-identical to the record', () => {
+  const json = JSON.stringify(OCT17_ENTITIES);
+  it('entities (v1.1.7) → A1: 5,638 B compact (md5 3dfb721e…) · with the LF 5,639 B (md5 559ac60d…, the record\'s) · Bearer 0 · zero ContractError · 10 rows, 1 UNAVAILABLE', () => {
+    expect(() => validateAgainstContract('A1:entities', OCT17_ENTITIES)).not.toThrow();
+    expect(wireBytes(OCT17_ENTITIES)).toBe(5638);
+    expect(createHash('md5').update(json, 'utf8').digest('hex')).toBe('3dfb721e0c4b2b7aa7df41b00f468f25');
+    expect(createHash('md5').update(`${json}\n`, 'utf8').digest('hex')).toBe('559ac60dc338068ad00313d57288115f');
+    expect(json).not.toContain('Bearer');
+    expect(OCT17_ENTITIES.data.length).toBe(10);
+    expect(OCT17_ENTITIES.data.filter((e) => e.availability === 'UNAVAILABLE').length).toBe(1);
+  });
+  it('the entities-list envelope dialect holds a third time (09-19 → 10-17): still no pagination key; the frozen row keys keep their order and the additive keys are APPENDED; the meta grows by exactly recoveryViewPosition, after timestamp', () => {
+    expect('pagination' in OCT17_ENTITIES).toBe(false);
+    expect(Object.keys(OCT17_ENTITIES.meta)).toEqual([...Object.keys(SEP19_ENTITIES.meta), 'recoveryViewPosition']);
+    const old = Object.keys(SEP19_ENTITIES.data[0]!);
+    for (const e of OCT17_ENTITIES.data) expect(Object.keys(e).slice(0, old.length), e.entityId).toEqual(old);
   });
 });

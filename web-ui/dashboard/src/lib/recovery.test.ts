@@ -24,9 +24,10 @@ import { describe, it, expect } from 'vitest';
 import { contractSentence, recoveryRow, stageOf, type RecoveryDecision } from './recovery';
 import type { EntitySummary } from './api/contract';
 import { clockTimeWithDate, timeAgo } from './format';
-import { t } from './i18n';
+import { t, type MessageKey } from './i18n';
 import { RECOVERY_GLYPHS } from './verdicts';
 import { WIRE_20261009_J1_ENTITY_ROW as REAL_ROW } from './api/fixtures/wire-2026-10-09-entities-j1-row';
+import { WIRE_20261017_ENTITIES as BC10 } from './api/fixtures/wire-2026-10-17-entities'; // HERO-U4 R2 — the real v1.1.7 rows
 import { resolveScenario } from './api/mock/scenarios';
 import RECOVERY_SOURCE from './recovery.ts?raw';
 import {
@@ -757,5 +758,71 @@ describe('HERO-U3 R7 — `recovery-live` reaches the S3 cells; `recovery-catchin
       expect(stageOf(r, meta), r.entityId).toBe('S2');
       expect(recoveryRow(r, stageOf(r, meta), NOW), r.entityId).toEqual(recoveryRow(v116(r), stageOf(v116(r)), NOW));
     }
+  });
+});
+
+/* ---- HERO-U4 R2 (2026-10-17) — IR-174's three rulings on the S3 column (the HERO-U3 intake audit §3; each refutable by REVERT O-n),
+ * and the first REAL v1.1.7 rows through the decision function (api/fixtures/wire-2026-10-17-entities.ts — BC10 at core 176adad).
+ *  (a) "Newest check on record: Not recorded." is its OWN §7 row (`recovery.l2.lastRecordedCheck.notRecorded`), never composed from
+ *      `recovery.l2.lastRecordedCheck`'s prefix. RED at HEAD: the key is absent; recovery.ts:104–:106 splits a sibling row at its slot.
+ *  (b) `recovery.contract.answersNoReports` is RETIRED — SPEC §3 names no wire-decidable rule for it; nothing consumed it. RED at
+ *      HEAD: the key resolves.
+ *  (c) PRECEDENCE — a passive device that is UNAVAILABLE with no reason and no last-seen instant renders R4's dark row, never R5: a
+ *      passive device is never asked. RED at HEAD: recovery.ts:362 returns the fifth state before the class is consulted. The asked
+ *      classes keep R5 — the capture's data[0] (the Hue: mains-floor · UNAVAILABLE · null · null) on its own LIVE meta [preservation]. ---- */
+describe('HERO-U4 R2 — IR-174 (a)(b)(c) on the S3 column, and the BC10 real rows (176adad) through the decision function', () => {
+  const NOW_BC10 = Date.parse(BC10.meta.timestamp); // the read's own instant: every age is honest to the capture
+  const bc10 = (i: number) => recoveryRow(BC10.data[i]!, stageOf(BC10.data[i]!, BC10.meta), NOW_BC10);
+  const at = (iso: string) => clockTimeWithDate(iso, NOW_BC10);
+  it('(a) the null arm of the newest check is its OWN §7 row with SPEC §3\'s words, and recovery.ts no longer splits a sibling row at its slot [RED at HEAD: the key is absent]', () => {
+    expect(t('recovery.l2.lastRecordedCheck.notRecorded' as MessageKey)).toBe(NO_CHECK);
+    expect(l2text(live(v117(s2('AVAILABLE', null, null), METERED)), 'lastRecordedCheck')).toBe(t('recovery.l2.lastRecordedCheck.notRecorded' as MessageKey));
+    expect(RECOVERY_SOURCE).not.toMatch(/\blead\(|\.split\(`\{\$\{slot\}\}`\)/);
+  });
+  it('(b) `recovery.contract.answersNoReports` is gone from the catalog [RED at HEAD: it resolves]', () => {
+    expect(t('recovery.contract.answersNoReports' as unknown as MessageKey)).toBeUndefined();
+  });
+  it('(c) passive ∧ UNAVAILABLE ∧ reason null ∧ lastSeenAt null → R4\'s dark row: "Not responding since {lastReported}" · the passive line · the dotted clock · dark — never the fifth state [RED at HEAD: `unasked`]', () => {
+    const d = live(v117(s2('UNAVAILABLE', null, null), PASSIVE));
+    expect(d.key).toBe('passiveNotResponding');
+    expect(d.form).toBe('plain');
+    expect(d.label).toBe(`Not responding since ${clock(REPORTED)}`);
+    expect(d.line).toBe(t('recovery.state.passive.notResponding.line'));
+    expect(d.tone).toBe('error');
+    expect(d.glyph).toBe(RECOVERY_GLYPHS.passiveNotResponding);
+    expect(d.dark).toBe(true);
+    expect(d.since).toEqual({ from: 'lastReported', iso: REPORTED });
+    neverLies(d);
+    const noReport = live(v117(s2('UNAVAILABLE', null, null, null), PASSIVE)); // every instant null: the since-less label, the same line
+    expect(noReport.key).toBe('passiveNotResponding');
+    expect(noReport.label).toBe(t('recovery.state.notResponding.bare.noTime.label'));
+    neverLies(noReport);
+  });
+  it('(c) the asked classes keep R5: UNAVAILABLE ∧ null · null with the metered or the floor contract, or with no contract on record, is the fifth state; UNKNOWN is R5 whatever the class; below S3 the class is not on the wire — S2\'s arm as before [preservation]', () => {
+    expect(live(v117(s2('UNAVAILABLE', null, null), METERED)).key).toBe('unasked');
+    expect(live(v117(s2('UNAVAILABLE', null, null), FLOOR)).key).toBe('unasked');
+    expect(live(v117(s2('UNAVAILABLE', null, null))).key).toBe('unasked');
+    expect(live(v117(s2('UNKNOWN', null, null), PASSIVE)).key).toBe('unasked');
+    expect(recoveryRow(v117(s2('UNAVAILABLE', null, null), PASSIVE), 'S2', NOW).key).toBe('unasked');
+  });
+  it('THE REAL ROWS at S3 — data[0] the Hue (mains-floor · UNAVAILABLE · null · null, last report 2026-07-19) → R5 with its date-qualified last report and "Newest check on record: Not recorded." in L2; the nine AVAILABLE rows → Reporting with the CLASS\'s sentence (5 passive · 3 metered · 1 floor), data[4]\'s answered check and its window in L2 [RED at HEAD on the (a) row; the rest preservation]', () => {
+    for (const r of BC10.data) expect(stageOf(r, BC10.meta), r.entityId).toBe('S3');
+    const hue = bc10(0);
+    expect(hue.key).toBe('unasked');
+    expect(hue.line2).toBe(`Last report on record: ${at('2026-07-19T00:49:15.787079Z')}.`);
+    expect(l2text(hue, 'lastRecordedCheck')).toBe(t('recovery.l2.lastRecordedCheck.notRecorded' as MessageKey));
+    expect(l2keys(hue)).toEqual(['lastReport', 'lastHeard', 'lastRecordedCheck', 'recordEvery', 'reason']);
+    expect(BC10.data.map((_, i) => bc10(i).key)).toEqual(['unasked', 'passiveReporting', 'passiveReporting', 'passiveReporting', 'reporting', 'passiveReporting', 'reporting', 'reporting', 'reporting', 'passiveReporting']);
+    for (let i = 1; i < BC10.data.length; i++) {
+      const r = BC10.data[i]!;
+      const d = bc10(i);
+      expect(d.beneath, r.entityId).toBe(SENTENCE[r.availabilityClass === 'passive' ? 'passive' : r.availabilityClass === 'mains-floor' ? 'floor' : 'metered']);
+      expect(d.line, r.entityId).toBe(`Last report ${timeAgo(r.lastReported!, NOW_BC10)}.`);
+      neverLies(d);
+    }
+    const floor = bc10(4);
+    expect(l2text(floor, 'lastRecordedCheck')).toBe(`Newest check on record: ${at('2026-10-17T15:17:00.416638676Z')} — answered`);
+    expect(l2text(floor, 'checkWindow')).toBe(`Checks in that record: ${at('2026-10-17T15:16:28.269545141Z')} to ${at('2026-10-17T15:17:00.416638676Z')} — 1 answered, 0 missed`);
+    expect(l2keys(floor)).toEqual(['lastReport', 'lastHeard', 'lastRecordedCheck', 'checkWindow', 'recordEvery', 'reason']);
   });
 });

@@ -21,7 +21,8 @@
  * the newest RECORDED answer (probeAnsweredAt after lastReported — at most one record per device per record interval, R-B;
  * never "checked just now") and at S2 ONLY on the ping_success edge (AVAILABLE ∧ reason = ping_success ∧ lastSeenAt AFTER
  * lastReported); in steady state a reply publishes nothing (SPEC correction 2), so the row is R1's form with a growing age.
- * The fifth state fires on UNKNOWN, or on UNAVAILABLE with BOTH reason and lastSeenAt null (the version-1 event); a null
+ * The fifth state fires on UNKNOWN, or on UNAVAILABLE with BOTH reason and lastSeenAt null (the version-1 event) — unless the
+ * passive class is on record (S3): never asked, it renders R4's dark row instead (IR-174 (c), HERO-U4); a null
  * reason ALONE is not "never asked" (N1), and U2a's "no probe on record → the fifth state" flip is retired with its key
  * (SPEC §12 Q9 (a)). The reason and the class are OPEN lower-cased vocabularies: a token this build does not know changes
  * no row — a reason shows in L2 verbatim, a class falls to the fallback sentence; nothing is ever .toUpperCase()'d.
@@ -101,9 +102,6 @@ export interface RecoveryDecision {
 export type RecoveryMeta = Partial<ResponseMeta> | null | undefined;
 
 const copy = (key: string, slots: Record<string, string> = {}) => fillSlots(t(key as MessageKey) ?? '', slots);
-/** A §7 row's words before one slot ("Newest check on record: ") — for the null arm SPEC §3 names in words ("Newest check on
- *  record: Not recorded."), which §7 carries as `recovery.l2.lastRecordedCheck` + `recovery.l2.notRecorded` (the return §3). */
-const lead = (key: string, slot: string) => (t(key as MessageKey) ?? '').split(`{${slot}}`)[0] ?? '';
 
 /** S3 when the read is LIVE (a numeric recoveryViewPosition) and the row carries any of the eleven keys; else S2 when any of
  *  the three J1 keys is on the row (null included — PRESENT is the fact); S1 when none is. */
@@ -168,7 +166,8 @@ export function recoveryRow(row: EntitySummary, stage: RecoveryStage = stageOf(r
     if (s3) {
       l2.push({
         key: 'lastRecordedCheck',
-        text: checked ? copy('recovery.l2.lastRecordedCheck', { absoluteTime: clock(checked) }) : `${lead('recovery.l2.lastRecordedCheck', 'absoluteTime')}${notRecorded}`,
+        // IR-174 (a), HERO-U4: the null arm is its OWN §7 row — never a sibling row split at its slot.
+        text: checked ? copy('recovery.l2.lastRecordedCheck', { absoluteTime: clock(checked) }) : t('recovery.l2.lastRecordedCheck.notRecorded'),
       });
       // That ONE record's window, named at both ends — sayable only with its start and both counts (never "this hour", Q12).
       const start = readable(row.probeWindowStart);
@@ -359,7 +358,9 @@ export function recoveryRow(row: EntitySummary, stage: RecoveryStage = stageOf(r
 
   /* ---- UNAVAILABLE ---- */
   if (stage === 'S1') return bare(); // R3's degraded form — also R4's dark row and R5's UNAVAILABLE variant, which S1 cannot tell apart
-  if (reason === null && seen === null) return unasked(); // the version-1 event (both null) is the fifth state — S2's arm carries S3 (P5)
+  // The version-1 event (both null) is the fifth state — S2's arm carries S3 (P5) — EXCEPT for the passive class on record (S3):
+  // a passive device is never asked, so it renders R4's dark row, never R5 (IR-174 (c), HERO-U4; SPEC §3 R4 / R5's precedence sentence).
+  if (reason === null && seen === null) return passive ? passiveDark() : unasked();
   if (reason === 'leave') {
     return {
       ...base,

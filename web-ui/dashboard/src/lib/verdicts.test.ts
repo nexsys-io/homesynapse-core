@@ -112,7 +112,8 @@ describe('confirmation posture (a posture is not a verdict)', () => {
     const m = postureMeta('best_effort');
     expect(m.tone).not.toBe('error');
     expect(m.tone).not.toBe('warn');
-    expect(m.help).toMatch(/still works/i);
+    // HERO-U4 R4: "it still works" was a fitness claim (claims register §0 item 7) — the calm stays in the posture; the words say what is sent (the named flip).
+    expect(m.help).toMatch(/still sent/i);
   });
 
   it('sleepy renders as designed behavior, not a fault', () => {
@@ -389,5 +390,20 @@ describe('HERO-1c C3 — an outcome string this build does not know renders hone
 
   it('the preservation pin carried over from the retired block: CONFIRMED is ok [GREEN at HEAD]', () => {
     expect(actionVerdict({ outcome: 'CONFIRMED', reason: null, resultOutcome: null, settled: true }).tone).toBe('ok');
+  });
+});
+
+/* HERO-U4 R4 (2026-10-17) — the posture helps (unconsumed: posture does not flow through the FROZEN v1.1 read API; design-ready) audited
+ * against the claims register §0 item 7 (HONEST, NOT FIT): "commands can be fully confirmed", "it still works" and "never silently skipped"
+ * were fitness or completeness absolutes the record cannot back (IR-207 names 1,108 silent skips) — RE-WORDED to what a device's own
+ * report can say. RED at HEAD: the three old sentences. */
+describe('HERO-U4 R4 — the posture helps say what one device reports, never that the system is fit', () => {
+  it('verified_reports · best_effort · disabled carry the re-worded helps, verbatim [RED at HEAD]', () => {
+    expect(postureMeta('verified_reports').help).toBe('This device reports what it does, so a command can be confirmed by its own report.');
+    expect(postureMeta('best_effort').help).toBe('Confirmation for this device is currently best-effort: commands are still sent, but its reports are not guaranteed. This can upgrade later.');
+    expect(postureMeta('disabled').help).toBe('Confirmation is turned off for this command, so it is reported as unconfirmed, not as confirmed.');
+  });
+  it('no posture help says "fully confirmed", "still works" or "never silently skipped"', () => {
+    for (const p of ['verified_reports', 'best_effort', 'sleepy', 'disabled', 'quantum']) expect(postureMeta(p).help, p).not.toMatch(/fully confirmed|still works|never silently skipped/i);
   });
 });

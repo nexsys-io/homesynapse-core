@@ -171,6 +171,10 @@ const en = {
   "explain.terminal.completed.open.noTime": "Done — {count} outcomes have not settled yet.",
   "explain.terminal.completed.open.one.noTime": "Done — one outcome has not settled yet.",
   "explain.terminal.status": "{label}.",
+  // HERO-U4 R3 (2026-10-17) — IR-207's rider: the terminal event's own command count beside the final status label wherever it
+  // renders ("Completed · 0 commands"); filed for the hero SPEC's §7 amendment. A count the wire did not carry as an integer ≥ 0 appends nothing.
+  "explain.terminal.commands": "{label} · {count} commands",
+  "explain.terminal.commands.one": "{label} · 1 command",
   // FE-114 D4 (2026-09-14, IR-12): the literals the widened lint reached in the six hero files, keyed
   // byte-identically — the do-nothing run's status pill / step label (an object property), the loud /
   // unnamed action line's verb for a command with no plain verb (a template beside `${`) and its null arm.
@@ -263,7 +267,9 @@ const en = {
   "explain.runs.empty": "No automation runs yet.",
   "explain.run.title": "Why this happened",
   // explain.permanence.*
-  "explain.permanence": "Rebuilt from the permanent activity log. Nothing here is ever deleted, so this run is always here.",
+  // HERO-U4 R4 (2026-10-17): re-cut to the claims register §0 items 5–6 — the no-eviction half (INV-SA-03) kept; "permanent" and
+  // "always here" (an every-event-survives claim the WAL-NORMAL record cannot back) dropped. A §7 TEXT-CHANGE row, filed for the hub.
+  "explain.permanence": "Rebuilt from the activity log. Nothing is ever removed from it, so this run stays on record.",
   // explain.nullName.*
   "explain.nullName.note": "This run happened under an earlier version of your automations, so its name is no longer on record. The run itself is preserved.",
   // explain.cascade.*
@@ -329,11 +335,13 @@ const en = {
   "explain.a11y.live": "Updated: {label}",
   // explain.error.*
   "explain.error.title": "This explanation couldn't be loaded.",
-  "explain.error.body": "The hub answered with an error. The record itself is safe — try again.",
+  // HERO-U4 R4: "The record itself is safe" asserted integrity on an error response (register §0 5–6) — say why retrying is safe instead.
+  "explain.error.body": "The hub answered with an error. This page only reads the record — try again.",
   "explain.error.retry": "Try again",
   // explain.offline.*
   "explain.offline.title": "The hub can't be reached right now.",
-  "explain.offline.body": "Nothing is lost. This page fills in when the connection returns.",
+  // HERO-U4 R4: an unqualified "Nothing is lost." during an outage is the every-event-survives form (register §0 item 5) — scoped to this page.
+  "explain.offline.body": "Nothing on this page is lost. It fills in when the connection returns.",
   // explain.replaying.*
   "explain.replaying.title": "The hub is catching up after a restart.",
   "explain.replaying.body": "This takes a moment. Explanations appear as the log is replayed.",
@@ -350,7 +358,8 @@ const en = {
    * (f) does not record: `state.quiet.line`, `l2.lastAsked`, `l2.outcome.*`; 9 added: `state.quiet.line.recorded` ·
    * `.noTime.label` · `.line.recorded.noReport`, `state.noCheckRecorded.label` · `.line`, `l2.lastRecordedCheck` ·
    * `.checkWindow` · `.recordEvery` · `.dueBy`; `contract.floor` re-cut) — 67 rows, extracted by script; the S3 rows
-   * render since HERO-U3 (`contract.answersNoReports` stays unconsumed: SPEC §3 names no rule for it — the return §3). */
+   * render since HERO-U3. HERO-U4 (2026-10-17, IR-174): `contract.answersNoReports` RETIRED (no wire-decidable rule; unconsumed) and
+ * the null arm `l2.lastRecordedCheck.notRecorded` filed as its own row — the [AMEND] block below; 67 rows. */
   // recovery.state.*
   "recovery.state.reporting.label": "Reporting",
   "recovery.state.reporting.line": "Last report {time}.",
@@ -382,7 +391,6 @@ const en = {
   "recovery.contract.floor": "This {kind} has no report schedule on record. After one minute of silence it is asked.",
   "recovery.contract.passive": "This {kind} reports when something changes. It is never asked.",
   "recovery.contract.fallback": "If this device goes quiet for a while, it is asked. How long is not shown here yet.",
-  "recovery.contract.answersNoReports": "It answers when asked but sends no reports. A window will not change that. Unplugging it and plugging it back in is the next thing to try.",
   // recovery.act.*
   "recovery.act.button": "Open a window for this device",
   "recovery.act.before": "A window of about {maxMinutes} minutes lets this device rejoin. Only this device can join through it.",
@@ -428,6 +436,10 @@ const en = {
   "recovery.state.notResponding.bare.noTime.label": "Not responding",
   "recovery.state.notResponding.line.noTime": "Asked twice; nothing came back.",
   "recovery.state.left.line.noTime": "This device left the network.",
+  /* [AMEND] HERO-U4 R2 (2026-10-17) — IR-174 (a): SPEC §3's null arm "Newest check on record: Not recorded." (R1 · R3 · R5 at
+   * S3, in words) as its OWN row — recovery.ts no longer composes it from `recovery.l2.lastRecordedCheck`'s prefix; filed for the
+   * hub's §7 amendment. */
+  "recovery.l2.lastRecordedCheck.notRecorded": "Newest check on record: Not recorded.",
 } as const;
 
 type Messages = typeof en;

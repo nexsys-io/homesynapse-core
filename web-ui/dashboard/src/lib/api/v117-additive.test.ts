@@ -24,6 +24,11 @@
  * THE ROW: fixtures/emitter-2026-10-11-entities-v117-row.ts — from the emitter's test at 2a54145; re-pinned against the
  * Pi's wire at BC10 (Sat Oct 17). Not a capture: no Pi serves v1.1.7 before BC10. The golden strings and the eleven
  * values below were extracted from EntityStateJsonV117Test.java by script, not typed (IR-89).
+ *
+ * HERO-U4 R1 (2026-10-17): H8 → VERIFIED. BC10's REAL v1.1.7 body at core 176adad (fixtures/wire-2026-10-17-entities.ts; the
+ * record _scratch/v111/bc10/wire-2026-10-17-entities_raw.json, md5 559ac60dc338068ad00313d57288115f) validates under these arms
+ * with ZERO ContractError, every row carrying the eleven keys as the emitter writes them; the emitter row's shape IS the wire's.
+ * The MIRRORED note on the emitter fixture is superseded by this exercise (its file stays untouched, P3).
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -56,6 +61,9 @@ import RAW_3 from './fixtures/wire-2026-09-19-h8a-automations.ts?raw';
 import RAW_4 from './fixtures/wire-2026-09-19-h8a-entities.ts?raw';
 import RAW_5 from './fixtures/wire-2026-09-19-h8a-nonfiring.ts?raw';
 import RAW_6 from './fixtures/wire-2026-10-09-entities-j1-row.ts?raw';
+/* HERO-U4 R1: the BC10 real body (176adad) — the whole A1 envelope, and its SOURCE for the md5 pin. */
+import { WIRE_20261017_ENTITIES } from './fixtures/wire-2026-10-17-entities';
+import RAW_7 from './fixtures/wire-2026-10-17-entities.ts?raw';
 
 /** The emitter's order, LITERALLY (EntityStateJsonV117Test.java:65–:68 V117_KEYS = EntityStateJson.RECOVERY_KEYS :62–:65). */
 const EMITTER_KEYS = ['probeAnsweredAt', 'probeWindowStart', 'probesAnswered', 'probesMissed', 'availabilityClass', 'reportIntervalSeconds', 'silenceLimitSeconds', 'missesToDark', 'recordIntervalSeconds', 'recordDueBy', 'recordOverdueSince'] as const;
@@ -239,6 +247,7 @@ const WIRE_RAW: Record<string, string> = {
   'wire-2026-09-19-h8a-entities.ts': RAW_4,
   'wire-2026-09-19-h8a-nonfiring.ts': RAW_5,
   'wire-2026-10-09-entities-j1-row.ts': RAW_6,
+  'wire-2026-10-17-entities.ts': RAW_7,
 };
 const WIRE_MD5: Record<string, string> = {
   'wire-2026-08-16-nonfiring.ts': '896f861d70026487bc4e8df1496a42f8',
@@ -248,10 +257,11 @@ const WIRE_MD5: Record<string, string> = {
   'wire-2026-09-19-h8a-entities.ts': 'bc58bc411130c8bd5439b6f32eebd538',
   'wire-2026-09-19-h8a-nonfiring.ts': 'c9d414b7297aed78214c99188634ee17',
   'wire-2026-10-09-entities-j1-row.ts': '88eb7965cf97bd65c07699df68b9b809',
+  'wire-2026-10-17-entities.ts': '6b8dbcc09960aa39b9baa452fb8a5f06', // HERO-U4 R1 — pinned at its birth (the BC10 body; the provenance block is part of the record)
 };
-describe('the seven wire-*.ts fixtures are untouched and still validate (the preservation fixtures, P3)', () => {
-  it('each file\'s md5 is its md5 at 2a54145 (the real captures are never "cleaned up")', () => {
-    expect(Object.keys(WIRE_MD5).length).toBe(7);
+describe('the eight wire-*.ts fixtures are untouched and still validate (the preservation fixtures, P3; HERO-U4 R1 adds the BC10 body — 7 → 8, the named flip)', () => {
+  it('each file\'s md5 is its md5 at 2a54145 — the BC10 body\'s at its birth (the real captures are never "cleaned up")', () => {
+    expect(Object.keys(WIRE_MD5).length).toBe(8);
     for (const [file, md5] of Object.entries(WIRE_MD5)) {
       expect(typeof WIRE_RAW[file], file).toBe('string');
       expect(createHash('md5').update(WIRE_RAW[file]!, 'utf8').digest('hex'), file).toBe(md5);
@@ -267,6 +277,68 @@ describe('the seven wire-*.ts fixtures are untouched and still validate (the pre
     for (const e of [...WIRE_20260919_H8A_ENTITIES.data, WIRE_20261009_J1_ENTITY_ROW]) for (const k of EMITTER_KEYS) expect(k in e, k).toBe(false);
     for (const m of [WIRE_20260919_H8A_ENTITIES.meta, WIRE_20261009_J1_META]) expect('recoveryViewPosition' in m).toBe(false);
     expect(WIRE_20260820_EVENTS_404_HEADERS_ONLY.status).toBe(404);
+  });
+});
+
+/* ---- HERO-U4 R1 (2026-10-17): THE REAL WIRE — BC10's v1.1.7 body at core 176adad (H8 → VERIFIED) ---- */
+describe('HERO-U4 R1 — THE REAL WIRE (BC10, core 176adad): the first v1.1.7 body, byte for byte [RED at HEAD: the fixture module does not exist]', () => {
+  const BODY = WIRE_20261017_ENTITIES;
+  const rows = BODY.data;
+  const JSON_BYTES = JSON.stringify(BODY);
+  const md5 = (s: string) => createHash('md5').update(s, 'utf8').digest('hex');
+  it('the embedded body IS the record: 5,638 compact UTF-8 bytes (md5 3dfb721e…) — plus the file\'s trailing LF, 5,639 B, md5 559ac60dc338068ad00313d57288115f; 10 rows; no Bearer', () => {
+    expect(new TextEncoder().encode(JSON_BYTES).length).toBe(5638);
+    expect(md5(JSON_BYTES)).toBe('3dfb721e0c4b2b7aa7df41b00f468f25');
+    expect(md5(`${JSON_BYTES}\n`)).toBe('559ac60dc338068ad00313d57288115f');
+    expect(rows.length).toBe(10);
+    expect(JSON_BYTES).not.toContain('Bearer');
+  });
+  it('P2 — the whole body validates as A1 under v1.1.7 with ZERO ContractError, and so does every row alone', () => {
+    expect(() => validateAgainstContract('A1:entities', BODY)).not.toThrow();
+    for (const r of rows) expect(() => validateAgainstContract('A1:entities', { data: [r], meta: BODY.meta }), r.entityId).not.toThrow();
+  });
+  it('P2 — every row carries the eleven keys PRESENT after the eight v1.1.6 list keys, in the emitter\'s order (19 keys), each null or typed as the emitter writes it', () => {
+    for (const r of rows) {
+      expect(Object.keys(r), r.entityId).toEqual([...V116_LIST_KEYS, ...EMITTER_KEYS]);
+      for (const k of EMITTER_KEYS) {
+        const v = field(r, k);
+        const at = `${r.entityId}.${k}`;
+        if (v === null) continue;
+        if (KIND[k] === 'instant' || KIND[k] === 'class') expect(typeof v, at).toBe('string');
+        if (KIND[k] === 'instant') expect(Number.isNaN(Date.parse(v as string)), at).toBe(false);
+        if (KIND[k] === 'count' || KIND[k] === 'int') expect(Number.isInteger(v) && (v as number) >= 0, at).toBe(true);
+      }
+    }
+  });
+  it('the meta is viewPosition · timestamp · recoveryViewPosition — AFTER timestamp (I-14); the read is LIVE and the instant is the capture\'s own', () => {
+    expect(Object.keys(BODY.meta)).toEqual(['viewPosition', 'timestamp', 'recoveryViewPosition']);
+    expect(BODY.meta).toEqual({ viewPosition: 2318763, timestamp: '2026-10-17T15:21:13.110460353Z', recoveryViewPosition: 2318441 });
+  });
+  it('the wire as it is, never "fixed": ONE UNAVAILABLE row — data[0], the Hue, mains-floor with reason · lastSeenAt · link null since a 2026-07-19 report; 5 passive · 3 metered · 2 floor with their contracts; ONE answered check on record; recordOverdueSince null on every row', () => {
+    expect(rows.filter((r) => r.availability === 'UNAVAILABLE').map((r) => r.entityId)).toEqual(['01KX1PA4HSJ581GASYB7DHE40F']);
+    expect(rows[0]).toMatchObject({ entityId: '01KX1PA4HSJ581GASYB7DHE40F', availabilityClass: 'mains-floor', availabilityReason: null, lastSeenAt: null, link: null, lastReported: '2026-07-19T00:49:15.787079Z' });
+    const by = (c: string) => rows.filter((r) => r.availabilityClass === c);
+    const contract = (r: EntitySummary) => [r.reportIntervalSeconds, r.silenceLimitSeconds, r.missesToDark, r.recordIntervalSeconds];
+    expect([by('passive').length, by('mains-metered').length, by('mains-floor').length]).toEqual([5, 3, 2]);
+    for (const r of by('passive')) expect(contract(r), r.entityId).toEqual([null, 90000, 2, null]);
+    for (const r of by('mains-metered')) expect(contract(r), r.entityId).toEqual([600, 660, 2, 3600]);
+    for (const r of by('mains-floor')) expect(contract(r), r.entityId).toEqual([null, 60, 2, 3600]);
+    expect(rows.filter((r) => r.probeAnsweredAt !== null).map((r) => r.entityId)).toEqual(['01KXW1W1SBJZERC9MBAMV2DWKE']);
+    expect(rows[4]).toMatchObject({ probeAnsweredAt: '2026-10-17T15:17:00.416638676Z', probeWindowStart: '2026-10-17T15:16:28.269545141Z', probesAnswered: 1, probesMissed: 0 });
+    for (const r of rows) {
+      expect(typeof r.recordDueBy, r.entityId).toBe('string');
+      expect(r.recordOverdueSince, r.entityId).toBeNull();
+    }
+  });
+  it('the emitter fixture\'s MIRRORED shape IS the wire\'s — the same 19 keys in the same order, the same meta key order (H8 VERIFIED on this body); data[7] is the j1-row fixture\'s entity one J1 transition later', () => {
+    for (const r of rows) expect(Object.keys(r), r.entityId).toEqual(Object.keys(ROW));
+    expect(Object.keys(BODY.meta)).toEqual(Object.keys(LIVE_META));
+    expect(rows[7]!.entityId).toBe(WIRE_20261009_J1_ENTITY_ROW.entityId);
+    expect(Date.parse(rows[7]!.lastSeenAt!)).toBeGreaterThan(Date.parse(WIRE_20261009_J1_ENTITY_ROW.lastSeenAt!));
+  });
+  it('V-6 on the real wire: every recordDueBy is AFTER the read instant, so every recordOverdueSince is null — the core\'s rule, observed', () => {
+    const read = Date.parse(BODY.meta.timestamp);
+    for (const r of rows) expect(Date.parse(r.recordDueBy!), r.entityId).toBeGreaterThan(read);
   });
 });
 

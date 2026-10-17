@@ -96,7 +96,8 @@ describe('HERO-1b B5 — the hero is legible without the marker shapes', () => {
     expect(srText(steps[0]!)).toContain('Step 1 of 4: trigger — Trigger.');
     expect(srText(steps[1]!)).toContain('Step 2 of 4: condition — was true.');
     expect(srText(steps[2]!)).toContain('Step 3 of 4: action — Confirmed.');
-    expect(srText(steps[3]!)).toContain('Step 4 of 4: outcome — Completed.');
+    // HERO-U4 R3 (IR-207's rider): the final status label carries the terminal event's command count — the named flip of this pin.
+    expect(srText(steps[3]!)).toContain('Step 4 of 4: outcome — Completed · 1 command.');
     for (const s of steps) expect(s.querySelector('[aria-hidden="true"]')).toBeTruthy(); // the marker stays hidden
   });
 

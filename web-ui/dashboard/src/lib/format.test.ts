@@ -341,6 +341,30 @@ describe('HERO-1b B1 — the 30-cell headline table (SPEC §3)', () => {
     );
   });
 
+  /* HERO-U4 R3 (2026-10-17) — IR-207's rider: a COMPLETED run whose ledger says NO command was issued (actionCount ≥ 1, commandCount 0)
+   * never takes an acted headline — confirmed / dispatched / unconfirmed / failed (rows 1–4), whatever the leading action row claims:
+   * the silent-skip sentence is its form (the count is the terminal event's own word). Row 5 (a SKIPPED leading action) already says
+   * nothing was sent and STANDS — SPEC §3's cell, pinned above; row 1 beside commandCount ≥ 1 is unchanged. RED at HEAD: rows 1–4
+   * render their acted sentences beside commandCount 0. */
+  const noCommand = (outcome: ActionOutcome) => {
+    const c = mk('COMPLETED', outcome);
+    c.outcome.actionCount = 1;
+    c.outcome.commandCount = 0;
+    return c;
+  };
+  it.each([['CONFIRMED'], ['DISPATCHED'], ['UNCONFIRMED'], ['FAILED']] as [ActionOutcome][])('IR-207 — COMPLETED × %s beside commandCount 0 → the silent-skip sentence, never an acted one [RED at HEAD]', (outcome) => {
+    const s = causalSentence(noCommand(outcome));
+    expect(s).toBe(`Evening Lights ran when ${BECAUSE}, but nothing was changed.`);
+    expect(s).not.toMatch(/turned on|was asked to|confirmed|command failed/);
+  });
+  it('IR-207 — COMPLETED × SKIPPED beside commandCount 0 keeps row 5 (nothing was sent — already honest); COMPLETED × CONFIRMED beside commandCount 1 keeps row 1 [preservation]', () => {
+    expect(causalSentence(noCommand('SKIPPED'))).toBe(`Nothing was sent to Hallway Light when ${BECAUSE} — that step was skipped.`);
+    const one = mk('COMPLETED', 'CONFIRMED');
+    one.outcome.actionCount = 1;
+    one.outcome.commandCount = 1;
+    expect(causalSentence(one)).toBe(`Hallway Light turned on because ${BECAUSE}.`);
+  });
+
   it('every headline sentence is ≤ 21 words at the sample slots (SPEC §3)', () => {
     for (const [, status, outcome] of rows) {
       for (const sentence of causalSentence(mk(status, outcome)).split(/(?<=\.)\s+/)) {

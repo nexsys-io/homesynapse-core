@@ -222,13 +222,15 @@ export function postureMeta(posture: string): PostureMeta {
       return {
         label: 'Verified by reports',
         tone: 'ok',
-        help: 'This device reports what it does, so commands can be fully confirmed.',
+        // HERO-U4 R4 (register §0 item 7): what one device's report can confirm — never "fully".
+        help: 'This device reports what it does, so a command can be confirmed by its own report.',
       };
     case 'best_effort':
       return {
         label: 'Best-effort confirmation',
         tone: 'neutral',
-        help: 'Confirmation for this device is currently best-effort — it still works; its reports are just not guaranteed. This can upgrade later.',
+        // HERO-U4 R4 (register §0 item 7): "it still works" was a fitness claim — the words say what is sent.
+        help: 'Confirmation for this device is currently best-effort: commands are still sent, but its reports are not guaranteed. This can upgrade later.',
       };
     case 'sleepy':
       return {
@@ -240,7 +242,8 @@ export function postureMeta(posture: string): PostureMeta {
       return {
         label: 'Confirmation off',
         tone: 'unknown',
-        help: 'Confirmation is turned off for this command, so it is honestly reported as unconfirmed — never silently skipped.',
+        // HERO-U4 R4 (register §0 item 7): "never silently skipped" was an absolute the record contradicts (IR-207) — dropped.
+        help: 'Confirmation is turned off for this command, so it is reported as unconfirmed, not as confirmed.',
       };
     default:
       return {

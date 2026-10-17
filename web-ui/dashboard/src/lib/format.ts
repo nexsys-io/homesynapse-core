@@ -389,6 +389,14 @@ export function runStatusMeta(s: RunStatus | string | null | undefined): { label
   return { label: `Recorded as "${s}"`, tone: 'unknown' };
 }
 
+/** HERO-U4 R3 (IR-207's rider): the final status label with the terminal event's own command count beside it — "Completed · 0 commands"
+ *  — through the §7 rows `explain.terminal.commands` / `.one`. A count the wire did not carry as an integer ≥ 0 appends nothing (the
+ *  honesty law: never "null commands"). A COMPLETED run that issued nothing is never read as acted. */
+export function withCommandCount(label: string, count: unknown): string {
+  if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) return label;
+  return count === 1 ? heroCopy('explain.terminal.commands.one', { label }) : heroCopy('explain.terminal.commands', { label, count: String(count) });
+}
+
 export function verdictMeta(v: NonFiringVerdict | string | null | undefined): { label: string; tone: Tone } {
   switch (v) {
     case 'CONDITION_NOT_MET':
@@ -687,6 +695,12 @@ export function causalHeadline(
           ? 'explain.headline.completed.silentSkip'
           : 'explain.headline.completed.none';
       return { text: fill(hs(key), slots), keys: [key] };
+    }
+    // HERO-U4 R3 (IR-207's rider): the ledger says no command was issued (actionCount ≥ 1, commandCount 0) — whatever the leading
+    // action row claims, the headline never says the run acted (confirmed / dispatched / unconfirmed / failed): the silent-skip
+    // sentence is its form. A SKIPPED leading action keeps SPEC §3 row 5 — "Nothing was sent …" is already the honest form.
+    if ((outcome?.actionCount ?? 0) > 0 && outcome?.commandCount === 0 && suffix !== 'skipped') {
+      return { text: fill(hs('explain.headline.completed.silentSkip'), slots), keys: ['explain.headline.completed.silentSkip'] };
     }
     const key = `explain.headline.completed.${suffix}`;
     return { text: fill(hs(key), slots), keys: [key] };

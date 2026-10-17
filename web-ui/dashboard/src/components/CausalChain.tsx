@@ -41,6 +41,7 @@ import {
   UNRESOLVED_REF_HELP,
   UNRESOLVED_REF_PHRASE,
   UNRESOLVED_REF_PILL,
+  withCommandCount,
   type Tone,
 } from '../lib/format';
 import { isUlid, UNVERIFIED_RESOLVER, type RefResolver } from '../lib/registry';
@@ -79,9 +80,12 @@ export function CausalChain({
   // that planned nothing keeps the completed.none headline and the empty note.
   const eraSkeleton = genuinelyEmpty && (chain.automationName === null || trigger?.type === null);
   // FE-114 D4: the do-nothing run's status label is a §7 row (`explain.terminal.completed.nothing.pill`), byte-identical.
-  const status = doNothing
+  const rawStatus = doNothing
     ? ({ label: t('explain.terminal.completed.nothing.pill'), tone: 'warn' } as const)
     : runStatusMeta(outcome?.status);
+  // HERO-U4 R3 (IR-207's rider): the final status never renders as a label without the terminal event's command count beside it
+  // ("Completed · 0 commands") — a COMPLETED run that issued nothing is never read as acted; the count is the wire's own, or nothing.
+  const status = { ...rawStatus, label: withCommandCount(rawStatus.label, outcome?.commandCount) };
   /* HERO-1b B5 (SPEC §5/§8): a held-DISPATCHED action that settles on a later poll is
      announced ONCE through a polite role="status" region (`explain.a11y.live`) — the
      region is always present (so assistive tech is subscribed) and silent otherwise.

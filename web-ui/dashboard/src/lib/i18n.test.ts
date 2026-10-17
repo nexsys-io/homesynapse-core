@@ -188,9 +188,9 @@ describe('HERO-1b B2 — the §7 copy table is the catalog', () => {
     }
   });
 
-  it('the permanence footer is the Q3 (a) sentence: name-free, rename-proof', () => {
+  it('the permanence footer is the Q3 (a) sentence: name-free, rename-proof — re-cut by HERO-U4 R4 to the claims register §0 5–6 (no "permanent", no "always here"; the named flip)', () => {
     expect(t('explain.permanence' as MessageKey)).toBe(
-      'Rebuilt from the permanent activity log. Nothing here is ever deleted, so this run is always here.',
+      'Rebuilt from the activity log. Nothing is ever removed from it, so this run stays on record.',
     );
     expect(t('explain.permanence' as MessageKey)).not.toContain(BRAND.productName);
   });
@@ -493,6 +493,9 @@ describe('FE-115 D4 — the four lint-reach rows are in the catalog, verbatim', 
  * sentence) — filed for the hub's §7 amendment. RED at HEAD: none of the keys exists in the catalog.
  * HERO-U3 (2026-10-11): the object below is RE-EXTRACTED by script from SPEC.md §7 as amended by U2c (:89–:151 — 63 rows;
  * the four null-arm rows :152–:155 stay in SPEC7_RECOVERY_AMEND_KEYS): 67 rows in all, the catalog's whole recovery.* set.
+ * HERO-U4 R2 (2026-10-17): RE-EXTRACTED again by script from SPEC.md:89–:151 MINUS `recovery.contract.answersNoReports` (:118 —
+ * RETIRED by IR-174 (b); striking the §7 row is the hub's design edit, filed): 62 rows here + the 4 null-arm rows + U4's ONE
+ * filed row (IR-174 (a), SPEC7_HERO_U4_AMEND_KEYS below) = 67, the catalog's whole recovery.* set.
  */
 const SPEC7_RECOVERY_KEYS = {
   "recovery.state.reporting.label": "Reporting",
@@ -524,7 +527,6 @@ const SPEC7_RECOVERY_KEYS = {
   "recovery.contract.floor": "This {kind} has no report schedule on record. After one minute of silence it is asked.",
   "recovery.contract.passive": "This {kind} reports when something changes. It is never asked.",
   "recovery.contract.fallback": "If this device goes quiet for a while, it is asked. How long is not shown here yet.",
-  "recovery.contract.answersNoReports": "It answers when asked but sends no reports. A window will not change that. Unplugging it and plugging it back in is the next thing to try.",
   "recovery.act.button": "Open a window for this device",
   "recovery.act.before": "A window of about {maxMinutes} minutes lets this device rejoin. Only this device can join through it.",
   "recovery.act.noDevice": "No device is on record for this entity, so no window can be opened for it.",
@@ -565,10 +567,17 @@ const SPEC7_RECOVERY_AMEND_KEYS = {
   "recovery.state.notResponding.line.noTime": "Asked twice; nothing came back.",
   "recovery.state.left.line.noTime": "This device left the network.",
 } as const;
+/* HERO-U4 R2 (2026-10-17) — IR-174 (a): SPEC §3's null arm "Newest check on record: Not recorded." (the R1 · R3 · R5 S3 cells, in
+ * words) gets its OWN §7 row, filed for the hub's §7 amendment like the four above; (b): `recovery.contract.answersNoReports`
+ * RETIRED — SPEC §3 names no wire-decidable rule for it and nothing consumed it (grep before removal: the catalog and this file only). */
+const SPEC7_HERO_U4_AMEND_KEYS = {
+  "recovery.l2.lastRecordedCheck.notRecorded": "Newest check on record: Not recorded.",
+} as const;
+const RETIRED_IR174 = ['recovery.contract.answersNoReports'] as const;
 
-describe('HERO-U2b R2 / HERO-U3 — the recovery card\'s §7 copy table is the catalog (63 rows + the 4 null-arm rows = SPEC §7\'s 67, as amended by U2c)', () => {
-  it('carries all 63 §7 keys with the SPEC strings, verbatim', () => {
-    expect(Object.keys(SPEC7_RECOVERY_KEYS).length).toBe(63);
+describe('HERO-U2b R2 / HERO-U3 / HERO-U4 — the recovery card\'s §7 copy table is the catalog (62 rows + the 4 null-arm rows + U4\'s filed row = 67; SPEC §7 reads 67 until the hub strikes :118 and adds the row)', () => {
+  it('carries all 62 §7 keys with the SPEC strings, verbatim (63 − the IR-174 (b) retirement — the named flip)', () => {
+    expect(Object.keys(SPEC7_RECOVERY_KEYS).length).toBe(62);
     for (const [k, s] of Object.entries(SPEC7_RECOVERY_KEYS)) expect(t(k as MessageKey), k).toBe(s);
   });
   it('carries the four [AMEND] rows — SPEC §3\'s own null-arm words, each a §7 label or line with a clause removed, never new words', () => {
@@ -579,7 +588,7 @@ describe('HERO-U2b R2 / HERO-U3 — the recovery card\'s §7 copy table is the c
     expect(t('recovery.state.notResponding.bare.label' as MessageKey).startsWith(t('recovery.state.notResponding.bare.noTime.label' as MessageKey))).toBe(true);
   });
   it('Register C on every recovery.* string: no product name, no `{{NAME}}`, no "we" — and never the words "offline" or "stale" (SPEC §2, §6 B)', () => {
-    const keys = Object.keys({ ...SPEC7_RECOVERY_KEYS, ...SPEC7_RECOVERY_AMEND_KEYS });
+    const keys = Object.keys({ ...SPEC7_RECOVERY_KEYS, ...SPEC7_RECOVERY_AMEND_KEYS, ...SPEC7_HERO_U4_AMEND_KEYS });
     expect(keys.every((k) => k.startsWith('recovery.'))).toBe(true);
     for (const k of keys) {
       const s = t(k as MessageKey) ?? '';
@@ -633,7 +642,7 @@ describe('HERO-U3 — the recovery catalog is SPEC §7 as amended by U2c (67 row
   });
   it('the catalog\'s recovery.* key set IS SPEC §7\'s — 67 keys, no more, no fewer [RED at HEAD: no messageKeys export]', () => {
     const catalog = messageKeys().filter((k) => k.startsWith('recovery.')).sort();
-    const spec = Object.keys({ ...SPEC7_RECOVERY_KEYS, ...SPEC7_RECOVERY_AMEND_KEYS }).sort();
+    const spec = Object.keys({ ...SPEC7_RECOVERY_KEYS, ...SPEC7_RECOVERY_AMEND_KEYS, ...SPEC7_HERO_U4_AMEND_KEYS }).sort();
     expect(spec.length).toBe(67);
     expect(catalog).toEqual(spec);
   });
@@ -647,6 +656,72 @@ describe('HERO-U3 — the recovery catalog is SPEC §7 as amended by U2c (67 row
       expect(s, k).not.toMatch(/\bwe\b/i);
       expect(s, k).not.toMatch(/\boffline\b/i);
       expect(s, k).not.toMatch(/\bstale\b/i);
+    }
+  });
+});
+
+/*
+ * HERO-U4 R2 (2026-10-17) — IR-174 (a)(b) in the catalog. RED at HEAD (176adad): (a) `recovery.l2.lastRecordedCheck.notRecorded` is
+ * absent (recovery.ts composed the sentence from a sibling row's prefix); (b) `recovery.contract.answersNoReports` resolves. The
+ * recovery.* set stays 67 (one filed, one retired) and Register C still binds all of it (the two HERO-U3 tests above, re-pointed).
+ */
+describe('HERO-U4 R2 — IR-174 (a)(b): one §7 row filed, one retired; the recovery.* set stays 67', () => {
+  it('(a) the filed row resolves to SPEC §3\'s words, verbatim — the words the composition produced, now ONE row — Register C [RED at HEAD: absent]', () => {
+    for (const [k, s] of Object.entries(SPEC7_HERO_U4_AMEND_KEYS)) {
+      expect(t(k as MessageKey), k).toBe(s);
+      expect(s, k).not.toContain(BRAND.productName);
+      expect(s, k).not.toContain('{{NAME}}');
+      expect(s, k).not.toMatch(/\bwe\b/i);
+    }
+    expect(t('recovery.l2.lastRecordedCheck.notRecorded' as MessageKey)).toBe(`${t('recovery.l2.lastRecordedCheck').split('{absoluteTime}')[0]}${t('recovery.l2.notRecorded')}`);
+  });
+  it('(b) the retired row is gone; the contract rows are the four SPEC §4 sentences and nothing else [RED at HEAD: it resolves]', () => {
+    for (const k of RETIRED_IR174) expect(t(k as unknown as MessageKey), k).toBeUndefined();
+    expect(messageKeys().filter((k) => k.startsWith('recovery.contract.'))).toEqual(['recovery.contract.metered', 'recovery.contract.floor', 'recovery.contract.passive', 'recovery.contract.fallback']);
+  });
+});
+
+/* HERO-U4 R3 (2026-10-17) — IR-207's rider: the two rows that put `commandCount` beside the final status label ("Completed · 0 commands"),
+ * filed as hero SPEC §7 amendment rows (design/hero-v1/SPEC.md is the hub's). Register C. RED at HEAD: absent. */
+const SPEC7_HERO_U4_R3_KEYS = {
+  'explain.terminal.commands': '{label} · {count} commands',
+  'explain.terminal.commands.one': '{label} · 1 command',
+} as const;
+describe('HERO-U4 R3 — the commandCount rows are in the catalog, verbatim', () => {
+  it('carries the two keys with their strings, Register C [RED at HEAD: absent]', () => {
+    for (const [k, s] of Object.entries(SPEC7_HERO_U4_R3_KEYS)) {
+      expect(t(k as MessageKey), k).toBe(s);
+      expect(s, k).not.toContain(BRAND.productName);
+      expect(s, k).not.toMatch(/\bwe\b/i);
+    }
+  });
+});
+
+/*
+ * HERO-U4 R4 (2026-10-17) — the "did it confirm" strings audited against the claims register §0 items 5–7 (claim-register.md:17–:19):
+ * 5 — the record is ORDERED and DURABLE TO THE LAST CHECKPOINT, never "every event kept"; 6 — VERIFIABLE, never tamper-evident, signed
+ * or immutable; 7 — HONEST, NOT FIT. Three explain.* rows broke an item and are RE-WORDED (the return §4 lists every KEEP):
+ *  · explain.permanence — "permanent" (6) and "always here" (5) → the no-eviction half kept (INV-SA-03), the survival claim dropped;
+ *  · explain.error.body — "The record itself is safe" asserted integrity on an error response (5/6) → why retrying is safe, said plainly;
+ *  · explain.offline.body — "Nothing is lost." during an outage is the every-event-survives form (5) → scoped to this page.
+ * RED at HEAD: the three old texts; the Q3 (a) pin above is re-pointed to the new sentence (the named flip — still name-free).
+ */
+const REWORDED_R4 = {
+  'explain.permanence': 'Rebuilt from the activity log. Nothing is ever removed from it, so this run stays on record.',
+  'explain.error.body': 'The hub answered with an error. This page only reads the record — try again.',
+  'explain.offline.body': 'Nothing on this page is lost. It fills in when the connection returns.',
+} as const;
+describe('HERO-U4 R4 — the three re-worded rows meet the register §0 5–7; Register C holds', () => {
+  it('carries the three new texts, verbatim [RED at HEAD: the old texts]', () => {
+    for (const [k, s] of Object.entries(REWORDED_R4)) {
+      expect(t(k as MessageKey), k).toBe(s);
+      expect(s, k).not.toContain(BRAND.productName);
+      expect(s, k).not.toMatch(/\bwe\b/i);
+    }
+  });
+  it('no explain.* / whyNot.* / recovery.* string says "permanent", "always here", "immutable", "tamper", "guaranteed" or "every command" — the register\'s banned forms [RED at HEAD: explain.permanence]', () => {
+    for (const k of messageKeys().filter((k) => /^(explain|whyNot|recovery)\./.test(k))) {
+      expect(t(k), k).not.toMatch(/\bpermanent\b|always here|\bimmutable\b|tamper|\bguaranteed\b|every command/i);
     }
   });
 });
