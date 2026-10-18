@@ -17,6 +17,8 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, act } from '@testing-library/preact';
 import { PollProvider, useApi } from './poll';
 import { api } from './api';
+import { ApiProblem } from './api/client';
+import { t } from './i18n';
 import { setToken } from './auth';
 import { Resource } from '../components/Resource';
 import { ErrorBoundary, RENDER_ERROR_TITLE } from '../components/ErrorBoundary';
@@ -135,5 +137,116 @@ describe('the polling loop provably survives a contained render throw', () => {
     const text = container.textContent ?? '';
     expect(text).toContain('sibling surface'); // the app did not go down with the view
     expect(text).toContain(RENDER_ERROR_TITLE);
+  });
+});
+
+/*
+ * HERO-U5 U1 (b) (2026-10-18) — IR-225 (a), made true. `useApi` refetches only when `viewPosition` moves
+ * (poll.tsx), so a view whose own fetch failed OFFLINE under a quiet home (the cursor never moved) kept its
+ * offline card under a live shell — "fills in when the connection returns" was not yet true. The rule now:
+ * when the loop's phase RETURNS to live, a view in the offline state reloads ONCE; nothing else changes
+ * (a view in any other state still waits for the cursor). Both halves are pinned below.
+ */
+const N = 7; // the quiet home's cursor — it never moves in these tests
+const LIVE_AT_N = {
+  data: { mode: 'LIVE', viewPosition: N, lagEvents: 0, projectionVersion: 5 },
+  meta: { viewPosition: N, timestamp: '2026-10-18T19:00:00.000Z' },
+};
+const unreachable = () => new ApiProblem({ type: 'network-unreachable', title: 'Cannot reach your home', status: 0 });
+
+describe('HERO-U5 U1 (b) — IR-225 (a): an offline view reloads once when the phase returns to live', () => {
+  it('live at N → the hub unreachable → the view mounted (and Retry pressed) in the outage → back at N: the fetcher runs ONCE more and the offline card is gone [RED at HEAD: the card stays under a live shell]', async () => {
+    let hubDown = false;
+    vi.spyOn(api, 'getProjection').mockImplementation(async () => {
+      if (hubDown) throw unreachable();
+      return LIVE_AT_N as never;
+    });
+    let fetches = 0;
+    const fetcher = async () => {
+      fetches++;
+      if (hubDown) throw unreachable();
+      return { data: { ok: true }, meta: LIVE_AT_N.meta };
+    };
+
+    // 1. Live at N; no view mounted yet.
+    const { container, rerender, getByText } = render(
+      <PollProvider intervalMs={500}>
+        <p>shell</p>
+      </PollProvider>,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+
+    // 2. The hub goes away; the loop reads offline (backoff, no alarm).
+    hubDown = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1200);
+    });
+
+    // 3. The view mounts IN the outage: its own fetch fails offline — the honest card, with Retry.
+    rerender(
+      <PollProvider intervalMs={500}>
+        <Panel fetcher={fetcher} renderData={() => <p>loaded content</p>} />
+      </PollProvider>,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(container.textContent).toContain(t('explain.offline.body'));
+    expect(fetches).toBe(1);
+    // Retry during the outage: one more failed fetch, the card stays.
+    fireEvent.click(getByText(t('explain.error.retry')));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(fetches).toBe(2);
+    expect(container.textContent).toContain(t('explain.offline.body'));
+
+    // 4. The hub is back at the SAME cursor N — a quiet home: the cursor effect never fires.
+    hubDown = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000); // past the 5 s backoff ceiling: the loop has read live again
+    });
+    await act(async () => {}); // one more flush for the reload's render
+    // THE PROOF: exactly one more fetch (the phase-return reload), and the card is gone.
+    expect(fetches).toBe(3);
+    expect(container.textContent).not.toContain(t('explain.offline.body'));
+    expect(container.textContent).toContain('loaded content');
+  });
+
+  it('nothing else changes: a view that loaded fine before the outage does NOT refetch when the phase returns at the same cursor', async () => {
+    let hubDown = false;
+    vi.spyOn(api, 'getProjection').mockImplementation(async () => {
+      if (hubDown) throw unreachable();
+      return LIVE_AT_N as never;
+    });
+    let fetches = 0;
+    const fetcher = async () => {
+      fetches++;
+      return { data: { ok: true }, meta: LIVE_AT_N.meta };
+    };
+    const { container } = render(
+      <PollProvider intervalMs={500}>
+        <Panel fetcher={fetcher} renderData={() => <p>loaded content</p>} />
+      </PollProvider>,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(container.textContent).toContain('loaded content');
+    const fetchesBefore = fetches;
+
+    hubDown = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1200);
+    });
+    hubDown = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    await act(async () => {});
+    expect(fetches).toBe(fetchesBefore); // the cursor did not move; an ok view is left alone
+    expect(container.textContent).toContain('loaded content');
   });
 });

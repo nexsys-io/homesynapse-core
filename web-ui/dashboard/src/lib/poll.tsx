@@ -2,8 +2,9 @@
  * HomeSynapse — Polling (the no-WebSocket model, D-OPEN-3 firm).
  * ---------------------------------------------------------------------------
  * ONE coalesced poll loop drives a global projection cursor (meta.viewPosition).
- * Views refetch only when the cursor advances — cheap change-detection without a
- * push channel, and no per-view polling storms (Doc 13 §performance; contract §0).
+ * Views refetch only when the cursor advances — and once when an offline view's
+ * phase returns to live — cheap change-detection without a push channel, and no
+ * per-view polling storms (Doc 13 §performance; contract §0).
  * The loop:
  *   - polls A4 /internal/projection every 1-2s (always present, cheap);
  *   - treats 503 state-store-replaying as a first-class "catching up" phase with
@@ -123,11 +124,13 @@ export interface ApiState<T> {
 
 /**
  * Fetch via the typed API and refetch whenever the global projection cursor
- * advances. `fetcher` may be an inline closure (kept in a ref to avoid stale
- * captures). Returns a discriminated load state for the view to render.
+ * advances — and once more when the loop's phase returns to live while this
+ * view is still offline (HERO-U5 U1 (b)). `fetcher` may be an inline closure
+ * (kept in a ref to avoid stale captures). Returns a discriminated load state
+ * for the view to render.
  */
 export function useApi<T>(fetcher: () => Promise<ApiResult<T>>): ApiState<T> {
-  const { viewPosition } = usePollCursor();
+  const { viewPosition, phase } = usePollCursor();
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
   const [s, setS] = useState<Omit<ApiState<T>, 'reload'>>({ status: 'loading' });
@@ -147,6 +150,20 @@ export function useApi<T>(fetcher: () => Promise<ApiResult<T>>): ApiState<T> {
   useEffect(() => {
     void load();
   }, [viewPosition, load]);
+
+  /* HERO-U5 U1 (b) (IR-225 (a)): the cursor is the only refetch signal, so a view whose own
+     fetch failed offline under a QUIET home (the cursor never moved) kept its offline card under
+     a live shell — the card's "fills in when the connection returns" was not yet true. When the
+     loop's phase RETURNS to live, an offline view reloads once; a view in any other state is
+     left to the cursor. The previous phase is tracked in a ref so only the transition fires. */
+  const statusRef = useRef(s.status);
+  statusRef.current = s.status;
+  const prevPhaseRef = useRef<Phase>(phase);
+  useEffect(() => {
+    const prev = prevPhaseRef.current;
+    prevPhaseRef.current = phase;
+    if (phase === 'live' && prev !== 'live' && statusRef.current === 'offline') void load();
+  }, [phase, load]);
 
   return { ...s, reload: load };
 }

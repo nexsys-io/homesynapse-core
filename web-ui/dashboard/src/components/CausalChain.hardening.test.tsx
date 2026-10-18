@@ -351,7 +351,9 @@ describe('HERO-1b B4 — two empty facts, two sentences (the era boundary vs a c
     const { container } = render(<CausalChain chain={skeleton()} />);
     const text = container.textContent ?? '';
     expect(text).toContain("This run is on record, but its steps aren't.");
-    expect(text).toContain('It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed.');
+    // FLIP-3 (HERO-U5 U2, IR-225 (b)): "Records are never removed." dropped from the body — the sentence that stays is the era fact.
+    expect(text).toContain('It happened before the current automations were loaded, so the run was kept but not its steps.');
+    expect(text).not.toContain('Records are never removed.');
     expect(text).not.toContain(EMPTY_CHAIN_NOTE);
     // FE-114 D7: narrowed by one token to the headline fact it guards (`explain.headline.completed.none` ends
     // "…and recorded no steps.") — the terminal step now reads SPEC §4's "Done, recorded no steps." for this
@@ -519,7 +521,8 @@ describe('HERO-1d D2 — the condition line, the cascade link, the do-nothing st
   it('the do-nothing hint → explain.step.nothing.hint, the paragraph whole (JSX collapsed its source line break to one space)', () => {
     const { container } = render(<CausalChain chain={doNothing(2)} />);
     const hint = container.querySelector('li[data-kind="action"] p')?.textContent ?? '';
-    expect(hint).toBe('This usually means the devices this automation targets were unavailable, so each was skipped by design. The step-by-step record of these skips is not kept yet.');
+    // FLIP-5 (HERO-U5 U5, O-4): the second sentence is this run's record, no longer the era-bound "is not kept yet".
+    expect(hint).toBe("This usually means the devices this automation targets were unavailable, so each was skipped by design. This run's record does not list the skipped steps.");
     expect(hint).toBe(key('explain.step.nothing.hint'));
   });
 

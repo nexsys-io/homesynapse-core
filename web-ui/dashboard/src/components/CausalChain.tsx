@@ -68,7 +68,8 @@ export function CausalChain({
   const conditions = chain.conditions ?? [];
   const actions = chain.actions ?? [];
   const outcome = chain.outcome;
-  const doNothing = outcome ? isDoNothingRun(outcome, actions.length) : false;
+  // HERO-U5 U5 (O-4): the do-nothing class is the counts alone — COMPLETED, planned steps, no command issued — whatever actions[] holds.
+  const doNothing = outcome ? isDoNothingRun(outcome) : false;
   // A real, successful, genuinely empty chain: nothing planned, nothing run.
   const genuinelyEmpty =
     conditions.length === 0 && actions.length === 0 && (outcome?.actionCount ?? 0) === 0;
@@ -283,11 +284,12 @@ export function CausalChain({
             });
           });
 
-          /* The silent-skip run class (lawful Doc 07 §3.9 per-target skips): planned
-             actions, zero commands, empty actions[] — nothing visible happened and
-             today no marker event records why. Render it honestly, never as clean
-             success; the actionCount-vs-actions[] disagreement is the tell. */
-          if (doNothing && outcome) {
+          /* The do-nothing run with NO rows (lawful Doc 07 §3.9 per-target skips): planned
+             actions, zero commands, empty actions[] — a run from before J3 T-B (core 176adad)
+             recorded no row for a skipped command, so one synthetic step says what the counts
+             say. Since J3 T-B each skipped command is a SKIPPED row: those rows ARE the record
+             and render as themselves — never beside a second, synthetic telling (HERO-U5 U5). */
+          if (doNothing && outcome && actions.length === 0) {
             steps.push({
               kind: 'action',
               tone: 'warn',
@@ -469,8 +471,8 @@ function terminalLine(chain: Chain): string {
       : null;
   const reasonClause = outcome.reason ? ` — ${outcome.reason}` : '';
   if (s === 'COMPLETED') {
-    // A do-nothing run must never read as clean success (the silent-skip class).
-    if (isDoNothingRun(outcome, actions.length)) {
+    // A do-nothing run must never read as clean success (the counts alone decide — HERO-U5 U5).
+    if (isDoNothingRun(outcome)) {
       return secs ? heroCopy('explain.terminal.completed.nothing', { secs }) : heroCopy('explain.terminal.completed.nothing.noTime');
     }
     // FE-114 D7 (SPEC §4 :88, the §7 row at :276): a completed run that recorded NO steps — `actionCount` 0

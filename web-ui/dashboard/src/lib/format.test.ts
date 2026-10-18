@@ -357,6 +357,29 @@ describe('HERO-1b B1 — the 30-cell headline table (SPEC §3)', () => {
     expect(s).toBe(`Evening Lights ran when ${BECAUSE}, but nothing was changed.`);
     expect(s).not.toMatch(/turned on|was asked to|confirmed|command failed/);
   });
+  /* HERO-U5 U3 (2026-10-18) — IR-225 (c), the corner: the R3 override needed `actionCount > 0`, so a self-contradictory wire — a
+   * CONFIRMED row beside `actionCount` 0 AND `commandCount` 0 — rendered "turned on because …" beside "Completed · 0 commands". The
+   * guard is dropped: a COMPLETED run whose `commandCount` is exactly 0 takes the silent-skip sentence unless its leading row is
+   * SKIPPED (D-2, row 5) or an outcome this build does not know (:677–:686); a null, absent or non-zero count is unchanged. */
+  it('IR-225 (c) — run_eh_001 with actionCount 0 AND commandCount 0 beside its CONFIRMED row → the silent-skip sentence, never "turned on" [RED at HEAD: the acted sentence]', () => {
+    const c = structuredClone(causalChains['run_eh_001']!);
+    c.outcome = { ...c.outcome, actionCount: 0, commandCount: 0 };
+    const s = causalSentence(c);
+    expect(s).toMatch(/^Evening Hallway Light ran when .*, but nothing was changed\.$/);
+    expect(s).not.toMatch(/turned on/);
+  });
+  it('IR-225 (c) — the guard\'s other arms are unchanged: commandCount null, absent or 1 beside actionCount 0 keeps the acted sentence; a SKIPPED leading row beside 0 · 0 keeps row 5 [preservation]', () => {
+    for (const count of [null, undefined, 1]) {
+      const c = structuredClone(causalChains['run_eh_001']!);
+      c.outcome = { ...c.outcome, actionCount: 0, commandCount: count as unknown as number };
+      if (count === undefined) delete (c.outcome as Partial<typeof c.outcome>).commandCount;
+      expect(causalSentence(c), String(count)).toMatch(/^Hallway Light turned on because /);
+    }
+    const skipped = mk('COMPLETED', 'SKIPPED');
+    skipped.outcome.actionCount = 0;
+    skipped.outcome.commandCount = 0;
+    expect(causalSentence(skipped)).toBe(`Nothing was sent to Hallway Light when ${BECAUSE} — that step was skipped.`);
+  });
   it('IR-207 — COMPLETED × SKIPPED beside commandCount 0 keeps row 5 (nothing was sent — already honest); COMPLETED × CONFIRMED beside commandCount 1 keeps row 1 [preservation]', () => {
     expect(causalSentence(noCommand('SKIPPED'))).toBe(`Nothing was sent to Hallway Light when ${BECAUSE} — that step was skipped.`);
     const one = mk('COMPLETED', 'CONFIRMED');

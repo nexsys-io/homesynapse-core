@@ -100,14 +100,17 @@ const en = {
   "whyNot.neverTriggered.body": "Nothing has set it off since this automation was loaded. It runs on {triggerSummary}. Nothing is wrong — it's waiting.",
   // explain.chain.*
   "explain.chain.noDetail.title": "This run is on record, but its steps aren't.",
-  "explain.chain.noDetail.body": "It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed.",
+  // HERO-U5 U2 (IR-225 (b)): "Records are never removed." dropped — a promise true only while retention never runs (D-v112-30).
+  "explain.chain.noDetail.body": "It happened before the current automations were loaded, so the run was kept but not its steps.",
   // FE-115 D4: the genuinely-empty chain's note (format.ts EMPTY_CHAIN_NOTE reads this row — the FE-114 D8 twin-fold), byte-identical.
   "explain.chain.empty": "This run finished without recording any steps — no conditions were checked and no commands were sent.",
   // explain.step.* — HERO-1d D2 (2026-09-13): the do-nothing step (the silent-skip run class), keyed
   // byte-identically from CausalChain.tsx; the hint is the paragraph whole.
   "explain.step.nothing.one": "Nothing was changed: the planned step ended without sending a command.",
   "explain.step.nothing.many": "Nothing was changed: all {count} planned steps ended without sending a command.",
-  "explain.step.nothing.hint": "This usually means the devices this automation targets were unavailable, so each was skipped by design. The step-by-step record of these skips is not kept yet.",
+  // HERO-U5 U5 (O-4): "is not kept yet" was era-bound (J3 T-B now records a SKIPPED row per skipped command); this step renders only when
+  // actions[] is empty, so the honest second sentence is about THIS run's record — true under every retention option.
+  "explain.step.nothing.hint": "This usually means the devices this automation targets were unavailable, so each was skipped by design. This run's record does not list the skipped steps.",
   // explain.trigger.*
   "explain.trigger.readingNotRecorded": "{Trigger} set it off at {time} — the reading wasn't recorded.",
   // explain.action.* — FE-115 D3: `.unconfirmed.title` / `.body` and `.pending.title` / `.body` RETIRED (superseded by
@@ -267,9 +270,10 @@ const en = {
   "explain.runs.empty": "No automation runs yet.",
   "explain.run.title": "Why this happened",
   // explain.permanence.*
-  // HERO-U4 R4 (2026-10-17): re-cut to the claims register §0 items 5–6 — the no-eviction half (INV-SA-03) kept; "permanent" and
-  // "always here" (an every-event-survives claim the WAL-NORMAL record cannot back) dropped. A §7 TEXT-CHANGE row, filed for the hub.
-  "explain.permanence": "Rebuilt from the activity log. Nothing is ever removed from it, so this run stays on record.",
+  // HERO-U4 R4 (2026-10-17) dropped "permanent" and "always here" (register §0 items 5–6); HERO-U5 U2 (IR-225 (b)) drops "Nothing is
+  // ever removed from it" — true only while retention never runs. What is left is true under every `RETENTION:` option: a run this
+  // page shows IS on record (D-v112-30 — a string's truth does not wait on a ruling). The §7 row at hero SPEC :250 carries it.
+  "explain.permanence": "Rebuilt from the activity log, where this run is on record.",
   // explain.nullName.*
   "explain.nullName.note": "This run happened under an earlier version of your automations, so its name is no longer on record. The run itself is preserved.",
   // explain.cascade.*
@@ -340,8 +344,9 @@ const en = {
   "explain.error.retry": "Try again",
   // explain.offline.*
   "explain.offline.title": "The hub can't be reached right now.",
-  // HERO-U4 R4: an unqualified "Nothing is lost." during an outage is the every-event-survives form (register §0 item 5) — scoped to this page.
-  "explain.offline.body": "Nothing on this page is lost. It fills in when the connection returns.",
+  // HERO-U4 R4 scoped "Nothing is lost." to this page; HERO-U5 U1 (IR-225 (a)) drops the sentence — the page holds nothing offline, so
+  // "lost" still promised the hub's record (register §0 item 5). The one sentence left is made true by poll.tsx's phase-return reload.
+  "explain.offline.body": "This page fills in when the connection returns.",
   // explain.replaying.*
   "explain.replaying.title": "The hub is catching up after a restart.",
   "explain.replaying.body": "This takes a moment. Explanations appear as the log is replayed.",

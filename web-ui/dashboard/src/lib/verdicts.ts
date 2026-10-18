@@ -255,26 +255,22 @@ export function postureMeta(posture: string): PostureMeta {
 }
 
 /* ---------------------------------------------------------------------------
- * The silent-skip run class (field evidence, lawful Doc 07 §3.9 per-target skips).
+ * The do-nothing run class (field evidence, lawful Doc 07 §3.9 per-target skips).
  *
- * A COMPLETED run can carry outcome.actionCount > 0 with commandCount = 0 and an
- * EMPTY actions[] — every planned target was lawfully skipped (e.g. UNAVAILABLE),
- * nothing visible happened, and today no marker event records it. Until the
- * SKIP-VIS core WU lands, the actionCount-vs-actions[] disagreement IS the tell,
- * and such runs must never render as clean success.
+ * A COMPLETED run whose terminal event counts planned steps (actionCount > 0) but
+ * no command issued (commandCount = 0) changed nothing — every planned target was
+ * lawfully skipped (e.g. UNAVAILABLE). The counts alone decide: before J3 T-B
+ * (core 176adad) such a run arrived with an EMPTY actions[]; since it, each
+ * skipped command action is a SKIPPED row, and the status is the same either way
+ * (HERO-U5 U5; O-4). Such runs must never render as clean success.
  * ------------------------------------------------------------------------- */
 
 export function isDoNothingRun(outcome: {
   status: string;
   actionCount: number;
   commandCount: number;
-}, actionsShown: number): boolean {
-  return (
-    outcome.status === 'COMPLETED' &&
-    outcome.actionCount > 0 &&
-    outcome.commandCount === 0 &&
-    actionsShown === 0
-  );
+}): boolean {
+  return outcome.status === 'COMPLETED' && outcome.actionCount > 0 && outcome.commandCount === 0;
 }
 
 /* ---------------------------------------------------------------------------

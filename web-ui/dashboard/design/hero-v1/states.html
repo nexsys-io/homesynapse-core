@@ -154,7 +154,7 @@ a:focus-visible, summary:focus-visible, .btn:focus-visible { outline: 2px solid 
   </ol>
   <p class="cascade">Started by another run — which one isn&#x27;t recorded.</p>
   <p class="asof">As of 9:42 pm · live</p>
-  <p class="permanence">Rebuilt from the permanent activity log. Nothing here is ever deleted, so this run is always here.</p>
+  <p class="permanence">Rebuilt from the activity log, where this run is on record.</p>
 </article></div><div class="theme-light pane"><article class="card run">
   <p class="headline">Hallway Light turned on because Hallway Motion detected motion at 9:42 pm.</p>
   <ol class="chain" aria-label="Step-by-step explanation, from trigger to outcome">
@@ -168,7 +168,7 @@ a:focus-visible, summary:focus-visible, .btn:focus-visible { outline: 2px solid 
   </ol>
   <p class="cascade">Started by another run — which one isn&#x27;t recorded.</p>
   <p class="asof">As of 9:42 pm · live</p>
-  <p class="permanence">Rebuilt from the permanent activity log. Nothing here is ever deleted, so this run is always here.</p>
+  <p class="permanence">Rebuilt from the activity log, where this run is on record.</p>
 </article></div></div>
 </section>
 <section><h2>B. The L1 headline — every (RunStatus × leading ActionOutcome) cell, plus the silent skip and the two mode overrides</h2>
@@ -518,7 +518,7 @@ a:focus-visible, summary:focus-visible, .btn:focus-visible { outline: 2px solid 
   <p class="headline">This run is on record, but its steps aren&#x27;t.</p>
   <p class="hint">This run happened under an earlier version of your automations, so its name is no longer on record. The run itself is preserved.</p>
   <ol class="chain"><li class="step"><span class="marker info" aria-hidden="true">●</span><div class="body"><div class="line"><span>Something set it off at 3 Sep, 9:42 pm (what isn&#x27;t recorded).</span></div></div></li>
-  <li class="step"><span class="marker unknown" aria-hidden="true">○</span><div class="body"><div class="line"><span>It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed.</span></div></div></li>
+  <li class="step"><span class="marker unknown" aria-hidden="true">○</span><div class="body"><div class="line"><span>It happened before the current automations were loaded, so the run was kept but not its steps.</span></div></div></li>
   <li class="step"><span class="marker unknown" aria-hidden="true">◆</span><div class="body"><div class="line"><span>Done.</span><span class="pill unknown">Done, recorded no steps</span></div></div></li></ol></article>
 <article class="card"><p class="cellno">3 · reading not recorded (trigger step, firingValue null — today: every run)</p>
   <ol class="chain"><li class="step"><span class="marker info" aria-hidden="true">●</span><div class="body"><div class="line"><span>Hallway Motion set it off at 9:42 pm — the reading wasn&#x27;t recorded.</span></div><details class="detail" open><summary>Trigger</summary><div class="dbody">state_changed · value not recorded</div></details></div></li></ol></article>
@@ -533,7 +533,7 @@ a:focus-visible, summary:focus-visible, .btn:focus-visible { outline: 2px solid 
   <p class="headline">This run is on record, but its steps aren&#x27;t.</p>
   <p class="hint">This run happened under an earlier version of your automations, so its name is no longer on record. The run itself is preserved.</p>
   <ol class="chain"><li class="step"><span class="marker info" aria-hidden="true">●</span><div class="body"><div class="line"><span>Something set it off at 3 Sep, 9:42 pm (what isn&#x27;t recorded).</span></div></div></li>
-  <li class="step"><span class="marker unknown" aria-hidden="true">○</span><div class="body"><div class="line"><span>It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed.</span></div></div></li>
+  <li class="step"><span class="marker unknown" aria-hidden="true">○</span><div class="body"><div class="line"><span>It happened before the current automations were loaded, so the run was kept but not its steps.</span></div></div></li>
   <li class="step"><span class="marker unknown" aria-hidden="true">◆</span><div class="body"><div class="line"><span>Done.</span><span class="pill unknown">Done, recorded no steps</span></div></div></li></ol></article>
 <article class="card"><p class="cellno">3 · reading not recorded (trigger step, firingValue null — today: every run)</p>
   <ol class="chain"><li class="step"><span class="marker info" aria-hidden="true">●</span><div class="body"><div class="line"><span>Hallway Motion set it off at 9:42 pm — the reading wasn&#x27;t recorded.</span></div><details class="detail" open><summary>Trigger</summary><div class="dbody">state_changed · value not recorded</div></details></div></li></ol></article>
@@ -558,10 +558,10 @@ a:focus-visible, summary:focus-visible, .btn:focus-visible { outline: 2px solid 
 <article class="card"><p class="cellno">N7 · unknown verdict string</p><p class="pills"><span class="pill unknown"><svg class="glyph" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 7h2M6.5 7h2M9.5 7h2"/></svg>Recorded as &quot;PAUSED&quot;</span><span class="autoname">Evening Lights</span></p><p class="headline">Recorded as &quot;PAUSED&quot; — a verdict this dashboard can&#x27;t explain yet.</p><p class="key">whyNot.headline.unknown</p></article></div></div>
 </section>
 <section><h2>F. The error posture (never an eternal spinner, never a silent empty card)</h2>
-<div class="pair"><div class="theme-dark pane"><article class="card"><p class="cellno">error — one honest, named, retryable card</p><p class="headline">This explanation couldn&#x27;t be loaded.</p><p class="bodytext">The hub answered with an error. The record itself is safe — try again.</p><p><button class="btn" type="button">Try again</button></p></article>
-<article class="card"><p class="cellno">offline</p><p class="headline">The hub can&#x27;t be reached right now.</p><p class="bodytext">Nothing is lost. This page fills in when the connection returns.</p></article>
-<article class="card"><p class="cellno">replaying</p><p class="headline">The hub is catching up after a restart.</p><p class="bodytext">This takes a moment. Explanations appear as the log is replayed.</p></article></div><div class="theme-light pane"><article class="card"><p class="cellno">error — one honest, named, retryable card</p><p class="headline">This explanation couldn&#x27;t be loaded.</p><p class="bodytext">The hub answered with an error. The record itself is safe — try again.</p><p><button class="btn" type="button">Try again</button></p></article>
-<article class="card"><p class="cellno">offline</p><p class="headline">The hub can&#x27;t be reached right now.</p><p class="bodytext">Nothing is lost. This page fills in when the connection returns.</p></article>
+<div class="pair"><div class="theme-dark pane"><article class="card"><p class="cellno">error — one honest, named, retryable card</p><p class="headline">This explanation couldn&#x27;t be loaded.</p><p class="bodytext">The hub answered with an error. This page only reads the record — try again.</p><p><button class="btn" type="button">Try again</button></p></article>
+<article class="card"><p class="cellno">offline</p><p class="headline">The hub can&#x27;t be reached right now.</p><p class="bodytext">This page fills in when the connection returns.</p></article>
+<article class="card"><p class="cellno">replaying</p><p class="headline">The hub is catching up after a restart.</p><p class="bodytext">This takes a moment. Explanations appear as the log is replayed.</p></article></div><div class="theme-light pane"><article class="card"><p class="cellno">error — one honest, named, retryable card</p><p class="headline">This explanation couldn&#x27;t be loaded.</p><p class="bodytext">The hub answered with an error. This page only reads the record — try again.</p><p><button class="btn" type="button">Try again</button></p></article>
+<article class="card"><p class="cellno">offline</p><p class="headline">The hub can&#x27;t be reached right now.</p><p class="bodytext">This page fills in when the connection returns.</p></article>
 <article class="card"><p class="cellno">replaying</p><p class="headline">The hub is catching up after a restart.</p><p class="bodytext">This takes a moment. Explanations appear as the log is replayed.</p></article></div></div>
 </section>
 <footer class="top"><p>Design of record: SPEC.md in this folder. Not shipped, not bundled.</p></footer>

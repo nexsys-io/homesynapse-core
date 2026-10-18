@@ -696,10 +696,13 @@ export function causalHeadline(
           : 'explain.headline.completed.none';
       return { text: fill(hs(key), slots), keys: [key] };
     }
-    // HERO-U4 R3 (IR-207's rider): the ledger says no command was issued (actionCount ≥ 1, commandCount 0) — whatever the leading
-    // action row claims, the headline never says the run acted (confirmed / dispatched / unconfirmed / failed): the silent-skip
-    // sentence is its form. A SKIPPED leading action keeps SPEC §3 row 5 — "Nothing was sent …" is already the honest form.
-    if ((outcome?.actionCount ?? 0) > 0 && outcome?.commandCount === 0 && suffix !== 'skipped') {
+    // HERO-U4 R3 (IR-207's rider): the ledger says no command was issued (commandCount 0) — whatever the leading action row
+    // claims, the headline never says the run acted (confirmed / dispatched / unconfirmed / failed): the silent-skip sentence is
+    // its form. A SKIPPED leading action keeps SPEC §3 row 5 — "Nothing was sent …" is already the honest form.
+    // HERO-U5 U3 (IR-225 (c)): the `actionCount > 0` guard is gone — beside a row, the count that decides is the command count
+    // alone (a CONFIRMED row beside 0 · 0 rendered "turned on" beside "Completed · 0 commands"). A null, absent or non-zero
+    // commandCount is unchanged; an outcome this build does not know returned above (:677–:686).
+    if (outcome?.commandCount === 0 && suffix !== 'skipped') {
       return { text: fill(hs('explain.headline.completed.silentSkip'), slots), keys: ['explain.headline.completed.silentSkip'] };
     }
     const key = `explain.headline.completed.${suffix}`;

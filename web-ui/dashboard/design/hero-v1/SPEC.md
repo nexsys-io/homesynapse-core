@@ -24,7 +24,7 @@ The run page order, top to bottom: the headline (L1); the name note when the aut
 
 ## §3 The L1 headline grammar
 
-The headline follows the run's status and the leading action's outcome, never the command's verb alone — the defect FE-NULL-1 O1 named (`commandVerb(:519)` turns `turn_on` into "turned on" on a SKIPPED run). The leading action is `actions[0]`; "no action" is the arm where `actions[]` is empty, split by the outcome counters into "recorded no steps" (`actionCount` 0) and the silent skip (`actionCount` > 0, `commandCount` 0). A COMPLETED run is device-led: the sentence starts with the device the person noticed. A run that did not complete is automation-led: the frame says what the run did, then one tail sentence says what happened to the leading device — so a skipped or failed run never opens with a device acting.
+The headline follows the run's status and the leading action's outcome, never the command's verb alone — the defect FE-NULL-1 O1 named (`commandVerb(:519)` turns `turn_on` into "turned on" on a SKIPPED run). The leading action is `actions[0]`; "no action" is the arm where `actions[]` is empty, split by the outcome counters into "recorded no steps" (`actionCount` 0) and the silent skip (`actionCount` > 0, `commandCount` 0). Whatever `actions[]` holds, a COMPLETED run whose `commandCount` is 0 takes the silent-skip sentence unless its leading action is SKIPPED (row 5) or unknown (HERO-U4 R3; HERO-U5). A COMPLETED run is device-led: the sentence starts with the device the person noticed. A run that did not complete is automation-led: the frame says what the run did, then one tail sentence says what happened to the leading device — so a skipped or failed run never opens with a device acting.
 
 Slots and their null arms (each arm is a keyed string in §7, so no cell is left to inference): `{Target}` is the target's display name; `targetRef` null → "a device the run didn't name"; a dangling ref on a complete census → "entity {id} (not in this hub's registry)". `{verb}` / `{verbPast}` come from the command (turn_on → turn on / turned on; turn_off; dim → dim / dimmed); a command with no plain verb → run "{command}" / ran "{command}"; command null → act / acted (unreachable in a dispatched cell, defined anyway). `{because}` is "{Trigger} {triggerVerb} at {time}"; `subjectRef` null → "something set it off at {time} (what isn't recorded)"; `firingValue` null (today: always) → the verb "changed". `{Automation}` is `automationName`; null → "An earlier automation". `{time}` is the date-qualified clock time from `matchedAt` (`clockTimeWithDate`); unparseable → "an unrecorded time". Every headline is ≤ 21 words per sentence at the sample slots (§7 measures it).
 
@@ -85,7 +85,7 @@ Each is a fact stated calmly, never an error posture, never a blank, never a spi
 
 **Not fired** — the why-not card for NEVER_TRIGGERED with no run. Title `whyNot.headline.neverTriggered` "It hasn't run yet." (`whyNot.neverTriggered.title`, its unconsumed twin, RETIRED — FE-115 D3, the hub's ruling.) Body `whyNot.neverTriggered.body` "Nothing has set it off since this automation was loaded. It runs on {triggerSummary}. Nothing is wrong — it's waiting." (HERO-0 said "Not since this automation was loaded"; the full sentence reads aloud without the title.) The card keeps "What would make it run" with `triggerSummary` and, when the wire names one, "Watching: {entity}". No link is offered: there is no run to see. The scope "since it was loaded" is the honest scope until EXPLAIN-5 lands.
 
-**No detail recorded** — the run page for a skeleton chain: `conditions[]` and `actions[]` empty, `actionCount` 0, and the run is from before the current automations were loaded (`automationName` null or `trigger.type` null — the prior-instance class HERO-0 §1 documents). The title `explain.chain.noDetail.title` "This run is on record, but its steps aren't." is the L1 headline for these runs (no device is named, because none is on record). The body `explain.chain.noDetail.body` "It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed." It is permanent for these runs (the era boundary) and reads as a fact. The chain renders the trigger step with its time, the body sentence as one step in place of the steps, and the terminal step ("Done, recorded no steps"). An empty chain whose name IS on record (a current automation that plans nothing) renders the headline `explain.headline.completed.none` instead — two facts, two sentences. HERO-0 wrote "the hub kept the run"; this is Register C, so the sentence is passive and names no actor.
+**No detail recorded** — the run page for a skeleton chain: `conditions[]` and `actions[]` empty, `actionCount` 0, and the run is from before the current automations were loaded (`automationName` null or `trigger.type` null — the prior-instance class HERO-0 §1 documents). The title `explain.chain.noDetail.title` "This run is on record, but its steps aren't." is the L1 headline for these runs (no device is named, because none is on record). The body `explain.chain.noDetail.body` "It happened before the current automations were loaded, so the run was kept but not its steps." It is permanent for these runs (the era boundary) and reads as a fact. The chain renders the trigger step with its time, the body sentence as one step in place of the steps, and the terminal step ("Done, recorded no steps"). An empty chain whose name IS on record (a current automation that plans nothing) renders the headline `explain.headline.completed.none` instead — two facts, two sentences. HERO-0 wrote "the hub kept the run"; this is Register C, so the sentence is passive and names no actor.
 
 **Reading not recorded** — an inline arm of the trigger step, not a card: `explain.trigger.readingNotRecorded` "{Trigger} set it off at {time} — the reading wasn't recorded." It replaces the trigger line whenever `firingValue` is null (today: every run). The L2 detail beneath says "value not recorded" in words. When the trigger subject is also null, the step line is the `because` null arm, and the reading marker is dropped (one honest sentence, not two).
 
@@ -139,7 +139,7 @@ Every string the hero shows, in Register C (no self-reference, no "we", never bl
 | `explain.headline.completed.failed` | {Target} was asked to {verb} because {because}, but the command failed. | L1 headline | Target·verb·because | 7.8 | 19 |
 | `explain.headline.completed.skipped` | Nothing was sent to {target} when {because} — that step was skipped. | L1 headline | target·because | 7.0 | 18 |
 | `explain.headline.completed.none` | {Automation} ran when {because} and recorded no steps. | L1 headline (actions[] empty, actionCount 0, current-instance name) | Automation·because | 7.6 | 15 |
-| `explain.headline.completed.silentSkip` | {Automation} ran when {because}, but nothing was changed. | L1 headline (actions[] empty, actionCount>0, commandCount 0) | Automation·because | 7.6 | 15 |
+| `explain.headline.completed.silentSkip` | {Automation} ran when {because}, but nothing was changed. | L1 headline (COMPLETED, `commandCount` 0, no leading action or one neither SKIPPED nor unknown) | Automation·because | 7.6 | 15 |
 | `explain.headline.skipped.frame` | {Automation} skipped this run when {because}. | L1 headline, sentence 1 | Automation·because | 6.8 | 13 |
 | `explain.headline.failed.frame` | {Automation} failed part-way when {because}. | L1 headline, sentence 1 | Automation·because | 6.8 | 13 |
 | `explain.headline.cancelled.frame` | {Automation} was cancelled after {because}. | L1 headline, sentence 1 | Automation·because | 9.1 | 12 |
@@ -169,7 +169,7 @@ Every string the hero shows, in Register C (no self-reference, no "we", never bl
 | ~~`whyNot.neverTriggered.title`~~ RETIRED (FE-115 D3, the hub's ruling — a twin of the consumed `whyNot.headline.neverTriggered`; unconsumed, grep-proven) | It hasn't run yet. | why-not card title | — | frag. | 4 |
 | `whyNot.neverTriggered.body` | Nothing has set it off since this automation was loaded. It runs on {triggerSummary}. Nothing is wrong — it's waiting. | why-not card body | triggerSummary | 3.4 | 10 |
 | `explain.chain.noDetail.title` | This run is on record, but its steps aren't. | run page, skeleton chain (era boundary) | — | 2.3 | 9 |
-| `explain.chain.noDetail.body` | It happened before the current automations were loaded, so the run was kept but not its steps. Records are never removed. | run page, skeleton chain body | — | 5.4 | 17 |
+| `explain.chain.noDetail.body` | It happened before the current automations were loaded, so the run was kept but not its steps. | run page, skeleton chain body | — | 7.0 | 17 |
 | `explain.trigger.readingNotRecorded` | {Trigger} set it off at {time} — the reading wasn't recorded. | trigger step line, firingValue null | Trigger·time | 4.8 | 12 |
 | ~~`explain.action.unconfirmed.title`~~ RETIRED (FE-115 D3, the hub's ruling — superseded by `explain.mode.*`; unconsumed, grep-proven) | Sent — the device never confirmed. | action step, settled UNCONFIRMED | — | frag. | 5 |
 | ~~`explain.action.unconfirmed.body`~~ RETIRED (FE-115 D3, the hub's ruling — superseded by `explain.mode.*`; unconsumed, grep-proven) | The command was sent; no confirmation came back{reasonClause}. It may have worked — the record can't say. | action step help, settled UNCONFIRMED | reasonClause = ' — {reason}' | '' | 2.0 | 8 |
@@ -247,7 +247,7 @@ Every string the hero shows, in Register C (no self-reference, no "we", never bl
 | `explain.hub.not.go` | Diagnose an automation → | hub card | — | frag. | 3 |
 | `explain.hub.autos.noRuns` | No runs yet | hub automation row | — | frag. | 3 |
 | ~~`explain.hub.autos.noRunsSinceLoad`~~ RETIRED (FE-115 D3, the hub's ruling — "since it was loaded" is not something the wire can vouch for — `lastRunId` null renders `explain.hub.autos.noRuns`; unconsumed, grep-proven) | Hasn't run since it was loaded | hub automation row (lastRunId null, honest scope) | — | -1.4 | 6 |
-| `explain.permanence` | Rebuilt from the permanent activity log. Nothing here is ever deleted, so this run is always here. | run page footer | — | 6.5 | 11 |
+| `explain.permanence` | Rebuilt from the activity log, where this run is on record. | run page footer | — | 5.9 | 11 |
 | `explain.nullName.note` | This run happened under an earlier version of your automations, so its name is no longer on record. The run itself is preserved. | run page, automationName null | — | 6.3 | 18 |
 | `explain.cascade.parentUnrecorded` | Started by another run — which one isn't recorded. | run page, depth>0, parentRunId null | — | 3.8 | 8 |
 | `explain.cascade.parent` | ← See what triggered this run | run page, parentRunId present | — | frag. | 5 |
@@ -266,10 +266,10 @@ Every string the hero shows, in Register C (no self-reference, no "we", never bl
 | `explain.a11y.provisional` | Provisional — may still change | screen-reader suffix on a dashed pill | — | frag. | 4 |
 | `explain.a11y.live` | Updated: {label} | role=status announcement on a settle | label | frag. | 2 |
 | `explain.error.title` | This explanation couldn't be loaded. | error card title | — | frag. | 5 |
-| `explain.error.body` | The hub answered with an error. The record itself is safe — try again. | error card body | — | 3.3 | 7 |
+| `explain.error.body` | The hub answered with an error. This page only reads the record — try again. | error card body | — | 3.2 | 8 |
 | `explain.error.retry` | Try again | error card button | — | frag. | 2 |
 | `explain.offline.title` | The hub can't be reached right now. | offline card title | — | -1.1 | 7 |
-| `explain.offline.body` | Nothing is lost. This page fills in when the connection returns. | offline card body | — | 2.6 | 8 |
+| `explain.offline.body` | This page fills in when the connection returns. | offline card body | — | 3.8 | 8 |
 | `explain.replaying.title` | The hub is catching up after a restart. | replaying card title | — | 3.8 | 8 |
 | `explain.replaying.body` | This takes a moment. Explanations appear as the log is replayed. | replaying card body | — | 4.8 | 7 |
 | `explain.loading` | Loading this run… | loading state (never an eternal spinner: becomes the error card on failure) | — | frag. | 3 |
@@ -288,7 +288,7 @@ Every string the hero shows, in Register C (no self-reference, no "we", never bl
 | `explain.terminal.status` | {label}. | terminal step line, INTERRUPTED ("Interrupted.") and any status this build does not know (`{label}` = format.ts runStatusMeta, shown as recorded; `explain.terminal.interrupted` stays unconsumed) | HERO-1d |
 | `explain.step.nothing.one` | Nothing was changed: the planned step ended without sending a command. | the do-nothing step line, `actionCount` 1 | HERO-1d |
 | `explain.step.nothing.many` | Nothing was changed: all {count} planned steps ended without sending a command. | the do-nothing step line, `actionCount` > 1 | HERO-1d |
-| `explain.step.nothing.hint` | This usually means the devices this automation targets were unavailable, so each was skipped by design. The step-by-step record of these skips is not kept yet. | the do-nothing step help | HERO-1d |
+| `explain.step.nothing.hint` | This usually means the devices this automation targets were unavailable, so each was skipped by design. This run's record does not list the skipped steps. | the do-nothing step help | HERO-1d |
 | `explain.action.detail.outcome.recovered` | (recovered from the recorded reason — this record predates the current hub software) | L2 "Recorded outcome" detail, appended to the outcome value — the catalog string carries the literal's leading space | HERO-1d |
 | `explain.hub.autos.title` | Your automations | hub automation list subhead | HERO-1d |
 | `explain.hub.autos.whyFire` | Why did it fire? | hub automation row link, `lastRunId` present | HERO-1d |
@@ -344,12 +344,16 @@ Every string the hero shows, in Register C (no self-reference, no "we", never bl
 | `explain.action.phrase.turnedOff` | Turned off | the same, `turn_off` | FE-115 |
 | `explain.action.phrase.dimmed` | Dimmed | the same, `dim` (one word — outside the lint's pattern; keyed with its siblings) | FE-115 |
 | `explain.chain.empty` | This run finished without recording any steps — no conditions were checked and no commands were sent. | the genuinely-empty chain's note (format.ts EMPTY_CHAIN_NOTE reads this row — the FE-114 D8 twin-fold; format.ts is outside the lint's six files by law) | FE-115 |
+| `explain.terminal.commands` | {label} · {count} commands | the final status label with the terminal event's command count | HERO-U4 |
+| `explain.terminal.commands.one` | {label} · 1 command | the same, a count of one | HERO-U4 |
 
 *§7 amendment, HERO-1d (2026-09-13): the keys above moved the last literal hero sentences into the catalog; the lint of `eslint.config.js` (IR-8) is the instrument. No sentence changed.*
 
 *§7 amendment, FE-115 (2026-09-19): the twenty-eight rows tagged FE-115 — the v1.1.5 `conditions[].definition` sentences (EXPLAIN-4 landed as a sentence under the condition line; 24 rows, `format.definitionSentence`) and the four literals D4 keyed (the lint's reach: `ReturnStatement > Literal` and `ConditionalExpression > Literal` join the six-file rule); six HERO-1b rows RETIRED on the hub's rulings (struck through above — D3). No existing sentence changed; D1 ADDS sentences.*
 
 *§7 amendment, FE-114 (2026-09-14): the thirteen rows tagged FE-114 — the v1.1.4 keys' sentences (EXPLAIN-6 · EXPLAIN-8 · EXPLAIN-9) and the six literals the widened lint (IR-12: two or more words, apostrophes, a capital beside `${`, object properties) reached, byte-identical to what the screen showed. ONE text change: `explain.mode.unknownOutcome.help` (:207) now reads "recognize" (IR-13 — US is the dialect of record; the row was edited in place). Two rows this table already carried are now consumed: `explain.terminal.interrupted` (the INTERRUPTED terminal line changed from "Interrupted." to its row) and `explain.terminal.noSteps` (a completed run with `actionCount` 0 and no rows — the era skeleton included, §4). The format.ts twins (IR-14 and five more: `not recorded`, the no-reading line, the cascade line, "An earlier automation", the null-name note, the unnamed target) read the catalog.*
+
+*§7 amendment, HERO-U5 (2026-10-18): six rows changed in place — `explain.chain.noDetail.body`, `explain.permanence`, `explain.offline.body` (IR-225 and its class), `explain.error.body` (HERO-U4 R4), `explain.step.nothing.hint` (O-4) and `explain.headline.completed.silentSkip`'s Where (HERO-U4 R3; HERO-U5 U3); two rows added (HERO-U4 R3); the four Levels by textstat 0.7.13 (CMU dictionary).*
 
 ## §8 Accessibility
 

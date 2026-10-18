@@ -188,10 +188,8 @@ describe('HERO-1b B2 — the §7 copy table is the catalog', () => {
     }
   });
 
-  it('the permanence footer is the Q3 (a) sentence: name-free, rename-proof — re-cut by HERO-U4 R4 to the claims register §0 5–6 (no "permanent", no "always here"; the named flip)', () => {
-    expect(t('explain.permanence' as MessageKey)).toBe(
-      'Rebuilt from the activity log. Nothing is ever removed from it, so this run stays on record.',
-    );
+  it('the permanence footer is the Q3 (a) sentence: name-free, rename-proof — re-cut by HERO-U4 R4 to the claims register §0 5–6, then by HERO-U5 U2 to a sentence true under every retention option (FLIP-2; IR-225 (b))', () => {
+    expect(t('explain.permanence' as MessageKey)).toBe('Rebuilt from the activity log, where this run is on record.');
     expect(t('explain.permanence' as MessageKey)).not.toContain(BRAND.productName);
   });
 
@@ -268,7 +266,8 @@ const SPEC7_HERO1D_KEYS = {
   // D2 — the do-nothing step and the recovered suffix
   'explain.step.nothing.one': 'Nothing was changed: the planned step ended without sending a command.',
   'explain.step.nothing.many': 'Nothing was changed: all {count} planned steps ended without sending a command.',
-  'explain.step.nothing.hint': 'This usually means the devices this automation targets were unavailable, so each was skipped by design. The step-by-step record of these skips is not kept yet.',
+  // FLIP-5 (HERO-U5 U5, O-4): the era-bound "is not kept yet" → this run's record (hero SPEC §7 :291 carries the row).
+  'explain.step.nothing.hint': 'This usually means the devices this automation targets were unavailable, so each was skipped by design. This run\'s record does not list the skipped steps.',
   'explain.action.detail.outcome.recovered': ' (recovered from the recorded reason — this record predates the current hub software)',
   // D3 — the hub page
   'explain.hub.autos.title': 'Your automations',
@@ -575,7 +574,7 @@ const SPEC7_HERO_U4_AMEND_KEYS = {
 } as const;
 const RETIRED_IR174 = ['recovery.contract.answersNoReports'] as const;
 
-describe('HERO-U2b R2 / HERO-U3 / HERO-U4 — the recovery card\'s §7 copy table is the catalog (62 rows + the 4 null-arm rows + U4\'s filed row = 67; SPEC §7 reads 67 until the hub strikes :118 and adds the row)', () => {
+describe('HERO-U2b R2 / HERO-U3 / HERO-U4 — the recovery card\'s §7 copy table is the catalog (62 rows + the 4 null-arm rows + U4\'s filed row = 67; SPEC §7 reads 67)', () => {
   it('carries all 62 §7 keys with the SPEC strings, verbatim (63 − the IR-174 (b) retirement — the named flip)', () => {
     expect(Object.keys(SPEC7_RECOVERY_KEYS).length).toBe(62);
     for (const [k, s] of Object.entries(SPEC7_RECOVERY_KEYS)) expect(t(k as MessageKey), k).toBe(s);
@@ -707,9 +706,11 @@ describe('HERO-U4 R3 — the commandCount rows are in the catalog, verbatim', ()
  * RED at HEAD: the three old texts; the Q3 (a) pin above is re-pointed to the new sentence (the named flip — still name-free).
  */
 const REWORDED_R4 = {
-  'explain.permanence': 'Rebuilt from the activity log. Nothing is ever removed from it, so this run stays on record.',
+  // FLIP-2 (HERO-U5 U2, IR-225 (b)): "Nothing is ever removed from it" held only while retention never runs — re-cut to the record fact.
+  'explain.permanence': 'Rebuilt from the activity log, where this run is on record.',
   'explain.error.body': 'The hub answered with an error. This page only reads the record — try again.',
-  'explain.offline.body': 'Nothing on this page is lost. It fills in when the connection returns.',
+  // FLIP-1 (HERO-U5 U1, IR-225 (a)): the first sentence dropped — "lost" promised the record; the sweep below bans the word.
+  'explain.offline.body': 'This page fills in when the connection returns.',
 } as const;
 describe('HERO-U4 R4 — the three re-worded rows meet the register §0 5–7; Register C holds', () => {
   it('carries the three new texts, verbatim [RED at HEAD: the old texts]', () => {
@@ -723,5 +724,20 @@ describe('HERO-U4 R4 — the three re-worded rows meet the register §0 5–7; R
     for (const k of messageKeys().filter((k) => /^(explain|whyNot|recovery)\./.test(k))) {
       expect(t(k), k).not.toMatch(/\bpermanent\b|always here|\bimmutable\b|tamper|\bguaranteed\b|every command/i);
     }
+  });
+  /* HERO-U5 U1 (2026-10-18) — IR-225 (a): the offline card holds nothing of the record, so "Nothing on this page is lost." promised
+   * the hub's record, which the register §0 item 5 bounds at the last checkpoint. The sentence is dropped and "lost" joins the sweep —
+   * a COLLECTING assertion over the whole catalog, so the failure names every offender (P3: exactly `explain.offline.body` at HEAD). */
+  it('no catalog string says "lost" — the promise form the register §0 item 5 forbids [RED at HEAD: explain.offline.body]', () => {
+    const keys = messageKeys();
+    expect(keys.filter((k) => /\blost\b/i.test(t(k)))).toEqual([]);
+  });
+  /* HERO-U5 U2 (2026-10-18) — IR-225 (b): "Records are never removed." and "Nothing is ever removed from it" are promise forms —
+   * true only while retention never runs (the DIAGNOSTIC window is declared, its purge not yet wired; `RETENTION:` is Nick's by Nov 2).
+   * Each sentence is re-cut to stay true under every option ("this run is on record"); the forms join the sweep (P3: exactly
+   * `explain.chain.noDetail.body` · `explain.permanence` at HEAD). */
+  it('no catalog string says "(n)ever removed / deleted", "fully" or "never skipped" — the register\'s promise forms [RED at HEAD: explain.chain.noDetail.body · explain.permanence]', () => {
+    const keys = messageKeys();
+    expect(keys.filter((k) => /\b(n?ever) (removed|deleted)\b|\bfully\b|never skipped/i.test(t(k)))).toEqual([]);
   });
 });

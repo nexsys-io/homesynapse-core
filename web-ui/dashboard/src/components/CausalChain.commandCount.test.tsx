@@ -62,7 +62,16 @@ describe('HERO-U4 R3 — IR-207\'s rider: commandCount beside the final status; 
     const r = rendered(c);
     expect(r.text).toMatch(/ran when .*, but nothing was changed\./);
     expect(r.text).not.toMatch(/turned on because/);
-    expect(r.pill).toBe('Completed · 0 commands');
+    // FLIP-6 (HERO-U5 U5, O-4): actionCount 1 · commandCount 0 IS the do-nothing class whatever the row shows — the do-nothing pill.
+    expect(r.pill).toBe('Completed, nothing changed · 0 commands');
+  });
+  it('HERO-U5 U3 — IR-225 (c), the corner: a CONFIRMED action row beside actionCount 0 AND commandCount 0 — the silent-skip headline beside "Completed · 0 commands", never "turned on" [RED at HEAD: the acted headline]', () => {
+    const c = confirmedRun();
+    c.outcome = { ...c.outcome, actionCount: 0, commandCount: 0 };
+    const r = rendered(c);
+    expect(r.text).toMatch(/ran when .*, but nothing was changed\./);
+    expect(r.text).not.toMatch(/turned on because/);
+    expect(r.pill).toBe('Completed · 0 commands'); // not the do-nothing pill: that class needs actionCount > 0 (U5)
   });
   it('a count the wire did not carry as an integer ≥ 0 (null · a fraction · a negative) appends NOTHING — the bare label, never "null commands" [GREEN at HEAD by construction; teeth after the fold]', () => {
     for (const bad of [null, 1.5, -1]) {
@@ -72,5 +81,60 @@ describe('HERO-U4 R3 — IR-207\'s rider: commandCount beside the final status; 
       expect(r.pill, String(bad)).toBe('Completed');
       expect(r.text, String(bad)).not.toMatch(/Completed · /);
     }
+  });
+});
+
+/*
+ * HERO-U5 U5 (2026-10-18) — O-4 · O-9: the do-nothing status, whatever the rows show. J3 T-B (core 176adad) records a SKIPPED
+ * row per command action that issued nothing (StandardExplanationService.java:895–:916: SKIPPED · command null · params {} ·
+ * reason null · resultOutcome null · settled true · settledAt the completion · confirmedAt null), so an all-skipped run arrives
+ * COMPLETED · actionCount N · commandCount 0 · N SKIPPED rows — and HEAD's `isDoNothingRun` (which needed actions[] EMPTY) let it
+ * read "Completed · 0 commands" · "Done in …s." The class is now the counts alone: COMPLETED ∧ actionCount > 0 ∧ commandCount 0.
+ * The synthetic do-nothing step and its hint render only when actions[] is empty — SKIPPED rows ARE the record, never shown twice.
+ * The chain below is built from the mock's confirmed run with §1's values on the contract's camelCase keys (IR-89).
+ */
+const j3Chain = (): Chain => {
+  const c = confirmedRun();
+  const done = c.actions[0]!.settledAt ?? null; // the completion instant the mock already carries
+  const skipped = (id: string) => ({
+    type: 'device_command',
+    targetRef: { type: 'ENTITY' as const, id },
+    command: null,
+    params: {},
+    outcome: 'SKIPPED' as const,
+    reason: null,
+    resultOutcome: null,
+    settled: true,
+    settledAt: done,
+    confirmedAt: null,
+  });
+  c.actions = [skipped('ent_hallway_light'), skipped('ent_livingroom_lamp')];
+  c.outcome = { ...c.outcome, status: 'COMPLETED', actionCount: 2, commandCount: 0 };
+  return c;
+};
+
+describe('HERO-U5 U5 — O-4: a J3 T-B all-skipped run (COMPLETED · 2 · 0 · two SKIPPED rows) carries the do-nothing status whatever the rows show', () => {
+  it('the pill reads "Completed, nothing changed · 0 commands" and the terminal line "Finished in …s, but nothing was changed." [RED at HEAD: "Completed · 0 commands" · "Done in …s."]', () => {
+    const r = rendered(j3Chain());
+    expect(r.pill).toBe('Completed, nothing changed · 0 commands');
+    expect(r.step).toContain('Finished in 0.4s, but nothing was changed.');
+    expect(r.step).not.toContain('Done in');
+  });
+  it('the two SKIPPED rows are the record: exactly two action steps, no synthetic do-nothing step, no hint; the headline keeps row 5 (D-2) [GREEN at HEAD — preservation: HEAD never rendered the synthetic step beside rows]', () => {
+    const c = j3Chain();
+    const { container } = render(<CausalChain chain={c} />);
+    const text = container.textContent ?? '';
+    expect(container.querySelectorAll('li[data-kind="action"]').length).toBe(2);
+    expect(text).not.toContain(t('explain.step.nothing.many' as MessageKey).split('{count}')[0]!.trim());
+    expect(text).not.toContain(t('explain.step.nothing.hint' as MessageKey));
+    expect(text).toMatch(/^.*Nothing was sent to Hallway Light when .* — that step was skipped\./);
+    expect(text).not.toMatch(/turned on|was asked to|did turn/i);
+  });
+  it('the empty-rows arm is unchanged: the SILENT-SKIP mock run (actions[] empty) keeps its synthetic step and hint beside the same pill [preservation]', () => {
+    const { container } = render(<CausalChain chain={silentSkipRun()} />);
+    const text = container.textContent ?? '';
+    expect(container.querySelectorAll('li[data-kind="action"]').length).toBe(1);
+    expect(text).toContain(t('explain.step.nothing.hint' as MessageKey));
+    expect(text).toContain('Completed, nothing changed · 0 commands');
   });
 });

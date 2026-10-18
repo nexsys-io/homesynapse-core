@@ -285,16 +285,17 @@ describe('D-4 retirement: first-class resultOutcome wins; recovery only for pre-
   });
 });
 
-describe('the silent-skip run class (lawful Doc 07 §3.9 per-target skips)', () => {
-  it('detects the actionCount-vs-actions[] disagreement', () => {
-    expect(isDoNothingRun({ status: 'COMPLETED', actionCount: 2, commandCount: 0 }, 0)).toBe(true);
+describe('the do-nothing run class (lawful Doc 07 §3.9 per-target skips) — the counts alone decide (HERO-U5 U5; O-4)', () => {
+  it('detects planned steps with no command issued: COMPLETED ∧ actionCount > 0 ∧ commandCount 0, whatever the rows show', () => {
+    expect(isDoNothingRun({ status: 'COMPLETED', actionCount: 2, commandCount: 0 })).toBe(true);
+    // FLIP-4 (HERO-U5 U5, O-4): HEAD's `actionsShown === 0` arm read this (one SKIPPED row shown, J3 T-B) as not do-nothing — it is.
+    expect(isDoNothingRun({ status: 'COMPLETED', actionCount: 1, commandCount: 0 })).toBe(true);
   });
 
-  it('does not flag runs that actually did something or actually showed their steps', () => {
-    expect(isDoNothingRun({ status: 'COMPLETED', actionCount: 1, commandCount: 1 }, 1)).toBe(false);
-    expect(isDoNothingRun({ status: 'COMPLETED', actionCount: 1, commandCount: 0 }, 1)).toBe(false);
-    expect(isDoNothingRun({ status: 'FAILED', actionCount: 2, commandCount: 0 }, 0)).toBe(false);
-    expect(isDoNothingRun({ status: 'COMPLETED', actionCount: 0, commandCount: 0 }, 0)).toBe(false);
+  it('does not flag runs that issued a command, did not complete, or planned nothing', () => {
+    expect(isDoNothingRun({ status: 'COMPLETED', actionCount: 1, commandCount: 1 })).toBe(false);
+    expect(isDoNothingRun({ status: 'FAILED', actionCount: 2, commandCount: 0 })).toBe(false);
+    expect(isDoNothingRun({ status: 'COMPLETED', actionCount: 0, commandCount: 0 })).toBe(false);
   });
 });
 
